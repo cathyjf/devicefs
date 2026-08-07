@@ -1,0 +1,3 @@
+[submodule "dependencies/wil"]
+	path = dependencies/wil
+	url = https://github.com/microsoft/wil

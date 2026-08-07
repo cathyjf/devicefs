@@ -1,0 +1,5 @@
+Checks: '-*,misc-const-correctness,modernize-use-auto,modernize-use-trailing-return-type,readability-qualified-auto'
+WarningsAsErrors: 'misc-const-correctness,modernize-use-auto,modernize-use-trailing-return-type,readability-qualified-auto'
+CheckOptions:
+  misc-const-correctness.WarnPointersAsValues: true
+  misc-const-correctness.TransformPointersAsValues: true

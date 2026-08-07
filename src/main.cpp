@@ -4,10 +4,8 @@
 #include <winioctl.h>
 
 using PNTSTATUS = NTSTATUS *;
-#pragma warning(push, 0)
 #include <winfsp/winfsp.h>
 #include <wil/resource.h>
-#pragma warning(pop)
 
 #include <algorithm>
 #include <array>
@@ -28,10 +26,12 @@ using PNTSTATUS = NTSTATUS *;
 
 namespace {
 
-constexpr auto kBlockSize = UINT64{512};
+constexpr auto kAdvertisedSectorSize = UINT16{512};
 constexpr auto kDefaultStopEvent = std::wstring_view(L"Local\\devicefs-stop");
+constexpr auto kFileSystemName = std::wstring_view(L"DEVICEFS");
 constexpr auto kMaxNameLength = std::size_t{255};
 constexpr auto kMaxMountPrefixLength = std::size(FSP_FSCTL_VOLUME_PARAMS{}.Prefix) - 1;
+constexpr auto kVolumeLabel = std::wstring_view(L"DEVICEFS");
 constexpr auto kRootInfo = FSP_FSCTL_FILE_INFO{
     .FileAttributes = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY,
     .IndexNumber = 1,
@@ -185,22 +185,21 @@ auto MakeSecurityDescriptor(const std::wstring &account) {
         WinError("could not resolve --read-user");
     }
 
-    auto *sid_text = PWSTR{};
-    if (!ConvertSidToStringSidW(sid.data(), &sid_text)) {
+    auto sid_text = wil::unique_hlocal_string{};
+    if (!ConvertSidToStringSidW(sid.data(), sid_text.addressof())) {
         WinError("could not format --read-user SID");
     }
-    const auto sid_owner = wil::unique_hlocal_ptr<wchar_t>(sid_text);
 
-    auto *raw = PSECURITY_DESCRIPTOR{};
+    auto descriptor = wil::unique_hlocal_security_descriptor{};
     auto size = ULONG{};
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
             std::format(
-                L"O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;{})", sid_text).c_str(),
-            SDDL_REVISION_1, &raw, &size)) {
+                L"O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;{})",
+                sid_text.get()).c_str(),
+            SDDL_REVISION_1, descriptor.addressof(), &size)) {
         WinError("could not create the filesystem ACL");
     }
-    const auto owner = wil::unique_hlocal_ptr<void>(raw);
-    const auto *const first = static_cast<const BYTE *>(raw);
+    const auto *const first = static_cast<const BYTE *>(descriptor.get());
     return std::vector<BYTE>(first, first + size);
 }
 
@@ -309,7 +308,7 @@ public:
         : files_(std::move(files)), security_(std::move(security)), mount_(std::move(mount)) {
         auto params = FSP_FSCTL_VOLUME_PARAMS{
             .Version = static_cast<UINT16>(sizeof(FSP_FSCTL_VOLUME_PARAMS)),
-            .SectorSize = static_cast<UINT16>(kBlockSize),
+            .SectorSize = kAdvertisedSectorSize,
             .SectorsPerAllocationUnit = 1,
             .MaxComponentLength = static_cast<UINT16>(kMaxNameLength),
             .CasePreservedNames = 1,
@@ -317,10 +316,10 @@ public:
             .PersistentAcls = 1,
             .ReadOnlyVolume = 1,
         };
-        wcscpy_s(params.FileSystemName, std::size(params.FileSystemName), L"DEVICEFS");
+        wcscpy_s(params.FileSystemName, kFileSystemName.data());
 
         if (mount_.network) {
-            wcscpy_s(params.Prefix, std::size(params.Prefix), mount_.value.c_str());
+            wcscpy_s(params.Prefix, mount_.value.c_str());
         }
         const auto *const device = mount_.network
             ? L"" FSP_FSCTL_NET_DEVICE_NAME
@@ -360,9 +359,8 @@ private:
                 return total + entry.second.info.FileSize;
             });
         info->FreeSize = 0;
-        constexpr auto label = std::wstring_view(L"DEVICEFS");
-        info->VolumeLabelLength = static_cast<UINT16>(label.size() * sizeof(wchar_t));
-        std::memcpy(info->VolumeLabel, label.data(), info->VolumeLabelLength);
+        info->VolumeLabelLength = static_cast<UINT16>(kVolumeLabel.size() * sizeof(wchar_t));
+        std::memcpy(info->VolumeLabel, kVolumeLabel.data(), info->VolumeLabelLength);
         return STATUS_SUCCESS;
     }
 
@@ -596,8 +594,7 @@ auto Run(const Options &options) {
         WinError("could not create shutdown-complete event");
     }
 
-    auto wait = WAIT_FAILED;
-    auto wait_error = DWORD{ERROR_GEN_FAILURE};
+    auto wait_error = DWORD{};
     {
         auto filesystem = DeviceFs(
             std::move(files), std::move(security), options.mount);
@@ -612,8 +609,7 @@ auto Run(const Options &options) {
         std::wcout << L"devicefs: mounted " << options.mappings.size() << L" device(s) at "
                    << options.mount.value << L"; read access: " << options.read_user
                    << L"; stop event: " << options.stop_event << L"\n";
-        wait = WaitForSingleObject(stop_event.get(), INFINITE);
-        if (wait == WAIT_FAILED) {
+        if (WaitForSingleObject(stop_event.get(), INFINITE) == WAIT_FAILED) {
             wait_error = GetLastError();
         }
     }
@@ -621,7 +617,7 @@ auto Run(const Options &options) {
     // The registered handler lives until process exit, so its handles must as well.
     stop_event.release();
     stopped_event.release();
-    if (wait != WAIT_OBJECT_0) {
+    if (wait_error != ERROR_SUCCESS) {
         WinError("shutdown wait failed", wait_error);
     }
     return 0;
@@ -643,7 +639,9 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
             Usage(std::wcout);
             return 0;
         }
-        CheckNt(FspLoad(nullptr), "could not load WinFsp DLL");
+        if (!NT_SUCCESS(FspLoad(nullptr))) {
+            throw std::runtime_error("could not load WinFsp DLL");
+        }
         return Run(options);
     } catch (const std::runtime_error &error) {
         std::wcerr << L"devicefs: " << error.what() << L"\n";

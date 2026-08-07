@@ -12,7 +12,7 @@ using PNTSTATUS = NTSTATUS *;
 #include <algorithm>
 #include <array>
 #include <cstddef>
-#include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <format>
 #include <iostream>
@@ -58,6 +58,27 @@ struct Options {
     bool help = false;
 };
 
+[[noreturn]] auto WinError(
+    const std::string &operation, const DWORD error = GetLastError()) {
+    throw std::system_error(static_cast<int>(error), std::system_category(), operation);
+}
+
+auto Lowercase(const std::wstring_view value) {
+    const auto input_size = static_cast<int>(value.size());
+    const auto output_size = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
+        value.data(), input_size, nullptr, 0, nullptr, nullptr, 0);
+    if (output_size == 0) {
+        WinError("could not lowercase a virtual filename");
+    }
+
+    auto result = std::wstring(static_cast<std::size_t>(output_size), L'\0');
+    if (!LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
+            value.data(), input_size, result.data(), output_size, nullptr, nullptr, 0)) {
+        WinError("could not lowercase a virtual filename");
+    }
+    return result;
+}
+
 auto Usage(std::wostream &out) {
     out << L"Usage: devicefs --mount TARGET --read-user USER"
            L" --map NAME DEVICE [--map NAME DEVICE ...] [OPTIONS]\n\n"
@@ -75,7 +96,8 @@ auto ParseArgs(const int argc, const wchar_t *const *const argv) {
     auto result = Options{};
     const auto next = [&](auto &i) {
         if (++i == argc) {
-            throw std::invalid_argument("missing value after command-line option");
+            throw std::invalid_argument(
+                std::format("missing value after argument {}", i - 1));
         }
         return argv[i];
     };
@@ -97,7 +119,7 @@ auto ParseArgs(const int argc, const wchar_t *const *const argv) {
         } else if (arg == L"--no-extended-dasd-io") {
             result.extended_dasd = false;
         } else {
-            throw std::invalid_argument("unknown option");
+            throw std::invalid_argument(std::format("unknown option at argument {}", i));
         }
     }
 
@@ -110,26 +132,33 @@ auto ParseArgs(const int argc, const wchar_t *const *const argv) {
         throw std::invalid_argument(
             "--mount, --read-user, and at least one --map are required");
     }
-    return result;
-}
 
-[[noreturn]] auto WinError(
-    const char *const operation, const DWORD error = GetLastError()) {
-    throw std::system_error(static_cast<int>(error), std::system_category(), operation);
-}
-
-auto Lowercase(const std::wstring_view value) {
-    const auto input_size = static_cast<int>(value.size());
-    const auto output_size = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
-        value.data(), input_size, nullptr, 0, nullptr, nullptr, 0);
-    if (output_size == 0) {
-        WinError("could not lowercase a virtual filename");
+    auto names = std::unordered_set<std::wstring>{};
+    for (auto i = std::size_t{}; i < result.mappings.size(); ++i) {
+        const auto &name = result.mappings[i].name;
+        if ((name.empty()) || (name == L".") || (name == L"..") ||
+            (name.size() > kMaxNameLength) ||
+            (name.find_first_of(L"/\\") != std::wstring_view::npos)) {
+            throw std::invalid_argument(std::format("invalid filename in --map #{}", i + 1));
+        }
+        if (!names.emplace(Lowercase(name)).second) {
+            throw std::invalid_argument(
+                std::format("duplicate filename in --map #{}", i + 1));
+        }
     }
 
-    auto result = std::wstring(static_cast<std::size_t>(output_size), L'\0');
-    if (!LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
-            value.data(), input_size, result.data(), output_size, nullptr, nullptr, 0)) {
-        WinError("could not lowercase a virtual filename");
+    if ((result.mount.value.size() == 2) && (result.mount.value[1] == L':')) {
+        result.mount.value = std::format(L"\\\\.\\{}", result.mount.value);
+    }
+    const auto device_path = (result.mount.value.starts_with(L"\\\\?\\")) ||
+        (result.mount.value.starts_with(L"\\\\.\\"));
+    result.mount.network = !device_path && (result.mount.value.starts_with(L"\\"));
+    if ((result.mount.network) && (result.mount.value.starts_with(L"\\\\"))) {
+        result.mount.value.erase(result.mount.value.begin());
+    }
+    if ((result.mount.network) &&
+        (result.mount.value.size() > kMaxMountPrefixLength)) {
+        throw std::invalid_argument("UNC mount prefix is too long");
     }
     return result;
 }
@@ -140,14 +169,7 @@ auto CheckNt(const NTSTATUS status, const char *const operation) {
     }
 }
 
-auto ResolveSid(const std::wstring &account) {
-    auto *raw = PSID{};
-    if (ConvertStringSidToSidW(account.c_str(), &raw)) {
-        const auto owner = wil::unique_hlocal_ptr<void>(raw);
-        const auto *const first = static_cast<const BYTE *>(raw);
-        return std::vector<BYTE>(first, first + GetLengthSid(raw));
-    }
-
+auto MakeSecurityDescriptor(const std::wstring &account) {
     auto sid_size = DWORD{};
     auto domain_size = DWORD{};
     auto use = SID_NAME_USE{};
@@ -162,12 +184,9 @@ auto ResolveSid(const std::wstring &account) {
             domain.data(), &domain_size, &use)) {
         WinError("could not resolve --read-user");
     }
-    return sid;
-}
 
-auto MakeSecurityDescriptor(const void *const read_sid) {
     auto *sid_text = PWSTR{};
-    if (!ConvertSidToStringSidW(const_cast<void *>(read_sid), &sid_text)) {
+    if (!ConvertSidToStringSidW(sid.data(), &sid_text)) {
         WinError("could not format --read-user SID");
     }
     const auto sid_owner = wil::unique_hlocal_ptr<wchar_t>(sid_text);
@@ -216,34 +235,40 @@ struct DeviceFile {
 
 using DeviceFiles = std::unordered_map<std::wstring, DeviceFile>;
 
-auto OpenDevice(const Mapping &mapping, const bool extended_dasd, const UINT64 index) {
+auto OpenDevice(const Mapping &mapping, const bool extended_dasd, const UINT64 map_number) {
     auto handle = wil::unique_hfile(CreateFileW(mapping.device.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_FLAG_OVERLAPPED, nullptr));
     if (!handle) {
-        WinError("could not open block device");
+        WinError(std::format("could not open block device for --map #{}", map_number));
     }
 
     auto length = GET_LENGTH_INFORMATION{};
     const auto length_error =
         Ioctl(handle.get(), IOCTL_DISK_GET_LENGTH_INFO, &length, sizeof(length));
     if (length_error != ERROR_SUCCESS) {
-        WinError("IOCTL_DISK_GET_LENGTH_INFO failed", length_error);
+        WinError(std::format("IOCTL_DISK_GET_LENGTH_INFO failed for --map #{}", map_number),
+            length_error);
     }
     if (length.Length.QuadPart < 0) {
-        throw std::runtime_error("IOCTL_DISK_GET_LENGTH_INFO returned an invalid length");
+        throw std::runtime_error(std::format(
+            "IOCTL_DISK_GET_LENGTH_INFO returned an invalid length for --map #{}",
+            map_number));
     }
 
     auto geometry = DISK_GEOMETRY{};
     const auto geometry_error =
         Ioctl(handle.get(), IOCTL_DISK_GET_DRIVE_GEOMETRY, &geometry, sizeof(geometry));
     if (geometry_error != ERROR_SUCCESS) {
-        WinError("IOCTL_DISK_GET_DRIVE_GEOMETRY failed", geometry_error);
+        WinError(std::format("IOCTL_DISK_GET_DRIVE_GEOMETRY failed for --map #{}", map_number),
+            geometry_error);
     }
 
     const auto size = static_cast<UINT64>(length.Length.QuadPart);
     if ((geometry.BytesPerSector == 0) || ((size % geometry.BytesPerSector) != 0)) {
-        throw std::runtime_error("block device length is not a multiple of its sector size");
+        throw std::runtime_error(std::format(
+            "block device length is not a multiple of its sector size for --map #{}",
+            map_number));
     }
 
     const auto dasd_error = extended_dasd
@@ -264,50 +289,17 @@ auto OpenDevice(const Mapping &mapping, const bool extended_dasd, const UINT64 i
             .FileAttributes = FILE_ATTRIBUTE_READONLY,
             .AllocationSize = size,
             .FileSize = size,
-            .IndexNumber = index,
+            .IndexNumber = map_number + 1,
         },
     };
 }
 
-auto ParseCommandLine(const int argc, const wchar_t *const *const argv) {
+template <typename Function>
+auto NtCallback(const Function &function) noexcept {
     try {
-        auto options = ParseArgs(argc, argv);
-        if (options.help) {
-            return options;
-        }
-
-        auto names = std::unordered_set<std::wstring>{};
-        for (const auto &mapping : options.mappings) {
-            const auto &name = mapping.name;
-            if ((name.empty()) || (name == L".") || (name == L"..") ||
-                (name.size() > kMaxNameLength) ||
-                (name.find_first_of(L"/\\") != std::wstring_view::npos)) {
-                throw std::invalid_argument(
-                    "a mapped name must be a nonempty single filename within the component limit");
-            }
-            if (!names.emplace(Lowercase(name)).second) {
-                throw std::invalid_argument("mapped filenames must be unique");
-            }
-        }
-
-        if ((options.mount.value.size() == 2) && (options.mount.value[1] == L':')) {
-            options.mount.value = std::format(L"\\\\.\\{}", options.mount.value);
-        }
-        const auto device_path = (options.mount.value.starts_with(L"\\\\?\\")) ||
-            (options.mount.value.starts_with(L"\\\\.\\"));
-        options.mount.network = !device_path && (options.mount.value.starts_with(L"\\"));
-        if ((options.mount.network) && (options.mount.value.starts_with(L"\\\\"))) {
-            options.mount.value.erase(options.mount.value.begin());
-        }
-        if ((options.mount.network) &&
-            (options.mount.value.size() > kMaxMountPrefixLength)) {
-            throw std::invalid_argument("UNC mount prefix is too long");
-        }
-        return options;
-    } catch (const std::invalid_argument &error) {
-        std::wcerr << L"devicefs: " << error.what() << L"\n\n";
-        Usage(std::wcerr);
-        std::exit(2);
+        return function();
+    } catch (...) {
+        return STATUS_UNEXPECTED_IO_ERROR;
     }
 }
 
@@ -333,15 +325,13 @@ public:
         const auto *const device = mount_.network
             ? L"" FSP_FSCTL_NET_DEVICE_NAME
             : L"" FSP_FSCTL_DISK_DEVICE_NAME;
-        CheckNt(FspFileSystemCreate(const_cast<PWSTR>(device), &params, Interface(), &fs_),
+        CheckNt(FspFileSystemCreate(const_cast<PWSTR>(device), &params, &interface_, &fs_),
             "could not create WinFsp filesystem");
         fs_->UserContext = this;
     }
 
     ~DeviceFs() {
-        if (started_) {
-            FspFileSystemStopDispatcher(fs_);
-        }
+        FspFileSystemStopDispatcher(fs_);
         FspFileSystemDelete(fs_);
     }
 
@@ -351,7 +341,6 @@ public:
                 "could not mount filesystem");
         }
         CheckNt(FspFileSystemStartDispatcher(fs_, 0), "could not start WinFsp dispatcher");
-        started_ = true;
     }
 
 private:
@@ -359,20 +348,17 @@ private:
         return *static_cast<const DeviceFs *>(fs->UserContext);
     }
 
-    auto File(const std::wstring_view path) const noexcept {
+    auto File(const std::wstring_view path) const {
         const auto found = files_.find(Lowercase(path.substr(1)));
         return found == files_.end() ? nullptr : &found->second;
     }
 
     static auto GetVolumeInfo(
         FSP_FILE_SYSTEM *const fs, FSP_FSCTL_VOLUME_INFO *const info) noexcept {
-        info->TotalSize = [](const auto &files) {
-            auto total = UINT64{};
-            for (const auto &entry : files) {
-                total += entry.second.info.FileSize;
-            }
-            return total;
-        }(Self(fs).files_);
+        info->TotalSize = std::ranges::fold_left(Self(fs).files_, UINT64{},
+            [](const auto total, const auto &entry) {
+                return total + entry.second.info.FileSize;
+            });
         info->FreeSize = 0;
         constexpr auto label = std::wstring_view(L"DEVICEFS");
         info->VolumeLabelLength = static_cast<UINT16>(label.size() * sizeof(wchar_t));
@@ -397,33 +383,37 @@ private:
     static auto GetSecurityByName(FSP_FILE_SYSTEM *const fs, wchar_t *const name,
         UINT32 *const attributes, void *const security,
         SIZE_T *const size) noexcept {
-        const auto &self = Self(fs);
-        const auto root = 0 == wcscmp(name, L"\\");
-        const auto *const file = root ? nullptr : self.File(name);
-        if (!root && (file == nullptr)) {
-            return STATUS_OBJECT_NAME_NOT_FOUND;
-        }
-        if (attributes != nullptr) {
-            *attributes = root ? kRootInfo.FileAttributes : file->info.FileAttributes;
-        }
-        return size == nullptr ? STATUS_SUCCESS : GetSecurity(fs, nullptr, security, size);
+        return NtCallback([&] {
+            const auto &self = Self(fs);
+            const auto root = 0 == wcscmp(name, L"\\");
+            const auto *const file = root ? nullptr : self.File(name);
+            if (!root && (file == nullptr)) {
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+            if (attributes != nullptr) {
+                *attributes = root ? kRootInfo.FileAttributes : file->info.FileAttributes;
+            }
+            return size == nullptr ? STATUS_SUCCESS : GetSecurity(fs, nullptr, security, size);
+        });
     }
 
     static auto Open(FSP_FILE_SYSTEM *const fs, wchar_t *const name,
         UINT32, const UINT32 access, void **const context,
         FSP_FSCTL_FILE_INFO *const info) noexcept {
-        const auto &self = Self(fs);
-        const auto root = 0 == wcscmp(name, L"\\");
-        const auto *const file = root ? nullptr : self.File(name);
-        if (!root && (file == nullptr)) {
-            return STATUS_OBJECT_NAME_NOT_FOUND;
-        }
-        if (access & kWriteAccess) {
-            return STATUS_MEDIA_WRITE_PROTECTED;
-        }
-        *context = const_cast<DeviceFile *>(file);
-        *info = root ? kRootInfo : file->info;
-        return STATUS_SUCCESS;
+        return NtCallback([&] {
+            const auto &self = Self(fs);
+            const auto root = 0 == wcscmp(name, L"\\");
+            const auto *const file = root ? nullptr : self.File(name);
+            if (!root && (file == nullptr)) {
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+            if (access & kWriteAccess) {
+                return STATUS_MEDIA_WRITE_PROTECTED;
+            }
+            *context = const_cast<DeviceFile *>(file);
+            *info = root ? kRootInfo : file->info;
+            return STATUS_SUCCESS;
+        });
     }
 
     static auto Read(FSP_FILE_SYSTEM *, void *const context, void *const buffer,
@@ -440,26 +430,30 @@ private:
 
         const auto wanted = static_cast<std::remove_cv_t<decltype(length)>>(
             std::min(UINT64{length}, file->info.FileSize - offset));
+        const auto failure = [&](const auto error) {
+            std::fwprintf(stderr, L"devicefs: read failed for '%ls': Windows error %lu\n",
+                file->name.c_str(), static_cast<unsigned long>(error));
+            return FspNtStatusFromWin32(error);
+        };
         const auto read = [&](void *const output, const UINT64 position,
                               const auto count, auto *const done) {
             auto event = wil::unique_event_nothrow{};
             if (!event.try_create(wil::EventOptions::ManualReset, nullptr)) {
-                return FspNtStatusFromWin32(GetLastError());
+                return failure(GetLastError());
             }
-
             auto operation = OVERLAPPED{};
-            operation.Offset = static_cast<DWORD>(position);
-            operation.OffsetHigh = static_cast<DWORD>(position >> 32);
+            operation.Offset = static_cast<decltype(operation.Offset)>(position);
+            operation.OffsetHigh = static_cast<decltype(operation.OffsetHigh)>(position >> 32);
             operation.hEvent = event.get();
             if (ReadFile(file->handle.get(), output, count, done, &operation)) {
                 return STATUS_SUCCESS;
             }
             const auto error = GetLastError();
             if (error != ERROR_IO_PENDING) {
-                return FspNtStatusFromWin32(error);
+                return failure(error);
             }
             if (!GetOverlappedResult(file->handle.get(), &operation, done, TRUE)) {
-                return FspNtStatusFromWin32(GetLastError());
+                return failure(GetLastError());
             }
             return STATUS_SUCCESS;
         };
@@ -477,7 +471,7 @@ private:
         auto storage = wil::unique_virtualalloc_ptr<BYTE>(static_cast<BYTE *>(
             VirtualAlloc(nullptr, read_length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)));
         if (!storage) {
-            return FspNtStatusFromWin32(GetLastError());
+            return failure(GetLastError());
         }
         auto device_transferred = std::remove_cv_t<decltype(length)>{};
         const auto status = read(
@@ -507,55 +501,55 @@ private:
     static auto ReadDirectory(FSP_FILE_SYSTEM *const fs, void *const context, wchar_t *,
         wchar_t *const marker, void *const buffer, const ULONG length,
         ULONG *const transferred) noexcept {
-        *transferred = 0;
-        if (context != nullptr) {
-            return STATUS_NOT_A_DIRECTORY;
-        }
-        const auto &self = Self(fs);
-        auto current = self.files_.begin();
-        if (marker != nullptr) {
-            current = self.files_.find(Lowercase(marker));
-            if (current != self.files_.end()) {
-                ++current;
+        return NtCallback([&] {
+            *transferred = 0;
+            if (context != nullptr) {
+                return STATUS_NOT_A_DIRECTORY;
             }
-        }
-        alignas(FSP_FSCTL_DIR_INFO) auto storage = std::array<BYTE,
-            sizeof(FSP_FSCTL_DIR_INFO) + kMaxNameLength * sizeof(wchar_t)>{};
-        auto *const info = reinterpret_cast<FSP_FSCTL_DIR_INFO *>(storage.data());
-        for (; current != self.files_.end(); ++current) {
-            const auto &file = current->second;
-            const auto name_bytes = file.name.size() * sizeof(wchar_t);
-            info->Size = static_cast<UINT16>(sizeof(FSP_FSCTL_DIR_INFO) + name_bytes);
-            info->FileInfo = file.info;
-            std::memcpy(info->FileNameBuf, file.name.data(), name_bytes);
-            if (!FspFileSystemAddDirInfo(info, buffer, length, transferred)) {
-                return STATUS_SUCCESS;
+            const auto &self = Self(fs);
+            auto current = self.files_.begin();
+            if (marker != nullptr) {
+                current = self.files_.find(Lowercase(marker));
+                if (current != self.files_.end()) {
+                    ++current;
+                }
             }
-        }
-        FspFileSystemAddDirInfo(nullptr, buffer, length, transferred);
-        return STATUS_SUCCESS;
+            alignas(FSP_FSCTL_DIR_INFO) auto storage = std::array<BYTE,
+                sizeof(FSP_FSCTL_DIR_INFO) + kMaxNameLength * sizeof(wchar_t)>{};
+            auto *const info = reinterpret_cast<FSP_FSCTL_DIR_INFO *>(storage.data());
+            for (; current != self.files_.end(); ++current) {
+                const auto &file = current->second;
+                const auto name_bytes = file.name.size() * sizeof(wchar_t);
+                info->Size = static_cast<UINT16>(sizeof(FSP_FSCTL_DIR_INFO) + name_bytes);
+                info->FileInfo = file.info;
+                std::memcpy(info->FileNameBuf, file.name.data(), name_bytes);
+                if (!FspFileSystemAddDirInfo(info, buffer, length, transferred)) {
+                    return STATUS_SUCCESS;
+                }
+            }
+            FspFileSystemAddDirInfo(nullptr, buffer, length, transferred);
+            return STATUS_SUCCESS;
+        });
     }
 
-    static auto Interface() noexcept -> const FSP_FILE_SYSTEM_INTERFACE * {
-        static const auto api = FSP_FILE_SYSTEM_INTERFACE{
-            .GetVolumeInfo = GetVolumeInfo,
-            .GetSecurityByName = GetSecurityByName,
-            .Create = [](auto...) { return STATUS_MEDIA_WRITE_PROTECTED; },
-            .Open = Open,
-            .Overwrite = [](auto...) { return STATUS_MEDIA_WRITE_PROTECTED; },
-            .Read = Read,
-            .GetFileInfo = GetFileInfo,
-            .GetSecurity = GetSecurity,
-            .ReadDirectory = ReadDirectory,
-        };
-        return &api;
-    }
-
+    static const FSP_FILE_SYSTEM_INTERFACE interface_;
     DeviceFiles files_;
     const std::vector<BYTE> security_;
     Mount mount_;
     FSP_FILE_SYSTEM *fs_ = nullptr;
-    bool started_ = false;
+};
+
+const auto DeviceFs::interface_ = FSP_FILE_SYSTEM_INTERFACE{
+    .GetVolumeInfo = GetVolumeInfo,
+    .GetSecurityByName = GetSecurityByName,
+    // WinFsp requires Create, Open, and Overwrite callbacks as a group.
+    .Create = [](auto...) { return STATUS_MEDIA_WRITE_PROTECTED; },
+    .Open = Open,
+    .Overwrite = [](auto...) { return STATUS_MEDIA_WRITE_PROTECTED; },
+    .Read = Read,
+    .GetFileInfo = GetFileInfo,
+    .GetSecurity = GetSecurity,
+    .ReadDirectory = ReadDirectory,
 };
 
 auto *g_stop_event = HANDLE{};
@@ -565,11 +559,11 @@ auto WINAPI ControlHandler(const DWORD event) -> BOOL {
     switch (event) {
     case CTRL_C_EVENT:
     case CTRL_BREAK_EVENT:
-        return (g_stop_event != nullptr) && (SetEvent(g_stop_event));
+        return SetEvent(g_stop_event);
     case CTRL_CLOSE_EVENT:
     case CTRL_LOGOFF_EVENT:
     case CTRL_SHUTDOWN_EVENT:
-        if ((g_stop_event == nullptr) || !SetEvent(g_stop_event)) {
+        if (!SetEvent(g_stop_event)) {
             return FALSE;
         }
         WaitForSingleObject(g_stopped_event, INFINITE);
@@ -580,13 +574,12 @@ auto WINAPI ControlHandler(const DWORD event) -> BOOL {
 }
 
 auto Run(const Options &options) {
-    const auto sid = ResolveSid(options.read_user);
-    auto security = MakeSecurityDescriptor(sid.data());
+    auto security = MakeSecurityDescriptor(options.read_user);
     auto files = DeviceFiles{};
     for (auto i = std::size_t{}; i < options.mappings.size(); ++i) {
         const auto &mapping = options.mappings[i];
         files.emplace(Lowercase(mapping.name),
-            OpenDevice(mapping, options.extended_dasd, i + 2));
+            OpenDevice(mapping, options.extended_dasd, i + 1));
     }
 
     auto stop_event = wil::unique_event_nothrow{};
@@ -625,9 +618,9 @@ auto Run(const Options &options) {
         }
     }
     SetEvent(stopped_event.get());
-    SetConsoleCtrlHandler(ControlHandler, FALSE);
-    g_stop_event = nullptr;
-    g_stopped_event = nullptr;
+    // The registered handler lives until process exit, so its handles must as well.
+    stop_event.release();
+    stopped_event.release();
     if (wait != WAIT_OBJECT_0) {
         WinError("shutdown wait failed", wait_error);
     }
@@ -637,15 +630,20 @@ auto Run(const Options &options) {
 } // namespace
 
 auto wmain(const int argc, wchar_t **const argv) -> int {
-    const auto options = ParseCommandLine(argc, argv);
-    if (options.help) {
-        Usage(std::wcout);
-        return 0;
-    }
     try {
-        if (!NT_SUCCESS(FspLoad(nullptr))) {
-            throw std::runtime_error("could not load WinFsp DLL");
+        auto options = Options{};
+        try {
+            options = ParseArgs(argc, argv);
+        } catch (const std::invalid_argument &error) {
+            std::wcerr << L"devicefs: " << error.what() << L"\n\n";
+            Usage(std::wcerr);
+            return 2;
         }
+        if (options.help) {
+            Usage(std::wcout);
+            return 0;
+        }
+        CheckNt(FspLoad(nullptr), "could not load WinFsp DLL");
         return Run(options);
     } catch (const std::runtime_error &error) {
         std::wcerr << L"devicefs: " << error.what() << L"\n";

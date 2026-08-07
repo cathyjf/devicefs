@@ -6,7 +6,7 @@ if(NOT MSVC)
     message(FATAL_ERROR "devicefs requires the Microsoft Visual C++ compiler")
 endif()
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 cmake_host_system_information(

@@ -473,11 +473,11 @@ private:
         if (file == nullptr) {
             return STATUS_FILE_IS_A_DIRECTORY;
         }
-        if (offset >= file->info.FileSize) {
-            return STATUS_END_OF_FILE;
-        }
         if (length == 0) {
             return STATUS_SUCCESS;
+        }
+        if (offset >= file->info.FileSize) {
+            return STATUS_END_OF_FILE;
         }
 
         [[gsl::suppress("type.1",

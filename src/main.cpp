@@ -22,6 +22,7 @@
 using PNTSTATUS = NTSTATUS *;
 #include <winfsp/winfsp.h>
 #include <wil/resource.h>
+#include <wil/stl.h>
 
 #include <algorithm>
 #include <array>
@@ -89,19 +90,19 @@ struct Options {
     throw std::system_error(std::bit_cast<int>(error), std::system_category(), operation);
 }
 
-[[nodiscard]] auto Lowercase(const std::wstring_view value) {
-    const auto input_size = static_cast<int>(value.size());
+[[nodiscard]] auto Lowercase(const wil::zwstring_view value) {
     const auto output_size = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
-        value.data(), input_size, nullptr, 0, nullptr, nullptr, 0);
+        value.c_str(), -1, nullptr, 0, nullptr, nullptr, 0);
     if (output_size == 0) {
         WinError("could not lowercase a virtual filename");
     }
 
-    auto result = std::wstring(static_cast<std::size_t>(output_size), L'\0');
+    auto result = std::wstring(output_size, L'\0');
     if (!LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
-            value.data(), input_size, result.data(), output_size, nullptr, nullptr, 0)) {
+            value.c_str(), -1, result.data(), output_size, nullptr, nullptr, 0)) {
         WinError("could not lowercase a virtual filename");
     }
+    result.pop_back();
     return result;
 }
 
@@ -343,7 +344,7 @@ public:
         DeviceFiles files, wil::unique_hlocal_security_descriptor security, Mount mount)
         : files_(std::move(files)), security_(std::move(security)), mount_(std::move(mount)) {
         auto params = FSP_FSCTL_VOLUME_PARAMS{
-            .Version = static_cast<UINT16>(sizeof(FSP_FSCTL_VOLUME_PARAMS)),
+            .Version = sizeof(FSP_FSCTL_VOLUME_PARAMS),
             .SectorSize = kAdvertisedSectorSize,
             .SectorsPerAllocationUnit = 1,
             .MaxComponentLength = kMaxNameLength,
@@ -367,6 +368,8 @@ public:
 
     auto Start() {
         if (!mount_.network) {
+            [[gsl::suppress("type.3",
+                justification: "WinFsp copies the mount point despite accepting a mutable pointer.")]]
             CheckNt(FspFileSystemSetMountPoint(
                 fs_.get(), const_cast<PWSTR>(mount_.value.c_str())),
                 "could not mount filesystem");
@@ -380,8 +383,9 @@ private:
         return *static_cast<const DeviceFs *>(fs->UserContext);
     }
 
-    [[nodiscard]] auto File(const std::wstring_view path) const {
-        const auto found = files_.find(Lowercase(path.substr(1)));
+    [[nodiscard]] auto File(wil::zwstring_view path) const {
+        path.remove_prefix(1);
+        const auto found = files_.find(Lowercase(path));
         return found == files_.end() ? nullptr : &found->second;
     }
 
@@ -392,7 +396,9 @@ private:
                 return total + entry.second.info.FileSize;
             });
         info->FreeSize = 0;
-        info->VolumeLabelLength = static_cast<UINT16>(kVolumeLabel.size() * sizeof(wchar_t));
+        [[gsl::suppress("type.4",
+            justification: "Braced initialization checks this constant expression for narrowing.")]]
+        info->VolumeLabelLength = UINT16{kVolumeLabel.size() * sizeof(wchar_t)};
         std::ranges::copy(kVolumeLabel, info->VolumeLabel);
         return STATUS_SUCCESS;
     }
@@ -442,7 +448,7 @@ private:
             if (access & kWriteAccess) {
                 return STATUS_MEDIA_WRITE_PROTECTED;
             }
-            [[gsl::suppress("26492",
+            [[gsl::suppress("type.3",
                 justification: "WinFsp stores an opaque context as void *, but DeviceFile is immutable.")]]
             *context = const_cast<DeviceFile *>(file);
             *info = root ? kRootInfo : file->info;

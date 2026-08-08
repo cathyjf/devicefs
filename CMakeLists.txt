@@ -54,6 +54,6 @@ target_link_options(devicefs PRIVATE /DELAYLOAD:winfsp-x64.dll)
 target_compile_definitions(devicefs PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 
 target_compile_options(devicefs PRIVATE
-    /W4 /WX /O2 /permissive- /EHsc /utf-8
+    /W4 /WX /permissive- /EHsc /utf-8
     /analyze:external-
 )

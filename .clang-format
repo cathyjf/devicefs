@@ -1,9 +1,0 @@
-BasedOnStyle: LLVM
-ColumnLimit: 100
-DerivePointerAlignment: false
-PointerAlignment: Right
-ReferenceAlignment: Pointer
-AllowShortBlocksOnASingleLine: Never
-AllowShortIfStatementsOnASingleLine: Never
-AllowShortLoopsOnASingleLine: false
-InsertBraces: true

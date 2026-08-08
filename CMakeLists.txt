@@ -26,6 +26,7 @@ endif()
 
 set(WINFSP_INCLUDE_DIR "${WINFSP_ROOT}/inc")
 set(WINFSP_LIBRARY "${WINFSP_ROOT}/lib/winfsp-x64.lib")
+set(WIL_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/wil/include")
 
 if(NOT EXISTS "${WINFSP_INCLUDE_DIR}/winfsp/winfsp.h" OR NOT EXISTS "${WINFSP_LIBRARY}")
     message(FATAL_ERROR
@@ -41,11 +42,12 @@ set_target_properties(devicefs PROPERTIES
     VS_GLOBAL_EnableCppCoreCheck true
     VS_GLOBAL_RunCodeAnalysis true
     VS_GLOBAL_CodeAnalysisRuleSet "${CMAKE_CURRENT_SOURCE_DIR}/.ruleset"
+    VS_GLOBAL_CAExcludePath "${WINFSP_INCLUDE_DIR};${WIL_INCLUDE_DIR};$(CAExcludePath)"
 )
 
 target_include_directories(devicefs SYSTEM PRIVATE
     "${WINFSP_INCLUDE_DIR}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/wil/include"
+    "${WIL_INCLUDE_DIR}"
 )
 target_link_libraries(devicefs PRIVATE "${WINFSP_LIBRARY}" advapi32 delayimp)
 target_link_options(devicefs PRIVATE /DELAYLOAD:winfsp-x64.dll)

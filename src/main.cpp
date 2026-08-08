@@ -25,6 +25,7 @@ using PNTSTATUS = NTSTATUS *;
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -46,7 +47,7 @@ namespace {
 constexpr auto kAdvertisedSectorSize = UINT16{512};
 constexpr auto kDefaultStopEvent = std::wstring_view(L"Local\\devicefs-stop");
 constexpr auto kFileSystemName = std::wstring_view(L"DEVICEFS");
-constexpr auto kMaxNameLength = std::size_t{255};
+constexpr auto kMaxNameLength = UINT16{255};
 constexpr auto kMaxMountPrefixLength = std::size(FSP_FSCTL_VOLUME_PARAMS{}.Prefix) - 1;
 constexpr auto kVolumeLabel = std::wstring_view(L"DEVICEFS");
 constexpr auto kRootInfo = FSP_FSCTL_FILE_INFO{
@@ -77,7 +78,7 @@ struct Options {
 
 [[noreturn]] auto WinError(
     const std::string &operation, const DWORD error = GetLastError()) {
-    throw std::system_error(static_cast<int>(error), std::system_category(), operation);
+    throw std::system_error(std::bit_cast<int>(error), std::system_category(), operation);
 }
 
 [[nodiscard]] auto Lowercase(const std::wstring_view value) {
@@ -219,7 +220,7 @@ auto CheckNt(const NTSTATUS status, const char *const operation) {
 }
 
 [[nodiscard]] auto Ioctl(const HANDLE device, const DWORD code, void *const output,
-    const DWORD output_size) {
+    const DWORD output_size) noexcept {
     auto event = wil::unique_event_nothrow{};
     if (!event.try_create(wil::EventOptions::ManualReset, nullptr)) {
         return GetLastError();
@@ -291,7 +292,7 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
         : DWORD{ERROR_SUCCESS};
     if (dasd_error != ERROR_SUCCESS) {
         const auto error = std::error_code(
-            static_cast<int>(dasd_error), std::system_category());
+            std::bit_cast<int>(dasd_error), std::system_category());
         std::wcerr << L"devicefs: warning: FSCTL_ALLOW_EXTENDED_DASD_IO failed for '"
                    << mapping.device << L"': " << error.message().c_str() << L"\n";
     }
@@ -318,6 +319,14 @@ template <typename Function>
     }
 }
 
+auto CloseFileSystem(FSP_FILE_SYSTEM *const fs) noexcept {
+    FspFileSystemStopDispatcher(fs);
+    FspFileSystemDelete(fs);
+}
+
+using UniqueFileSystem = wil::unique_any<
+    FSP_FILE_SYSTEM *, decltype(&CloseFileSystem), CloseFileSystem>;
+
 class DeviceFs {
 public:
     [[nodiscard]] DeviceFs(
@@ -327,7 +336,7 @@ public:
             .Version = static_cast<UINT16>(sizeof(FSP_FSCTL_VOLUME_PARAMS)),
             .SectorSize = kAdvertisedSectorSize,
             .SectorsPerAllocationUnit = 1,
-            .MaxComponentLength = static_cast<UINT16>(kMaxNameLength),
+            .MaxComponentLength = kMaxNameLength,
             .CasePreservedNames = 1,
             .UnicodeOnDisk = 1,
             .PersistentAcls = 1,
@@ -338,25 +347,22 @@ public:
         if (mount_.network) {
             wcscpy_s(params.Prefix, mount_.value.c_str());
         }
-        const auto *const device = mount_.network
+        auto device = std::wstring{mount_.network
             ? L"" FSP_FSCTL_NET_DEVICE_NAME
-            : L"" FSP_FSCTL_DISK_DEVICE_NAME;
-        CheckNt(FspFileSystemCreate(const_cast<PWSTR>(device), &params, &interface_, &fs_),
+            : L"" FSP_FSCTL_DISK_DEVICE_NAME};
+        CheckNt(FspFileSystemCreate(device.data(), &params, &interface_, fs_.put()),
             "could not create WinFsp filesystem");
-        fs_->UserContext = this;
-    }
-
-    ~DeviceFs() {
-        FspFileSystemStopDispatcher(fs_);
-        FspFileSystemDelete(fs_);
+        fs_.get()->UserContext = this;
     }
 
     auto Start() {
         if (!mount_.network) {
-            CheckNt(FspFileSystemSetMountPoint(fs_, const_cast<PWSTR>(mount_.value.c_str())),
+            CheckNt(FspFileSystemSetMountPoint(
+                fs_.get(), const_cast<PWSTR>(mount_.value.c_str())),
                 "could not mount filesystem");
         }
-        CheckNt(FspFileSystemStartDispatcher(fs_, 0), "could not start WinFsp dispatcher");
+        CheckNt(FspFileSystemStartDispatcher(fs_.get(), 0),
+            "could not start WinFsp dispatcher");
     }
 
 private:
@@ -377,7 +383,7 @@ private:
             });
         info->FreeSize = 0;
         info->VolumeLabelLength = static_cast<UINT16>(kVolumeLabel.size() * sizeof(wchar_t));
-        std::memcpy(info->VolumeLabel, kVolumeLabel.data(), info->VolumeLabelLength);
+        std::ranges::copy(kVolumeLabel, info->VolumeLabel);
         return STATUS_SUCCESS;
     }
 
@@ -426,6 +432,8 @@ private:
             if (access & kWriteAccess) {
                 return STATUS_MEDIA_WRITE_PROTECTED;
             }
+            [[gsl::suppress("26492",
+                justification: "WinFsp stores an opaque context as void *, but DeviceFile is immutable.")]]
             *context = const_cast<DeviceFile *>(file);
             *info = root ? kRootInfo : file->info;
             return STATUS_SUCCESS;
@@ -449,9 +457,9 @@ private:
 
         const auto wanted = static_cast<std::remove_cv_t<decltype(length)>>(
             std::min(UINT64{length}, file->info.FileSize - offset));
-        const auto failure = [&](const auto error) {
+        const auto failure = [&](const DWORD error) {
             std::fwprintf(stderr, L"devicefs: read failed for '%ls': Windows error %lu\n",
-                file->name.c_str(), static_cast<unsigned long>(error));
+                file->name.c_str(), error);
             return FspNtStatusFromWin32(error);
         };
         const auto read = [&](void *const output, const UINT64 position,
@@ -461,8 +469,9 @@ private:
                 return failure(GetLastError());
             }
             auto operation = OVERLAPPED{};
-            operation.Offset = static_cast<decltype(operation.Offset)>(position);
-            operation.OffsetHigh = static_cast<decltype(operation.OffsetHigh)>(position >> 32);
+            const auto parts = ULARGE_INTEGER{.QuadPart = position};
+            operation.Offset = parts.LowPart;
+            operation.OffsetHigh = parts.HighPart;
             operation.hEvent = event.get();
             if (ReadFile(file->handle.get(), output, count, done, &operation)) {
                 return STATUS_SUCCESS;
@@ -481,8 +490,12 @@ private:
         const auto read_offset = offset - (offset % sector_size);
         const auto end = offset + wanted;
         const auto read_end = ((end + sector_size - 1) / sector_size) * sector_size;
-        const auto read_length = static_cast<std::remove_cv_t<decltype(length)>>(
-            read_end - read_offset);
+        using LengthType = std::remove_cv_t<decltype(length)>;
+        const auto aligned_length = read_end - read_offset;
+        if (!std::in_range<LengthType>(aligned_length)) {
+            return STATUS_INVALID_PARAMETER;
+        }
+        const auto read_length = static_cast<LengthType>(aligned_length);
         if ((read_offset == offset) && (read_length == wanted)) {
             return read(buffer, offset, wanted, transferred);
         }
@@ -492,15 +505,14 @@ private:
         if (!storage) {
             return failure(GetLastError());
         }
-        auto device_transferred = std::remove_cv_t<decltype(length)>{};
+        auto device_transferred = LengthType{};
         const auto status = read(
             storage.get(), read_offset, read_length, &device_transferred);
         if (!NT_SUCCESS(status)) {
             return status;
         }
 
-        const auto prefix = static_cast<std::remove_cv_t<decltype(length)>>(
-            offset - read_offset);
+        const auto prefix = static_cast<LengthType>(offset - read_offset);
         if (device_transferred <= prefix) {
             return STATUS_END_OF_FILE;
         }
@@ -551,16 +563,16 @@ private:
     const DeviceFiles files_;
     const wil::unique_hlocal_security_descriptor security_;
     const Mount mount_;
-    FSP_FILE_SYSTEM *fs_ = nullptr;
+    UniqueFileSystem fs_;
 };
 
 const FSP_FILE_SYSTEM_INTERFACE DeviceFs::interface_ = {
     .GetVolumeInfo = GetVolumeInfo,
     .GetSecurityByName = GetSecurityByName,
     // WinFsp requires Create, Open, and Overwrite callbacks as a group.
-    .Create = [](auto...) { return STATUS_MEDIA_WRITE_PROTECTED; },
+    .Create = [](auto...) noexcept { return STATUS_MEDIA_WRITE_PROTECTED; },
     .Open = Open,
-    .Overwrite = [](auto...) { return STATUS_MEDIA_WRITE_PROTECTED; },
+    .Overwrite = [](auto...) noexcept { return STATUS_MEDIA_WRITE_PROTECTED; },
     .Read = Read,
     .GetFileInfo = GetFileInfo,
     .GetSecurity = GetSecurity,
@@ -570,7 +582,7 @@ const FSP_FILE_SYSTEM_INTERFACE DeviceFs::interface_ = {
 auto *g_stop_event = HANDLE{};
 auto *g_stopped_event = HANDLE{};
 
-auto WINAPI ControlHandler(const DWORD event) -> BOOL {
+auto WINAPI ControlHandler(const DWORD event) noexcept -> BOOL {
     switch (event) {
     case CTRL_C_EVENT:
     case CTRL_BREAK_EVENT:

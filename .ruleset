@@ -1,25 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <RuleSet Name="devicefs" Description="Code-analysis rules enforced by devicefs." ToolsVersion="10.0">
-  <Include Path="NativeRecommendedRules.ruleset" Action="Default" />
+  <Include Path="NativeRecommendedRules.ruleset" Action="Error" />
+  <Include Path="CppCoreCheckRules.ruleset" Action="Error" />
   <Rules AnalyzerId="Microsoft.Analyzers.NativeCodeAnalysis" RuleNamespace="Microsoft.Rules.Native">
-    <!-- Require named RAII objects. -->
-    <Rule Id="C26444" Action="Error" />
-
-    <!-- Enforce const references, pointees, and local variables where possible. -->
-    <Rule Id="C26460" Action="Error" />
-    <Rule Id="C26462" Action="Error" />
-    <Rule Id="C26496" Action="Error" />
-
-    <!-- Disallow casting away const, and require typed casts and initialized variables and members. -->
-    <Rule Id="C26492" Action="Error" />
-    <Rule Id="C26493" Action="Error" />
-    <Rule Id="C26494" Action="Error" />
-    <Rule Id="C26495" Action="Error" />
-
-    <!-- Diagnose moved-from objects, dangling values, and accidental copies. -->
-    <Rule Id="C26800" Action="Error" />
-    <Rule Id="C26815" Action="Error" />
-    <Rule Id="C26816" Action="Error" />
-    <Rule Id="C26820" Action="Error" />
+    <!-- "Symbol 'symbol' is never tested for nullness, it can be marked as not_null." -->
+    <Rule Id="C26429" Action="None" />
+    <!-- "Prefer to use gsl::at() instead of unchecked subscript operator." -->
+    <Rule Id="C26446" Action="None" />
+    <!-- "The pointer argument 'argument' for function 'function' can be marked as a pointer to const." -->
+    <Rule Id="C26461" Action="None" />
+    <!-- "Don't use pointer arithmetic. Use span instead." -->
+    <Rule Id="C26481" Action="None" />
+    <!-- "Expression 'expr': No array to pointer decay." -->
+    <Rule Id="C26485" Action="None" />
   </Rules>
 </RuleSet>

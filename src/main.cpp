@@ -57,6 +57,10 @@ constexpr auto kAdvertisedSectorSize = UINT16{512};
 constexpr auto kDefaultStopEvent = std::wstring_view(L"Local\\devicefs-stop");
 constexpr auto kFileSystemName = std::wstring_view(L"DEVICEFS");
 constexpr auto kMaxNameLength = UINT16{255};
+constexpr auto kMaxDirectoryInfoSize =
+    sizeof(FSP_FSCTL_DIR_INFO) + kMaxNameLength * sizeof(wchar_t);
+static_assert(std::in_range<decltype(FSP_FSCTL_DIR_INFO::Size)>(kMaxDirectoryInfoSize),
+    "The largest directory record must fit in the FSP_FSCTL_DIR_INFO::Size field.");
 constexpr auto kMaxMountPrefixLength = std::size(FSP_FSCTL_VOLUME_PARAMS{}.Prefix) - 1;
 constexpr auto kVolumeLabel = std::wstring_view(L"DEVICEFS");
 constexpr auto kRootInfo = FSP_FSCTL_FILE_INFO{
@@ -231,7 +235,7 @@ auto CheckNt(const NTSTATUS status, const char *const operation) {
 }
 
 [[nodiscard]] auto Ioctl(const HANDLE device, const DWORD code, void *const output,
-    const DWORD output_size) noexcept {
+    const DWORD output_size) {
     auto event = wil::unique_event_nothrow{};
     if (!event.try_create(wil::EventOptions::ManualReset, nullptr)) {
         return GetLastError();
@@ -291,6 +295,8 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
             geometry_error);
     }
 
+    [[gsl::suppress("type.1",
+        justification: "The negative case is rejected above, so this conversion preserves the device length.")]]
     const auto size = static_cast<UINT64>(length.Length.QuadPart);
     if ((geometry.BytesPerSector == 0) || ((size % geometry.BytesPerSector) != 0)) {
         throw std::runtime_error(std::format(
@@ -471,6 +477,8 @@ private:
             return STATUS_SUCCESS;
         }
 
+        [[gsl::suppress("type.1",
+            justification: "The minimum cannot exceed the ULONG length argument.")]]
         const auto wanted = static_cast<std::remove_cv_t<decltype(length)>>(
             std::min(UINT64{length}, file->info.FileSize - offset));
         const auto failure = [&](const DWORD error) {
@@ -511,10 +519,20 @@ private:
         if (!std::in_range<LengthType>(aligned_length)) {
             return STATUS_INVALID_PARAMETER;
         }
+        [[gsl::suppress("type.1",
+            justification: "std::in_range above proves aligned_length is representable by LengthType.")]]
         const auto read_length = static_cast<LengthType>(aligned_length);
         if ((read_offset == offset) && (read_length == wanted)) {
             return read(buffer, offset, wanted, transferred);
         }
+
+        const auto prefix_length = offset - read_offset;
+        if (!std::in_range<LengthType>(prefix_length)) {
+            return STATUS_INVALID_PARAMETER;
+        }
+        [[gsl::suppress("type.1",
+            justification: "std::in_range above proves prefix_length is representable by LengthType.")]]
+        const auto prefix = static_cast<LengthType>(prefix_length);
 
         auto storage = wil::unique_virtualalloc_ptr<BYTE>(static_cast<BYTE *>(
             VirtualAlloc(nullptr, read_length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)));
@@ -528,7 +546,6 @@ private:
             return status;
         }
 
-        const auto prefix = static_cast<LengthType>(offset - read_offset);
         if (device_transferred <= prefix) {
             return STATUS_END_OF_FILE;
         }
@@ -557,13 +574,15 @@ private:
             auto current = marker == nullptr
                 ? self.files_.begin()
                 : self.files_.upper_bound(Lowercase(marker));
-            alignas(FSP_FSCTL_DIR_INFO) auto storage = std::array<BYTE,
-                sizeof(FSP_FSCTL_DIR_INFO) + kMaxNameLength * sizeof(wchar_t)>{};
+            alignas(FSP_FSCTL_DIR_INFO) auto storage = std::array<BYTE, kMaxDirectoryInfoSize>{};
             auto *const info = std::start_lifetime_as<FSP_FSCTL_DIR_INFO>(storage.data());
             for (; current != self.files_.end(); ++current) {
                 const auto &file = current->second;
                 const auto name_bytes = file.name.size() * sizeof(wchar_t);
-                info->Size = static_cast<UINT16>(sizeof(FSP_FSCTL_DIR_INFO) + name_bytes);
+                [[gsl::suppress("type.1",
+                    justification: "Filename validation bounds the record by kMaxDirectoryInfoSize, which is asserted to fit FSP_FSCTL_DIR_INFO::Size.")]]
+                info->Size = static_cast<decltype(info->Size)>(
+                    sizeof(FSP_FSCTL_DIR_INFO) + name_bytes);
                 info->FileInfo = file.info;
                 std::memcpy(info->FileNameBuf, file.name.data(), name_bytes);
                 if (!FspFileSystemAddDirInfo(info, buffer, length, transferred)) {

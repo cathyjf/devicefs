@@ -134,7 +134,7 @@ auto ParseArgs(const int argc, const wchar_t *const *const argv) {
     }
 
     auto names = std::unordered_set<std::wstring>{};
-    for (auto i = std::size_t{}; i < result.mappings.size(); ++i) {
+    for (auto i = 0uz; i < result.mappings.size(); ++i) {
         const auto &name = result.mappings[i].name;
         if ((name.empty()) || (name == L".") || (name == L"..") ||
             (name.size() > kMaxNameLength) ||
@@ -334,7 +334,7 @@ public:
 
     auto Start() {
         if (!mount_.network) {
-            CheckNt(FspFileSystemSetMountPoint(fs_, mount_.value.data()),
+            CheckNt(FspFileSystemSetMountPoint(fs_, const_cast<PWSTR>(mount_.value.c_str())),
                 "could not mount filesystem");
         }
         CheckNt(FspFileSystemStartDispatcher(fs_, 0), "could not start WinFsp dispatcher");
@@ -529,9 +529,9 @@ private:
     }
 
     static const FSP_FILE_SYSTEM_INTERFACE interface_;
-    DeviceFiles files_;
+    const DeviceFiles files_;
     const wil::unique_hlocal_security_descriptor security_;
-    Mount mount_;
+    const Mount mount_;
     FSP_FILE_SYSTEM *fs_ = nullptr;
 };
 
@@ -572,14 +572,14 @@ auto WINAPI ControlHandler(const DWORD event) -> BOOL {
 auto Run(const Options &options) {
     auto security = MakeSecurityDescriptor(options.read_user);
     auto files = DeviceFiles{};
-    for (auto i = std::size_t{}; i < options.mappings.size(); ++i) {
+    for (auto i = 0uz; i < options.mappings.size(); ++i) {
         const auto &mapping = options.mappings[i];
         files.emplace(Lowercase(mapping.name),
             OpenDevice(mapping, options.extended_dasd, i + 1));
     }
 
     auto stop_event = wil::unique_event_nothrow{};
-    auto already_exists = bool{};
+    auto already_exists = false;
     if (!stop_event.try_create(wil::EventOptions::ManualReset,
             options.stop_event.c_str(), nullptr, &already_exists)) {
         WinError("could not create shutdown event");

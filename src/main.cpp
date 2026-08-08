@@ -80,7 +80,7 @@ struct Options {
     throw std::system_error(static_cast<int>(error), std::system_category(), operation);
 }
 
-auto Lowercase(const std::wstring_view value) {
+[[nodiscard]] auto Lowercase(const std::wstring_view value) {
     const auto input_size = static_cast<int>(value.size());
     const auto output_size = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
         value.data(), input_size, nullptr, 0, nullptr, nullptr, 0);
@@ -109,7 +109,7 @@ auto Usage(std::wostream &out) {
         << L"    --map C.img '\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy12'\n";
 }
 
-auto ParseArgs(const int argc, const wchar_t *const *const argv) {
+[[nodiscard]] auto ParseArgs(const int argc, const wchar_t *const *const argv) {
     auto result = Options{};
     const auto next = [&](auto &i) {
         if (++i == argc) {
@@ -186,7 +186,7 @@ auto CheckNt(const NTSTATUS status, const char *const operation) {
     }
 }
 
-auto MakeSecurityDescriptor(const std::wstring &account) {
+[[nodiscard]] auto MakeSecurityDescriptor(const std::wstring &account) {
     auto sid_size = DWORD{};
     auto domain_size = DWORD{};
     auto use = SID_NAME_USE{};
@@ -218,7 +218,7 @@ auto MakeSecurityDescriptor(const std::wstring &account) {
     return descriptor;
 }
 
-auto Ioctl(const HANDLE device, const DWORD code, void *const output,
+[[nodiscard]] auto Ioctl(const HANDLE device, const DWORD code, void *const output,
     const DWORD output_size) {
     auto event = wil::unique_event_nothrow{};
     if (!event.try_create(wil::EventOptions::ManualReset, nullptr)) {
@@ -249,7 +249,8 @@ struct DeviceFile {
 
 using DeviceFiles = std::map<std::wstring, DeviceFile>;
 
-auto OpenDevice(const Mapping &mapping, const bool extended_dasd, const UINT64 map_number) {
+[[nodiscard]] auto OpenDevice(
+    const Mapping &mapping, const bool extended_dasd, const UINT64 map_number) {
     auto handle = wil::unique_hfile(CreateFileW(mapping.device.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_FLAG_OVERLAPPED, nullptr));
@@ -309,7 +310,7 @@ auto OpenDevice(const Mapping &mapping, const bool extended_dasd, const UINT64 m
 }
 
 template <typename Function>
-auto NtCallback(const Function &function) noexcept {
+[[nodiscard]] auto NtCallback(const Function &function) noexcept {
     try {
         return function();
     } catch (...) {
@@ -319,7 +320,8 @@ auto NtCallback(const Function &function) noexcept {
 
 class DeviceFs {
 public:
-    DeviceFs(DeviceFiles files, wil::unique_hlocal_security_descriptor security, Mount mount)
+    [[nodiscard]] DeviceFs(
+        DeviceFiles files, wil::unique_hlocal_security_descriptor security, Mount mount)
         : files_(std::move(files)), security_(std::move(security)), mount_(std::move(mount)) {
         auto params = FSP_FSCTL_VOLUME_PARAMS{
             .Version = static_cast<UINT16>(sizeof(FSP_FSCTL_VOLUME_PARAMS)),
@@ -358,11 +360,11 @@ public:
     }
 
 private:
-    static auto Self(const FSP_FILE_SYSTEM *const fs) noexcept -> decltype(auto) {
+    [[nodiscard]] static auto Self(const FSP_FILE_SYSTEM *const fs) noexcept -> decltype(auto) {
         return *static_cast<const DeviceFs *>(fs->UserContext);
     }
 
-    auto File(const std::wstring_view path) const {
+    [[nodiscard]] auto File(const std::wstring_view path) const {
         const auto found = files_.find(Lowercase(path.substr(1)));
         return found == files_.end() ? nullptr : &found->second;
     }

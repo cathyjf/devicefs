@@ -216,6 +216,8 @@ auto CheckNt(const NTSTATUS status, const char *const operation) {
         WinError("could not format --read-user SID");
     }
 
+    // SYSTEM and Administrators get full access.
+    // The user specified by `--read-user` gets read and execute.
     auto descriptor = wil::unique_hlocal_security_descriptor{};
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
             std::format(

@@ -2,11 +2,11 @@ cmake_minimum_required(VERSION 4.2)
 
 project(devicefs LANGUAGES CXX)
 
-if(NOT MSVC)
+if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     message(FATAL_ERROR "devicefs requires the Microsoft Visual C++ compiler")
 endif()
 
-if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+if(NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
     message(FATAL_ERROR "devicefs requires an x64 target")
 endif()
 

@@ -15,6 +15,7 @@ using PNTSTATUS = NTSTATUS *;
 #include <format>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -512,7 +513,7 @@ private:
                 : self.files_.upper_bound(Lowercase(marker));
             alignas(FSP_FSCTL_DIR_INFO) auto storage = std::array<BYTE,
                 sizeof(FSP_FSCTL_DIR_INFO) + kMaxNameLength * sizeof(wchar_t)>{};
-            auto *const info = reinterpret_cast<FSP_FSCTL_DIR_INFO *>(storage.data());
+            auto *const info = std::start_lifetime_as<FSP_FSCTL_DIR_INFO>(storage.data());
             for (; current != self.files_.end(); ++current) {
                 const auto &file = current->second;
                 const auto name_bytes = file.name.size() * sizeof(wchar_t);

@@ -344,6 +344,9 @@ auto CloseFileSystem(FSP_FILE_SYSTEM *const fs) noexcept {
 using UniqueFileSystem = wil::unique_any<
     FSP_FILE_SYSTEM *, decltype(&CloseFileSystem), CloseFileSystem>;
 
+auto *g_stop_event = HANDLE{};
+auto *g_stopped_event = HANDLE{};
+
 class DeviceFs {
 public:
     [[nodiscard]] DeviceFs(
@@ -497,12 +500,11 @@ private:
             operation.Offset = parts.LowPart;
             operation.OffsetHigh = parts.HighPart;
             operation.hEvent = event.get();
-            if (ReadFile(file->handle.get(), output, count, done, &operation)) {
-                return STATUS_SUCCESS;
-            }
-            const auto error = GetLastError();
-            if (error != ERROR_IO_PENDING) {
-                return failure(error);
+            if (!ReadFile(file->handle.get(), output, count, nullptr, &operation)) {
+                const auto error = GetLastError();
+                if (error != ERROR_IO_PENDING) {
+                    return failure(error);
+                }
             }
             if (!GetOverlappedResult(file->handle.get(), &operation, done, TRUE)) {
                 return failure(GetLastError());
@@ -594,6 +596,12 @@ private:
         });
     }
 
+    static auto DispatcherStopped(FSP_FILE_SYSTEM *, const BOOLEAN normally) noexcept {
+        if (!normally) {
+            SetEvent(g_stop_event);
+        }
+    }
+
     static const FSP_FILE_SYSTEM_INTERFACE interface_;
     const DeviceFiles files_;
     const wil::unique_hlocal_security_descriptor security_;
@@ -612,10 +620,8 @@ const FSP_FILE_SYSTEM_INTERFACE DeviceFs::interface_ = {
     .GetFileInfo = GetFileInfo,
     .GetSecurity = GetSecurity,
     .ReadDirectory = ReadDirectory,
+    .DispatcherStopped = DispatcherStopped,
 };
-
-auto *g_stop_event = HANDLE{};
-auto *g_stopped_event = HANDLE{};
 
 auto WINAPI ControlHandler(const DWORD event) noexcept -> BOOL {
     switch (event) {
@@ -662,10 +668,10 @@ auto Run(const Options &options) {
     {
         auto filesystem = DeviceFs(
             std::move(files), std::move(security), options.mount);
-        filesystem.Start();
-
         g_stop_event = stop_event.get();
         g_stopped_event = stopped_event.get();
+        filesystem.Start();
+
         if (!SetConsoleCtrlHandler(ControlHandler, TRUE)) {
             WinError("could not install console handler");
         }

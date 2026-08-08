@@ -14,12 +14,12 @@ using PNTSTATUS = NTSTATUS *;
 #include <cstring>
 #include <format>
 #include <iostream>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <type_traits>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -191,16 +191,14 @@ auto MakeSecurityDescriptor(const std::wstring &account) {
     }
 
     auto descriptor = wil::unique_hlocal_security_descriptor{};
-    auto size = ULONG{};
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
             std::format(
                 L"O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;{})",
                 sid_text.get()).c_str(),
-            SDDL_REVISION_1, descriptor.addressof(), &size)) {
+            SDDL_REVISION_1, descriptor.addressof(), nullptr)) {
         WinError("could not create the filesystem ACL");
     }
-    const auto *const first = static_cast<const BYTE *>(descriptor.get());
-    return std::vector<BYTE>(first, first + size);
+    return descriptor;
 }
 
 auto Ioctl(const HANDLE device, const DWORD code, void *const output,
@@ -232,7 +230,7 @@ struct DeviceFile {
     FSP_FSCTL_FILE_INFO info{};
 };
 
-using DeviceFiles = std::unordered_map<std::wstring, DeviceFile>;
+using DeviceFiles = std::map<std::wstring, DeviceFile>;
 
 auto OpenDevice(const Mapping &mapping, const bool extended_dasd, const UINT64 map_number) {
     auto handle = wil::unique_hfile(CreateFileW(mapping.device.c_str(), GENERIC_READ,
@@ -304,7 +302,7 @@ auto NtCallback(const Function &function) noexcept {
 
 class DeviceFs {
 public:
-    DeviceFs(DeviceFiles files, std::vector<BYTE> security, Mount mount)
+    DeviceFs(DeviceFiles files, wil::unique_hlocal_security_descriptor security, Mount mount)
         : files_(std::move(files)), security_(std::move(security)), mount_(std::move(mount)) {
         auto params = FSP_FSCTL_VOLUME_PARAMS{
             .Version = static_cast<UINT16>(sizeof(FSP_FSCTL_VOLUME_PARAMS)),
@@ -367,13 +365,14 @@ private:
     static auto GetSecurity(FSP_FILE_SYSTEM *const fs, void *,
         void *const output, SIZE_T *const size) noexcept {
         const auto &security = Self(fs).security_;
-        if (*size < security.size()) {
-            *size = security.size();
+        const auto length = GetSecurityDescriptorLength(security.get());
+        if (*size < length) {
+            *size = length;
             return STATUS_BUFFER_OVERFLOW;
         }
-        *size = security.size();
+        *size = length;
         if (output != nullptr) {
-            std::memcpy(output, security.data(), security.size());
+            std::memcpy(output, security.get(), length);
         }
         return STATUS_SUCCESS;
     }
@@ -424,6 +423,9 @@ private:
         }
         if (offset >= file->info.FileSize) {
             return STATUS_END_OF_FILE;
+        }
+        if (length == 0) {
+            return STATUS_SUCCESS;
         }
 
         const auto wanted = static_cast<std::remove_cv_t<decltype(length)>>(
@@ -505,13 +507,9 @@ private:
                 return STATUS_NOT_A_DIRECTORY;
             }
             const auto &self = Self(fs);
-            auto current = self.files_.begin();
-            if (marker != nullptr) {
-                current = self.files_.find(Lowercase(marker));
-                if (current != self.files_.end()) {
-                    ++current;
-                }
-            }
+            auto current = marker == nullptr
+                ? self.files_.begin()
+                : self.files_.upper_bound(Lowercase(marker));
             alignas(FSP_FSCTL_DIR_INFO) auto storage = std::array<BYTE,
                 sizeof(FSP_FSCTL_DIR_INFO) + kMaxNameLength * sizeof(wchar_t)>{};
             auto *const info = reinterpret_cast<FSP_FSCTL_DIR_INFO *>(storage.data());
@@ -532,12 +530,12 @@ private:
 
     static const FSP_FILE_SYSTEM_INTERFACE interface_;
     DeviceFiles files_;
-    const std::vector<BYTE> security_;
+    const wil::unique_hlocal_security_descriptor security_;
     Mount mount_;
     FSP_FILE_SYSTEM *fs_ = nullptr;
 };
 
-const auto DeviceFs::interface_ = FSP_FILE_SYSTEM_INTERFACE{
+const FSP_FILE_SYSTEM_INTERFACE DeviceFs::interface_ = {
     .GetVolumeInfo = GetVolumeInfo,
     .GetSecurityByName = GetSecurityByName,
     // WinFsp requires Create, Open, and Overwrite callbacks as a group.

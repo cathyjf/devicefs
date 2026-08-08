@@ -6,6 +6,10 @@ if(NOT MSVC)
     message(FATAL_ERROR "devicefs requires the Microsoft Visual C++ compiler")
 endif()
 
+if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR "devicefs requires an x64 target")
+endif()
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 

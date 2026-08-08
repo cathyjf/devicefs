@@ -37,6 +37,12 @@ add_executable(devicefs
     src/main.cpp
 )
 
+set_target_properties(devicefs PROPERTIES
+    VS_GLOBAL_EnableCppCoreCheck true
+    VS_GLOBAL_RunCodeAnalysis true
+    VS_GLOBAL_CodeAnalysisRuleSet "${CMAKE_CURRENT_SOURCE_DIR}/.ruleset"
+)
+
 target_include_directories(devicefs SYSTEM PRIVATE
     "${WINFSP_INCLUDE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/wil/include"
@@ -47,5 +53,5 @@ target_compile_definitions(devicefs PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN
 
 target_compile_options(devicefs PRIVATE
     /W4 /WX /O2 /permissive- /EHsc /utf-8
-    /analyze /analyze:external-
+    /analyze:external-
 )

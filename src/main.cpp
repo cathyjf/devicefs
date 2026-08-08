@@ -477,7 +477,7 @@ private:
             return STATUS_SUCCESS;
         };
 
-        const auto sector_size = UINT64{file->sector_size};
+        const auto sector_size = file->sector_size;
         const auto read_offset = offset - (offset % sector_size);
         const auto end = offset + wanted;
         const auto read_end = ((end + sector_size - 1) / sector_size) * sector_size;

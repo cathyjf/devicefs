@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RuleSet Name="devicefs" Description="Code-analysis rules enforced by devicefs." ToolsVersion="10.0">
+  <Include Path="NativeRecommendedRules.ruleset" Action="Default" />
+  <Rules AnalyzerId="Microsoft.Analyzers.NativeCodeAnalysis" RuleNamespace="Microsoft.Rules.Native">
+    <!-- Require named RAII objects. -->
+    <Rule Id="C26444" Action="Error" />
+
+    <!-- Enforce const references, pointees, and local variables where possible. -->
+    <Rule Id="C26460" Action="Error" />
+    <Rule Id="C26462" Action="Error" />
+    <Rule Id="C26496" Action="Error" />
+
+    <!-- Require typed casts and initialized variables and members. -->
+    <Rule Id="C26493" Action="Error" />
+    <Rule Id="C26494" Action="Error" />
+    <Rule Id="C26495" Action="Error" />
+
+    <!-- Diagnose moved-from objects, dangling values, and accidental copies. -->
+    <Rule Id="C26800" Action="Error" />
+    <Rule Id="C26815" Action="Error" />
+    <Rule Id="C26816" Action="Error" />
+    <Rule Id="C26820" Action="Error" />
+  </Rules>
+</RuleSet>

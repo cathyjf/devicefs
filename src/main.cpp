@@ -19,6 +19,7 @@
 #include <sddl.h>
 #include <winioctl.h>
 
+// The supported Windows SDK does not declare PNTSTATUS where WinFsp expects it.
 using PNTSTATUS = NTSTATUS *;
 #include <winfsp/winfsp.h>
 #include <wil/resource.h>
@@ -56,6 +57,9 @@ namespace {
 constexpr auto kAdvertisedSectorSize = UINT16{512};
 constexpr auto kDefaultStopEvent = std::wstring_view(L"Local\\devicefs-stop");
 constexpr auto kFileSystemName = std::wstring_view(L"DEVICEFS");
+static_assert(kFileSystemName.size() + 1 <=
+    std::size(FSP_FSCTL_VOLUME_PARAMS{}.FileSystemName),
+    "The filesystem name and its terminator must fit the WinFsp volume parameters.");
 constexpr auto kMaxNameLength = UINT16{255};
 constexpr auto kMaxDirectoryInfoSize =
     sizeof(FSP_FSCTL_DIR_INFO) + kMaxNameLength * sizeof(wchar_t);
@@ -63,6 +67,8 @@ static_assert(std::in_range<decltype(FSP_FSCTL_DIR_INFO::Size)>(kMaxDirectoryInf
     "The largest directory record must fit in the FSP_FSCTL_DIR_INFO::Size field.");
 constexpr auto kMaxMountPrefixLength = std::size(FSP_FSCTL_VOLUME_PARAMS{}.Prefix) - 1;
 constexpr auto kVolumeLabel = std::wstring_view(L"DEVICEFS");
+static_assert(kVolumeLabel.size() <= std::size(FSP_FSCTL_VOLUME_INFO{}.VolumeLabel),
+    "The volume label must fit the WinFsp volume information buffer.");
 constexpr auto kRootInfo = FSP_FSCTL_FILE_INFO{
     .FileAttributes = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY,
     .IndexNumber = 1,
@@ -90,8 +96,9 @@ struct Options {
 };
 
 [[noreturn]] auto WinError(
-    const std::string &operation, const DWORD error = GetLastError()) {
-    throw std::system_error(std::bit_cast<int>(error), std::system_category(), operation);
+    const wil::zstring_view operation, const DWORD error = GetLastError()) {
+    throw std::system_error(
+        std::bit_cast<int>(error), std::system_category(), operation.c_str());
 }
 
 [[nodiscard]] auto Lowercase(const wil::zwstring_view value) {
@@ -114,6 +121,9 @@ auto Usage(std::wostream &out) {
     out << L"Usage: devicefs --mount TARGET --read-user USER"
            L" --map NAME DEVICE [--map NAME DEVICE ...] [OPTIONS]\n\n"
         << L"Options:\n"
+        << L"  --mount TARGET         Drive letter, directory, or network prefix\n"
+        << L"  --read-user USER       User granted read access\n"
+        << L"  --map NAME DEVICE      Virtual filename and block device (repeatable)\n"
         << L"  --stop-event NAME      Named shutdown event (default: "
         << kDefaultStopEvent << L")\n"
         << L"  --no-extended-dasd-io  Do not issue FSCTL_ALLOW_EXTENDED_DASD_IO\n"
@@ -194,7 +204,7 @@ auto Usage(std::wostream &out) {
     return result;
 }
 
-auto CheckNt(const NTSTATUS status, const char *const operation) {
+auto CheckNt(const NTSTATUS status, const wil::zstring_view operation) {
     if (!NT_SUCCESS(status)) {
         WinError(operation, FspWin32FromNtStatus(status));
     }
@@ -269,7 +279,7 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
     const Mapping &mapping, const bool extended_dasd, const UINT64 map_number) {
     auto handle = wil::unique_hfile(CreateFileW(mapping.device.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-        FILE_FLAG_OVERLAPPED, nullptr));
+        FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
     if (!handle) {
         WinError(std::format("could not open block device for --map #{}", map_number));
     }
@@ -301,6 +311,12 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
     if ((geometry.BytesPerSector == 0) || ((size % geometry.BytesPerSector) != 0)) {
         throw std::runtime_error(std::format(
             "block device length is not a multiple of its sector size for --map #{}",
+            map_number));
+    }
+    if ((size % kAdvertisedSectorSize) != 0) {
+        throw std::runtime_error(std::format(
+            "block device length is not a multiple of the advertised "
+            "allocation unit for --map #{}",
             map_number));
     }
 
@@ -361,6 +377,8 @@ public:
             .UnicodeOnDisk = 1,
             .PersistentAcls = 1,
             .ReadOnlyVolume = 1,
+            // Give raw-device reads page-aligned buffers.
+            .AlwaysUseDoubleBuffering = 1,
         };
         wcscpy_s(params.FileSystemName, kFileSystemName.data());
 
@@ -509,6 +527,9 @@ private:
             if (!GetOverlappedResult(file->handle.get(), &operation, done, TRUE)) {
                 return failure(GetLastError());
             }
+            if (*done != count) {
+                return failure(ERROR_READ_FAULT);
+            }
             return STATUS_SUCCESS;
         };
 
@@ -548,11 +569,8 @@ private:
             return status;
         }
 
-        if (device_transferred <= prefix) {
-            return STATUS_END_OF_FILE;
-        }
-        *transferred = std::min(wanted, device_transferred - prefix);
-        std::memcpy(buffer, storage.get() + prefix, *transferred);
+        *transferred = wanted;
+        std::memcpy(buffer, storage.get() + prefix, wanted);
         return STATUS_SUCCESS;
     }
 
@@ -606,6 +624,7 @@ private:
     const DeviceFiles files_;
     const wil::unique_hlocal_security_descriptor security_;
     const Mount mount_;
+    // Declared last so it stops callbacks before the state they reference is destroyed.
     UniqueFileSystem fs_;
 };
 
@@ -708,6 +727,9 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
         if (options.help) {
             Usage(std::wcout);
             return 0;
+        }
+        if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)) {
+            WinError("could not restrict DLL search directories");
         }
         if (!NT_SUCCESS(FspLoad(nullptr))) {
             throw std::runtime_error("could not load WinFsp DLL");

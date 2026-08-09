@@ -362,6 +362,7 @@ using UniqueFileSystem = wil::unique_any<
 
 auto *g_stop_event = HANDLE{};
 auto *g_stopped_event = HANDLE{};
+auto g_dispatcher_stopped_unexpectedly = false;
 
 class DeviceFs {
 public:
@@ -615,9 +616,11 @@ private:
     }
 
     static auto DispatcherStopped(FSP_FILE_SYSTEM *, const BOOLEAN normally) noexcept {
-        if (!normally) {
-            SetEvent(g_stop_event);
+        if (normally) {
+            return;
         }
+        g_dispatcher_stopped_unexpectedly = true;
+        SetEvent(g_stop_event);
     }
 
     static const FSP_FILE_SYSTEM_INTERFACE interface_;
@@ -708,6 +711,9 @@ auto Run(const Options &options) {
     stopped_event.release();
     if (wait_error != ERROR_SUCCESS) {
         WinError("shutdown wait failed", wait_error);
+    }
+    if (g_dispatcher_stopped_unexpectedly) {
+        throw std::runtime_error("WinFsp dispatcher stopped unexpectedly");
     }
     return 0;
 }

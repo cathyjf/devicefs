@@ -104,6 +104,45 @@ struct Options {
         std::bit_cast<int>(error), std::system_category(), operation.c_str());
 }
 
+auto HardenProcess() {
+    auto dynamic_code = PROCESS_MITIGATION_DYNAMIC_CODE_POLICY{};
+    dynamic_code.ProhibitDynamicCode = 1;
+    if (!SetProcessMitigationPolicy(
+            ProcessDynamicCodePolicy, &dynamic_code, sizeof(dynamic_code))) {
+        WinError("could not prohibit dynamic code");
+    }
+
+    auto strict_handles = PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY{};
+    strict_handles.RaiseExceptionOnInvalidHandleReference = 1;
+    strict_handles.HandleExceptionsPermanentlyEnabled = 1;
+    if (!SetProcessMitigationPolicy(
+            ProcessStrictHandleCheckPolicy, &strict_handles, sizeof(strict_handles))) {
+        WinError("could not enable strict handle checking");
+    }
+
+    auto extension_points = PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY{};
+    extension_points.DisableExtensionPoints = 1;
+    if (!SetProcessMitigationPolicy(ProcessExtensionPointDisablePolicy,
+            &extension_points, sizeof(extension_points))) {
+        WinError("could not disable legacy extension points");
+    }
+
+    auto image_load = PROCESS_MITIGATION_IMAGE_LOAD_POLICY{};
+    image_load.NoRemoteImages = 1;
+    image_load.NoLowMandatoryLabelImages = 1;
+    if (!SetProcessMitigationPolicy(
+            ProcessImageLoadPolicy, &image_load, sizeof(image_load))) {
+        WinError("could not restrict image loading");
+    }
+
+    auto child_processes = PROCESS_MITIGATION_CHILD_PROCESS_POLICY{};
+    child_processes.NoChildProcessCreation = 1;
+    if (!SetProcessMitigationPolicy(
+            ProcessChildProcessPolicy, &child_processes, sizeof(child_processes))) {
+        WinError("could not prohibit child process creation");
+    }
+}
+
 [[nodiscard]] auto Lowercase(const wil::zwstring_view value) {
     const auto output_size = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
         value.c_str(), -1, nullptr, 0, nullptr, nullptr, 0);
@@ -915,6 +954,7 @@ auto Run(const Options &options) {
 
 auto wmain(const int argc, wchar_t **const argv) -> int {
     try {
+        HardenProcess();
         auto options = Options{};
         try {
             options = ParseArgs(argc, argv);

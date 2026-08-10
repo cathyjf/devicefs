@@ -50,10 +50,14 @@ target_include_directories(devicefs SYSTEM PRIVATE
     "${WIL_INCLUDE_DIR}"
 )
 target_link_libraries(devicefs PRIVATE "${WINFSP_LIBRARY}" advapi32 delayimp)
-target_link_options(devicefs PRIVATE /DELAYLOAD:winfsp-x64.dll /GUARD:CF)
-target_compile_definitions(devicefs PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_options(devicefs PRIVATE
+    /DELAYLOAD:winfsp-x64.dll /GUARD:CF /guard:ehcont /CETCOMPAT
+)
+target_compile_definitions(devicefs PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _MSVC_STL_HARDENING=1
+)
 
 target_compile_options(devicefs PRIVATE
-    /W4 /WX /permissive- /EHsc /utf-8 /guard:cf
+    /W4 /WX /permissive- /EHsc /utf-8 /guard:cf /guard:ehcont /sdl
     /analyze:external-
 )

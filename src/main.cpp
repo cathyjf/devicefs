@@ -227,7 +227,7 @@ auto Usage(std::wostream &out) {
         const auto &name = result.mappings[i].name;
         if ((name.empty()) || (name == L".") || (name == L"..") ||
             (name.size() > kMaxNameLength) ||
-            (name.find_first_of(L"/\\") != std::wstring_view::npos)) {
+            (name.find_first_of(L"/\\:") != std::wstring_view::npos)) {
             throw std::invalid_argument(std::format("invalid filename in --map #{}", i + 1));
         }
         if (!names.emplace(Lowercase(name)).second) {
@@ -352,7 +352,7 @@ public:
 
     [[nodiscard]] auto Claim(const UINT64 cluster) noexcept {
         const auto word_index = cluster / kClustersPerClaimWord;
-        const auto mask = UINT64{1} << (cluster % kClustersPerClaimWord);
+        const auto mask = 1ULL << (cluster % kClustersPerClaimWord);
         return (claims_[word_index].fetch_or(
             mask, std::memory_order_relaxed) & mask) == 0;
     }
@@ -495,6 +495,7 @@ struct DeviceFile {
     FSP_FSCTL_FILE_INFO info{};
 };
 
+// WinFsp directory markers require a stable order and an upper-bound lookup.
 using DeviceFiles = std::map<std::wstring, DeviceFile>;
 
 [[nodiscard]] auto LoadAllocationBitmap(
@@ -864,6 +865,7 @@ private:
             operation.Offset = parts.LowPart;
             operation.OffsetHigh = parts.HighPart;
             operation.hEvent = event.get();
+            // GetOverlappedResult supplies the byte count for either completion path.
             if (!ReadFile(file->handle.get(), output, count, nullptr, &operation)) {
                 const auto error = GetLastError();
                 if (error != ERROR_IO_PENDING) {
@@ -900,13 +902,7 @@ private:
             return STATUS_SUCCESS;
         }
 
-        const auto prefix_length = offset - read_offset;
-        if (!std::in_range<LengthType>(prefix_length)) {
-            return STATUS_INVALID_PARAMETER;
-        }
-        [[gsl::suppress("type.1",
-            justification: "std::in_range above proves prefix_length is representable by LengthType.")]]
-        const auto prefix = static_cast<LengthType>(prefix_length);
+        const auto prefix = offset - read_offset;
 
         auto storage = wil::unique_virtualalloc_ptr<BYTE>(static_cast<BYTE *>(
             VirtualAlloc(nullptr, read_length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)));

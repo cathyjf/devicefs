@@ -33,13 +33,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-$native_source_path = [IO.Path]::Combine(
-    $PSScriptRoot, 'types', 'DeviceFsTestNative.cs')
-if ($null -ne ([Management.Automation.PSTypeName]'DeviceFsTestNative').Type) {
-    throw 'DeviceFsTestNative is already loaded. Run the test in a fresh pwsh process.'
-}
-Add-Type -Path $native_source_path
+$file_backed_virtual_bus_type = [UInt16]15
 
 function Assert-Condition {
     param(
@@ -53,22 +47,6 @@ function Assert-Condition {
     if (-not $Condition) {
         throw $Message
     }
-}
-
-function New-SystemTempItem {
-    param(
-        [Parameter(Mandatory)]
-        [ValidateSet('File', 'Directory')]
-        [string] $ItemType,
-
-        [string] $ParentPath = (Join-Path $env:WINDIR 'SystemTemp'),
-
-        [string] $LeafName =
-            "devicefs-test-$([guid]::NewGuid().ToString('N'))"
-    )
-
-    $path = Join-Path $ParentPath $LeafName
-    return (New-Item -ItemType $ItemType -Path $path).FullName
 }
 
 function Assert-BytesEqual {
@@ -160,7 +138,6 @@ function Mount-ValidatedReadOnlyVhd {
         $Fixture
     )
 
-    $file_backed_virtual_bus_type = [UInt16]15
     $disk_image = Mount-DiskImage -ImagePath $Path -StorageType VHD `
         -Access ReadOnly -NoDriveLetter -PassThru
     $disks = @($disk_image | Get-Disk)
@@ -170,7 +147,7 @@ function Mount-ValidatedReadOnlyVhd {
     $disk = $disks[0]
     Assert-Condition (
         $disk.CimInstanceProperties['BusType'].Value -eq
-            $file_backed_virtual_bus_type) `
+            $script:file_backed_virtual_bus_type) `
         'The read-only test disk is not file-backed virtual storage.'
     Assert-Condition (
         ($disk.Size -eq $Fixture.DiskLength) -and (-not $disk.IsBoot) -and
@@ -226,9 +203,6 @@ function Start-DeviceFsTestProcess {
         [Parameter(Mandatory)]
         [string] $SourceDevice,
 
-        [Parameter(Mandatory)]
-        [string] $LogPrefix,
-
         [switch] $ZeroFreeClusters
     )
 
@@ -257,8 +231,8 @@ function Start-DeviceFsTestProcess {
         StandardErrorTask = $process.StandardError.ReadToEndAsync()
         StopEvent = $StopEvent
         ImagePath = [IO.Path]::Combine($MountPath, 'volume.img')
-        OutputLog = "$LogPrefix.stdout.log"
-        ErrorLog = "$LogPrefix.stderr.log"
+        OutputLog = "$MountPath.stdout.log"
+        ErrorLog = "$MountPath.stderr.log"
         OutputCollected = $false
         StartupExitObserved = $false
     }
@@ -399,6 +373,13 @@ $DeviceFsPath = (Resolve-Path -LiteralPath $DeviceFsPath).Path
 Assert-Condition ([IO.File]::Exists($DeviceFsPath)) `
     "devicefs was not found at '$DeviceFsPath'."
 
+$native_source_path = [IO.Path]::Combine(
+    $PSScriptRoot, 'types', 'DeviceFsTestNative.cs')
+if ($null -ne ([Management.Automation.PSTypeName]'DeviceFsTestNative').Type) {
+    throw 'DeviceFsTestNative is already loaded. Run the test in a fresh pwsh process.'
+}
+Add-Type -Path $native_source_path
+
 $run_id = [Guid]::NewGuid().ToString('N')
 $test_root = $null
 $vhd_path = $null
@@ -414,17 +395,18 @@ $devicefs_processes_gone = $true
 $image_detached = $false
 
 $source_label = "DFSTSRC-$($run_id.Substring(0, 16))"
-$file_backed_virtual_bus_type = [UInt16]15
 $uninitialized_partition_style = [UInt16]0
 $ntfs_cluster_size = 4096
 $free_run_length = 16
+# Force the full comparison to cross ordinary sector and cluster boundaries.
 $comparison_chunk_size = 1MB + 37
 
 try {
-    $test_root = New-SystemTempItem -ItemType Directory
+    $test_root = Join-Path $env:WINDIR 'SystemTemp' "devicefs-test-$run_id"
+    $test_root = (New-Item -ItemType Directory -Path $test_root).FullName
     $vhd_path = [IO.Path]::Combine($test_root, 'test.vhd')
-    $source_mount = New-SystemTempItem -ItemType Directory `
-        -ParentPath $test_root -LeafName 'source'
+    $source_mount = [IO.Path]::Combine($test_root, 'source')
+    New-Item -ItemType Directory -Path $source_mount | Out-Null
     $normal_mount = [IO.Path]::Combine($test_root, 'normal')
     $zeroed_mount = [IO.Path]::Combine($test_root, 'zeroed')
 
@@ -600,14 +582,12 @@ try {
     $normal_invocation = Start-DeviceFsTestProcess `
         -Executable $DeviceFsPath -MountPath $normal_mount `
         -ReadUser $read_user -StopEvent "Local\devicefs-test-$run_id-normal" `
-        -SourceDevice $source_device `
-        -LogPrefix ([IO.Path]::Combine($test_root, 'normal'))
+        -SourceDevice $source_device
     Wait-DeviceFsReady $normal_invocation
     $zeroed_invocation = Start-DeviceFsTestProcess `
         -Executable $DeviceFsPath -MountPath $zeroed_mount `
         -ReadUser $read_user -StopEvent "Local\devicefs-test-$run_id-zeroed" `
-        -SourceDevice $source_device -ZeroFreeClusters `
-        -LogPrefix ([IO.Path]::Combine($test_root, 'zeroed'))
+        -SourceDevice $source_device -ZeroFreeClusters
     Wait-DeviceFsReady $zeroed_invocation
 
     $normal_image = $normal_invocation.ImagePath
@@ -675,28 +655,34 @@ try {
                 $cleanup_errors.Add($_.Exception)
             }
             if ($gone) {
+                if (-not $invocation.OutputCollected) {
+                    try {
+                        Save-TestProcessOutput $invocation
+                    } catch {
+                        $cleanup_errors.Add($_.Exception)
+                    }
+                }
                 $invocation.Process.Dispose()
             } else {
                 $devicefs_processes_gone = $false
                 Write-Warning (
                     "devicefs process $($invocation.Process.Id) remains " +
-                    'alive; its process object and logs were preserved.')
+                    'alive; the VHD and test directory will be preserved.')
             }
         }
     }
 
-    $access_path_removed = -not $source_access_path_added
     if ($devicefs_processes_gone -and $source_access_path_added) {
         try {
             Remove-PartitionAccessPath -InputObject $source_partition `
                 -AccessPath $source_mount -Confirm:$false
-            $access_path_removed = $true
+            $source_access_path_added = $false
         } catch {
             $cleanup_errors.Add($_.Exception)
         }
     }
 
-    if ($devicefs_processes_gone -and $access_path_removed -and
+    if ($devicefs_processes_gone -and (-not $source_access_path_added) -and
         ($null -ne $vhd_path) -and [IO.File]::Exists($vhd_path)) {
         try {
             $current_image = Get-DiskImage -ImagePath $vhd_path

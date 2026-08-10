@@ -54,7 +54,6 @@ public sealed class NtfsBitmap {
 public sealed class ComparisonSummary {
     public long BytesCompared { get; internal set; }
     public long FreeBytes { get; internal set; }
-    public long NonzeroFreeBytes { get; internal set; }
 }
 
 public static class DeviceFsTestNative {
@@ -157,8 +156,8 @@ public static class DeviceFsTestNative {
         EntryPoint = "GetVolumeInformationByHandleW")]
     private static extern bool GetVolumeInformationByHandle(
         SafeFileHandle volume, StringBuilder volumeName,
-        uint volumeNameSize, out uint volumeSerialNumber,
-        out uint maximumComponentLength, out uint fileSystemFlags,
+        uint volumeNameSize, IntPtr volumeSerialNumber,
+        IntPtr maximumComponentLength, out uint fileSystemFlags,
         StringBuilder fileSystemName, uint fileSystemNameSize);
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -222,13 +221,11 @@ public static class DeviceFsTestNative {
     private static IoResult Control(SafeFileHandle device, uint code,
         byte[] input, int outputSize) {
         var output = outputSize == 0 ? null : new byte[outputSize];
-        uint returned;
         if (!DeviceIoControl(device, code, input,
                 (uint)(input == null ? 0 : input.Length), output,
-                (uint)outputSize, out returned, IntPtr.Zero)) {
+                (uint)outputSize, out var returned, IntPtr.Zero)) {
             var error = Marshal.GetLastWin32Error();
-            throw Win32Error(
-                string.Format("DeviceIoControl 0x{0:X8} failed", code), error);
+            throw Win32Error($"DeviceIoControl 0x{code:X8} failed", error);
         }
 
         return new IoResult(output ?? Array.Empty<byte>(), returned);
@@ -298,12 +295,12 @@ public static class DeviceFsTestNative {
 
     private static void QueryVolumeInformation(SafeFileHandle device,
         out string label, out string fileSystemName,
-        out uint serialNumber, out uint fileSystemFlags) {
+        out uint fileSystemFlags) {
         var labelBuffer = new StringBuilder(261);
         var fileSystemBuffer = new StringBuilder(261);
         if (!GetVolumeInformationByHandle(device, labelBuffer,
-                (uint)labelBuffer.Capacity, out serialNumber,
-                out _, out fileSystemFlags,
+                (uint)labelBuffer.Capacity, IntPtr.Zero,
+                IntPtr.Zero, out fileSystemFlags,
                 fileSystemBuffer, (uint)fileSystemBuffer.Capacity)) {
             throw LastError("GetVolumeInformationByHandleW failed");
         }
@@ -314,10 +311,8 @@ public static class DeviceFsTestNative {
 
     private static NtfsBitmap QueryBitmap(SafeFileHandle device,
         bool requireReadOnly) {
-        string fileSystemName;
-        uint fileSystemFlags;
-        QueryVolumeInformation(device, out _, out fileSystemName,
-            out _, out fileSystemFlags);
+        QueryVolumeInformation(device, out _, out var fileSystemName,
+            out var fileSystemFlags);
         if (!string.Equals(fileSystemName, "NTFS",
                 StringComparison.OrdinalIgnoreCase)) {
             throw new InvalidDataException("volume is not NTFS");
@@ -365,20 +360,14 @@ public static class DeviceFsTestNative {
     }
 
     private static VolumeIdentity InspectHandle(SafeFileHandle device) {
-        string label;
-        string fileSystemName;
-        QueryVolumeInformation(device, out label, out fileSystemName,
-            out _, out _);
+        QueryVolumeInformation(device, out var label, out var fileSystemName,
+            out _);
         if (!string.Equals(fileSystemName, "NTFS",
                 StringComparison.OrdinalIgnoreCase)) {
             throw new InvalidDataException("volume is not NTFS");
         }
 
         var length = QueryLength(device);
-        var sectorSize = QuerySectorSize(device);
-        var ntfs = QueryNtfsData(device);
-        ValidateNtfsGeometry(length, sectorSize, ntfs);
-
         var extents = Control(device, IoctlVolumeGetVolumeDiskExtents,
             null, VolumeDiskExtentsSize);
         if ((extents.BytesReturned < VolumeDiskExtentsSize) ||
@@ -393,17 +382,10 @@ public static class DeviceFsTestNative {
             BitConverter.ToInt64(extents.Buffer, 24));
     }
 
-    private static void Seek(SafeFileHandle device, long offset) {
-        if (!SetFilePointerEx(device, offset, out _, FileBegin)) {
-            throw LastError("SetFilePointerEx failed");
-        }
-    }
-
     private static void ReadExact(SafeFileHandle device,
         AlignedBuffer buffer, int count) {
-        uint read;
         if (!ReadFile(device, buffer.DangerousGetHandle(), (uint)count,
-                out read, IntPtr.Zero)) {
+                out var read, IntPtr.Zero)) {
             throw LastError("raw ReadFile failed");
         }
         if (read != count) {
@@ -428,19 +410,20 @@ public static class DeviceFsTestNative {
             rawEnd = deviceLength;
         }
         var rawLength = checked((int)(rawEnd - rawStart));
-        using (var buffer = new AlignedBuffer(rawLength)) {
-            if ((buffer.DangerousGetHandle().ToInt64() % sectorSize) != 0) {
-                throw new InvalidOperationException(
-                    "VirtualAlloc did not satisfy volume alignment");
-            }
-
-            Seek(device, rawStart);
-            ReadExact(device, buffer, rawLength);
-            var result = new byte[available];
-            Marshal.Copy(IntPtr.Add(buffer.DangerousGetHandle(),
-                checked((int)(offset - rawStart))), result, 0, available);
-            return result;
+        using var buffer = new AlignedBuffer(rawLength);
+        if ((buffer.DangerousGetHandle().ToInt64() % sectorSize) != 0) {
+            throw new InvalidOperationException(
+                "VirtualAlloc did not satisfy volume alignment");
         }
+
+        if (!SetFilePointerEx(device, rawStart, out _, FileBegin)) {
+            throw LastError("SetFilePointerEx failed");
+        }
+        ReadExact(device, buffer, rawLength);
+        var result = new byte[available];
+        Marshal.Copy(IntPtr.Add(buffer.DangerousGetHandle(),
+            checked((int)(offset - rawStart))), result, 0, available);
+        return result;
     }
 
     public static string GetVolumeName(string mountRoot) {
@@ -458,24 +441,21 @@ public static class DeviceFsTestNative {
     }
 
     public static VolumeIdentity InspectVolume(string volumeName) {
-        using (var device = OpenDevice(volumeName)) {
-            return InspectHandle(device);
-        }
+        using var device = OpenDevice(volumeName);
+        return InspectHandle(device);
     }
 
     public static NtfsBitmap GetNtfsBitmap(string devicePath,
         bool requireReadOnly) {
-        using (var device = OpenDevice(devicePath)) {
-            return QueryBitmap(device, requireReadOnly);
-        }
+        using var device = OpenDevice(devicePath);
+        return QueryBitmap(device, requireReadOnly);
     }
 
     public static byte[] ReadDeviceAt(string devicePath,
         long offset, int count) {
-        using (var device = OpenRawReadDevice(devicePath)) {
-            return ReadDeviceAt(device, QueryLength(device),
-                QuerySectorSize(device), offset, count);
-        }
+        using var device = OpenRawReadDevice(devicePath);
+        return ReadDeviceAt(device, QueryLength(device),
+            QuerySectorSize(device), offset, count);
     }
 
     private static int ReadManaged(FileStream stream, byte[] buffer,
@@ -506,27 +486,23 @@ public static class DeviceFsTestNative {
             for (var i = startIndex; i < startIndex + length; ++i) {
                 var absolute = checked(offset + i);
                 if (normal[i] != source[i]) {
-                    throw new InvalidDataException(string.Format(
-                        "normal devicefs view differs at offset 0x{0:X}, " +
-                        "LCN {1}: source=0x{2:X2}, actual=0x{3:X2}",
-                        absolute, cluster, source[i], normal[i]));
+                    throw new InvalidDataException(
+                        $"normal devicefs view differs at offset 0x{absolute:X}, " +
+                        $"LCN {cluster}: source=0x{source[i]:X2}, " +
+                        $"actual=0x{normal[i]:X2}");
                 }
 
                 var expected = allocated ? source[i] : (byte)0;
                 if (zeroed[i] != expected) {
-                    throw new InvalidDataException(string.Format(
-                        "zeroing devicefs view differs at offset 0x{0:X}, " +
-                        "LCN {1}: allocated={2}, source=0x{3:X2}, " +
-                        "expected=0x{4:X2}, actual=0x{5:X2}",
-                        absolute, cluster, allocated, source[i],
-                        expected, zeroed[i]));
+                    throw new InvalidDataException(
+                        $"zeroing devicefs view differs at offset 0x{absolute:X}, " +
+                        $"LCN {cluster}: allocated={allocated}, " +
+                        $"source=0x{source[i]:X2}, expected=0x{expected:X2}, " +
+                        $"actual=0x{zeroed[i]:X2}");
                 }
 
                 if (!allocated) {
                     ++summary.FreeBytes;
-                    if (source[i] != 0) {
-                        ++summary.NonzeroFreeBytes;
-                    }
                 }
             }
 
@@ -543,42 +519,41 @@ public static class DeviceFsTestNative {
             throw new ArgumentOutOfRangeException(nameof(chunkSize));
         }
 
-        using (var source = OpenRawReadDevice(sourceDevicePath))
-        using (var normal = new FileStream(normalImagePath, FileMode.Open,
+        using var source = OpenRawReadDevice(sourceDevicePath);
+        using var normal = new FileStream(normalImagePath, FileMode.Open,
             FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1,
-            FileOptions.SequentialScan))
-        using (var zeroed = new FileStream(zeroedImagePath, FileMode.Open,
+            FileOptions.SequentialScan);
+        using var zeroed = new FileStream(zeroedImagePath, FileMode.Open,
             FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1,
-            FileOptions.SequentialScan)) {
-            var length = QueryLength(source);
-            var sectorSize = QuerySectorSize(source);
-            if ((length != bitmap.Length) ||
-                (sectorSize != bitmap.SectorSize) ||
-                (normal.Length != length) || (zeroed.Length != length)) {
-                throw new InvalidDataException(
-                    "source, bitmap, and devicefs view geometry do not agree");
-            }
-
-            var normalBytes = new byte[chunkSize];
-            var zeroedBytes = new byte[chunkSize];
-            var summary = new ComparisonSummary();
-            for (var offset = 0L; offset < length;) {
-                var current = (int)Math.Min((long)chunkSize, length - offset);
-                if ((ReadManaged(normal, normalBytes, current) != current) ||
-                    (ReadManaged(zeroed, zeroedBytes, current) != current)) {
-                    throw new EndOfStreamException(
-                        "a devicefs view completed a sequential read short");
-                }
-
-                var sourceBytes = ReadDeviceAt(
-                    source, length, sectorSize, offset, current);
-                CompareChunk(sourceBytes, normalBytes, zeroedBytes,
-                    offset, current, bitmap, summary);
-                offset += current;
-            }
-
-            return summary;
+            FileOptions.SequentialScan);
+        var length = QueryLength(source);
+        var sectorSize = QuerySectorSize(source);
+        if ((length != bitmap.Length) ||
+            (sectorSize != bitmap.SectorSize) ||
+            (normal.Length != length) || (zeroed.Length != length)) {
+            throw new InvalidDataException(
+                "source, bitmap, and devicefs view geometry do not agree");
         }
+
+        var normalBytes = new byte[chunkSize];
+        var zeroedBytes = new byte[chunkSize];
+        var summary = new ComparisonSummary();
+        for (var offset = 0L; offset < length;) {
+            var current = (int)Math.Min((long)chunkSize, length - offset);
+            if ((ReadManaged(normal, normalBytes, current) != current) ||
+                (ReadManaged(zeroed, zeroedBytes, current) != current)) {
+                throw new EndOfStreamException(
+                    "a devicefs view completed a sequential read short");
+            }
+
+            var sourceBytes = ReadDeviceAt(
+                source, length, sectorSize, offset, current);
+            CompareChunk(sourceBytes, normalBytes, zeroedBytes,
+                offset, current, bitmap, summary);
+            offset += current;
+        }
+
+        return summary;
     }
 
     public static ComparisonSummary CompareRange(string sourceDevicePath,
@@ -594,20 +569,19 @@ public static class DeviceFsTestNative {
         var source = ReadDeviceAt(sourceDevicePath, offset, requestedLength);
         var normalBytes = new byte[requestedLength];
         var zeroedBytes = new byte[requestedLength];
-        using (var normal = new FileStream(normalImagePath, FileMode.Open,
+        using var normal = new FileStream(normalImagePath, FileMode.Open,
             FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1,
-            FileOptions.RandomAccess))
-        using (var zeroed = new FileStream(zeroedImagePath, FileMode.Open,
+            FileOptions.RandomAccess);
+        using var zeroed = new FileStream(zeroedImagePath, FileMode.Open,
             FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1,
-            FileOptions.RandomAccess)) {
-            normal.Position = offset;
-            zeroed.Position = offset;
-            var normalCount = ReadManaged(normal, normalBytes, requestedLength);
-            var zeroedCount = ReadManaged(zeroed, zeroedBytes, requestedLength);
-            if ((normalCount != count) || (zeroedCount != count)) {
-                throw new InvalidDataException(
-                    "a devicefs view returned an unexpected targeted-read length");
-            }
+            FileOptions.RandomAccess);
+        normal.Position = offset;
+        zeroed.Position = offset;
+        var normalCount = normal.Read(normalBytes, 0, requestedLength);
+        var zeroedCount = zeroed.Read(zeroedBytes, 0, requestedLength);
+        if ((normalCount != count) || (zeroedCount != count)) {
+            throw new InvalidDataException(
+                "a devicefs view returned an unexpected targeted-read length");
         }
 
         if (source.Length != count) {

@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+#include <sal.h>
 #include <windows.h>
 #include <winternl.h>
 #include <sddl.h>
@@ -136,7 +137,8 @@ auto Usage(std::wostream &out) {
         << L"    --map C.img '\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy12'\n";
 }
 
-[[nodiscard]] auto ParseArgs(const int argc, const wchar_t *const *const argv) {
+[[nodiscard]] auto ParseArgs(const int argc,
+    _In_reads_(argc) _Deref_pre_z_ const wchar_t *const *const argv) {
     auto result = Options{};
     const auto next = [&](auto &i) {
         if (++i == argc) {
@@ -249,9 +251,13 @@ auto CheckNt(const NTSTATUS status, const wil::zstring_view operation) {
     return descriptor;
 }
 
-[[nodiscard]] auto Ioctl(const HANDLE device, const DWORD code, void *const output,
-    const DWORD output_size, void *const input = nullptr,
-    const DWORD input_size = 0, DWORD *const bytes_returned = nullptr) {
+_Success_(return == ERROR_SUCCESS)
+[[nodiscard]] auto Ioctl(const HANDLE device, const DWORD code,
+    _Out_writes_bytes_opt_(output_size) void *const output,
+    const DWORD output_size,
+    _In_reads_bytes_opt_(input_size) void *const input = nullptr,
+    const DWORD input_size = 0,
+    _Out_opt_ DWORD *const bytes_returned = nullptr) {
     auto event = wil::unique_event_nothrow{};
     if (!event.try_create(wil::EventOptions::ManualReset, nullptr)) {
         return GetLastError();
@@ -291,7 +297,8 @@ struct AllocationBitmap {
     }
 
     [[nodiscard]] auto HasAllocatedClusters(
-        const UINT64 offset, const UINT64 length) const noexcept {
+        const UINT64 offset,
+        _In_range_(1, MAXUINT64 - offset) const UINT64 length) const noexcept {
         if (!storage) {
             return true;
         }
@@ -310,7 +317,9 @@ struct AllocationBitmap {
     }
 
     auto ZeroFreeClusters(
-        void *const buffer, const UINT64 offset, const UINT64 length) const noexcept {
+        _Inout_updates_bytes_(length) void *const buffer,
+        const UINT64 offset,
+        _In_range_(1, MAXUINT64 - offset) const UINT64 length) const noexcept {
         if (!storage) {
             return;
         }
@@ -587,8 +596,10 @@ private:
         return STATUS_SUCCESS;
     }
 
+    _Success_(return == STATUS_SUCCESS)
     static auto GetSecurity(FSP_FILE_SYSTEM *const fs, void *,
-        void *const output, SIZE_T *const size) noexcept {
+        _Out_writes_bytes_to_opt_(*size, *size) void *const output,
+        _Inout_ SIZE_T *const size) noexcept {
         const auto &security = Self(fs).security_;
         const auto length = GetSecurityDescriptorLength(security.get());
         if (*size < length) {
@@ -602,9 +613,13 @@ private:
         return STATUS_SUCCESS;
     }
 
-    static auto GetSecurityByName(FSP_FILE_SYSTEM *const fs, wchar_t *const name,
-        UINT32 *const attributes, void *const security,
-        SIZE_T *const size) noexcept {
+    _Success_(return == STATUS_SUCCESS)
+    static auto GetSecurityByName(FSP_FILE_SYSTEM *const fs,
+        _In_z_ wchar_t *const name,
+        _Out_opt_ UINT32 *const attributes,
+        _When_(size != nullptr,
+            _Out_writes_bytes_to_opt_(*size, *size)) void *const security,
+        _Inout_opt_ SIZE_T *const size) noexcept {
         return NtCallback([&] {
             const auto &self = Self(fs);
             const auto root = 0 == wcscmp(name, L"\\");
@@ -619,9 +634,12 @@ private:
         });
     }
 
-    static auto Open(FSP_FILE_SYSTEM *const fs, wchar_t *const name,
-        UINT32, const UINT32 access, void **const context,
-        FSP_FSCTL_FILE_INFO *const info) noexcept {
+    _Success_(return == STATUS_SUCCESS)
+    static auto Open(FSP_FILE_SYSTEM *const fs,
+        _In_z_ wchar_t *const name,
+        UINT32, const UINT32 access,
+        _Outptr_result_maybenull_ void **const context,
+        _Out_ FSP_FSCTL_FILE_INFO *const info) noexcept {
         return NtCallback([&] {
             const auto &self = Self(fs);
             const auto root = 0 == wcscmp(name, L"\\");
@@ -640,9 +658,11 @@ private:
         });
     }
 
-    static auto Read(FSP_FILE_SYSTEM *, void *const context, void *const buffer,
+    _Success_(return == STATUS_SUCCESS)
+    static auto Read(FSP_FILE_SYSTEM *, _In_opt_ void *const context,
+        _Out_writes_bytes_to_(length, *transferred) void *const buffer,
         const UINT64 offset, const ULONG length,
-        ULONG *const transferred) noexcept {
+        _Out_ ULONG *const transferred) noexcept {
         *transferred = 0;
         const auto *const file = static_cast<const DeviceFile *>(context);
         if (file == nullptr) {
@@ -742,17 +762,22 @@ private:
         return STATUS_SUCCESS;
     }
 
-    static auto GetFileInfo(FSP_FILE_SYSTEM *, void *const context,
-        FSP_FSCTL_FILE_INFO *const info) noexcept {
+    static auto GetFileInfo(FSP_FILE_SYSTEM *,
+        _In_opt_ void *const context,
+        _Out_ FSP_FSCTL_FILE_INFO *const info) noexcept {
         *info = context == nullptr
             ? kRootInfo
             : static_cast<const DeviceFile *>(context)->info;
         return STATUS_SUCCESS;
     }
 
-    static auto ReadDirectory(FSP_FILE_SYSTEM *const fs, void *const context, wchar_t *,
-        wchar_t *const marker, void *const buffer, const ULONG length,
-        ULONG *const transferred) noexcept {
+    _Success_(return == STATUS_SUCCESS)
+    static auto ReadDirectory(FSP_FILE_SYSTEM *const fs,
+        _In_opt_ void *const context,
+        wchar_t *,
+        _In_opt_z_ wchar_t *const marker,
+        _Out_writes_bytes_to_(length, *transferred) void *const buffer,
+        const ULONG length, _Out_ ULONG *const transferred) noexcept {
         return NtCallback([&] {
             *transferred = 0;
             if (context != nullptr) {

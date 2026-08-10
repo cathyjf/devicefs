@@ -429,7 +429,24 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
     const auto cluster_count = static_cast<UINT64>(volume.TotalClusters.QuadPart);
     if (cluster_count > (device_size / volume.BytesPerCluster)) {
         throw std::runtime_error(std::format(
-            "NTFS cluster data exceeds the device length for --map #{}", map_number));
+            "NTFS cluster span exceeds the exposed device length for --map #{}",
+            map_number));
+    }
+
+    // The bitmap is applied directly to device offsets, so LCN 0 must begin at byte 0.
+    auto retrieval_base = RETRIEVAL_POINTER_BASE{};
+    const auto retrieval_base_error = Ioctl(device,
+        FSCTL_GET_RETRIEVAL_POINTER_BASE, &retrieval_base, sizeof(retrieval_base));
+    if (retrieval_base_error != ERROR_SUCCESS) {
+        WinError(std::format(
+            "FSCTL_GET_RETRIEVAL_POINTER_BASE failed for --map #{}", map_number),
+            retrieval_base_error);
+    }
+    if (retrieval_base.FileAreaOffset.QuadPart != 0) {
+        throw std::runtime_error(std::format(
+            "NTFS LCN 0 is offset {} sectors from the start of the exposed device "
+            "for --map #{}",
+            retrieval_base.FileAreaOffset.QuadPart, map_number));
     }
 
     const auto bitmap_bytes =

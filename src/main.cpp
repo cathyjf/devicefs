@@ -295,13 +295,16 @@ struct AllocationBitmap {
         if (!storage) {
             return true;
         }
-        const auto end = offset + length;
-        for (auto position = offset; position < end;) {
-            const auto cluster = position / cluster_size;
+
+        const auto first_cluster = offset / cluster_size;
+        const auto last_cluster = (offset + (length - 1)) / cluster_size;
+        if (last_cluster >= cluster_count) {
+            return true;
+        }
+        for (auto cluster = first_cluster; cluster <= last_cluster; ++cluster) {
             if (IsAllocated(cluster)) {
                 return true;
             }
-            position = std::min(end, (cluster + 1) * cluster_size);
         }
         return false;
     }
@@ -311,15 +314,25 @@ struct AllocationBitmap {
         if (!storage) {
             return;
         }
+
         auto *const output = static_cast<BYTE *>(buffer);
         const auto end = offset + length;
-        for (auto position = offset; position < end;) {
-            const auto cluster = position / cluster_size;
-            const auto next = std::min(end, (cluster + 1) * cluster_size);
+        const auto first_cluster = offset / cluster_size;
+        const auto last_cluster = (end - 1) / cluster_size;
+        auto free_begin = end;
+        for (auto cluster = first_cluster; cluster <= last_cluster; ++cluster) {
+            const auto position = std::max(offset, cluster * cluster_size);
             if (!IsAllocated(cluster)) {
-                std::memset(output + (position - offset), 0, next - position);
+                if (free_begin == end) {
+                    free_begin = position;
+                }
+            } else if (free_begin != end) {
+                std::memset(output + (free_begin - offset), 0, position - free_begin);
+                free_begin = end;
             }
-            position = next;
+        }
+        if (free_begin != end) {
+            std::memset(output + (free_begin - offset), 0, end - free_begin);
         }
     }
 };

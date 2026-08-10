@@ -169,7 +169,7 @@ auto Usage(std::wostream &out) {
         << L"  --stop-event NAME      Named shutdown event (default: "
         << kDefaultStopEvent << L")\n"
         << L"  --no-extended-dasd-io  Do not issue FSCTL_ALLOW_EXTENDED_DASD_IO\n"
-        << L"  --zero-free-clusters   Return zeros for free NTFS snapshot clusters\n"
+        << L"  --zero-free-clusters   Return zeros for free clusters on read-only NTFS volumes\n"
         << L"  -h, --help             Show this help\n\n"
         << L"Example:\n"
         << L"  devicefs --mount X: --read-user '.\\pbs-vss' `\n"

@@ -28,6 +28,7 @@ using PNTSTATUS = NTSTATUS *;
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <climits>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -92,6 +93,7 @@ struct Options {
     std::wstring stop_event{kDefaultStopEvent};
     std::vector<Mapping> mappings;
     bool extended_dasd = true;
+    bool zero_free_clusters = false;
     bool help = false;
 };
 
@@ -127,6 +129,7 @@ auto Usage(std::wostream &out) {
         << L"  --stop-event NAME      Named shutdown event (default: "
         << kDefaultStopEvent << L")\n"
         << L"  --no-extended-dasd-io  Do not issue FSCTL_ALLOW_EXTENDED_DASD_IO\n"
+        << L"  --zero-free-clusters   Return zeros for free NTFS snapshot clusters\n"
         << L"  -h, --help             Show this help\n\n"
         << L"Example:\n"
         << L"  devicefs --mount X: --read-user '.\\pbs-vss' `\n"
@@ -159,6 +162,8 @@ auto Usage(std::wostream &out) {
             result.mappings.push_back({.name = name, .device = device});
         } else if (arg == L"--no-extended-dasd-io") {
             result.extended_dasd = false;
+        } else if (arg == L"--zero-free-clusters") {
+            result.zero_free_clusters = true;
         } else {
             throw std::invalid_argument(std::format("unknown option at argument {}", i));
         }
@@ -245,7 +250,8 @@ auto CheckNt(const NTSTATUS status, const wil::zstring_view operation) {
 }
 
 [[nodiscard]] auto Ioctl(const HANDLE device, const DWORD code, void *const output,
-    const DWORD output_size) {
+    const DWORD output_size, void *const input = nullptr,
+    const DWORD input_size = 0, DWORD *const bytes_returned = nullptr) {
     auto event = wil::unique_event_nothrow{};
     if (!event.try_create(wil::EventOptions::ManualReset, nullptr)) {
         return GetLastError();
@@ -253,30 +259,163 @@ auto CheckNt(const NTSTATUS status, const wil::zstring_view operation) {
 
     auto operation = OVERLAPPED{.hEvent = event.get()};
     auto returned = DWORD{};
-    if (DeviceIoControl(device, code, nullptr, 0, output, output_size, &returned, &operation)) {
+    auto *const result_size = bytes_returned == nullptr ? &returned : bytes_returned;
+    if (DeviceIoControl(device, code, input, input_size,
+            output, output_size, result_size, &operation)) {
         return DWORD{ERROR_SUCCESS};
     }
     const auto error = GetLastError();
     if (error != ERROR_IO_PENDING) {
         return error;
     }
-    if (!GetOverlappedResult(device, &operation, &returned, TRUE)) {
+    if (!GetOverlappedResult(device, &operation, result_size, TRUE)) {
         return GetLastError();
     }
     return DWORD{ERROR_SUCCESS};
 }
 
+constexpr auto kVolumeBitmapHeaderSize = offsetof(VOLUME_BITMAP_BUFFER, Buffer);
+
+struct AllocationBitmap {
+    UINT32 cluster_size = 0;
+    UINT64 cluster_count = 0;
+    wil::unique_virtualalloc_ptr<BYTE> storage;
+
+    [[nodiscard]] auto IsAllocated(const UINT64 cluster) const noexcept {
+        // Preserve any device tail not represented by NTFS clusters.
+        if (cluster >= cluster_count) {
+            return true;
+        }
+        return (storage.get()[kVolumeBitmapHeaderSize + cluster / CHAR_BIT] &
+            (1u << (cluster % CHAR_BIT))) != 0;
+    }
+
+    [[nodiscard]] auto HasAllocatedClusters(
+        const UINT64 offset, const UINT64 length) const noexcept {
+        if (!storage) {
+            return true;
+        }
+        const auto end = offset + length;
+        for (auto position = offset; position < end;) {
+            const auto cluster = position / cluster_size;
+            if (IsAllocated(cluster)) {
+                return true;
+            }
+            position = std::min(end, (cluster + 1) * cluster_size);
+        }
+        return false;
+    }
+
+    auto ZeroFreeClusters(
+        void *const buffer, const UINT64 offset, const UINT64 length) const noexcept {
+        if (!storage) {
+            return;
+        }
+        auto *const output = static_cast<BYTE *>(buffer);
+        const auto end = offset + length;
+        for (auto position = offset; position < end;) {
+            const auto cluster = position / cluster_size;
+            const auto next = std::min(end, (cluster + 1) * cluster_size);
+            if (!IsAllocated(cluster)) {
+                std::memset(output + (position - offset), 0, next - position);
+            }
+            position = next;
+        }
+    }
+};
+
 struct DeviceFile {
     std::wstring name;
     wil::unique_hfile handle;
     UINT32 sector_size = 0;
+    AllocationBitmap allocation_bitmap;
     FSP_FSCTL_FILE_INFO info{};
 };
 
 using DeviceFiles = std::map<std::wstring, DeviceFile>;
 
+[[nodiscard]] auto LoadAllocationBitmap(
+    const HANDLE device, const UINT64 device_size, const UINT64 map_number) {
+    auto file_system_flags = DWORD{};
+    if (!GetVolumeInformationByHandleW(
+            device, nullptr, 0, nullptr, nullptr, &file_system_flags, nullptr, 0)) {
+        WinError(std::format(
+            "could not query filesystem flags for --map #{}", map_number));
+    }
+    // A retained allocation bitmap is safe only while the source cannot change.
+    if ((file_system_flags & FILE_READ_ONLY_VOLUME) == 0) {
+        throw std::runtime_error(std::format(
+            "--zero-free-clusters requires a read-only volume for --map #{}",
+            map_number));
+    }
+
+    auto volume = NTFS_VOLUME_DATA_BUFFER{};
+    const auto volume_error =
+        Ioctl(device, FSCTL_GET_NTFS_VOLUME_DATA, &volume, sizeof(volume));
+    if (volume_error != ERROR_SUCCESS) {
+        WinError(std::format(
+            "FSCTL_GET_NTFS_VOLUME_DATA failed for --map #{}", map_number),
+            volume_error);
+    }
+    if ((volume.TotalClusters.QuadPart <= 0) || (volume.BytesPerCluster == 0)) {
+        throw std::runtime_error(std::format(
+            "FSCTL_GET_NTFS_VOLUME_DATA returned invalid data for --map #{}",
+            map_number));
+    }
+
+    [[gsl::suppress("type.1",
+        justification: "The nonpositive case is rejected above, so this conversion preserves the cluster count.")]]
+    const auto cluster_count = static_cast<UINT64>(volume.TotalClusters.QuadPart);
+    if (cluster_count > (device_size / volume.BytesPerCluster)) {
+        throw std::runtime_error(std::format(
+            "NTFS cluster data exceeds the device length for --map #{}", map_number));
+    }
+
+    const auto bitmap_bytes =
+        cluster_count / CHAR_BIT + ((cluster_count % CHAR_BIT) != 0);
+    const auto bitmap_data_size = kVolumeBitmapHeaderSize + bitmap_bytes;
+    const auto output_size = std::max(sizeof(VOLUME_BITMAP_BUFFER), bitmap_data_size);
+    if (!std::in_range<DWORD>(output_size)) {
+        throw std::runtime_error(std::format(
+            "NTFS allocation bitmap is too large for --map #{}", map_number));
+    }
+    [[gsl::suppress("type.1",
+        justification: "std::in_range above proves output_size is representable by DWORD.")]]
+    const auto output_size_for_api = static_cast<DWORD>(output_size);
+
+    auto storage = wil::unique_virtualalloc_ptr<BYTE>(static_cast<BYTE *>(
+        VirtualAlloc(nullptr, output_size_for_api, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)));
+    if (!storage) {
+        WinError(std::format(
+            "could not allocate NTFS allocation bitmap for --map #{}", map_number));
+    }
+    auto *const output = std::start_lifetime_as<VOLUME_BITMAP_BUFFER>(storage.get());
+    auto input = STARTING_LCN_INPUT_BUFFER{.StartingLcn = {.QuadPart = 0}};
+    auto returned = DWORD{};
+    const auto bitmap_error = Ioctl(device, FSCTL_GET_VOLUME_BITMAP,
+        output, output_size_for_api, &input, sizeof(input), &returned);
+    if (bitmap_error != ERROR_SUCCESS) {
+        WinError(std::format(
+            "FSCTL_GET_VOLUME_BITMAP failed for --map #{}", map_number), bitmap_error);
+    }
+    if ((output->StartingLcn.QuadPart != 0) ||
+        (output->BitmapSize.QuadPart != volume.TotalClusters.QuadPart) ||
+        (returned < bitmap_data_size)) {
+        throw std::runtime_error(std::format(
+            "FSCTL_GET_VOLUME_BITMAP returned incomplete data for --map #{}",
+            map_number));
+    }
+
+    return AllocationBitmap{
+        .cluster_size = volume.BytesPerCluster,
+        .cluster_count = cluster_count,
+        .storage = std::move(storage),
+    };
+}
+
 [[nodiscard]] auto OpenDevice(
-    const Mapping &mapping, const bool extended_dasd, const UINT64 map_number) {
+    const Mapping &mapping, const bool extended_dasd,
+    const bool zero_free_clusters, const UINT64 map_number) {
     auto handle = wil::unique_hfile(CreateFileW(mapping.device.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
@@ -330,10 +469,14 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
                    << mapping.device << L"': " << error.message().c_str() << L"\n";
     }
 
+    auto allocation_bitmap = zero_free_clusters
+        ? LoadAllocationBitmap(handle.get(), size, map_number)
+        : AllocationBitmap{};
     return DeviceFile{
         .name = mapping.name,
         .handle = std::move(handle),
         .sector_size = geometry.BytesPerSector,
+        .allocation_bitmap = std::move(allocation_bitmap),
         .info = {
             .FileAttributes = FILE_ATTRIBUTE_READONLY,
             .AllocationSize = size,
@@ -503,6 +646,11 @@ private:
             justification: "The minimum cannot exceed the ULONG length argument.")]]
         const auto wanted = static_cast<std::remove_cv_t<decltype(length)>>(
             std::min(UINT64{length}, file->info.FileSize - offset));
+        if (!file->allocation_bitmap.HasAllocatedClusters(offset, wanted)) {
+            std::memset(buffer, 0, wanted);
+            *transferred = wanted;
+            return STATUS_SUCCESS;
+        }
         const auto failure = [&](const DWORD error) {
             std::fwprintf(stderr, L"devicefs: read failed for '%ls': Windows error %lu\n",
                 file->name.c_str(), error);
@@ -547,7 +695,12 @@ private:
             justification: "std::in_range above proves aligned_length is representable by LengthType.")]]
         const auto read_length = static_cast<LengthType>(aligned_length);
         if ((read_offset == offset) && (read_length == wanted)) {
-            return read(buffer, offset, wanted, transferred);
+            const auto status = read(buffer, offset, wanted, transferred);
+            if (!NT_SUCCESS(status)) {
+                return status;
+            }
+            file->allocation_bitmap.ZeroFreeClusters(buffer, offset, wanted);
+            return STATUS_SUCCESS;
         }
 
         const auto prefix_length = offset - read_offset;
@@ -572,6 +725,7 @@ private:
 
         *transferred = wanted;
         std::memcpy(buffer, storage.get() + prefix, wanted);
+        file->allocation_bitmap.ZeroFreeClusters(buffer, offset, wanted);
         return STATUS_SUCCESS;
     }
 
@@ -669,7 +823,8 @@ auto Run(const Options &options) {
     for (auto i = 0uz; i < options.mappings.size(); ++i) {
         const auto &mapping = options.mappings[i];
         files.emplace(Lowercase(mapping.name),
-            OpenDevice(mapping, options.extended_dasd, i + 1));
+            OpenDevice(mapping, options.extended_dasd,
+                options.zero_free_clusters, i + 1));
     }
 
     auto stop_event = wil::unique_event_nothrow{};

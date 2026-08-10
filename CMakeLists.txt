@@ -13,6 +13,11 @@ endif()
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(DEVICEFS_MEASURE_FREE_CLUSTER_DATA
+    "Measure nonzero data in bitmap-free clusters (diagnostic builds only)"
+    OFF
+)
+
 cmake_host_system_information(
     RESULT WINFSP_ROOT
     QUERY WINDOWS_REGISTRY "HKLM/SOFTWARE/WinFsp"
@@ -55,6 +60,7 @@ target_link_options(devicefs PRIVATE
 )
 target_compile_definitions(devicefs PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _MSVC_STL_HARDENING=1
+    DEVICEFS_MEASURE_FREE_CLUSTER_DATA=$<BOOL:${DEVICEFS_MEASURE_FREE_CLUSTER_DATA}>
 )
 
 target_compile_options(devicefs PRIVATE

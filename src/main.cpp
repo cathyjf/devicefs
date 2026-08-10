@@ -28,6 +28,7 @@ using PNTSTATUS = NTSTATUS *;
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <climits>
 #include <cstddef>
@@ -59,6 +60,7 @@ namespace {
 constexpr auto kAdvertisedSectorSize = UINT16{512};
 constexpr auto kDefaultStopEvent = std::wstring_view(L"Local\\devicefs-stop");
 constexpr auto kFileSystemName = std::wstring_view(L"DEVICEFS");
+constexpr auto kMeasureFreeClusterData = DEVICEFS_MEASURE_FREE_CLUSTER_DATA != 0;
 static_assert(kFileSystemName.size() + 1 <=
     std::size(FSP_FSCTL_VOLUME_PARAMS{}.FileSystemName),
     "The filesystem name and its terminator must fit the WinFsp volume parameters.");
@@ -321,9 +323,84 @@ _Success_(return == ERROR_SUCCESS)
 
 constexpr auto kVolumeBitmapHeaderSize = offsetof(VOLUME_BITMAP_BUFFER, Buffer);
 
+#if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
+class FreeClusterMeasurement {
+    static constexpr auto kClustersPerClaimWord = sizeof(UINT64) * CHAR_BIT;
+
+    [[nodiscard]] static auto CountFreeClusters(
+        const BYTE *const bitmap, const UINT64 cluster_count) noexcept {
+        auto allocated_clusters = UINT64{};
+        const auto full_bytes = cluster_count / CHAR_BIT;
+        for (auto i = UINT64{}; i < full_bytes; ++i) {
+            allocated_clusters += std::popcount(bitmap[i]);
+        }
+        const auto remaining_bits = cluster_count % CHAR_BIT;
+        if (remaining_bits != 0) {
+            const auto mask = (1u << remaining_bits) - 1;
+            allocated_clusters += std::popcount(bitmap[full_bytes] & mask);
+        }
+        return cluster_count - allocated_clusters;
+    }
+
+public:
+    FreeClusterMeasurement(const BYTE *const bitmap, const UINT64 cluster_count)
+        : claims_(std::make_unique<std::atomic<UINT64>[]>(
+              cluster_count / kClustersPerClaimWord +
+              ((cluster_count % kClustersPerClaimWord) != 0))),
+          total_free_clusters_(CountFreeClusters(bitmap, cluster_count)) {
+    }
+
+    [[nodiscard]] auto Claim(const UINT64 cluster) noexcept {
+        const auto word_index = cluster / kClustersPerClaimWord;
+        const auto mask = UINT64{1} << (cluster % kClustersPerClaimWord);
+        return (claims_[word_index].fetch_or(
+            mask, std::memory_order_relaxed) & mask) == 0;
+    }
+
+    auto Record(const UINT64 fully_examined_clusters,
+        const UINT64 nonzero_clusters, const UINT64 nonzero_bytes) noexcept {
+        if (fully_examined_clusters == 0) {
+            return;
+        }
+        fully_examined_clusters_.fetch_add(
+            fully_examined_clusters, std::memory_order_relaxed);
+        nonzero_clusters_.fetch_add(nonzero_clusters, std::memory_order_relaxed);
+        nonzero_bytes_.fetch_add(nonzero_bytes, std::memory_order_relaxed);
+    }
+
+    [[gsl::suppress("type.1",
+        justification: "fwprintf's %llu arguments require unsigned long long; every UINT64 value is representable.")]]
+    auto Report(const wchar_t *const name) const noexcept {
+        const auto fully_examined_clusters =
+            fully_examined_clusters_.load(std::memory_order_relaxed);
+        const auto nonzero_clusters = nonzero_clusters_.load(std::memory_order_relaxed);
+        const auto nonzero_bytes = nonzero_bytes_.load(std::memory_order_relaxed);
+        std::fwprintf(stderr,
+            L"devicefs: free-cluster measurement for '%ls': "
+            L"%llu of %llu bitmap-free clusters fully examined in one read; "
+            L"%llu of those clusters contained nonzero data (%llu bytes total)\n",
+            name,
+            static_cast<unsigned long long>(fully_examined_clusters),
+            static_cast<unsigned long long>(total_free_clusters_),
+            static_cast<unsigned long long>(nonzero_clusters),
+            static_cast<unsigned long long>(nonzero_bytes));
+    }
+
+private:
+    std::unique_ptr<std::atomic<UINT64>[]> claims_;
+    const UINT64 total_free_clusters_;
+    std::atomic<UINT64> fully_examined_clusters_ = 0;
+    std::atomic<UINT64> nonzero_clusters_ = 0;
+    std::atomic<UINT64> nonzero_bytes_ = 0;
+};
+#endif
+
 struct AllocationBitmap {
     UINT32 cluster_size = 0;
     UINT64 cluster_count = 0;
+#if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
+    std::unique_ptr<FreeClusterMeasurement> measurement;
+#endif
     wil::unique_virtualalloc_ptr<BYTE> storage;
 
     [[nodiscard]] auto IsAllocated(const UINT64 cluster) const noexcept {
@@ -367,6 +444,31 @@ struct AllocationBitmap {
         const auto end = offset + length;
         const auto first_cluster = offset / cluster_size;
         const auto last_cluster = (end - 1) / cluster_size;
+#if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
+        auto fully_examined_clusters = UINT64{};
+        auto nonzero_clusters = UINT64{};
+        auto nonzero_bytes = UINT64{};
+        // Count a cluster only when this read returned all of its bytes.
+        for (auto cluster = first_cluster; cluster <= last_cluster; ++cluster) {
+            const auto cluster_begin = cluster * cluster_size;
+            const auto cluster_end = cluster_begin + cluster_size;
+            if (IsAllocated(cluster) || (cluster_begin < offset) || (cluster_end > end) ||
+                !measurement->Claim(cluster)) {
+                continue;
+            }
+
+            ++fully_examined_clusters;
+            auto cluster_nonzero_bytes = UINT64{};
+            const auto *const cluster_data = output + (cluster_begin - offset);
+            for (auto i = UINT32{}; i < cluster_size; ++i) {
+                cluster_nonzero_bytes += cluster_data[i] != 0;
+            }
+            nonzero_bytes += cluster_nonzero_bytes;
+            nonzero_clusters += cluster_nonzero_bytes != 0;
+        }
+        measurement->Record(
+            fully_examined_clusters, nonzero_clusters, nonzero_bytes);
+#endif
         auto free_begin = end;
         for (auto cluster = first_cluster; cluster <= last_cluster; ++cluster) {
             const auto position = std::max(offset, cluster * cluster_size);
@@ -487,6 +589,10 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
     return AllocationBitmap{
         .cluster_size = volume.BytesPerCluster,
         .cluster_count = cluster_count,
+#if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
+        .measurement = std::make_unique<FreeClusterMeasurement>(
+            storage.get() + kVolumeBitmapHeaderSize, cluster_count),
+#endif
         .storage = std::move(storage),
     };
 }
@@ -735,10 +841,12 @@ private:
             justification: "The minimum cannot exceed the ULONG length argument.")]]
         const auto wanted = static_cast<std::remove_cv_t<decltype(length)>>(
             std::min(UINT64{length}, file->info.FileSize - offset));
-        if (!file->allocation_bitmap.HasAllocatedClusters(offset, wanted)) {
-            std::memset(buffer, 0, wanted);
-            *transferred = wanted;
-            return STATUS_SUCCESS;
+        if constexpr (!kMeasureFreeClusterData) {
+            if (!file->allocation_bitmap.HasAllocatedClusters(offset, wanted)) {
+                std::memset(buffer, 0, wanted);
+                *transferred = wanted;
+                return STATUS_SUCCESS;
+            }
         }
         const auto failure = [&](const DWORD error) {
             std::fwprintf(stderr, L"devicefs: read failed for '%ls': Windows error %lu\n",
@@ -863,7 +971,17 @@ private:
         });
     }
 
-    static auto DispatcherStopped(FSP_FILE_SYSTEM *, const BOOLEAN normally) noexcept {
+    static auto DispatcherStopped(
+        [[maybe_unused]] FSP_FILE_SYSTEM *const fs,
+        const BOOLEAN normally) noexcept {
+#if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
+        for (const auto &entry : Self(fs).files_) {
+            const auto &file = entry.second;
+            if (file.allocation_bitmap.measurement) {
+                file.allocation_bitmap.measurement->Report(file.name.c_str());
+            }
+        }
+#endif
         if (normally) {
             return;
         }
@@ -937,6 +1055,12 @@ auto Run(const Options &options) {
 
     auto wait_error = DWORD{};
     {
+        if constexpr (kMeasureFreeClusterData) {
+            if (options.zero_free_clusters) {
+                std::wcerr << L"devicefs: free-cluster measurement is enabled; "
+                              L"free-only reads will access the source device\n";
+            }
+        }
         auto filesystem = DeviceFs(
             std::move(files), std::move(security), options.mount);
         g_stop_event = stop_event.get();

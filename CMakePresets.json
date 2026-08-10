@@ -11,13 +11,30 @@
       "displayName": "Windows x64 (Visual Studio 2026)",
       "generator": "Visual Studio 18 2026",
       "architecture": "x64",
-      "binaryDir": "${sourceDir}/build/windows-x64"
+      "binaryDir": "${sourceDir}/build/windows-x64",
+      "cacheVariables": {
+        "DEVICEFS_MEASURE_FREE_CLUSTER_DATA": false
+      }
+    },
+    {
+      "name": "windows-x64-measure-free-cluster-data",
+      "displayName": "Windows x64 — free-cluster measurement",
+      "inherits": "windows-x64",
+      "binaryDir": "${sourceDir}/build/windows-x64-measure-free-cluster-data",
+      "cacheVariables": {
+        "DEVICEFS_MEASURE_FREE_CLUSTER_DATA": true
+      }
     }
   ],
   "buildPresets": [
     {
       "name": "windows-x64-release",
       "configurePreset": "windows-x64",
+      "configuration": "Release"
+    },
+    {
+      "name": "windows-x64-measure-free-cluster-data-release",
+      "configurePreset": "windows-x64-measure-free-cluster-data",
       "configuration": "Release"
     }
   ]

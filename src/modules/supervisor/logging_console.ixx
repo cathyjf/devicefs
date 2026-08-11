@@ -30,7 +30,9 @@ module;
 #include <cstddef>
 #include <filesystem>
 #include <future>
+#include <span>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -47,34 +49,165 @@ using unique_pseudoconsole = wil::unique_any<
         std::bit_cast<int>(error), std::system_category(), operation.c_str());
 }
 
+auto WriteOutput(const HANDLE log, std::u8string_view output,
+    DWORD &first_error) noexcept {
+    while (!output.empty() && (first_error == ERROR_SUCCESS)) {
+        const auto chunk_size =
+            std::min(output.size(), std::size_t{MAXDWORD});
+        [[gsl::suppress("type.1",
+            justification: "chunk_size is limited to MAXDWORD above.")]]
+        const auto size = static_cast<DWORD>(chunk_size);
+        auto written = DWORD{};
+        if (!WriteFile(log, output.data(), size, &written, nullptr)) {
+            first_error = GetLastError();
+        } else if (written != size) {
+            first_error = ERROR_WRITE_FAULT;
+        }
+        output.remove_prefix(chunk_size);
+    }
+}
+
+// ConPTY emits UTF-8 interleaved with VT sequences. Keep parser state across
+// pipe reads and strip the ESC-prefixed sequences throughout the stream while
+// preserving non-ASCII UTF-8 bytes. Of the C0 controls, retain only tabs and
+// line feeds; dropping carriage returns turns CRLF into LF and prevents
+// progress output from rewriting replayed lines.
+// https://learn.microsoft.com/en-us/windows/console/createpseudoconsole
+// https://ecma-international.org/publications-and-standards/standards/ecma-48/
+class VtFilter {
+public:
+    [[nodiscard]] auto Remove(std::span<char8_t> input) noexcept {
+        auto output_size = 0uz;
+        for (const auto character : input) {
+            if (Preserve(character)) {
+                input[output_size++] = character;
+            }
+        }
+        return std::u8string_view{input.data(), output_size};
+    }
+
+private:
+    enum class State {
+        Text,
+        Escape,
+        EscapeIntermediate,
+        ControlSequence,
+        OscString,
+        StString,
+    };
+
+    [[nodiscard]] auto Preserve(const char8_t character) noexcept -> bool {
+        if ((state_ == State::OscString) ||
+            (state_ == State::StString)) {
+            if (IsSequenceCancellation(character) ||
+                ((state_ == State::OscString) &&
+                 (character == u8'\x07'))) {
+                state_ = State::Text;
+            } else if (character == u8'\x1b') {
+                state_ = State::Escape;
+            }
+            return false;
+        }
+        if (character == u8'\x1b') {
+            state_ = State::Escape;
+            return false;
+        }
+        if (IsSequenceCancellation(character)) {
+            state_ = State::Text;
+            return false;
+        }
+        if (IsControl(character)) {
+            return IsPlainTextControl(character);
+        }
+
+        switch (state_) {
+        case State::Text:
+            return true;
+
+        case State::Escape:
+            switch (character) {
+            case u8'[':
+                state_ = State::ControlSequence;
+                break;
+            case u8']':
+                state_ = State::OscString;
+                break;
+            case u8'P':
+            case u8'X':
+            case u8'^':
+            case u8'_':
+                state_ = State::StString;
+                break;
+            default:
+                if (character <= u8'/') {
+                    state_ = State::EscapeIntermediate;
+                } else if (character <= u8'~') {
+                    state_ = State::Text;
+                } else {
+                    state_ = State::Text;
+                    return true;
+                }
+            }
+            return false;
+
+        case State::EscapeIntermediate:
+            if (character <= u8'/') {
+                return false;
+            }
+            state_ = State::Text;
+            return character > u8'~';
+
+        case State::ControlSequence:
+            if (character >= u8'@') {
+                state_ = State::Text;
+                return character > u8'~';
+            }
+            return false;
+
+        default:
+            std::unreachable();
+        }
+    }
+
+    [[nodiscard]] static constexpr auto IsPlainTextControl(
+        const char8_t character) noexcept -> bool {
+        return (character == u8'\t') ||
+               (character == u8'\n');
+    }
+
+    [[nodiscard]] static constexpr auto IsControl(
+        const char8_t character) noexcept -> bool {
+        return (character < u8' ') || (character == u8'\x7f');
+    }
+
+    [[nodiscard]] static constexpr auto IsSequenceCancellation(
+        const char8_t character) noexcept -> bool {
+        return (character == u8'\x18') || (character == u8'\x1a');
+    }
+
+    State state_ = State::Text;
+};
+
 [[nodiscard]] auto CopyConsoleOutput(
     wil::unique_handle output, const HANDLE log) noexcept {
     constexpr auto kBufferSize = DWORD{4096};
-    auto buffer = std::array<std::byte, kBufferSize>{};
+    auto buffer = std::array<char8_t, kBufferSize>{};
     auto first_error = DWORD{ERROR_SUCCESS};
+    auto filter = VtFilter{};
     while (true) {
         auto read = DWORD{};
         if (!ReadFile(output.get(), buffer.data(), kBufferSize,
                 &read, nullptr)) {
             const auto error = GetLastError();
-            if (error == ERROR_BROKEN_PIPE) {
-                return first_error;
+            if (error != ERROR_BROKEN_PIPE) {
+                return first_error == ERROR_SUCCESS ? error : first_error;
             }
-            return first_error == ERROR_SUCCESS ? error : first_error;
         }
         if (read == 0) {
             return first_error;
         }
-        if (first_error != ERROR_SUCCESS) {
-            continue;
-        }
-
-        auto written = DWORD{};
-        if (!WriteFile(log, buffer.data(), read, &written, nullptr)) {
-            first_error = GetLastError();
-        } else if (written != read) {
-            first_error = ERROR_WRITE_FAULT;
-        }
+        WriteOutput(log,
+            filter.Remove(std::span{buffer}.first(read)), first_error);
     }
 }
 
@@ -93,7 +226,7 @@ public:
             WinError("could not create the pseudoconsole output channel");
         }
         const auto error = CreatePseudoConsole(
-            COORD{120, 30}, input_read_.get(), output_write_.get(),
+            COORD{1000, 30}, input_read_.get(), output_write_.get(),
             0, console_.put());
         if (FAILED(error)) {
             WinError("could not create the backup pseudoconsole",

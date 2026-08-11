@@ -567,11 +567,8 @@ struct ServiceOutcome {
     if (forced) {
         return ServiceOutcome{.win32_error = ERROR_TIMEOUT};
     }
-    if (child_exit_code == 0) {
+    if (cancelled || (child_exit_code == 0)) {
         return ServiceOutcome{};
-    }
-    if (cancelled) {
-        return ServiceOutcome{.win32_error = ERROR_CANCELLED};
     }
     return ServiceOutcome{
         .win32_error = ERROR_SERVICE_SPECIFIC_ERROR,
@@ -668,10 +665,14 @@ auto TryWriteFailure(
         const auto log_path = directory / kLogRelativePath;
         std::filesystem::create_directory(log_path.parent_path());
         log.reset(CreateFileW(log_path.c_str(),
-            GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_DELETE,
-            nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
+            GENERIC_WRITE, FILE_SHARE_READ,
+            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
         if (!log) {
             WinError("could not open the backup supervisor log");
+        }
+        if (!SetFilePointerEx(
+                log.get(), LARGE_INTEGER{}, nullptr, FILE_END)) {
+            WinError("could not seek to the end of the backup supervisor log");
         }
         context.cancellation_event = CreateCancellationEvent();
         result = RunBackup(context, directory, log.get());

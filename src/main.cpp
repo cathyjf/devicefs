@@ -37,6 +37,7 @@ using PNTSTATUS = NTSTATUS *;
 #include <iostream>
 #include <map>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -503,7 +504,10 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
     };
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
     result.measurement = std::make_unique<FreeClusterMeasurement>(
-        result.storage.get() + kVolumeBitmapHeaderSize,
+        std::span<const BYTE>{
+            result.storage.get() + kVolumeBitmapHeaderSize,
+            bitmap_bytes,
+        },
         volume.BytesPerCluster, cluster_count);
 #endif
     return result;

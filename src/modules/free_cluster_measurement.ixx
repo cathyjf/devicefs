@@ -23,6 +23,7 @@ module;
 #include <cstdio>
 #include <cwchar>
 #include <memory>
+#include <span>
 
 export module devicefs.free_cluster_measurement;
 
@@ -31,7 +32,7 @@ export class FreeClusterMeasurement {
         sizeof(std::uint64_t) * CHAR_BIT;
 
     [[nodiscard]] static auto CountFreeClusters(
-        const unsigned char *const bitmap,
+        const std::span<const unsigned char> bitmap,
         const std::uint64_t cluster_count) noexcept {
         auto allocated_clusters = std::uint64_t{};
         const auto full_bytes = cluster_count / CHAR_BIT;
@@ -63,7 +64,7 @@ export class FreeClusterMeasurement {
 
 public:
     FreeClusterMeasurement(
-        const unsigned char *const bitmap,
+        const std::span<const unsigned char> bitmap,
         const std::uint32_t cluster_size,
         const std::uint64_t cluster_count)
         : bitmap_(bitmap),
@@ -133,7 +134,7 @@ public:
     }
 
 private:
-    const unsigned char *const bitmap_;
+    const std::span<const unsigned char> bitmap_;
     const std::uint32_t cluster_size_;
     const std::uint64_t cluster_count_;
     std::unique_ptr<std::atomic<std::uint64_t>[]> claims_;

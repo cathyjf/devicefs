@@ -17,10 +17,10 @@
       }
     },
     {
-      "name": "windows-x64-measure-free-cluster-data",
-      "displayName": "Windows x64 — free-cluster measurement",
+      "name": "windows-x64-instrumented",
+      "displayName": "Windows x64 — instrumented",
       "inherits": "windows-x64",
-      "binaryDir": "${sourceDir}/build/windows-x64-measure-free-cluster-data",
+      "binaryDir": "${sourceDir}/build/windows-x64-instrumented",
       "cacheVariables": {
         "DEVICEFS_MEASURE_FREE_CLUSTER_DATA": true
       }
@@ -33,8 +33,8 @@
       "configuration": "Release"
     },
     {
-      "name": "windows-x64-measure-free-cluster-data-release",
-      "configurePreset": "windows-x64-measure-free-cluster-data",
+      "name": "windows-x64-instrumented-release",
+      "configurePreset": "windows-x64-instrumented",
       "configuration": "Release"
     }
   ]

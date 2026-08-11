@@ -12,6 +12,7 @@ endif()
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 
 option(DEVICEFS_MEASURE_FREE_CLUSTER_DATA
     "Measure nonzero data in bitmap-free clusters (diagnostic builds only)"
@@ -42,6 +43,13 @@ endif()
 add_executable(devicefs
     src/main.cpp
 )
+
+if(DEVICEFS_MEASURE_FREE_CLUSTER_DATA)
+    target_sources(devicefs PRIVATE
+        FILE_SET CXX_MODULES
+        FILES src/modules/free_cluster_measurement.ixx
+    )
+endif()
 
 set_target_properties(devicefs PROPERTIES
     VS_GLOBAL_EnableCppCoreCheck true

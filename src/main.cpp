@@ -28,7 +28,6 @@ using PNTSTATUS = NTSTATUS *;
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <bit>
 #include <climits>
 #include <cstddef>
@@ -46,6 +45,10 @@ using PNTSTATUS = NTSTATUS *;
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
+import devicefs.free_cluster_measurement;
+#endif
 
 #if defined(__INTELLISENSE__) && !defined(__cpp_lib_start_lifetime_as)
 // IntelliSense uses EDG, which does not yet expose `std::start_lifetime_as`.
@@ -323,85 +326,13 @@ _Success_(return == ERROR_SUCCESS)
 
 constexpr auto kVolumeBitmapHeaderSize = offsetof(VOLUME_BITMAP_BUFFER, Buffer);
 
-#if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
-class FreeClusterMeasurement {
-    static constexpr auto kClustersPerClaimWord = sizeof(UINT64) * CHAR_BIT;
-
-    [[nodiscard]] static auto CountFreeClusters(
-        const BYTE *const bitmap, const UINT64 cluster_count) noexcept {
-        auto allocated_clusters = UINT64{};
-        const auto full_bytes = cluster_count / CHAR_BIT;
-        for (auto i = UINT64{}; i < full_bytes; ++i) {
-            allocated_clusters += std::popcount(bitmap[i]);
-        }
-        const auto remaining_bits = cluster_count % CHAR_BIT;
-        if (remaining_bits != 0) {
-            const auto mask = (1u << remaining_bits) - 1;
-            allocated_clusters += std::popcount(bitmap[full_bytes] & mask);
-        }
-        return cluster_count - allocated_clusters;
-    }
-
-public:
-    FreeClusterMeasurement(const BYTE *const bitmap, const UINT64 cluster_count)
-        : claims_(std::make_unique<std::atomic<UINT64>[]>(
-              cluster_count / kClustersPerClaimWord +
-              ((cluster_count % kClustersPerClaimWord) != 0))),
-          total_free_clusters_(CountFreeClusters(bitmap, cluster_count)) {
-    }
-
-    [[nodiscard]] auto Claim(const UINT64 cluster) noexcept {
-        const auto word_index = cluster / kClustersPerClaimWord;
-        const auto mask = 1ULL << (cluster % kClustersPerClaimWord);
-        return (claims_[word_index].fetch_or(
-            mask, std::memory_order_relaxed) & mask) == 0;
-    }
-
-    auto Record(const UINT64 fully_examined_clusters,
-        const UINT64 nonzero_clusters, const UINT64 nonzero_bytes) noexcept {
-        if (fully_examined_clusters == 0) {
-            return;
-        }
-        fully_examined_clusters_.fetch_add(
-            fully_examined_clusters, std::memory_order_relaxed);
-        nonzero_clusters_.fetch_add(nonzero_clusters, std::memory_order_relaxed);
-        nonzero_bytes_.fetch_add(nonzero_bytes, std::memory_order_relaxed);
-    }
-
-    [[gsl::suppress("type.1",
-        justification: "fwprintf's %llu arguments require unsigned long long; every UINT64 value is representable.")]]
-    auto Report(const wchar_t *const name) const noexcept {
-        const auto fully_examined_clusters =
-            fully_examined_clusters_.load(std::memory_order_relaxed);
-        const auto nonzero_clusters = nonzero_clusters_.load(std::memory_order_relaxed);
-        const auto nonzero_bytes = nonzero_bytes_.load(std::memory_order_relaxed);
-        std::fwprintf(stderr,
-            L"devicefs: free-cluster measurement for '%ls': "
-            L"%llu of %llu bitmap-free clusters fully examined in one read; "
-            L"%llu of those clusters contained nonzero data (%llu bytes total)\n",
-            name,
-            static_cast<unsigned long long>(fully_examined_clusters),
-            static_cast<unsigned long long>(total_free_clusters_),
-            static_cast<unsigned long long>(nonzero_clusters),
-            static_cast<unsigned long long>(nonzero_bytes));
-    }
-
-private:
-    std::unique_ptr<std::atomic<UINT64>[]> claims_;
-    const UINT64 total_free_clusters_;
-    std::atomic<UINT64> fully_examined_clusters_ = 0;
-    std::atomic<UINT64> nonzero_clusters_ = 0;
-    std::atomic<UINT64> nonzero_bytes_ = 0;
-};
-#endif
-
 struct AllocationBitmap {
     UINT32 cluster_size = 0;
     UINT64 cluster_count = 0;
+    wil::unique_virtualalloc_ptr<BYTE> storage;
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
     std::unique_ptr<FreeClusterMeasurement> measurement;
 #endif
-    wil::unique_virtualalloc_ptr<BYTE> storage;
 
     [[nodiscard]] auto IsAllocated(const UINT64 cluster) const noexcept {
         // Preserve any device tail not represented by NTFS clusters.
@@ -445,29 +376,7 @@ struct AllocationBitmap {
         const auto first_cluster = offset / cluster_size;
         const auto last_cluster = (end - 1) / cluster_size;
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
-        auto fully_examined_clusters = UINT64{};
-        auto nonzero_clusters = UINT64{};
-        auto nonzero_bytes = UINT64{};
-        // Count a cluster only when this read returned all of its bytes.
-        for (auto cluster = first_cluster; cluster <= last_cluster; ++cluster) {
-            const auto cluster_begin = cluster * cluster_size;
-            const auto cluster_end = cluster_begin + cluster_size;
-            if (IsAllocated(cluster) || (cluster_begin < offset) || (cluster_end > end) ||
-                !measurement->Claim(cluster)) {
-                continue;
-            }
-
-            ++fully_examined_clusters;
-            auto cluster_nonzero_bytes = UINT64{};
-            const auto *const cluster_data = output + (cluster_begin - offset);
-            for (auto i = UINT32{}; i < cluster_size; ++i) {
-                cluster_nonzero_bytes += cluster_data[i] != 0;
-            }
-            nonzero_bytes += cluster_nonzero_bytes;
-            nonzero_clusters += cluster_nonzero_bytes != 0;
-        }
-        measurement->Record(
-            fully_examined_clusters, nonzero_clusters, nonzero_bytes);
+        measurement->ObserveRead(output, offset, length);
 #endif
         auto free_begin = end;
         for (auto cluster = first_cluster; cluster <= last_cluster; ++cluster) {
@@ -587,15 +496,17 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
             map_number));
     }
 
-    return AllocationBitmap{
+    auto result = AllocationBitmap{
         .cluster_size = volume.BytesPerCluster,
         .cluster_count = cluster_count,
-#if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
-        .measurement = std::make_unique<FreeClusterMeasurement>(
-            storage.get() + kVolumeBitmapHeaderSize, cluster_count),
-#endif
         .storage = std::move(storage),
     };
+#if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
+    result.measurement = std::make_unique<FreeClusterMeasurement>(
+        result.storage.get() + kVolumeBitmapHeaderSize,
+        volume.BytesPerCluster, cluster_count);
+#endif
+    return result;
 }
 
 [[nodiscard]] auto OpenDevice(

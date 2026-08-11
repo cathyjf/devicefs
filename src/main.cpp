@@ -602,8 +602,8 @@ auto CloseFileSystem(FSP_FILE_SYSTEM *const fs) noexcept {
 using UniqueFileSystem = wil::unique_any<
     FSP_FILE_SYSTEM *, decltype(&CloseFileSystem), CloseFileSystem>;
 
-auto *g_stop_event = HANDLE{};
-auto *g_stopped_event = HANDLE{};
+auto g_stop_event = HANDLE{};
+auto g_stopped_event = HANDLE{};
 auto g_dispatcher_stopped_unexpectedly = false;
 
 class DeviceFs {

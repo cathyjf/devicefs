@@ -89,4 +89,4 @@ target_compile_definitions(devicefs PRIVATE
 )
 
 target_compile_definitions(backup-supervisor PRIVATE _WIN32_WINNT=0x0A00)
-target_link_libraries(backup-supervisor PRIVATE advapi32 userenv)
+target_link_libraries(backup-supervisor PRIVATE advapi32 ntdll userenv)

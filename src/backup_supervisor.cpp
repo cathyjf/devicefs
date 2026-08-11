@@ -15,7 +15,9 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #include <windows.h>
+#include <tlhelp32.h>
 #include <userenv.h>
+#include <winternl.h>
 
 // wil/stl.h uses these facilities without including their standard headers.
 #include <algorithm>
@@ -87,6 +89,10 @@ constexpr auto kJobPollMilliseconds = DWORD{100};
 constexpr auto kInternalFailure = DWORD{1};
 constexpr auto kAcceptedControls =
     DWORD{SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN};
+[[gsl::suppress("type.1",
+    justification: "ProcessCommandLineInformation is NT process information class 60.")]]
+constexpr auto kProcessCommandLineInformation =
+    static_cast<PROCESSINFOCLASS>(60);
 
 [[noreturn]] auto WinError(
     const wil::zstring_view operation, const DWORD error = GetLastError()) {
@@ -323,6 +329,85 @@ auto WriteLog(const HANDLE log,
     }
 }
 
+template <typename... Arguments>
+auto TryWriteLog(const HANDLE log,
+    const std::format_string<Arguments...> format,
+    Arguments&&... arguments) noexcept {
+    try {
+        WriteLog(log, format, std::forward<Arguments>(arguments)...);
+    } catch (...) {}
+}
+
+[[nodiscard]] auto Utf8(const std::wstring_view value) {
+    const auto encoded = std::filesystem::path(value).u8string();
+    return std::string(encoded.begin(), encoded.end());
+}
+
+[[nodiscard]] auto ProcessCommandLine(const HANDLE process) {
+    auto bytes = ULONG{};
+    static_cast<void>(NtQueryInformationProcess(
+        process, kProcessCommandLineInformation,
+        nullptr, 0, &bytes));
+    if (bytes < sizeof(UNICODE_STRING)) {
+        return std::wstring{};
+    }
+    auto storage = std::vector<std::byte>(bytes);
+    if (NtQueryInformationProcess(process, kProcessCommandLineInformation,
+            storage.data(), bytes, &bytes) < 0) {
+        return std::wstring{};
+    }
+    const auto *const command_line =
+        std::start_lifetime_as<UNICODE_STRING>(storage.data());
+    if (command_line->Buffer == nullptr) {
+        return std::wstring{};
+    }
+    return std::wstring(command_line->Buffer,
+        command_line->Length / sizeof(wchar_t));
+}
+
+auto LogJobProcesses(const HANDLE log, const HANDLE job) noexcept {
+    try {
+        auto snapshot = wil::unique_tool_help_snapshot(
+            CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+        if (!snapshot) {
+            TryWriteLog(log,
+                "backup-supervisor: could not enumerate processes before "
+                "terminating the backup job: error {}", GetLastError());
+            return;
+        }
+
+        auto entry = PROCESSENTRY32W{.dwSize = sizeof(PROCESSENTRY32W)};
+        if (!Process32FirstW(snapshot.get(), &entry)) {
+            TryWriteLog(log,
+                "backup-supervisor: could not read the process snapshot: "
+                "error {}", GetLastError());
+            return;
+        }
+        do {
+            auto process = wil::unique_process_handle(OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID));
+            if (!process) {
+                continue;
+            }
+            auto in_job = FALSE;
+            if (!IsProcessInJob(process.get(), job, &in_job) || !in_job) {
+                continue;
+            }
+
+            const auto command_line = ProcessCommandLine(process.get());
+            WriteLog(log,
+                "backup-supervisor: terminating '{}' "
+                "(PID {}, command line '{}')",
+                Utf8(entry.szExeFile), entry.th32ProcessID,
+                command_line.empty() ? "unavailable" : Utf8(command_line));
+        } while (Process32NextW(snapshot.get(), &entry));
+    } catch (const std::exception &error) {
+        TryWriteLog(log,
+            "backup-supervisor: could not identify processes before "
+            "terminating the backup job: {}", error.what());
+    }
+}
+
 [[nodiscard]] auto StartOrchestrator(
     const std::filesystem::path &directory,
     const HANDLE log) {
@@ -444,6 +529,7 @@ struct ServiceOutcome {
     if (cancelled && !backup.Wait(kGracefulStopMilliseconds)) {
         WriteLog(log,
             "backup-supervisor: graceful stop timed out; terminating the process job");
+        LogJobProcesses(log, backup.job.get());
         SetServiceState(context, SERVICE_STOP_PENDING,
             ERROR_SUCCESS, 0, 2, kForcedProcessWaitMilliseconds);
         backup.TerminateAndWait(ERROR_CANCELLED);
@@ -454,6 +540,7 @@ struct ServiceOutcome {
     if (!backup.WaitForAll(kStrayProcessWaitMilliseconds)) {
         WriteLog(log,
             "backup-supervisor: terminating child processes left behind by the orchestrator");
+        LogJobProcesses(log, backup.job.get());
         SetServiceState(context, SERVICE_STOP_PENDING,
             ERROR_SUCCESS, 0, 2, kForcedProcessWaitMilliseconds);
         backup.TerminateAndWait(ERROR_PROCESS_ABORTED);
@@ -567,12 +654,8 @@ auto InstallService(const InstallMode mode) {
 
 auto TryWriteFailure(
     const wil::unique_hfile &log, const std::string_view diagnostic) noexcept {
-    if (!log) {
-        return;
-    }
-    try {
-        WriteLog(log.get(), "backup-supervisor: {}", diagnostic);
-    } catch (...) {
+    if (log) {
+        TryWriteLog(log.get(), "backup-supervisor: {}", diagnostic);
     }
 }
 

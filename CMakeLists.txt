@@ -49,7 +49,9 @@ add_executable(backup-supervisor
 )
 target_sources(backup-supervisor PRIVATE
     FILE_SET CXX_MODULES
-    FILES src/modules/supervisor/logging_console.ixx
+    FILES
+        src/modules/supervisor/logging_console.ixx
+        src/modules/supervisor/process_diagnostics.ixx
 )
 
 if(DEVICEFS_MEASURE_FREE_CLUSTER_DATA)

@@ -314,9 +314,10 @@ private:
                 WriteRaw(std::string_view(timestamp));
                 at_line_start_ = false;
             }
-            const auto line_end = std::min(
-                output.find(Character{'\r'}),
-                output.find(Character{'\n'}));
+            constexpr auto line_ends =
+                std::array{Character{'\r'}, Character{'\n'}};
+            const auto line_end = output.find_first_of(
+                std::basic_string_view{line_ends});
             if (line_end == output.npos) {
                 WriteRaw(output);
                 return;

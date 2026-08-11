@@ -15,9 +15,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #include <windows.h>
-#include <tlhelp32.h>
 #include <userenv.h>
-#include <winternl.h>
 
 // wil/stl.h uses these facilities without including their standard headers.
 #include <algorithm>
@@ -46,6 +44,7 @@
 #include <vector>
 
 import devicefs.supervisor.logging_console;
+import devicefs.supervisor.process_diagnostics;
 
 #if defined(__INTELLISENSE__) && !defined(__cpp_lib_start_lifetime_as)
 namespace std {
@@ -93,10 +92,6 @@ constexpr auto kAcceptedControls =
     DWORD{SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN};
 constexpr auto kWslCreationFlags =
     DWORD{CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT};
-[[gsl::suppress("type.1",
-    justification: "ProcessCommandLineInformation is NT process information class 60.")]]
-constexpr auto kProcessCommandLineInformation =
-    static_cast<PROCESSINFOCLASS>(60);
 
 [[noreturn]] auto WinError(
     const wil::zstring_view operation, const DWORD error = GetLastError()) {
@@ -313,76 +308,6 @@ template <typename Start>
         WinError(operation);
     }
     return process;
-}
-
-[[nodiscard]] auto Utf8(const std::wstring_view value) {
-    const auto encoded = std::filesystem::path(value).u8string();
-    return std::string(encoded.begin(), encoded.end());
-}
-
-[[nodiscard]] auto ProcessCommandLine(const HANDLE process) {
-    auto bytes = ULONG{};
-    static_cast<void>(NtQueryInformationProcess(
-        process, kProcessCommandLineInformation,
-        nullptr, 0, &bytes));
-    if (bytes < sizeof(UNICODE_STRING)) {
-        return std::wstring{};
-    }
-    auto storage = std::vector<std::byte>(bytes);
-    if (NtQueryInformationProcess(process, kProcessCommandLineInformation,
-            storage.data(), bytes, &bytes) < 0) {
-        return std::wstring{};
-    }
-    const auto *const command_line =
-        std::start_lifetime_as<UNICODE_STRING>(storage.data());
-    if (command_line->Buffer == nullptr) {
-        return std::wstring{};
-    }
-    return std::wstring(command_line->Buffer,
-        command_line->Length / sizeof(wchar_t));
-}
-
-auto LogJobProcesses(Log &log, const HANDLE job) noexcept {
-    try {
-        auto snapshot = wil::unique_tool_help_snapshot(
-            CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
-        if (!snapshot) {
-            log.TryWrite(
-                "backup-supervisor: could not enumerate processes before "
-                "terminating the backup job: error {}", GetLastError());
-            return;
-        }
-
-        auto entry = PROCESSENTRY32W{.dwSize = sizeof(PROCESSENTRY32W)};
-        if (!Process32FirstW(snapshot.get(), &entry)) {
-            log.TryWrite(
-                "backup-supervisor: could not read the process snapshot: "
-                "error {}", GetLastError());
-            return;
-        }
-        do {
-            auto process = wil::unique_process_handle(OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID));
-            if (!process) {
-                continue;
-            }
-            auto in_job = FALSE;
-            if (!IsProcessInJob(process.get(), job, &in_job) || !in_job) {
-                continue;
-            }
-
-            const auto command_line = ProcessCommandLine(process.get());
-            log.Write(
-                "backup-supervisor: terminating '{}' "
-                "(PID {}, command line '{}')",
-                Utf8(entry.szExeFile), entry.th32ProcessID,
-                command_line.empty() ? "unavailable" : Utf8(command_line));
-        } while (Process32NextW(snapshot.get(), &entry));
-    } catch (const std::exception &error) {
-        log.TryWrite(
-            "backup-supervisor: could not identify processes before "
-            "terminating the backup job: {}", error.what());
-    }
 }
 
 [[nodiscard]] auto StartOrchestrator(

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 4.2)
 
-project(devicefs LANGUAGES CXX)
+project(devicefs LANGUAGES CXX RC)
 
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     message(FATAL_ERROR "devicefs requires the Microsoft Visual C++ compiler")
@@ -47,9 +47,44 @@ add_executable(devicefs
 add_executable(backup-supervisor
     src/backup_supervisor.cpp
 )
+
+set(ORCHESTRATOR_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/orchestrator")
+set(ORCHESTRATOR_ARTIFACTS
+    "${ORCHESTRATOR_DIRECTORY}/Orchestrate-Backup.ps1"
+    "${ORCHESTRATOR_DIRECTORY}/Complete-Backup.ps1"
+    "${ORCHESTRATOR_DIRECTORY}/VShadow-Helper.cmd"
+    "${ORCHESTRATOR_DIRECTORY}/start-pbs.fish"
+)
+set(ARTIFACT_RESOURCE_SCRIPT
+    "${CMAKE_CURRENT_BINARY_DIR}/backup-supervisor-artifacts-$<CONFIG>.rc"
+)
+set(ARTIFACT_RESOURCE
+    "${CMAKE_CURRENT_BINARY_DIR}/backup-supervisor-artifacts-$<CONFIG>.res"
+)
+file(GENERATE OUTPUT "${ARTIFACT_RESOURCE_SCRIPT}" CONTENT
+"ORCHESTRATE_BACKUP DEVICEFS_ARTIFACT \"${ORCHESTRATOR_DIRECTORY}/Orchestrate-Backup.ps1\"
+COMPLETE_BACKUP DEVICEFS_ARTIFACT \"${ORCHESTRATOR_DIRECTORY}/Complete-Backup.ps1\"
+VSHADOW_HELPER DEVICEFS_ARTIFACT \"${ORCHESTRATOR_DIRECTORY}/VShadow-Helper.cmd\"
+START_PBS DEVICEFS_ARTIFACT \"${ORCHESTRATOR_DIRECTORY}/start-pbs.fish\"
+DEVICEFS DEVICEFS_ARTIFACT \"$<TARGET_FILE:devicefs>\"
+")
+add_custom_command(
+    OUTPUT "${ARTIFACT_RESOURCE}"
+    COMMAND "${CMAKE_RC_COMPILER}" /nologo /fo "${ARTIFACT_RESOURCE}"
+        "${ARTIFACT_RESOURCE_SCRIPT}"
+    DEPENDS devicefs "${ARTIFACT_RESOURCE_SCRIPT}"
+        ${ORCHESTRATOR_ARTIFACTS}
+    VERBATIM
+)
+add_custom_target(backup-supervisor-artifacts
+    DEPENDS "${ARTIFACT_RESOURCE}"
+)
+add_dependencies(backup-supervisor backup-supervisor-artifacts)
+target_link_libraries(backup-supervisor PRIVATE "${ARTIFACT_RESOURCE}")
 target_sources(backup-supervisor PRIVATE
     FILE_SET CXX_MODULES
     FILES
+        src/modules/supervisor/embedded_artifacts.ixx
         src/modules/supervisor/logging_console.ixx
         src/modules/supervisor/process_diagnostics.ixx
 )
@@ -95,4 +130,4 @@ target_compile_definitions(devicefs PRIVATE
 )
 
 target_compile_definitions(backup-supervisor PRIVATE _WIN32_WINNT=0x0A00)
-target_link_libraries(backup-supervisor PRIVATE advapi32 ntdll userenv)
+target_link_libraries(backup-supervisor PRIVATE advapi32 ntdll ole32 userenv)

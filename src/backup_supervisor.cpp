@@ -43,6 +43,7 @@
 #include <utility>
 #include <vector>
 
+import devicefs.supervisor.embedded_artifacts;
 import devicefs.supervisor.logging_console;
 import devicefs.supervisor.process_diagnostics;
 
@@ -60,8 +61,15 @@ constexpr auto kCancellationEventName =
     wil::zwstring_view(L"Local\\devicefs-backup-stop");
 constexpr auto kCancellationEventEnvironment =
     wil::zwstring_view(L"DEVICEFS_BACKUP_STOP_EVENT");
+constexpr auto kBackupLockEnvironment =
+    wil::zwstring_view(L"DEVICEFS_BACKUP_LOCK_PATH");
+constexpr auto kSupervisorPathEnvironment =
+    wil::zwstring_view(L"DEVICEFS_BACKUP_SUPERVISOR_PATH");
 constexpr auto kHelperOption =
     std::wstring_view(L"--run-wsl-as-pbs-vss");
+constexpr auto kForegroundOption = std::wstring_view(L"--foreground");
+constexpr auto kNoWritersOption = std::wstring_view(L"--no-writers");
+constexpr auto kRunServiceOption = std::wstring_view(L"--run-service");
 constexpr auto kInstallOption = std::wstring_view(L"--install-service");
 constexpr auto kUpdateOption = std::wstring_view(L"--update");
 constexpr auto kServiceDisplayName =
@@ -77,6 +85,8 @@ constexpr auto kLogRelativePath =
     std::wstring_view(L"logs\\backup-supervisor.log");
 constexpr auto kPasswordRelativePath =
     std::wstring_view(L"credentials\\pbs-vss.password");
+constexpr auto kBackupLockRelativePath =
+    std::wstring_view(L"credentials\\pbs-vss-backup.lock");
 constexpr auto kPbsUser = wil::zwstring_view(L"pbs-vss");
 constexpr auto kLocalDomain = wil::zwstring_view(L".");
 constexpr auto kGracefulStopMilliseconds = DWORD{300000};
@@ -145,8 +155,21 @@ auto HardenProcess() {
     return result;
 }
 
-[[nodiscard]] auto OrchestrationDirectory() {
+[[nodiscard]] auto InstallationDirectory() {
     return std::filesystem::path(ExecutablePath()).parent_path().parent_path();
+}
+
+auto PublishPersistentPaths(const std::filesystem::path &directory) {
+    const auto backup_lock = directory / kBackupLockRelativePath;
+    if (!SetEnvironmentVariableW(
+            kBackupLockEnvironment.c_str(), backup_lock.c_str())) {
+        WinError("could not publish the backup lock path");
+    }
+    const auto supervisor = ExecutablePath();
+    if (!SetEnvironmentVariableW(
+            kSupervisorPathEnvironment.c_str(), supervisor.c_str())) {
+        WinError("could not publish the backup supervisor path");
+    }
 }
 
 [[nodiscard]] auto CreateCancellationEvent() {
@@ -246,6 +269,7 @@ template <typename Start>
     const HANDLE standard_output,
     const HANDLE standard_error,
     const HANDLE job,
+    const DWORD additional_startup_flags,
     const Start &start,
     const wil::zstring_view operation) {
     auto child_handles = std::array{
@@ -295,7 +319,7 @@ template <typename Start>
     auto startup = STARTUPINFOEXW{
         .StartupInfo = {
             .cb = sizeof(STARTUPINFOEXW),
-            .dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES,
+            .dwFlags = STARTF_USESTDHANDLES | additional_startup_flags,
             .wShowWindow = SW_HIDE,
             .hStdInput = inherited_handles[0],
             .hStdOutput = inherited_handles[1],
@@ -489,8 +513,9 @@ constexpr auto kNoDependencies = std::array{L'\0', L'\0'};
 
 auto InstallService(const InstallMode mode) {
     const auto executable = ExecutablePath();
-    const auto binary_path = wil::ArgvToCommandLine(
-        std::array{std::wstring_view(executable)});
+    const auto binary_path = wil::ArgvToCommandLine(std::array{
+        std::wstring_view(executable), kRunServiceOption,
+    });
     auto manager = wil::unique_schandle(OpenSCManagerW(
         nullptr, nullptr,
         SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE));
@@ -555,8 +580,14 @@ auto TryWriteFailure(
                 ERROR_INVALID_PARAMETER, std::system_category(),
                 "service start arguments are not supported");
         }
-        const auto directory = OrchestrationDirectory();
-        log.emplace(directory / kLogRelativePath);
+        const auto installation = InstallationDirectory();
+        log.emplace(installation / kLogRelativePath);
+        const auto directory = ExtractEmbeddedArtifacts();
+        const auto remove_artifacts = wil::scope_exit([&] {
+            auto ignored = std::error_code{};
+            std::filesystem::remove_all(directory, ignored);
+        });
+        PublishPersistentPaths(installation);
         context.cancellation_event = CreateCancellationEvent();
         result = RunBackup(context, directory, *log);
     } catch (const std::system_error &error) {
@@ -578,6 +609,56 @@ auto TryWriteFailure(
         log->TryFlush();
     }
     return result;
+}
+
+[[nodiscard]] auto RunForeground(const bool no_writers) {
+    auto console_mode = DWORD{};
+    if (!GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &console_mode)) {
+        throw std::runtime_error(
+            "--foreground requires an attached console");
+    }
+    if (!SetEnvironmentVariableW(
+            kCancellationEventEnvironment.c_str(), nullptr)) {
+        WinError("could not clear the supervisor cancellation event");
+    }
+
+    const auto installation = InstallationDirectory();
+    PublishPersistentPaths(installation);
+    const auto directory = ExtractEmbeddedArtifacts();
+    const auto remove_artifacts = wil::scope_exit([&] {
+        auto ignored = std::error_code{};
+        std::filesystem::remove_all(directory, ignored);
+    });
+
+    const auto script = directory / kOrchestratorName;
+    auto arguments = std::vector<std::wstring_view>{
+        kPowerShellPath,
+        L"-NoLogo", L"-NoProfile", L"-File", script.native(),
+    };
+    if (no_writers) {
+        arguments.push_back(L"-NoWriters");
+    }
+    auto command = wil::ArgvToCommandLine(arguments);
+    auto process = StartProcessWithHandles(
+        GetStdHandle(STD_INPUT_HANDLE),
+        GetStdHandle(STD_OUTPUT_HANDLE),
+        GetStdHandle(STD_ERROR_HANDLE),
+        nullptr,
+        0,
+        [&](STARTUPINFOW *const startup, PROCESS_INFORMATION *const result) {
+            return CreateProcessW(kPowerShellPath.c_str(), command.data(),
+                nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT,
+                nullptr, directory.c_str(), startup, result);
+        },
+        "could not start the foreground backup");
+    if (WaitForSingleObject(process.hProcess, INFINITE) == WAIT_FAILED) {
+        WinError("could not wait for the foreground backup");
+    }
+    auto exit_code = DWORD{};
+    if (!GetExitCodeProcess(process.hProcess, &exit_code)) {
+        WinError("could not obtain the foreground backup exit code");
+    }
+    return std::bit_cast<int>(exit_code);
 }
 
 auto WINAPI ServiceMain(
@@ -720,7 +801,7 @@ auto EnableProfilePrivileges(const HANDLE token) {
         throw std::invalid_argument(
             "--run-wsl-as-pbs-vss requires at least one WSL argument");
     }
-    const auto directory = OrchestrationDirectory();
+    const auto directory = InstallationDirectory();
     const auto password =
         ReadPbsVssPassword(directory / kPasswordRelativePath);
     auto argument_views = std::vector{kWslPath};
@@ -777,6 +858,7 @@ auto EnableProfilePrivileges(const HANDLE token) {
         GetStdHandle(STD_OUTPUT_HANDLE),
         GetStdHandle(STD_ERROR_HANDLE),
         nullptr,
+        STARTF_USESHOWWINDOW,
         [&](STARTUPINFOW *const startup, PROCESS_INFORMATION *const result) {
             return CreateProcessAsUserW(pbs_token.get(), kWslPath.c_str(), command.data(),
                 nullptr, nullptr, TRUE,
@@ -805,6 +887,15 @@ auto RunServiceDispatcher() {
     return 0;
 }
 
+auto PrintHelp() {
+    std::fputws(
+        L"Usage:\n"
+        L"  backup-supervisor.exe --foreground [--no-writers]\n"
+        L"  backup-supervisor.exe --install-service [--update]\n"
+        L"  backup-supervisor.exe --run-service\n",
+        stdout);
+}
+
 } // namespace
 
 auto wmain(const int argc, wchar_t **const argv) -> int {
@@ -813,9 +904,17 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
         const auto arguments =
             std::span<const wchar_t *const>{argv + 1, argv + argc};
         if (arguments.empty()) {
-            return RunServiceDispatcher();
+            PrintHelp();
+            return 0;
         }
         const auto option = std::wstring_view(arguments.front());
+        if (option == kRunServiceOption) {
+            if (arguments.size() != 1) {
+                throw std::invalid_argument(
+                    "--run-service does not accept arguments");
+            }
+            return RunServiceDispatcher();
+        }
         if (option == kInstallOption) {
             if (arguments.size() == 1) {
                 InstallService(InstallMode::CreateOnly);
@@ -828,6 +927,17 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
             }
             throw std::invalid_argument(
                 "--install-service accepts only the optional --update argument");
+        }
+        if (option == kForegroundOption) {
+            if (arguments.size() == 1) {
+                return RunForeground(false);
+            }
+            if ((arguments.size() == 2) &&
+                (std::wstring_view(arguments[1]) == kNoWritersOption)) {
+                return RunForeground(true);
+            }
+            throw std::invalid_argument(
+                "--foreground accepts only the optional --no-writers argument");
         }
         if (option == kHelperOption) {
             return RunWslAsPbsVss(arguments.subspan(1));

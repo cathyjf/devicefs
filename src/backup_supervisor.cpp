@@ -33,10 +33,10 @@
 #include <cstddef>
 #include <cstdio>
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -315,35 +315,6 @@ template <typename Start>
     return process;
 }
 
-template <typename... Arguments>
-auto WriteLog(const HANDLE log,
-    const std::format_string<Arguments...> format,
-    Arguments&&... arguments) {
-    auto message = std::format(
-        format, std::forward<Arguments>(arguments)...);
-    message.append("\r\n");
-    auto written = DWORD{};
-    [[gsl::suppress("type.1",
-        justification: "Service diagnostics are far smaller than the DWORD WriteFile limit.")]]
-    const auto size = static_cast<DWORD>(message.size());
-    if (!WriteFile(log, message.data(), size, &written, nullptr)) {
-        WinError("could not write the backup supervisor log");
-    }
-    if (written != size) {
-        throw std::runtime_error(
-            "the backup supervisor log write was incomplete");
-    }
-}
-
-template <typename... Arguments>
-auto TryWriteLog(const HANDLE log,
-    const std::format_string<Arguments...> format,
-    Arguments&&... arguments) noexcept {
-    try {
-        WriteLog(log, format, std::forward<Arguments>(arguments)...);
-    } catch (...) {}
-}
-
 [[nodiscard]] auto Utf8(const std::wstring_view value) {
     const auto encoded = std::filesystem::path(value).u8string();
     return std::string(encoded.begin(), encoded.end());
@@ -371,12 +342,12 @@ auto TryWriteLog(const HANDLE log,
         command_line->Length / sizeof(wchar_t));
 }
 
-auto LogJobProcesses(const HANDLE log, const HANDLE job) noexcept {
+auto LogJobProcesses(Log &log, const HANDLE job) noexcept {
     try {
         auto snapshot = wil::unique_tool_help_snapshot(
             CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
         if (!snapshot) {
-            TryWriteLog(log,
+            log.TryWrite(
                 "backup-supervisor: could not enumerate processes before "
                 "terminating the backup job: error {}", GetLastError());
             return;
@@ -384,7 +355,7 @@ auto LogJobProcesses(const HANDLE log, const HANDLE job) noexcept {
 
         auto entry = PROCESSENTRY32W{.dwSize = sizeof(PROCESSENTRY32W)};
         if (!Process32FirstW(snapshot.get(), &entry)) {
-            TryWriteLog(log,
+            log.TryWrite(
                 "backup-supervisor: could not read the process snapshot: "
                 "error {}", GetLastError());
             return;
@@ -401,14 +372,14 @@ auto LogJobProcesses(const HANDLE log, const HANDLE job) noexcept {
             }
 
             const auto command_line = ProcessCommandLine(process.get());
-            WriteLog(log,
+            log.Write(
                 "backup-supervisor: terminating '{}' "
                 "(PID {}, command line '{}')",
                 Utf8(entry.szExeFile), entry.th32ProcessID,
                 command_line.empty() ? "unavailable" : Utf8(command_line));
         } while (Process32NextW(snapshot.get(), &entry));
     } catch (const std::exception &error) {
-        TryWriteLog(log,
+        log.TryWrite(
             "backup-supervisor: could not identify processes before "
             "terminating the backup job: {}", error.what());
     }
@@ -416,7 +387,7 @@ auto LogJobProcesses(const HANDLE log, const HANDLE job) noexcept {
 
 [[nodiscard]] auto StartOrchestrator(
     const std::filesystem::path &directory,
-    const HANDLE log) {
+    Log &log) {
     auto console = LoggingConsole(log);
     auto job = CreateChildJob();
     const auto script = directory / kOrchestratorName;
@@ -486,7 +457,7 @@ struct ServiceOutcome {
 [[nodiscard]] auto RunBackup(
     ServiceContext &context,
     const std::filesystem::path &directory,
-    const HANDLE log) {
+    Log &log) {
     if (!SetEnvironmentVariableW(
             kCancellationEventEnvironment.c_str(),
             kCancellationEventName.c_str())) {
@@ -494,7 +465,7 @@ struct ServiceOutcome {
     }
 
     auto backup = StartOrchestrator(directory, log);
-    WriteLog(log, "backup-supervisor: backup starting");
+    log.Write("backup-supervisor: backup starting");
     if (!SetServiceState(context, SERVICE_RUNNING)) {
         WinError("could not report that the backup service is running");
     }
@@ -521,7 +492,7 @@ struct ServiceOutcome {
     const auto cancelled = context.cancellation_event.is_signaled();
     auto forced = false;
     if (cancelled && !backup.Wait(kGracefulStopMilliseconds)) {
-        WriteLog(log,
+        log.Write(
             "backup-supervisor: graceful stop timed out; terminating the process job");
         LogJobProcesses(log, backup.job.get());
         SetServiceState(context, SERVICE_STOP_PENDING,
@@ -532,7 +503,7 @@ struct ServiceOutcome {
 
     const auto child_exit_code = backup.ExitCode();
     if (!backup.WaitForAll(kStrayProcessWaitMilliseconds)) {
-        WriteLog(log,
+        log.Write(
             "backup-supervisor: terminating child processes left behind by the orchestrator");
         LogJobProcesses(log, backup.job.get());
         SetServiceState(context, SERVICE_STOP_PENDING,
@@ -543,27 +514,25 @@ struct ServiceOutcome {
     backup.console.Finish();
 
     if (forced) {
-        WriteLog(log,
+        log.Write(
             "backup-supervisor: backup failed after forced process termination; "
             "orchestrator exit code {}",
             child_exit_code);
     } else if ((child_exit_code == 0) && cancelled) {
-        WriteLog(log,
+        log.Write(
             "backup-supervisor: backup completed before cancellation took effect");
     } else if (child_exit_code == 0) {
-        WriteLog(log, "backup-supervisor: backup completed successfully");
+        log.Write("backup-supervisor: backup completed successfully");
     } else if (cancelled) {
-        WriteLog(log,
+        log.Write(
             "backup-supervisor: backup cancelled; orchestrator exit code {}",
             child_exit_code);
     } else {
-        WriteLog(log,
+        log.Write(
             "backup-supervisor: backup failed; orchestrator exit code {}",
             child_exit_code);
     }
-    if (!FlushFileBuffers(log)) {
-        WinError("could not flush the backup supervisor log");
-    }
+    log.Flush();
     if (forced) {
         return ServiceOutcome{.win32_error = ERROR_TIMEOUT};
     }
@@ -645,16 +614,16 @@ auto InstallService(const InstallMode mode) {
 }
 
 auto TryWriteFailure(
-    const wil::unique_hfile &log, const std::string_view diagnostic) noexcept {
-    if (log) {
-        TryWriteLog(log.get(), "backup-supervisor: {}", diagnostic);
+    Log *const log, const std::string_view diagnostic) noexcept {
+    if (log != nullptr) {
+        log->TryWrite("backup-supervisor: {}", diagnostic);
     }
 }
 
 [[nodiscard]] auto RunService(
     ServiceContext &context, const DWORD argc) noexcept {
     auto result = ServiceOutcome{};
-    auto log = wil::unique_hfile{};
+    auto log = std::optional<Log>{};
     try {
         if (argc != 1) {
             throw std::system_error(
@@ -662,29 +631,18 @@ auto TryWriteFailure(
                 "service start arguments are not supported");
         }
         const auto directory = OrchestrationDirectory();
-        const auto log_path = directory / kLogRelativePath;
-        std::filesystem::create_directory(log_path.parent_path());
-        log.reset(CreateFileW(log_path.c_str(),
-            GENERIC_WRITE, FILE_SHARE_READ,
-            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
-        if (!log) {
-            WinError("could not open the backup supervisor log");
-        }
-        if (!SetFilePointerEx(
-                log.get(), LARGE_INTEGER{}, nullptr, FILE_END)) {
-            WinError("could not seek to the end of the backup supervisor log");
-        }
+        log.emplace(directory / kLogRelativePath);
         context.cancellation_event = CreateCancellationEvent();
-        result = RunBackup(context, directory, log.get());
+        result = RunBackup(context, directory, *log);
     } catch (const std::system_error &error) {
         result.win32_error = std::bit_cast<DWORD>(error.code().value());
-        TryWriteFailure(log, error.what());
+        TryWriteFailure(log ? &*log : nullptr, error.what());
     } catch (const std::runtime_error &error) {
         result = {
             .win32_error = ERROR_SERVICE_SPECIFIC_ERROR,
             .service_error = kInternalFailure,
         };
-        TryWriteFailure(log, error.what());
+        TryWriteFailure(log ? &*log : nullptr, error.what());
     } catch (...) {
         result = {
             .win32_error = ERROR_UNHANDLED_EXCEPTION,
@@ -692,7 +650,7 @@ auto TryWriteFailure(
     }
 
     if (log) {
-        FlushFileBuffers(log.get());
+        log->TryFlush();
     }
     return result;
 }

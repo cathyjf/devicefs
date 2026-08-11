@@ -27,9 +27,13 @@ module;
 
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
+#include <format>
+#include <functional>
 #include <future>
+#include <new>
 #include <span>
 #include <string>
 #include <string_view>
@@ -38,8 +42,6 @@ module;
 
 export module devicefs.supervisor.logging_console;
 
-namespace {
-
 using unique_pseudoconsole = wil::unique_any<
     HPCON, decltype(&::ClosePseudoConsole), ::ClosePseudoConsole>;
 
@@ -47,24 +49,6 @@ using unique_pseudoconsole = wil::unique_any<
     const wil::zstring_view operation, const DWORD error = GetLastError()) {
     throw std::system_error(
         std::bit_cast<int>(error), std::system_category(), operation.c_str());
-}
-
-auto WriteOutput(const HANDLE log, std::u8string_view output,
-    DWORD &first_error) noexcept {
-    while (!output.empty() && (first_error == ERROR_SUCCESS)) {
-        const auto chunk_size =
-            std::min(output.size(), std::size_t{MAXDWORD});
-        [[gsl::suppress("type.1",
-            justification: "chunk_size is limited to MAXDWORD above.")]]
-        const auto size = static_cast<DWORD>(chunk_size);
-        auto written = DWORD{};
-        if (!WriteFile(log, output.data(), size, &written, nullptr)) {
-            first_error = GetLastError();
-        } else if (written != size) {
-            first_error = ERROR_WRITE_FAULT;
-        }
-        output.remove_prefix(chunk_size);
-    }
 }
 
 // ConPTY emits UTF-8 interleaved with VT sequences. Keep parser state across
@@ -188,8 +172,184 @@ private:
     State state_ = State::Text;
 };
 
+export class Log {
+public:
+    explicit Log(const std::filesystem::path &path) {
+        std::filesystem::create_directory(path.parent_path());
+        file_.reset(CreateFileW(path.c_str(),
+            GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
+            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (!file_) {
+            WinError("could not open the backup supervisor log");
+        }
+
+        auto size = LARGE_INTEGER{};
+        if (!GetFileSizeEx(file_.get(), &size)) {
+            WinError("could not obtain the backup supervisor log size");
+        }
+        if (size.QuadPart != 0) {
+            auto offset = LARGE_INTEGER{.QuadPart = -1};
+            if (!SetFilePointerEx(
+                    file_.get(), offset, nullptr, FILE_END)) {
+                WinError("could not seek in the backup supervisor log");
+            }
+            auto last = char{};
+            auto read = DWORD{};
+            if (!ReadFile(file_.get(), &last, DWORD{sizeof(last)},
+                    &read, nullptr)) {
+                WinError("could not inspect the backup supervisor log");
+            }
+            if (read != DWORD{sizeof(last)}) {
+                throw std::runtime_error(
+                    "the backup supervisor log read was incomplete");
+            }
+            if (last != '\n') {
+                WriteRaw(last == '\r'
+                    ? std::string_view{"\n"}
+                    : std::string_view{"\r\n"});
+            }
+        }
+        // A missing time-zone database should remove timestamps, not prevent
+        // the backup from running.
+        try {
+            zone_ = std::chrono::current_zone();
+        } catch (...) {}
+    }
+
+    template <typename... Arguments>
+    auto Write(const std::format_string<Arguments...> format,
+        Arguments&&... arguments) -> void {
+        WriteLine(std::format(
+            format, std::forward<Arguments>(arguments)...));
+    }
+
+    template <typename... Arguments>
+    auto TryWrite(const std::format_string<Arguments...> format,
+        Arguments&&... arguments) noexcept -> void {
+        try {
+            Write(format, std::forward<Arguments>(arguments)...);
+        } catch (...) {}
+    }
+
+    [[nodiscard]] auto WriteStream(
+        const std::u8string_view output) noexcept -> DWORD {
+        try {
+            const auto lock = lock_.lock_exclusive();
+            WriteText(output);
+            return ERROR_SUCCESS;
+        } catch (const std::bad_alloc &) {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        } catch (const std::system_error &error) {
+            if (error.code().category() == std::system_category()) {
+                return std::bit_cast<DWORD>(error.code().value());
+            }
+            return ERROR_WRITE_FAULT;
+        } catch (const std::exception &) {
+            return ERROR_INVALID_DATA;
+        } catch (...) {
+            // The result reaches LoggingConsole::Finish. The reader must keep
+            // draining after any failure so a full ConPTY pipe cannot deadlock.
+            return ERROR_UNHANDLED_EXCEPTION;
+        }
+    }
+
+    auto Flush() -> void {
+        const auto lock = lock_.lock_exclusive();
+        if (!FlushFileBuffers(file_.get())) {
+            WinError("could not flush the backup supervisor log");
+        }
+    }
+
+    auto TryFlush() noexcept -> void {
+        try {
+            Flush();
+        } catch (...) {}
+    }
+
+private:
+    template <typename Character>
+    auto WriteRaw(const std::basic_string_view<Character> output) -> void {
+        static_assert(sizeof(Character) == 1);
+        if (output.empty()) {
+            return;
+        }
+        [[gsl::suppress("type.1",
+            justification: "Supervisor diagnostics and ConPTY chunks are bounded far below MAXDWORD.")]]
+        const auto size = static_cast<DWORD>(output.size());
+        auto written = DWORD{};
+        if (!WriteFile(file_.get(), output.data(),
+                size, &written, nullptr)) {
+            WinError("could not write the backup supervisor log");
+        }
+        if (written != size) {
+            WinError("could not write the complete backup supervisor log",
+                ERROR_WRITE_FAULT);
+        }
+    }
+
+    [[nodiscard]] auto Timestamp() const noexcept -> std::string {
+        try {
+            if (zone_ == nullptr) {
+                return {};
+            }
+            const auto now = std::chrono::floor<std::chrono::seconds>(
+                std::chrono::system_clock::now());
+            return std::format("[{:%a, %d %b %Y %T %z}] ",
+                std::chrono::zoned_seconds{zone_, now});
+        } catch (...) {
+            // Timestamp metadata is never worth failing the backup.
+            return {};
+        }
+    }
+
+    template <typename Character>
+    auto WriteText(std::basic_string_view<Character> output) -> void {
+        while (!output.empty()) {
+            if (output.front() == Character{'\r'}) {
+                output.remove_prefix(1);
+                continue;
+            }
+            if (at_line_start_) {
+                const auto timestamp = Timestamp();
+                WriteRaw(std::string_view(timestamp));
+                at_line_start_ = false;
+            }
+            const auto line_end = std::min(
+                output.find(Character{'\r'}),
+                output.find(Character{'\n'}));
+            if (line_end == output.npos) {
+                WriteRaw(output);
+                return;
+            }
+            WriteRaw(output.substr(0, line_end));
+            if (output[line_end] == Character{'\n'}) {
+                WriteRaw(std::string_view{"\r\n"});
+                at_line_start_ = true;
+            }
+            output.remove_prefix(line_end + 1);
+        }
+    }
+
+    auto WriteLine(const std::string_view message) -> void {
+        const auto lock = lock_.lock_exclusive();
+        if (!at_line_start_) {
+            WriteRaw(std::string_view{"\r\n"});
+            at_line_start_ = true;
+        }
+        WriteText(message);
+        if (message.empty() || (message.back() != '\n')) {
+            WriteText(std::string_view{"\n"});
+        }
+    }
+
+    wil::unique_hfile file_;
+    const std::chrono::time_zone *zone_ = nullptr;
+    wil::srwlock lock_;
+    bool at_line_start_ = true;
+};
+
 [[nodiscard]] auto CopyConsoleOutput(
-    wil::unique_handle output, const HANDLE log) noexcept {
+    wil::unique_handle output, Log &log) noexcept {
     constexpr auto kBufferSize = DWORD{4096};
     auto buffer = std::array<char8_t, kBufferSize>{};
     auto first_error = DWORD{ERROR_SUCCESS};
@@ -206,16 +366,16 @@ private:
         if (read == 0) {
             return first_error;
         }
-        WriteOutput(log,
-            filter.Remove(std::span{buffer}.first(read)), first_error);
+        if (first_error == ERROR_SUCCESS) {
+            first_error = log.WriteStream(
+                filter.Remove(std::span{buffer}.first(read)));
+        }
     }
 }
 
-} // namespace
-
 export class LoggingConsole {
 public:
-    explicit LoggingConsole(const HANDLE log) {
+    explicit LoggingConsole(Log &log) {
         if (!CreatePipe(input_read_.addressof(),
                 input_write_.addressof(), nullptr, 0)) {
             WinError("could not create the pseudoconsole input channel");
@@ -234,7 +394,7 @@ public:
         }
         output_task_ = std::async(
             std::launch::async, CopyConsoleOutput,
-            std::move(output_read), log);
+            std::move(output_read), std::ref(log));
     }
 
     [[nodiscard]] auto StartProcess(

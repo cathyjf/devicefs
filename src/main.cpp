@@ -182,19 +182,18 @@ auto Usage(std::wostream &out) {
         << L"    --map C.img '\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy12'\n";
 }
 
-[[nodiscard]] auto ParseArgs(const int argc,
-    _In_reads_(argc) _Deref_pre_z_ const wchar_t *const *const argv) {
+[[nodiscard]] auto ParseArgs(const std::span<const wchar_t *const> args) {
     auto result = Options{};
     const auto next = [&](auto &i) {
-        if (++i == argc) {
+        if (++i == args.size()) {
             throw std::invalid_argument(
                 std::format("missing value after argument {}", i - 1));
         }
-        return argv[i];
+        return args[i];
     };
 
-    for (auto i = 1; i < argc; ++i) {
-        const auto arg = std::wstring_view(argv[i]);
+    for (auto i = 1uz; i < args.size(); ++i) {
+        const auto arg = std::wstring_view(args[i]);
         if ((arg == L"-h") || (arg == L"--help")) {
             result.help = true;
         } else if (arg == L"--mount") {
@@ -365,19 +364,17 @@ struct AllocationBitmap {
     }
 
     auto ZeroFreeClusters(
-        _Inout_updates_bytes_(length) void *const buffer,
-        const UINT64 offset,
-        _In_range_(1, MAXUINT64 - offset) const UINT64 length) const noexcept {
-        if (!storage) {
+        const std::span<BYTE> output,
+        const UINT64 offset) const noexcept {
+        if (!storage || output.empty()) {
             return;
         }
 
-        auto *const output = static_cast<BYTE *>(buffer);
-        const auto end = offset + length;
+        const auto end = offset + output.size();
         const auto first_cluster = offset / cluster_size;
         const auto last_cluster = (end - 1) / cluster_size;
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
-        measurement->ObserveRead(output, offset, length);
+        measurement->ObserveRead(output, offset);
 #endif
         auto free_begin = end;
         for (auto cluster = first_cluster; cluster <= last_cluster; ++cluster) {
@@ -387,12 +384,14 @@ struct AllocationBitmap {
                     free_begin = position;
                 }
             } else if (free_begin != end) {
-                std::memset(output + (free_begin - offset), 0, position - free_begin);
+                std::ranges::fill(
+                    output.subspan(free_begin - offset, position - free_begin), 0);
                 free_begin = end;
             }
         }
         if (free_begin != end) {
-            std::memset(output + (free_begin - offset), 0, end - free_begin);
+            std::ranges::fill(
+                output.subspan(free_begin - offset, end - free_begin), 0);
         }
     }
 };
@@ -757,9 +756,10 @@ private:
             justification: "The minimum cannot exceed the ULONG length argument.")]]
         const auto wanted = static_cast<std::remove_cv_t<decltype(length)>>(
             std::min(UINT64{length}, file->info.FileSize - offset));
+        const auto output = std::span<BYTE>{static_cast<BYTE *>(buffer), wanted};
         if constexpr (!kMeasureFreeClusterData) {
             if (!file->allocation_bitmap.HasAllocatedClusters(offset, wanted)) {
-                std::memset(buffer, 0, wanted);
+                std::ranges::fill(output, 0);
                 *transferred = wanted;
                 return STATUS_SUCCESS;
             }
@@ -809,11 +809,11 @@ private:
             justification: "std::in_range above proves aligned_length is representable by LengthType.")]]
         const auto read_length = static_cast<LengthType>(aligned_length);
         if ((read_offset == offset) && (read_length == wanted)) {
-            const auto status = read(buffer, offset, wanted, transferred);
+            const auto status = read(output.data(), offset, wanted, transferred);
             if (!NT_SUCCESS(status)) {
                 return status;
             }
-            file->allocation_bitmap.ZeroFreeClusters(buffer, offset, wanted);
+            file->allocation_bitmap.ZeroFreeClusters(output, offset);
             return STATUS_SUCCESS;
         }
 
@@ -824,16 +824,17 @@ private:
         if (!storage) {
             return failure(GetLastError());
         }
+        const auto bounce = std::span<BYTE>{storage.get(), read_length};
         auto device_transferred = LengthType{};
         const auto status = read(
-            storage.get(), read_offset, read_length, &device_transferred);
+            bounce.data(), read_offset, read_length, &device_transferred);
         if (!NT_SUCCESS(status)) {
             return status;
         }
 
         *transferred = wanted;
-        std::memcpy(buffer, storage.get() + prefix, wanted);
-        file->allocation_bitmap.ZeroFreeClusters(buffer, offset, wanted);
+        std::ranges::copy(bounce.subspan(prefix, wanted), output.begin());
+        file->allocation_bitmap.ZeroFreeClusters(output, offset);
         return STATUS_SUCCESS;
     }
 
@@ -889,7 +890,7 @@ private:
         for (const auto &entry : Self(fs).files_) {
             const auto &file = entry.second;
             if (file.allocation_bitmap.measurement) {
-                file.allocation_bitmap.measurement->Report(file.name.c_str());
+                file.allocation_bitmap.measurement->Report(file.name);
             }
         }
 #endif
@@ -1009,7 +1010,7 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
         HardenProcess();
         auto options = Options{};
         try {
-            options = ParseArgs(argc, argv);
+            options = ParseArgs({argv, argv + argc});
         } catch (const std::invalid_argument &error) {
             std::wcerr << L"devicefs: " << error.what() << L"\n\n";
             Usage(std::wcerr);

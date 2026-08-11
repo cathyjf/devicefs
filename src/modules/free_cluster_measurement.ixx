@@ -16,6 +16,8 @@
 
 module;
 
+#include <wil/stl.h>
+
 #include <atomic>
 #include <bit>
 #include <climits>
@@ -36,7 +38,7 @@ export class FreeClusterMeasurement {
         const std::uint64_t cluster_count) noexcept {
         auto allocated_clusters = std::uint64_t{};
         const auto full_bytes = cluster_count / CHAR_BIT;
-        for (auto i = std::uint64_t{}; i < full_bytes; ++i) {
+        for (auto i = 0uz; i < full_bytes; ++i) {
             allocated_clusters += std::popcount(bitmap[i]);
         }
         const auto remaining_bits = cluster_count % CHAR_BIT;
@@ -77,10 +79,13 @@ public:
     }
 
     auto ObserveRead(
-        const unsigned char *const data,
-        const std::uint64_t offset,
-        const std::uint64_t length) noexcept {
-        const auto end = offset + length;
+        const std::span<const unsigned char> data,
+        const std::uint64_t offset) noexcept {
+        if (data.empty()) {
+            return;
+        }
+
+        const auto end = offset + data.size();
         const auto first_cluster = offset / cluster_size_;
         const auto last_cluster = (end - 1) / cluster_size_;
         auto fully_examined_clusters = std::uint64_t{};
@@ -98,9 +103,10 @@ public:
 
             ++fully_examined_clusters;
             auto cluster_nonzero_bytes = std::uint64_t{};
-            const auto *const cluster_data = data + (cluster_begin - offset);
-            for (auto i = std::uint32_t{}; i < cluster_size_; ++i) {
-                cluster_nonzero_bytes += cluster_data[i] != 0;
+            const auto cluster_data = data.subspan(
+                cluster_begin - offset, cluster_size_);
+            for (const auto value : cluster_data) {
+                cluster_nonzero_bytes += value != 0;
             }
             nonzero_bytes += cluster_nonzero_bytes;
             nonzero_clusters += cluster_nonzero_bytes != 0;
@@ -115,7 +121,7 @@ public:
         nonzero_bytes_.fetch_add(nonzero_bytes, std::memory_order_relaxed);
     }
 
-    auto Report(const wchar_t *const name) const noexcept {
+    auto Report(const wil::zwstring_view name) const noexcept {
         const auto fully_examined_clusters =
             fully_examined_clusters_.load(std::memory_order_relaxed);
         const auto nonzero_clusters =
@@ -126,7 +132,7 @@ public:
             L"devicefs: free-cluster measurement for '%ls': "
             L"%llu of %llu bitmap-free clusters fully examined in one read; "
             L"%llu of those clusters contained nonzero data (%llu bytes total)\n",
-            name,
+            name.c_str(),
             fully_examined_clusters,
             total_free_clusters_,
             nonzero_clusters,

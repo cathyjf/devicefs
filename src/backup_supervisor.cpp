@@ -45,6 +45,8 @@
 #include <utility>
 #include <vector>
 
+import devicefs.supervisor.logging_console;
+
 #if defined(__INTELLISENSE__) && !defined(__cpp_lib_start_lifetime_as)
 namespace std {
 template <class T> auto start_lifetime_as(void *) noexcept -> T *;
@@ -181,6 +183,7 @@ auto HardenProcess() {
 }
 
 struct BackupProcess {
+    LoggingConsole console;
     wil::unique_process_information process;
     wil::unique_handle job;
 
@@ -414,6 +417,7 @@ auto LogJobProcesses(const HANDLE log, const HANDLE job) noexcept {
 [[nodiscard]] auto StartOrchestrator(
     const std::filesystem::path &directory,
     const HANDLE log) {
+    auto console = LoggingConsole(log);
     auto job = CreateChildJob();
     const auto script = directory / kOrchestratorName;
     const auto arguments = std::to_array<std::wstring_view>({
@@ -422,23 +426,10 @@ auto LogJobProcesses(const HANDLE log, const HANDLE job) noexcept {
         script.native(),
     });
     auto command = wil::ArgvToCommandLine(arguments);
-    auto null_input = wil::unique_hfile(CreateFileW(L"NUL", GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL, nullptr));
-    if (!null_input) {
-        WinError("could not open the null input device");
-    }
-    auto process = StartProcessWithHandles(
-        null_input.get(), log, log, job.get(),
-        [&](STARTUPINFOW *const startup, PROCESS_INFORMATION *const result) {
-            return CreateProcessW(kPowerShellPath.c_str(), command.data(),
-                nullptr, nullptr, TRUE,
-                CREATE_SUSPENDED | CREATE_NO_WINDOW |
-                    EXTENDED_STARTUPINFO_PRESENT,
-                nullptr, directory.c_str(), startup, result);
-        },
-        "could not start the backup orchestrator");
+    auto process = console.StartProcess(
+        job.get(), kPowerShellPath, command, directory);
     return BackupProcess{
+        .console = std::move(console),
         .process = std::move(process),
         .job = std::move(job),
     };
@@ -549,6 +540,7 @@ struct ServiceOutcome {
         backup.TerminateAndWait(ERROR_PROCESS_ABORTED);
         forced = true;
     }
+    backup.console.Finish();
 
     if (forced) {
         WriteLog(log,

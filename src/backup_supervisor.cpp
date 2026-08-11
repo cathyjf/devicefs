@@ -89,6 +89,8 @@ constexpr auto kJobPollMilliseconds = DWORD{100};
 constexpr auto kInternalFailure = DWORD{1};
 constexpr auto kAcceptedControls =
     DWORD{SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN};
+constexpr auto kWslCreationFlags =
+    DWORD{CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT};
 [[gsl::suppress("type.1",
     justification: "ProcessCommandLineInformation is NT process information class 60.")]]
 constexpr auto kProcessCommandLineInformation =
@@ -169,7 +171,8 @@ auto HardenProcess() {
         WinError("could not create the backup process job");
     }
     auto limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION{};
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    limits.BasicLimitInformation.LimitFlags =
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
     if (!SetInformationJobObject(job.get(), JobObjectExtendedLimitInformation,
             &limits, sizeof(limits))) {
         WinError("could not configure the backup process job");
@@ -812,10 +815,11 @@ auto EnableProfilePrivileges(const HANDLE token) {
     auto process = wil::unique_process_information{};
     // This API copies STARTF_USESTDHANDLES itself and, unlike the service
     // launch path below, is available only when the caller is not LocalSystem.
+    // Manual backups create no supervisor job, so do not request breakaway.
     if (!CreateProcessWithLogonW(
             kPbsUser.c_str(), kLocalDomain.c_str(), password.c_str(),
             LOGON_WITH_PROFILE, kWslPath.c_str(), command.data(),
-            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+            kWslCreationFlags,
             nullptr, working_directory.c_str(), &startup, &process)) {
         WinError("could not start WSL as pbs-vss");
     }
@@ -891,6 +895,7 @@ auto EnableProfilePrivileges(const HANDLE token) {
 
     // CreateProcessWithTokenW has no bInheritHandles parameter, so it cannot
     // satisfy PROC_THREAD_ATTRIBUTE_HANDLE_LIST's documented requirements.
+    // WSL manages its own infrastructure, so exclude it from the backup job.
     auto process = StartProcessWithHandles(
         GetStdHandle(STD_INPUT_HANDLE),
         GetStdHandle(STD_OUTPUT_HANDLE),
@@ -899,7 +904,7 @@ auto EnableProfilePrivileges(const HANDLE token) {
         [&](STARTUPINFOW *const startup, PROCESS_INFORMATION *const result) {
             return CreateProcessAsUserW(pbs_token.get(), kWslPath.c_str(), command.data(),
                 nullptr, nullptr, TRUE,
-                CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT |
+                kWslCreationFlags | CREATE_BREAKAWAY_FROM_JOB |
                     EXTENDED_STARTUPINFO_PRESENT,
                 environment.get(), wsl_directory.c_str(), startup, result);
         },

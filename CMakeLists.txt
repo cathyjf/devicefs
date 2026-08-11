@@ -73,5 +73,5 @@ target_compile_definitions(devicefs PRIVATE
 
 target_compile_options(devicefs PRIVATE
     /W4 /WX /permissive- /EHsc /utf-8 /guard:cf /guard:ehcont /sdl
-    /analyze:external-
+    /analyze:external- /analyze:autolog-
 )

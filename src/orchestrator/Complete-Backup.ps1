@@ -5,6 +5,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$backup_supervisor_path = $env:DEVICEFS_BACKUP_SUPERVISOR_PATH
+if (!$backup_supervisor_path) {
+    throw 'The backup supervisor path was not supplied.'
+}
+
 function Get-SuppliedShadowSetID {
     if (!(Test-Path -LiteralPath $env:VSHADOW_TEMP_FILE -PathType Leaf)) {
         throw 'Could not find data file supplied by the orchestrator.'
@@ -44,17 +49,17 @@ function Start-Process-With-Argv {
         [Parameter(Mandatory)]
         [string]$FileName,
         [string[]]$ArgumentList = @(),
-        [switch]$RedirectStreams
+        [switch]$RedirectStreams,
+        [switch]$RedirectStandardOutput
     )
     $psi = [Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $FileName
     $psi.UseShellExecute = $false
     $psi.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
-    if ($RedirectStreams) {
-        $psi.RedirectStandardInput = $true
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $true
-    }
+    $psi.RedirectStandardInput = [bool]$RedirectStreams
+    $psi.RedirectStandardOutput =
+        $RedirectStreams -or $RedirectStandardOutput
+    $psi.RedirectStandardError = [bool]$RedirectStreams
     $ArgumentList.ForEach({ $psi.ArgumentList.Add($_) })
     return [Diagnostics.Process]::Start($psi)
 }
@@ -81,13 +86,6 @@ function Start-Wsl-Fish {
         '--distribution', 'Debian',
         '--exec', '/usr/bin/fish', '-c', 'source - $argv'
     ) + $ArgumentList
-    $backup_supervisor_path = $env:DEVICEFS_BACKUP_SUPERVISOR_PATH
-    if (!$backup_supervisor_path) {
-        throw 'The backup supervisor path was not supplied.'
-    }
-    if (!(Test-Path -LiteralPath $backup_supervisor_path -PathType Leaf)) {
-        throw 'Could not locate backup-supervisor.exe.'
-    }
     $process = Start-Process-With-Argv `
         -FileName $backup_supervisor_path `
         -ArgumentList (@('--run-wsl-as-pbs-vss') + $wsl_argv) `
@@ -296,14 +294,19 @@ function Invoke-WslBackup {
     $control_path = "/tmp/devicefs-$([guid]::NewGuid().ToString('N'))"
     $pid_file = "$control_path.pid"
     $stop_file = "$control_path.stop"
-    $fish_program_path = $env:DEVICEFS_BACKUP_FISH_PROGRAM_PATH
-    if (!$fish_program_path) {
-        throw 'The Fish program path was not supplied by backup-supervisor.'
+    $fish_process = Start-Process-With-Argv `
+        -FileName $backup_supervisor_path `
+        -ArgumentList @('--write-start-pbs') `
+        -RedirectStandardOutput
+    try {
+        $fish_command = $fish_process.StandardOutput.ReadToEnd()
+        $fish_process.WaitForExit()
+        if ($fish_process.ExitCode -ne 0) {
+            throw "Could not read the embedded Fish program; backup-supervisor exited with code $($fish_process.ExitCode)."
+        }
+    } finally {
+        $fish_process.Dispose()
     }
-    if (!(Test-Path -LiteralPath $fish_program_path -PathType Leaf)) {
-        throw "Could not locate Fish program: ${fish_program_path}"
-    }
-    $fish_command = Get-Content -LiteralPath $fish_program_path -Raw
     $argv = @($pid_file, $stop_file, $env:COMPUTERNAME)
     $wsl = Start-Wsl-Fish -Command $fish_command `
         -ArgumentList $argv
@@ -338,20 +341,13 @@ try {
         $devicefs_args += @('--map', $image_filename, $shadow.DeviceObject)
     }
 
-    $devicefs_path = $env:DEVICEFS_BACKUP_SUPERVISOR_PATH
-    if (!$devicefs_path) {
-        throw 'The backup supervisor path was not supplied.'
-    }
-    if (!(Test-Path -LiteralPath $devicefs_path -PathType Leaf)) {
-        throw 'Could not locate backup-supervisor.exe.'
-    }
     if ([Environment]::GetLogicalDrives() -contains "${mount_target}\") {
         throw "Mount target is already present: ${mount_target}"
     }
     $devicefs_invocation_args = @('--devicefs') + $devicefs_args
-    Write-Host 'Setting up virtual filesystem:' $devicefs_path @devicefs_invocation_args
+    Write-Host 'Setting up virtual filesystem:' $backup_supervisor_path @devicefs_invocation_args
     $devicefs_process = Start-Process-With-Argv `
-        -FileName $devicefs_path `
+        -FileName $backup_supervisor_path `
         -ArgumentList $devicefs_invocation_args
 
     $backup_succeeded = $false

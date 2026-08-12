@@ -413,9 +413,9 @@ public:
         const HANDLE job,
         const wil::zwstring_view application,
         std::wstring &command,
-        const std::filesystem::path &working_directory) {
+        const HANDLE program_input) {
         auto attribute_bytes = SIZE_T{};
-        InitializeProcThreadAttributeList(nullptr, 2, 0, &attribute_bytes);
+        InitializeProcThreadAttributeList(nullptr, 3, 0, &attribute_bytes);
         if ((attribute_bytes == 0) ||
             (GetLastError() != ERROR_INSUFFICIENT_BUFFER)) {
             WinError("could not size the process attribute list");
@@ -429,10 +429,11 @@ public:
         auto *const attributes = static_cast<PPROC_THREAD_ATTRIBUTE_LIST>(
             attribute_storage.get());
         if (!InitializeProcThreadAttributeList(
-                attributes, 2, 0, &attribute_bytes)) {
+                attributes, 3, 0, &attribute_bytes)) {
             WinError("could not initialize the process attribute list");
         }
         auto jobs = std::array{job};
+        auto program_handles = std::array{program_input};
         const auto delete_attributes = wil::scope_exit(
             [=] { DeleteProcThreadAttributeList(attributes); });
         if (!UpdateProcThreadAttribute(attributes, 0,
@@ -445,6 +446,12 @@ public:
                 sizeof(jobs), nullptr, nullptr)) {
             WinError("could not assign the child process to its job");
         }
+        if (!UpdateProcThreadAttribute(attributes, 0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                program_handles.data(), sizeof(program_handles),
+                nullptr, nullptr)) {
+            WinError("could not inherit the PowerShell program channel");
+        }
 
         auto startup = STARTUPINFOEXW{
             .StartupInfo = {.cb = sizeof(STARTUPINFOEXW)},
@@ -452,9 +459,9 @@ public:
         };
         auto process = wil::unique_process_information{};
         if (!CreateProcessW(application.c_str(), command.data(),
-                nullptr, nullptr, FALSE,
+                nullptr, nullptr, TRUE,
                 CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
-                nullptr, working_directory.c_str(),
+                nullptr, nullptr,
                 &startup.StartupInfo, &process)) {
             WinError("could not start the backup orchestrator");
         }

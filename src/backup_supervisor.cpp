@@ -31,6 +31,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -69,26 +70,17 @@ constexpr auto kBackupLockEnvironment =
     wil::zwstring_view(L"DEVICEFS_BACKUP_LOCK_PATH");
 constexpr auto kSupervisorPathEnvironment =
     wil::zwstring_view(L"DEVICEFS_BACKUP_SUPERVISOR_PATH");
-constexpr auto kVShadowHelperEnvironment =
-    wil::zwstring_view(L"DEVICEFS_BACKUP_VSHADOW_HELPER_PATH");
-constexpr auto kVShadowCompletionEnvironment =
-    wil::zwstring_view(L"DEVICEFS_BACKUP_COMPLETION_SCRIPT_PATH");
-constexpr auto kFishProgramEnvironment =
-    wil::zwstring_view(L"DEVICEFS_BACKUP_FISH_PROGRAM_PATH");
 constexpr auto kSystemTempEnvironment =
     wil::zwstring_view(L"DEVICEFS_BACKUP_SYSTEM_TEMP_PATH");
 constexpr auto kDeviceFsOption = std::wstring_view(L"--devicefs");
 constexpr auto kHelperOption =
     std::wstring_view(L"--run-wsl-as-pbs-vss");
+constexpr auto kWriteStartPbsOption =
+    std::wstring_view(L"--write-start-pbs");
 constexpr auto kForegroundOption = std::wstring_view(L"--foreground");
 constexpr auto kNoWritersOption = std::wstring_view(L"--no-writers");
 constexpr auto kInstallOption = std::wstring_view(L"--install-service");
 constexpr auto kUpdateOption = std::wstring_view(L"--update");
-constexpr auto kOrchestratorName = std::wstring_view(L"Orchestrate-Backup.ps1");
-constexpr auto kVShadowHelperName = std::wstring_view(L"VShadow-Helper.cmd");
-constexpr auto kCompletionScriptName =
-    std::wstring_view(L"Complete-Backup.ps1");
-constexpr auto kFishProgramName = std::wstring_view(L"start-pbs.fish");
 constexpr auto kPbsUser = wil::zwstring_view(L"pbs-vss");
 constexpr auto kLocalDomain = wil::zwstring_view(L".");
 constexpr auto kGracefulStopMilliseconds = DWORD{300000};
@@ -105,33 +97,34 @@ constexpr auto kAcceptedControls =
 constexpr auto kWslCreationFlags =
     DWORD{CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT};
 
+using MaybeZwstringView = std::optional<wil::zwstring_view>;
+
 auto PublishEnvironmentVariable(
     const wil::zwstring_view variable,
-    const std::optional<wil::zwstring_view> value) {
+    const MaybeZwstringView value) {
     if (!SetEnvironmentVariableW(
             variable.c_str(), value ? value->c_str() : nullptr)) {
         WinError("could not update an environment variable");
     }
 }
 
-auto PublishBackupPaths(
+auto PublishBackupEnvironment(
     const PersistentPaths &persistent,
-    const std::filesystem::path &artifacts) {
+    const bool no_writers) {
     PublishEnvironmentVariable(
         kBackupLockEnvironment, persistent.backup_lock);
     PublishEnvironmentVariable(
         kSupervisorPathEnvironment, CurrentExecutablePath());
     PublishEnvironmentVariable(
-        kVShadowHelperEnvironment, artifacts / kVShadowHelperName);
-    PublishEnvironmentVariable(
-        kVShadowCompletionEnvironment, artifacts / kCompletionScriptName);
-    PublishEnvironmentVariable(
-        kFishProgramEnvironment, artifacts / kFishProgramName);
-    PublishEnvironmentVariable(
         kSystemTempEnvironment, SystemTempDirectory());
     PublishEnvironmentVariable(L"POWERSHELL_TELEMETRY_OPTOUT", L"1");
     PublishEnvironmentVariable(L"POWERSHELL_DIAGNOSTICS_OPTOUT", L"1");
     PublishEnvironmentVariable(L"POWERSHELL_UPDATECHECK", L"Off");
+    PublishEnvironmentVariable(
+        L"DEVICEFS_RUN_VHSADOW_CALLBACK", std::nullopt);
+    PublishEnvironmentVariable(L"DEVICEFS_BACKUP_NO_WRITERS",
+        no_writers ? L"1" : MaybeZwstringView{std::nullopt}
+    );
 }
 
 [[nodiscard]] auto PowerShellPath() {
@@ -140,6 +133,74 @@ auto PublishBackupPaths(
 
 [[nodiscard]] auto WslPath() {
     return ProgramFilesDirectory() / L"WSL" / L"wsl.exe";
+}
+
+struct PowerShellProgramPipe {
+    wil::unique_handle read;
+    wil::unique_handle write;
+};
+
+[[nodiscard]] auto CreatePowerShellProgramPipe() {
+    auto result = PowerShellProgramPipe{};
+    auto security = SECURITY_ATTRIBUTES{
+        .nLength = sizeof(SECURITY_ATTRIBUTES),
+        .lpSecurityDescriptor = nullptr,
+        .bInheritHandle = TRUE,
+    };
+    if (!CreatePipe(result.read.addressof(), result.write.addressof(),
+            &security, 0)) {
+        WinError("could not create the embedded PowerShell program channel");
+    }
+    return result;
+}
+
+[[nodiscard]] auto PowerShellCommand(const HANDLE program_input) {
+    const auto handle = std::bit_cast<std::intptr_t>(program_input);
+    return std::format(
+        LR"powershell(if ($PSVersionTable.PSVersion -lt [version]'7.4') {{
+    throw 'PowerShell 7.4 or later is required.'
+}}
+$ErrorActionPreference = 'Stop'
+$reader = [IO.StreamReader]::new(
+    [IO.Pipes.AnonymousPipeClientStream]::new(
+        [IO.Pipes.PipeDirection]::In, '{}'),
+    [Text.UTF8Encoding]::new($false, $true), $false)
+$source = $reader.ReadToEnd()
+$reader.Dispose()
+$program = [scriptblock]::Create($source)
+& $program
+)powershell",
+        handle);
+}
+
+auto WritePowerShellProgram(
+    wil::unique_handle destination,
+    const std::span<const char> program) {
+    [[gsl::suppress("type.1",
+        justification: "Embedded PowerShell programs are bounded far below MAXDWORD.")]]
+    const auto program_size = static_cast<DWORD>(program.size());
+    auto written = DWORD{};
+    if (!WriteFile(destination.get(), program.data(), program_size,
+            &written, nullptr)) {
+        WinError("could not write the embedded PowerShell program");
+    }
+}
+
+auto WriteStartPbs() {
+    const auto program = EmbeddedProgram(L"START_PBS");
+    [[gsl::suppress("type.1",
+        justification: "The embedded Fish program is bounded far below MAXDWORD.")]]
+    const auto program_size = static_cast<DWORD>(program.size());
+    auto written = DWORD{};
+    if (!WriteFile(GetStdHandle(STD_OUTPUT_HANDLE),
+            program.data(), program_size,
+            &written, nullptr)) {
+        WinError("could not write the embedded Fish program");
+    }
+    if (written != program_size) {
+        WinError("could not write the complete embedded Fish program",
+            ExplicitWin32Error{ERROR_WRITE_FAULT});
+    }
 }
 
 [[nodiscard]] auto CreateCancellationEvent() {
@@ -173,6 +234,7 @@ auto PublishBackupPaths(
 struct BackupProcess {
     LoggingConsole console;
     wil::unique_process_information process;
+    wil::unique_handle program_write;
     wil::unique_handle job;
 
     [[nodiscard]] auto Wait(const DWORD timeout) const {
@@ -238,6 +300,7 @@ template <typename Start>
     const HANDLE standard_input,
     const HANDLE standard_output,
     const HANDLE standard_error,
+    const HANDLE program_input,
     const HANDLE job,
     const DWORD additional_startup_flags,
     const Start &start,
@@ -249,7 +312,10 @@ template <typename Start>
     };
     auto inherited_handles = std::array{
         child_handles[0].get(), child_handles[1].get(), child_handles[2].get(),
+        program_input,
     };
+    const auto inherited_handle_count =
+        program_input == nullptr ? 3uz : inherited_handles.size();
     const auto attribute_count = job == nullptr ? 1u : 2u;
     auto attribute_bytes = SIZE_T{};
     InitializeProcThreadAttributeList(
@@ -275,7 +341,8 @@ template <typename Start>
         [=] { DeleteProcThreadAttributeList(attributes); });
     if (!UpdateProcThreadAttribute(attributes, 0,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            inherited_handles.data(), sizeof(inherited_handles), nullptr, nullptr)) {
+            inherited_handles.data(),
+            inherited_handle_count * sizeof(HANDLE), nullptr, nullptr)) {
         WinError("could not restrict inherited process handles");
     }
 
@@ -304,25 +371,67 @@ template <typename Start>
     return process;
 }
 
-[[nodiscard]] auto StartOrchestrator(
-    const std::filesystem::path &directory,
-    Log &log) {
+[[nodiscard]] auto RunPowerShellProgram(
+    const wil::zwstring_view resource,
+    const bool non_interactive) {
+    const auto program = EmbeddedProgram(resource);
+    auto pipe = CreatePowerShellProgramPipe();
+    const auto powershell = PowerShellPath();
+    const auto powershell_command = PowerShellCommand(pipe.read.get());
+    auto arguments = std::vector<std::wstring_view>{
+        powershell.native(),
+        L"-NoLogo", L"-NoProfile",
+    };
+    if (non_interactive) {
+        arguments.push_back(L"-NonInteractive");
+    }
+    arguments.push_back(L"-Command");
+    arguments.push_back(powershell_command);
+    auto command = wil::ArgvToCommandLine(arguments);
+    auto process = StartProcessWithHandles(
+        GetStdHandle(STD_INPUT_HANDLE),
+        GetStdHandle(STD_OUTPUT_HANDLE),
+        GetStdHandle(STD_ERROR_HANDLE),
+        pipe.read.get(),
+        nullptr,
+        0,
+        [&](STARTUPINFOW *const startup, PROCESS_INFORMATION *const result) {
+            return CreateProcessW(powershell.c_str(), command.data(),
+                nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT,
+                nullptr, nullptr, startup, result);
+        },
+        "could not start an embedded PowerShell program");
+    pipe.read.reset();
+    WritePowerShellProgram(std::move(pipe.write), program);
+    if (WaitForSingleObject(process.hProcess, INFINITE) == WAIT_FAILED) {
+        WinError("could not wait for an embedded PowerShell program");
+    }
+    auto exit_code = DWORD{};
+    if (!GetExitCodeProcess(process.hProcess, &exit_code)) {
+        WinError("could not obtain an embedded PowerShell program exit code");
+    }
+    return std::bit_cast<int>(exit_code);
+}
+
+[[nodiscard]] auto StartOrchestrator(Log &log) {
     auto console = LoggingConsole(log);
     auto job = CreateChildJob();
-    const auto script = directory / kOrchestratorName;
+    auto pipe = CreatePowerShellProgramPipe();
     const auto powershell = PowerShellPath();
+    const auto program = PowerShellCommand(pipe.read.get());
     const auto arguments = std::to_array<std::wstring_view>({
         powershell.native(),
-        L"-NoLogo", L"-NoProfile", L"-NonInteractive", L"-File",
-        script.native(),
+        L"-NoLogo", L"-NoProfile", L"-NonInteractive", L"-Command",
+        program,
     });
     auto command = wil::ArgvToCommandLine(arguments);
     auto process = console.StartProcess(
         job.get(), wil::zwstring_view(powershell.native()),
-        command, directory);
+        command, pipe.read.get());
     return BackupProcess{
         .console = std::move(console),
         .process = std::move(process),
+        .program_write = std::move(pipe.write),
         .job = std::move(job),
     };
 }
@@ -377,12 +486,12 @@ struct ServiceOutcome {
 
 [[nodiscard]] auto RunBackup(
     ServiceContext &context,
-    const std::filesystem::path &directory,
     Log &log) {
     PublishEnvironmentVariable(
         kCancellationEventEnvironment, kCancellationEventName);
 
-    auto backup = StartOrchestrator(directory, log);
+    const auto program = EmbeddedProgram(L"ORCHESTRATE_BACKUP");
+    auto backup = StartOrchestrator(log);
     log.Write("backup-supervisor: backup starting");
     if (!SetServiceState(context, SERVICE_RUNNING)) {
         WinError("could not report that the backup service is running");
@@ -394,6 +503,8 @@ struct ServiceOutcome {
     if (ResumeThread(backup.process.hThread) == MAXDWORD) {
         WinError("could not resume the backup orchestrator");
     }
+    WritePowerShellProgram(
+        std::move(backup.program_write), program);
 
     const auto waits = std::array{
         backup.process.hProcess, context.cancellation_event.get(),
@@ -482,14 +593,9 @@ auto TryWriteFailure(
         }
         const auto persistent = ResolvePersistentPaths();
         log.emplace(persistent.logs);
-        const auto directory = ExtractEmbeddedArtifacts();
-        const auto remove_artifacts = wil::scope_exit([&] {
-            auto ignored = std::error_code{};
-            std::filesystem::remove_all(directory, ignored);
-        });
-        PublishBackupPaths(persistent, directory);
+        PublishBackupEnvironment(persistent, false);
         context.cancellation_event = CreateCancellationEvent();
-        result = RunBackup(context, directory, *log);
+        result = RunBackup(context, *log);
     } catch (const std::system_error &error) {
         result.win32_error = std::bit_cast<DWORD>(error.code().value());
         TryWriteFailure(log ? &*log : nullptr, error.what());
@@ -521,43 +627,8 @@ auto TryWriteFailure(
         kCancellationEventEnvironment, std::nullopt);
 
     const auto persistent = ResolvePersistentPaths();
-    const auto directory = ExtractEmbeddedArtifacts();
-    const auto remove_artifacts = wil::scope_exit([&] {
-        auto ignored = std::error_code{};
-        std::filesystem::remove_all(directory, ignored);
-    });
-    PublishBackupPaths(persistent, directory);
-
-    const auto script = directory / kOrchestratorName;
-    const auto powershell = PowerShellPath();
-    auto arguments = std::vector<std::wstring_view>{
-        powershell.native(),
-        L"-NoLogo", L"-NoProfile", L"-File", script.native(),
-    };
-    if (no_writers) {
-        arguments.push_back(L"-NoWriters");
-    }
-    auto command = wil::ArgvToCommandLine(arguments);
-    auto process = StartProcessWithHandles(
-        GetStdHandle(STD_INPUT_HANDLE),
-        GetStdHandle(STD_OUTPUT_HANDLE),
-        GetStdHandle(STD_ERROR_HANDLE),
-        nullptr,
-        0,
-        [&](STARTUPINFOW *const startup, PROCESS_INFORMATION *const result) {
-            return CreateProcessW(powershell.c_str(), command.data(),
-                nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT,
-                nullptr, directory.c_str(), startup, result);
-        },
-        "could not start the foreground backup");
-    if (WaitForSingleObject(process.hProcess, INFINITE) == WAIT_FAILED) {
-        WinError("could not wait for the foreground backup");
-    }
-    auto exit_code = DWORD{};
-    if (!GetExitCodeProcess(process.hProcess, &exit_code)) {
-        WinError("could not obtain the foreground backup exit code");
-    }
-    return std::bit_cast<int>(exit_code);
+    PublishBackupEnvironment(persistent, no_writers);
+    return RunPowerShellProgram(L"ORCHESTRATE_BACKUP", false);
 }
 
 auto WINAPI ServiceMain(
@@ -760,6 +831,7 @@ auto EnableProfilePrivileges(const HANDLE token) {
         GetStdHandle(STD_OUTPUT_HANDLE),
         GetStdHandle(STD_ERROR_HANDLE),
         nullptr,
+        nullptr,
         STARTF_USESHOWWINDOW,
         [&](STARTUPINFOW *const startup, PROCESS_INFORMATION *const result) {
             return CreateProcessAsUserW(pbs_token.get(), wsl_path.c_str(), command.data(),
@@ -811,6 +883,15 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
             return devicefs::Main(arguments);
         }
         if (arguments.empty()) {
+            auto callback = std::array<wchar_t, 2>{};
+            if ((GetEnvironmentVariableW(
+                    L"DEVICEFS_RUN_VHSADOW_CALLBACK",
+                    callback.data(), DWORD{callback.size()}) == 1) &&
+                (callback.front() == L'1')) {
+                PublishEnvironmentVariable(
+                    L"DEVICEFS_RUN_VHSADOW_CALLBACK", std::nullopt);
+                return RunPowerShellProgram(L"COMPLETE_BACKUP", true);
+            }
             PrintHelp();
             return 0;
         }
@@ -850,6 +931,14 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
         }
         if (option == kHelperOption) {
             return RunWslAsPbsVss(arguments.subspan(1));
+        }
+        if (option == kWriteStartPbsOption) {
+            if (arguments.size() != 1) {
+                throw std::invalid_argument(
+                    "--write-start-pbs does not accept arguments");
+            }
+            WriteStartPbs();
+            return 0;
         }
         throw std::invalid_argument("unknown backup-supervisor argument");
     } catch (const std::invalid_argument &error) {

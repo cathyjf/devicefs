@@ -2,10 +2,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 #requires -Version 7.4
-param(
-    [switch]$NoWriters
-)
-
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -129,33 +125,21 @@ try {
     $vshadow = Get-VShadow
     Write-Host "Found vshadow.exe: ${vshadow}"
 
-    $helper_script = $env:DEVICEFS_BACKUP_VSHADOW_HELPER_PATH
-    if (!$helper_script) {
-        throw 'The VShadow helper path was not supplied by backup-supervisor.'
-    }
-    if (!(Test-Path -LiteralPath $helper_script -PathType Leaf)) {
-        throw "Helper script missing: ${helper_script}"
+    $backup_supervisor_path = $env:DEVICEFS_BACKUP_SUPERVISOR_PATH
+    if (!$backup_supervisor_path) {
+        throw 'The backup supervisor path was not supplied.'
     }
 
-    $env:VSHADOW_COMPLETION_SCRIPT =
-        $env:DEVICEFS_BACKUP_COMPLETION_SCRIPT_PATH
-    if (!$env:VSHADOW_COMPLETION_SCRIPT) {
-        throw 'The completion script path was not supplied by backup-supervisor.'
-    }
-    if (!(Test-Path -LiteralPath $env:VSHADOW_COMPLETION_SCRIPT -PathType Leaf)) {
-        throw "Helper script missing: ${env:VSHADOW_COMPLETION_SCRIPT}"
-    }
-
-    $env:VSHADOW_PWSH_PATH = [Environment]::ProcessPath
     $env:VSHADOW_TEMP_FILE = Get-SystemTempFile
     try {
         $vshadow_arguments = @(
-            if ($NoWriters) {
+            if ($env:DEVICEFS_BACKUP_NO_WRITERS -eq '1') {
                 '-nw'
             }
             "-script=${env:VSHADOW_TEMP_FILE}"
-            "-exec=${helper_script}"
+            "-exec=${backup_supervisor_path}"
         ) + $BACKUP_DRIVES
+        $env:DEVICEFS_RUN_VHSADOW_CALLBACK = '1'
         if ($manual_cancellation_event) {
             $vshadow_exit_code = Invoke-VShadowManually `
                 -FileName $vshadow `

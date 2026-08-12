@@ -335,15 +335,21 @@ try {
         $devicefs_args += @('--map', $image_filename, $shadow.DeviceObject)
     }
 
-    $devicefs_path = Join-Path $PSScriptRoot 'devicefs.exe'
+    $devicefs_path = $env:DEVICEFS_BACKUP_SUPERVISOR_PATH
+    if (!$devicefs_path) {
+        throw 'The backup supervisor path was not supplied.'
+    }
     if (!(Test-Path -LiteralPath $devicefs_path -PathType Leaf)) {
-        throw 'Could not locate devicefs.exe.'
+        throw 'Could not locate backup-supervisor.exe.'
     }
     if ([Environment]::GetLogicalDrives() -contains "${mount_target}\") {
         throw "Mount target is already present: ${mount_target}"
     }
-    Write-Host 'Setting up virtual filesystem:' $devicefs_path @devicefs_args
-    $devicefs_process = Start-Process-With-Argv -FileName $devicefs_path -ArgumentList $devicefs_args
+    $devicefs_invocation_args = @('--devicefs') + $devicefs_args
+    Write-Host 'Setting up virtual filesystem:' $devicefs_path @devicefs_invocation_args
+    $devicefs_process = Start-Process-With-Argv `
+        -FileName $devicefs_path `
+        -ArgumentList $devicefs_invocation_args
 
     $backup_succeeded = $false
     try {

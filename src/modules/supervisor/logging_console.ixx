@@ -42,14 +42,10 @@ module;
 
 export module devicefs.supervisor.logging_console;
 
+import devicefs.common;
+
 using unique_pseudoconsole = wil::unique_any<
     HPCON, decltype(&::ClosePseudoConsole), ::ClosePseudoConsole>;
-
-[[noreturn]] auto WinError(
-    const wil::zstring_view operation, const DWORD error = GetLastError()) {
-    throw std::system_error(
-        std::bit_cast<int>(error), std::system_category(), operation.c_str());
-}
 
 // ConPTY emits UTF-8 interleaved with VT sequences. Keep parser state across
 // pipe reads and strip the ESC-prefixed sequences throughout the stream while

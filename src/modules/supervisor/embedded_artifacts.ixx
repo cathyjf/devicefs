@@ -28,7 +28,6 @@ module;
 #include <wil/win32_helpers.h>
 
 #include <array>
-#include <bit>
 #include <filesystem>
 #include <format>
 #include <stdexcept>
@@ -37,6 +36,8 @@ module;
 #include <system_error>
 
 export module devicefs.supervisor.embedded_artifacts;
+
+import devicefs.common;
 
 namespace {
 
@@ -54,14 +55,7 @@ constexpr auto kArtifacts = std::array{
     Artifact{L"COMPLETE_BACKUP", L"Complete-Backup.ps1"},
     Artifact{L"VSHADOW_HELPER", L"VShadow-Helper.cmd"},
     Artifact{L"START_PBS", L"start-pbs.fish"},
-    Artifact{L"DEVICEFS", L"devicefs.exe"},
 };
-
-[[noreturn]] auto WinError(
-    const wil::zstring_view operation, const DWORD error = GetLastError()) {
-    throw std::system_error(
-        std::bit_cast<int>(error), std::system_category(), operation.c_str());
-}
 
 [[nodiscard]] auto SystemTempDirectory() {
     auto windows_directory = std::wstring{};

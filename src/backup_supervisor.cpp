@@ -43,11 +43,15 @@
 #include <utility>
 #include <vector>
 
+import devicefs.common;
+import devicefs.filesystem;
 import devicefs.supervisor.embedded_artifacts;
 import devicefs.supervisor.logging_console;
 import devicefs.supervisor.process_diagnostics;
 
 #if defined(__INTELLISENSE__) && !defined(__cpp_lib_start_lifetime_as)
+// IntelliSense uses EDG, which does not yet expose these C++23 functions.
+// Tracked by <https://github.com/microsoft/STL/issues/6169>.
 namespace std {
 template <class T> auto start_lifetime_as(void *) noexcept -> T *;
 template <class T> auto start_lifetime_as_array(void *, size_t) noexcept -> T *;
@@ -65,6 +69,7 @@ constexpr auto kBackupLockEnvironment =
     wil::zwstring_view(L"DEVICEFS_BACKUP_LOCK_PATH");
 constexpr auto kSupervisorPathEnvironment =
     wil::zwstring_view(L"DEVICEFS_BACKUP_SUPERVISOR_PATH");
+constexpr auto kDeviceFsOption = std::wstring_view(L"--devicefs");
 constexpr auto kHelperOption =
     std::wstring_view(L"--run-wsl-as-pbs-vss");
 constexpr auto kForegroundOption = std::wstring_view(L"--foreground");
@@ -101,48 +106,6 @@ constexpr auto kAcceptedControls =
     DWORD{SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN};
 constexpr auto kWslCreationFlags =
     DWORD{CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT};
-
-[[noreturn]] auto WinError(
-    const wil::zstring_view operation, const DWORD error = GetLastError()) {
-    throw std::system_error(
-        std::bit_cast<int>(error), std::system_category(), operation.c_str());
-}
-
-auto HardenProcess() {
-    if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)) {
-        WinError("could not restrict DLL search directories");
-    }
-
-    auto dynamic_code = PROCESS_MITIGATION_DYNAMIC_CODE_POLICY{};
-    dynamic_code.ProhibitDynamicCode = 1;
-    if (!SetProcessMitigationPolicy(
-            ProcessDynamicCodePolicy, &dynamic_code, sizeof(dynamic_code))) {
-        WinError("could not prohibit dynamic code");
-    }
-
-    auto strict_handles = PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY{};
-    strict_handles.RaiseExceptionOnInvalidHandleReference = 1;
-    strict_handles.HandleExceptionsPermanentlyEnabled = 1;
-    if (!SetProcessMitigationPolicy(
-            ProcessStrictHandleCheckPolicy, &strict_handles, sizeof(strict_handles))) {
-        WinError("could not enable strict handle checking");
-    }
-
-    auto extension_points = PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY{};
-    extension_points.DisableExtensionPoints = 1;
-    if (!SetProcessMitigationPolicy(ProcessExtensionPointDisablePolicy,
-            &extension_points, sizeof(extension_points))) {
-        WinError("could not disable legacy extension points");
-    }
-
-    auto image_load = PROCESS_MITIGATION_IMAGE_LOAD_POLICY{};
-    image_load.NoRemoteImages = 1;
-    image_load.NoLowMandatoryLabelImages = 1;
-    if (!SetProcessMitigationPolicy(
-            ProcessImageLoadPolicy, &image_load, sizeof(image_load))) {
-        WinError("could not restrict image loading");
-    }
-}
 
 [[nodiscard]] auto ExecutablePath() {
     auto result = std::wstring{};
@@ -889,6 +852,7 @@ auto RunServiceDispatcher() {
 auto PrintHelp() {
     std::fputws(
         L"Usage:\n"
+        L"  backup-supervisor.exe --devicefs [devicefs arguments]\n"
         L"  backup-supervisor.exe --foreground [--no-writers]\n"
         L"  backup-supervisor.exe --install-service [--update]\n"
         L"  backup-supervisor.exe --run-service\n",
@@ -902,6 +866,10 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
         HardenProcess();
         const auto arguments =
             std::span<const wchar_t *const>{argv + 1, argv + argc};
+        if (!arguments.empty() &&
+            (std::wstring_view(arguments.front()) == kDeviceFsOption)) {
+            return devicefs::Main(arguments);
+        }
         if (arguments.empty()) {
             PrintHelp();
             return 0;

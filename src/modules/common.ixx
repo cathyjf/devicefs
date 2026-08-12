@@ -18,23 +18,80 @@ module;
 
 #include <windows.h>
 
-// wil/stl.h uses these facilities without including their standard headers.
-#include <algorithm>
-#include <cstdint>
-
-#include <wil/stl.h>
-
 #include <bit>
+#include <cstddef>
+#include <format>
 #include <system_error>
+#include <tuple>
+#include <type_traits>
+#include <utility>
 
 export module devicefs.common;
 
-export [[noreturn]] auto WinError(
-    const wil::zstring_view operation,
-    const DWORD error = GetLastError()) {
+export struct ExplicitWin32Error final {
+    DWORD value;
+};
+
+namespace detail {
+
+template <class... Arguments>
+constexpr auto kHasExplicitWin32Error = [] {
+    if constexpr (sizeof...(Arguments) == 0) {
+        return false;
+    } else {
+        using LastArgument = std::tuple_element_t<
+            sizeof...(Arguments) - 1, std::tuple<Arguments...>>;
+        return std::is_same_v<
+            std::remove_cvref_t<LastArgument>, ExplicitWin32Error>;
+    }
+}();
+
+template <class Arguments, class Indices>
+struct WinErrorFormat;
+
+template <class Arguments, std::size_t... Index>
+struct WinErrorFormat<Arguments, std::index_sequence<Index...>> {
+    using type = std::format_string<std::tuple_element_t<Index, Arguments>...>;
+};
+
+template <class... Arguments>
+using WinErrorFormatString = typename WinErrorFormat<
+    std::tuple<Arguments...>,
+    std::make_index_sequence<
+        sizeof...(Arguments) - kHasExplicitWin32Error<Arguments...>>>::type;
+
+} // namespace detail
+
+export template <class... Arguments>
+[[noreturn]] auto WinError(
+    const detail::WinErrorFormatString<Arguments...> format,
+    Arguments &&...arguments) {
+    const auto last_error = GetLastError();
+    static_assert(
+        (!std::is_same_v<std::remove_cvref_t<Arguments>, DWORD> && ...),
+        "wrap an explicit Win32 error in ExplicitWin32Error; "
+        "cast a DWORD that is intentionally being formatted");
+    constexpr auto has_explicit_error =
+        detail::kHasExplicitWin32Error<Arguments...>;
+    constexpr auto format_argument_count =
+        sizeof...(Arguments) - has_explicit_error;
+    auto argument_tuple = std::forward_as_tuple(
+        std::forward<Arguments>(arguments)...);
+    const auto error = [&] {
+        if constexpr (has_explicit_error) {
+            return std::get<sizeof...(Arguments) - 1>(argument_tuple).value;
+        } else {
+            return last_error;
+        }
+    }();
+    const auto operation = [&]<std::size_t... Index>(
+        std::index_sequence<Index...>) {
+        return std::format(format,
+            std::get<Index>(std::move(argument_tuple))...);
+    }(std::make_index_sequence<format_argument_count>{});
     throw std::system_error(
         std::bit_cast<int>(error), std::system_category(),
-        operation.c_str());
+        operation);
 }
 
 export auto HardenProcess() {

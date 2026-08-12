@@ -112,7 +112,8 @@ constexpr auto kWslCreationFlags =
     const auto error = wil::GetModuleFileNameW(nullptr, result);
     if (FAILED(error)) {
         WinError("could not obtain the backup supervisor path",
-            HRESULT_CODE(error));
+            ExplicitWin32Error{
+                static_cast<DWORD>(HRESULT_CODE(error))});
     }
     return result;
 }
@@ -254,7 +255,7 @@ template <typename Start>
         HeapAlloc(GetProcessHeap(), 0, attribute_bytes));
     if (!attribute_storage) {
         WinError("could not allocate the process attribute list",
-            ERROR_NOT_ENOUGH_MEMORY);
+            ExplicitWin32Error{ERROR_NOT_ENOUGH_MEMORY});
     }
     auto *const attributes = static_cast<PPROC_THREAD_ATTRIBUTE_LIST>(
         attribute_storage.get());
@@ -291,7 +292,7 @@ template <typename Start>
     };
     auto process = wil::unique_process_information{};
     if (!start(&startup.StartupInfo, &process)) {
-        WinError(operation);
+        WinError("{}", operation);
     }
     return process;
 }
@@ -504,7 +505,8 @@ auto InstallService(const InstallMode mode) {
     const auto error = GetLastError();
     if ((mode != InstallMode::CreateOrUpdate) ||
         (error != ERROR_SERVICE_EXISTS)) {
-        WinError("could not install the backup service", error);
+        WinError("could not install the backup service",
+            ExplicitWin32Error{error});
     }
     service.reset(OpenServiceW(manager.get(),
         kServiceName.c_str(), SERVICE_CHANGE_CONFIG));
@@ -699,7 +701,8 @@ auto EnableProfilePrivileges(const HANDLE token) {
     }
     const auto error = GetLastError();
     if (error != ERROR_SUCCESS) {
-        WinError("could not enable the user-profile privileges", error);
+        WinError("could not enable the user-profile privileges",
+            ExplicitWin32Error{error});
     }
 }
 
@@ -709,7 +712,8 @@ auto EnableProfilePrivileges(const HANDLE token) {
         &result, nullptr, SECURITY_NT_AUTHORITY, SECURITY_LOCAL_SYSTEM_RID);
     if (FAILED(error)) {
         WinError("could not identify the backup-supervisor account",
-            HRESULT_CODE(error));
+            ExplicitWin32Error{
+                static_cast<DWORD>(HRESULT_CODE(error))});
     }
     return result;
 }

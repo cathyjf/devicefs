@@ -61,7 +61,9 @@ constexpr auto kArtifacts = std::array{
     auto windows_directory = std::wstring{};
     const auto error = wil::GetWindowsDirectoryW(windows_directory);
     if (FAILED(error)) {
-        WinError("could not obtain the Windows directory", HRESULT_CODE(error));
+        WinError("could not obtain the Windows directory",
+            ExplicitWin32Error{
+                static_cast<DWORD>(HRESULT_CODE(error))});
     }
     return std::filesystem::path(windows_directory) / L"SystemTemp";
 }
@@ -71,7 +73,8 @@ constexpr auto kArtifacts = std::array{
     const auto error = CoCreateGuid(&identifier);
     if (FAILED(error)) {
         WinError("could not create a unique backup directory name",
-            HRESULT_CODE(error));
+            ExplicitWin32Error{
+                static_cast<DWORD>(HRESULT_CODE(error))});
     }
     auto text = std::array<wchar_t, kGuidBufferCharacters>{};
     if (StringFromGUID2(identifier, text.data(), kGuidBufferCharacters) == 0) {
@@ -123,7 +126,7 @@ auto ExtractArtifact(
     }
     if (written != size) {
         WinError("could not extract the complete backup artifact",
-            ERROR_WRITE_FAULT);
+            ExplicitWin32Error{ERROR_WRITE_FAULT});
     }
 }
 

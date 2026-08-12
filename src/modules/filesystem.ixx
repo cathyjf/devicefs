@@ -227,7 +227,8 @@ auto Usage(std::wostream &out) {
 
 auto CheckNt(const NTSTATUS status, const wil::zstring_view operation) {
     if (!NT_SUCCESS(status)) {
-        WinError(operation, FspWin32FromNtStatus(status));
+        WinError("{}", operation,
+            ExplicitWin32Error{FspWin32FromNtStatus(status)});
     }
 }
 
@@ -382,8 +383,8 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
     auto file_system_flags = DWORD{};
     if (!GetVolumeInformationByHandleW(
             device, nullptr, 0, nullptr, nullptr, &file_system_flags, nullptr, 0)) {
-        WinError(std::format(
-            "could not query filesystem flags for --map #{}", map_number));
+        WinError(
+            "could not query filesystem flags for --map #{}", map_number);
     }
     // A retained allocation bitmap is safe only while the source cannot change.
     if ((file_system_flags & FILE_READ_ONLY_VOLUME) == 0) {
@@ -396,9 +397,8 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
     const auto volume_error =
         Ioctl(device, FSCTL_GET_NTFS_VOLUME_DATA, &volume, sizeof(volume));
     if (volume_error != ERROR_SUCCESS) {
-        WinError(std::format(
-            "FSCTL_GET_NTFS_VOLUME_DATA failed for --map #{}", map_number),
-            volume_error);
+        WinError("FSCTL_GET_NTFS_VOLUME_DATA failed for --map #{}", map_number,
+            ExplicitWin32Error{volume_error});
     }
     if ((volume.TotalClusters.QuadPart <= 0) || (volume.BytesPerCluster == 0)) {
         throw std::runtime_error(std::format(
@@ -420,9 +420,8 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
     const auto retrieval_base_error = Ioctl(device,
         FSCTL_GET_RETRIEVAL_POINTER_BASE, &retrieval_base, sizeof(retrieval_base));
     if (retrieval_base_error != ERROR_SUCCESS) {
-        WinError(std::format(
-            "FSCTL_GET_RETRIEVAL_POINTER_BASE failed for --map #{}", map_number),
-            retrieval_base_error);
+        WinError("FSCTL_GET_RETRIEVAL_POINTER_BASE failed for --map #{}",
+            map_number, ExplicitWin32Error{retrieval_base_error});
     }
     if (retrieval_base.FileAreaOffset.QuadPart != 0) {
         throw std::runtime_error(std::format(
@@ -446,8 +445,8 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
     auto storage = wil::unique_virtualalloc_ptr<BYTE>(static_cast<BYTE *>(
         VirtualAlloc(nullptr, output_size_for_api, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)));
     if (!storage) {
-        WinError(std::format(
-            "could not allocate NTFS allocation bitmap for --map #{}", map_number));
+        WinError(
+            "could not allocate NTFS allocation bitmap for --map #{}", map_number);
     }
     auto *const output = std::start_lifetime_as<VOLUME_BITMAP_BUFFER>(storage.get());
     auto input = STARTING_LCN_INPUT_BUFFER{.StartingLcn = {.QuadPart = 0}};
@@ -455,8 +454,8 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
     const auto bitmap_error = Ioctl(device, FSCTL_GET_VOLUME_BITMAP,
         output, output_size_for_api, &input, sizeof(input), &returned);
     if (bitmap_error != ERROR_SUCCESS) {
-        WinError(std::format(
-            "FSCTL_GET_VOLUME_BITMAP failed for --map #{}", map_number), bitmap_error);
+        WinError("FSCTL_GET_VOLUME_BITMAP failed for --map #{}", map_number,
+            ExplicitWin32Error{bitmap_error});
     }
     if ((output->StartingLcn.QuadPart != 0) ||
         (output->BitmapSize.QuadPart != volume.TotalClusters.QuadPart) ||
@@ -489,15 +488,15 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
     if (!handle) {
-        WinError(std::format("could not open block device for --map #{}", map_number));
+        WinError("could not open block device for --map #{}", map_number);
     }
 
     auto length = GET_LENGTH_INFORMATION{};
     const auto length_error =
         Ioctl(handle.get(), IOCTL_DISK_GET_LENGTH_INFO, &length, sizeof(length));
     if (length_error != ERROR_SUCCESS) {
-        WinError(std::format("IOCTL_DISK_GET_LENGTH_INFO failed for --map #{}", map_number),
-            length_error);
+        WinError("IOCTL_DISK_GET_LENGTH_INFO failed for --map #{}", map_number,
+            ExplicitWin32Error{length_error});
     }
     if (length.Length.QuadPart < 0) {
         throw std::runtime_error(std::format(
@@ -509,8 +508,8 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
     const auto geometry_error =
         Ioctl(handle.get(), IOCTL_DISK_GET_DRIVE_GEOMETRY, &geometry, sizeof(geometry));
     if (geometry_error != ERROR_SUCCESS) {
-        WinError(std::format("IOCTL_DISK_GET_DRIVE_GEOMETRY failed for --map #{}", map_number),
-            geometry_error);
+        WinError("IOCTL_DISK_GET_DRIVE_GEOMETRY failed for --map #{}", map_number,
+            ExplicitWin32Error{geometry_error});
     }
 
     [[gsl::suppress("type.1",
@@ -969,7 +968,7 @@ auto Run(const Options &options) {
     stop_event.release();
     stopped_event.release();
     if (wait_error != ERROR_SUCCESS) {
-        WinError("shutdown wait failed", wait_error);
+        WinError("shutdown wait failed", ExplicitWin32Error{wait_error});
     }
     if (g_dispatcher_stopped_unexpectedly) {
         throw std::runtime_error("WinFsp dispatcher stopped unexpectedly");

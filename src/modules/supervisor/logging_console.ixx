@@ -293,7 +293,7 @@ private:
         }
         if (written != size) {
             WinError("could not write the complete backup supervisor log",
-                ERROR_WRITE_FAULT);
+                ExplicitWin32Error{ERROR_WRITE_FAULT});
         }
     }
 
@@ -401,7 +401,8 @@ public:
             0, console_.put());
         if (FAILED(error)) {
             WinError("could not create the backup pseudoconsole",
-                HRESULT_CODE(error));
+                ExplicitWin32Error{
+                    static_cast<DWORD>(HRESULT_CODE(error))});
         }
         output_task_ = std::async(
             std::launch::async, CopyConsoleOutput,
@@ -423,7 +424,7 @@ public:
             HeapAlloc(GetProcessHeap(), 0, attribute_bytes));
         if (!attribute_storage) {
             WinError("could not allocate the process attribute list",
-                ERROR_NOT_ENOUGH_MEMORY);
+                ExplicitWin32Error{ERROR_NOT_ENOUGH_MEMORY});
         }
         auto *const attributes = static_cast<PPROC_THREAD_ATTRIBUTE_LIST>(
             attribute_storage.get());
@@ -469,7 +470,8 @@ public:
         console_.reset();
         const auto error = output_task_.get();
         if (error != ERROR_SUCCESS) {
-            WinError("could not capture the backup pseudoconsole output", error);
+            WinError("could not capture the backup pseudoconsole output",
+                ExplicitWin32Error{error});
         }
     }
 

@@ -34,8 +34,11 @@ function Get-VShadow {
 }
 
 function Get-SystemTempFile {
-    # The temp file will be created under SystemTemp to avoid certain attacks.
-    $temp_file = Join-Path $env:WINDIR 'SystemTemp' "pbs-vss-$([guid]::NewGuid().ToString('N')).txt"
+    $system_temp = $env:DEVICEFS_BACKUP_SYSTEM_TEMP_PATH
+    if (!$system_temp) {
+        throw 'The SystemTemp path was not supplied by backup-supervisor.'
+    }
+    $temp_file = Join-Path $system_temp "pbs-vss-$([guid]::NewGuid().ToString('N')).txt"
     New-Item -ItemType File -Path $temp_file | Out-Null
     return $temp_file
 }
@@ -126,12 +129,19 @@ try {
     $vshadow = Get-VShadow
     Write-Host "Found vshadow.exe: ${vshadow}"
 
-    $helper_script = Join-Path $PSScriptRoot 'VShadow-Helper.cmd'
+    $helper_script = $env:DEVICEFS_BACKUP_VSHADOW_HELPER_PATH
+    if (!$helper_script) {
+        throw 'The VShadow helper path was not supplied by backup-supervisor.'
+    }
     if (!(Test-Path -LiteralPath $helper_script -PathType Leaf)) {
         throw "Helper script missing: ${helper_script}"
     }
 
-    $env:VSHADOW_COMPLETION_SCRIPT = Join-Path $PSScriptRoot 'Complete-Backup.ps1'
+    $env:VSHADOW_COMPLETION_SCRIPT =
+        $env:DEVICEFS_BACKUP_COMPLETION_SCRIPT_PATH
+    if (!$env:VSHADOW_COMPLETION_SCRIPT) {
+        throw 'The completion script path was not supplied by backup-supervisor.'
+    }
     if (!(Test-Path -LiteralPath $env:VSHADOW_COMPLETION_SCRIPT -PathType Leaf)) {
         throw "Helper script missing: ${env:VSHADOW_COMPLETION_SCRIPT}"
     }

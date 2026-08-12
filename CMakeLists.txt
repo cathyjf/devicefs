@@ -91,6 +91,7 @@ target_sources(backup-supervisor PRIVATE
     FILE_SET CXX_MODULES
     FILES
         src/modules/supervisor/embedded_artifacts.ixx
+        src/modules/supervisor/installation.ixx
         src/modules/supervisor/logging_console.ixx
         src/modules/supervisor/process_diagnostics.ixx
 )
@@ -144,4 +145,6 @@ target_compile_definitions(devicefs-filesystem PRIVATE
 )
 
 target_compile_definitions(backup-supervisor PRIVATE _WIN32_WINNT=0x0A00)
-target_link_libraries(backup-supervisor PRIVATE advapi32 ntdll ole32 userenv)
+target_link_libraries(backup-supervisor PRIVATE
+    advapi32 ntdll ole32 shell32 userenv uuid
+)

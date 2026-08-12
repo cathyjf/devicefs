@@ -28,6 +28,7 @@ module;
 #include <wil/win32_helpers.h>
 
 #include <array>
+#include <cstddef>
 #include <filesystem>
 #include <format>
 #include <stdexcept>
@@ -38,6 +39,29 @@ module;
 export module devicefs.supervisor.embedded_artifacts;
 
 import devicefs.common;
+
+export [[nodiscard]] auto SystemTempDirectory() {
+    auto windows_directory = std::wstring{};
+    const auto error = wil::AdaptFixedSizeToAllocatedResult(
+        windows_directory,
+        [](wchar_t *const buffer, const std::size_t capacity,
+            std::size_t *const required) -> HRESULT {
+            *required = GetSystemWindowsDirectoryW(
+                buffer, static_cast<UINT>(capacity));
+            RETURN_LAST_ERROR_IF(*required == 0);
+            if (*required < capacity) {
+                ++*required;
+            }
+            return S_OK;
+        });
+    if (FAILED(error)) {
+        WinError(
+            "could not obtain the system Windows directory",
+            ExplicitWin32Error{
+                static_cast<DWORD>(HRESULT_CODE(error))});
+    }
+    return std::filesystem::path(windows_directory) / L"SystemTemp";
+}
 
 namespace {
 
@@ -56,17 +80,6 @@ constexpr auto kArtifacts = std::array{
     Artifact{L"VSHADOW_HELPER", L"VShadow-Helper.cmd"},
     Artifact{L"START_PBS", L"start-pbs.fish"},
 };
-
-[[nodiscard]] auto SystemTempDirectory() {
-    auto windows_directory = std::wstring{};
-    const auto error = wil::GetWindowsDirectoryW(windows_directory);
-    if (FAILED(error)) {
-        WinError("could not obtain the Windows directory",
-            ExplicitWin32Error{
-                static_cast<DWORD>(HRESULT_CODE(error))});
-    }
-    return std::filesystem::path(windows_directory) / L"SystemTemp";
-}
 
 [[nodiscard]] auto UniqueRunDirectory() {
     auto identifier = GUID{};

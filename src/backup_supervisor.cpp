@@ -46,6 +46,7 @@
 import devicefs.common;
 import devicefs.filesystem;
 import devicefs.supervisor.embedded_artifacts;
+import devicefs.supervisor.installation;
 import devicefs.supervisor.logging_console;
 import devicefs.supervisor.process_diagnostics;
 
@@ -60,7 +61,6 @@ template <class T> auto start_lifetime_as_array(void *, size_t) noexcept -> T *;
 
 namespace {
 
-constexpr auto kServiceName = wil::zwstring_view(L"DeviceFsBackup");
 constexpr auto kCancellationEventName =
     wil::zwstring_view(L"Local\\devicefs-backup-stop");
 constexpr auto kCancellationEventEnvironment =
@@ -69,28 +69,26 @@ constexpr auto kBackupLockEnvironment =
     wil::zwstring_view(L"DEVICEFS_BACKUP_LOCK_PATH");
 constexpr auto kSupervisorPathEnvironment =
     wil::zwstring_view(L"DEVICEFS_BACKUP_SUPERVISOR_PATH");
+constexpr auto kVShadowHelperEnvironment =
+    wil::zwstring_view(L"DEVICEFS_BACKUP_VSHADOW_HELPER_PATH");
+constexpr auto kVShadowCompletionEnvironment =
+    wil::zwstring_view(L"DEVICEFS_BACKUP_COMPLETION_SCRIPT_PATH");
+constexpr auto kFishProgramEnvironment =
+    wil::zwstring_view(L"DEVICEFS_BACKUP_FISH_PROGRAM_PATH");
+constexpr auto kSystemTempEnvironment =
+    wil::zwstring_view(L"DEVICEFS_BACKUP_SYSTEM_TEMP_PATH");
 constexpr auto kDeviceFsOption = std::wstring_view(L"--devicefs");
 constexpr auto kHelperOption =
     std::wstring_view(L"--run-wsl-as-pbs-vss");
 constexpr auto kForegroundOption = std::wstring_view(L"--foreground");
 constexpr auto kNoWritersOption = std::wstring_view(L"--no-writers");
-constexpr auto kRunServiceOption = std::wstring_view(L"--run-service");
 constexpr auto kInstallOption = std::wstring_view(L"--install-service");
 constexpr auto kUpdateOption = std::wstring_view(L"--update");
-constexpr auto kServiceDisplayName =
-    wil::zwstring_view(L"DeviceFs Backup");
-constexpr auto kLocalSystemAccount =
-    wil::zwstring_view(L".\\LocalSystem");
-constexpr auto kPowerShellPath =
-    wil::zwstring_view(L"C:\\Program Files\\PowerShell\\7\\pwsh.exe");
-constexpr auto kWslPath =
-    wil::zwstring_view(L"C:\\Program Files\\WSL\\wsl.exe");
 constexpr auto kOrchestratorName = std::wstring_view(L"Orchestrate-Backup.ps1");
-constexpr auto kLogDirectory = std::wstring_view(L"logs");
-constexpr auto kPasswordRelativePath =
-    std::wstring_view(L"credentials\\pbs-vss.password");
-constexpr auto kBackupLockRelativePath =
-    std::wstring_view(L"credentials\\pbs-vss-backup.lock");
+constexpr auto kVShadowHelperName = std::wstring_view(L"VShadow-Helper.cmd");
+constexpr auto kCompletionScriptName =
+    std::wstring_view(L"Complete-Backup.ps1");
+constexpr auto kFishProgramName = std::wstring_view(L"start-pbs.fish");
 constexpr auto kPbsUser = wil::zwstring_view(L"pbs-vss");
 constexpr auto kLocalDomain = wil::zwstring_view(L".");
 constexpr auto kGracefulStopMilliseconds = DWORD{300000};
@@ -107,32 +105,38 @@ constexpr auto kAcceptedControls =
 constexpr auto kWslCreationFlags =
     DWORD{CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT};
 
-[[nodiscard]] auto ExecutablePath() {
-    auto result = std::wstring{};
-    const auto error = wil::GetModuleFileNameW(nullptr, result);
-    if (FAILED(error)) {
-        WinError("could not obtain the backup supervisor path",
-            ExplicitWin32Error{
-                static_cast<DWORD>(HRESULT_CODE(error))});
+auto PublishEnvironmentVariable(
+    const wil::zwstring_view variable,
+    const std::optional<wil::zwstring_view> value) {
+    if (!SetEnvironmentVariableW(
+            variable.c_str(), value ? value->c_str() : nullptr)) {
+        WinError("could not update an environment variable");
     }
-    return result;
 }
 
-[[nodiscard]] auto InstallationDirectory() {
-    return std::filesystem::path(ExecutablePath()).parent_path().parent_path();
+auto PublishBackupPaths(
+    const PersistentPaths &persistent,
+    const std::filesystem::path &artifacts) {
+    PublishEnvironmentVariable(
+        kBackupLockEnvironment, persistent.backup_lock);
+    PublishEnvironmentVariable(
+        kSupervisorPathEnvironment, CurrentExecutablePath());
+    PublishEnvironmentVariable(
+        kVShadowHelperEnvironment, artifacts / kVShadowHelperName);
+    PublishEnvironmentVariable(
+        kVShadowCompletionEnvironment, artifacts / kCompletionScriptName);
+    PublishEnvironmentVariable(
+        kFishProgramEnvironment, artifacts / kFishProgramName);
+    PublishEnvironmentVariable(
+        kSystemTempEnvironment, SystemTempDirectory());
 }
 
-auto PublishPersistentPaths(const std::filesystem::path &directory) {
-    const auto backup_lock = directory / kBackupLockRelativePath;
-    if (!SetEnvironmentVariableW(
-            kBackupLockEnvironment.c_str(), backup_lock.c_str())) {
-        WinError("could not publish the backup lock path");
-    }
-    const auto supervisor = ExecutablePath();
-    if (!SetEnvironmentVariableW(
-            kSupervisorPathEnvironment.c_str(), supervisor.c_str())) {
-        WinError("could not publish the backup supervisor path");
-    }
+[[nodiscard]] auto PowerShellPath() {
+    return ProgramFilesDirectory() / L"PowerShell" / L"7" / L"pwsh.exe";
+}
+
+[[nodiscard]] auto WslPath() {
+    return ProgramFilesDirectory() / L"WSL" / L"wsl.exe";
 }
 
 [[nodiscard]] auto CreateCancellationEvent() {
@@ -303,14 +307,16 @@ template <typename Start>
     auto console = LoggingConsole(log);
     auto job = CreateChildJob();
     const auto script = directory / kOrchestratorName;
+    const auto powershell = PowerShellPath();
     const auto arguments = std::to_array<std::wstring_view>({
-        kPowerShellPath,
+        powershell.native(),
         L"-NoLogo", L"-NoProfile", L"-NonInteractive", L"-File",
         script.native(),
     });
     auto command = wil::ArgvToCommandLine(arguments);
     auto process = console.StartProcess(
-        job.get(), kPowerShellPath, command, directory);
+        job.get(), wil::zwstring_view(powershell.native()),
+        command, directory);
     return BackupProcess{
         .console = std::move(console),
         .process = std::move(process),
@@ -370,11 +376,8 @@ struct ServiceOutcome {
     ServiceContext &context,
     const std::filesystem::path &directory,
     Log &log) {
-    if (!SetEnvironmentVariableW(
-            kCancellationEventEnvironment.c_str(),
-            kCancellationEventName.c_str())) {
-        WinError("could not publish the cancellation event");
-    }
+    PublishEnvironmentVariable(
+        kCancellationEventEnvironment, kCancellationEventName);
 
     auto backup = StartOrchestrator(directory, log);
     log.Write("backup-supervisor: backup starting");
@@ -457,76 +460,6 @@ struct ServiceOutcome {
     };
 }
 
-auto ConfigurePreshutdownTimeout(const SC_HANDLE service) {
-    auto configuration = SERVICE_PRESHUTDOWN_INFO{
-        .dwPreshutdownTimeout = kMinimumPreshutdownMilliseconds,
-    };
-    if (!ChangeServiceConfig2W(service,
-            SERVICE_CONFIG_PRESHUTDOWN_INFO, &configuration)) {
-        WinError("could not configure the backup service preshutdown timeout");
-    }
-}
-
-enum class InstallMode {
-    CreateOnly,
-    CreateOrUpdate,
-};
-
-constexpr auto kNoDependencies = std::array{L'\0', L'\0'};
-
-auto InstallService(const InstallMode mode) {
-    const auto executable = ExecutablePath();
-    const auto binary_path = wil::ArgvToCommandLine(std::array{
-        std::wstring_view(executable), kRunServiceOption,
-    });
-    auto manager = wil::unique_schandle(OpenSCManagerW(
-        nullptr, nullptr,
-        SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE));
-    if (!manager) {
-        WinError("could not open the Service Control Manager");
-    }
-    auto service = wil::unique_schandle(CreateServiceW(
-        manager.get(), kServiceName.c_str(), kServiceDisplayName.c_str(),
-        SERVICE_CHANGE_CONFIG | DELETE,
-        SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL,
-        binary_path.c_str(), nullptr, nullptr, nullptr,
-        kLocalSystemAccount.c_str(), L""));
-    if (service) {
-        auto remove_incomplete_service = wil::scope_exit([&] {
-            DeleteService(service.get());
-        });
-        ConfigurePreshutdownTimeout(service.get());
-        remove_incomplete_service.release();
-        std::fwprintf(stdout, L"backup-supervisor: installed %ls\n",
-            kServiceName.c_str());
-        return;
-    }
-
-    const auto error = GetLastError();
-    if ((mode != InstallMode::CreateOrUpdate) ||
-        (error != ERROR_SERVICE_EXISTS)) {
-        WinError("could not install the backup service",
-            ExplicitWin32Error{error});
-    }
-    service.reset(OpenServiceW(manager.get(),
-        kServiceName.c_str(), SERVICE_CHANGE_CONFIG));
-    if (!service) {
-        WinError("could not open the existing backup service");
-    }
-    ConfigurePreshutdownTimeout(service.get());
-    if (!ChangeServiceConfigW(service.get(),
-            SERVICE_WIN32_OWN_PROCESS,
-            SERVICE_DEMAND_START,
-            SERVICE_ERROR_NORMAL,
-            binary_path.c_str(), L"", nullptr, kNoDependencies.data(),
-            kLocalSystemAccount.c_str(), L"",
-            kServiceDisplayName.c_str())) {
-        WinError("could not update the backup service");
-    }
-    std::fwprintf(stdout, L"backup-supervisor: updated %ls\n",
-        kServiceName.c_str());
-}
-
 auto TryWriteFailure(
     Log *const log, const std::string_view diagnostic) noexcept {
     if (log != nullptr) {
@@ -544,14 +477,14 @@ auto TryWriteFailure(
                 ERROR_INVALID_PARAMETER, std::system_category(),
                 "service start arguments are not supported");
         }
-        const auto installation = InstallationDirectory();
-        log.emplace(installation / kLogDirectory);
+        const auto persistent = ResolvePersistentPaths();
+        log.emplace(persistent.logs);
         const auto directory = ExtractEmbeddedArtifacts();
         const auto remove_artifacts = wil::scope_exit([&] {
             auto ignored = std::error_code{};
             std::filesystem::remove_all(directory, ignored);
         });
-        PublishPersistentPaths(installation);
+        PublishBackupPaths(persistent, directory);
         context.cancellation_event = CreateCancellationEvent();
         result = RunBackup(context, directory, *log);
     } catch (const std::system_error &error) {
@@ -581,22 +514,21 @@ auto TryWriteFailure(
         throw std::runtime_error(
             "--foreground requires an attached console");
     }
-    if (!SetEnvironmentVariableW(
-            kCancellationEventEnvironment.c_str(), nullptr)) {
-        WinError("could not clear the supervisor cancellation event");
-    }
+    PublishEnvironmentVariable(
+        kCancellationEventEnvironment, std::nullopt);
 
-    const auto installation = InstallationDirectory();
-    PublishPersistentPaths(installation);
+    const auto persistent = ResolvePersistentPaths();
     const auto directory = ExtractEmbeddedArtifacts();
     const auto remove_artifacts = wil::scope_exit([&] {
         auto ignored = std::error_code{};
         std::filesystem::remove_all(directory, ignored);
     });
+    PublishBackupPaths(persistent, directory);
 
     const auto script = directory / kOrchestratorName;
+    const auto powershell = PowerShellPath();
     auto arguments = std::vector<std::wstring_view>{
-        kPowerShellPath,
+        powershell.native(),
         L"-NoLogo", L"-NoProfile", L"-File", script.native(),
     };
     if (no_writers) {
@@ -610,7 +542,7 @@ auto TryWriteFailure(
         nullptr,
         0,
         [&](STARTUPINFOW *const startup, PROCESS_INFORMATION *const result) {
-            return CreateProcessW(kPowerShellPath.c_str(), command.data(),
+            return CreateProcessW(powershell.c_str(), command.data(),
                 nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT,
                 nullptr, directory.c_str(), startup, result);
         },
@@ -629,7 +561,7 @@ auto WINAPI ServiceMain(
     const DWORD argc, wchar_t **) noexcept -> void {
     static auto context = ServiceContext{};
     context.status_handle = RegisterServiceCtrlHandlerExW(
-        kServiceName.c_str(), ServiceControlHandler, &context);
+        kServiceName.data(), ServiceControlHandler, &context);
     if (context.status_handle == nullptr) {
         return;
     }
@@ -720,6 +652,7 @@ auto EnableProfilePrivileges(const HANDLE token) {
 
 [[nodiscard]] auto StartWslWithLogon(
     const wil::zwstring_view password,
+    const std::filesystem::path &wsl_path,
     std::wstring &command,
     const std::filesystem::path &working_directory) {
     auto child_handles = std::array{
@@ -741,7 +674,7 @@ auto EnableProfilePrivileges(const HANDLE token) {
     // Manual backups create no supervisor job, so do not request breakaway.
     if (!CreateProcessWithLogonW(
             kPbsUser.c_str(), kLocalDomain.c_str(), password.c_str(),
-            LOGON_WITH_PROFILE, kWslPath.c_str(), command.data(),
+            LOGON_WITH_PROFILE, wsl_path.c_str(), command.data(),
             kWslCreationFlags,
             nullptr, working_directory.c_str(), &startup, &process)) {
         WinError("could not start WSL as pbs-vss");
@@ -767,17 +700,17 @@ auto EnableProfilePrivileges(const HANDLE token) {
         throw std::invalid_argument(
             "--run-wsl-as-pbs-vss requires at least one WSL argument");
     }
-    const auto directory = InstallationDirectory();
-    const auto password =
-        ReadPbsVssPassword(directory / kPasswordRelativePath);
-    auto argument_views = std::vector{kWslPath};
+    const auto persistent = ResolvePersistentPaths();
+    const auto password = ReadPbsVssPassword(persistent.password);
+    const auto wsl_path = WslPath();
+    auto argument_views = std::vector<std::wstring_view>{wsl_path.native()};
     argument_views.append_range(arguments);
     auto command = wil::ArgvToCommandLine(argument_views);
-    const auto wsl_directory =
-        std::filesystem::path(kWslPath.c_str()).parent_path();
+    const auto wsl_directory = wsl_path.parent_path();
     if (!RunningAsLocalSystem()) {
         return WaitForWsl(
-            StartWslWithLogon(password, command, wsl_directory));
+            StartWslWithLogon(
+                password, wsl_path, command, wsl_directory));
     }
 
     auto pbs_token = LogOnPbsVss(password);
@@ -826,7 +759,7 @@ auto EnableProfilePrivileges(const HANDLE token) {
         nullptr,
         STARTF_USESHOWWINDOW,
         [&](STARTUPINFOW *const startup, PROCESS_INFORMATION *const result) {
-            return CreateProcessAsUserW(pbs_token.get(), kWslPath.c_str(), command.data(),
+            return CreateProcessAsUserW(pbs_token.get(), wsl_path.c_str(), command.data(),
                 nullptr, nullptr, TRUE,
                 kWslCreationFlags | CREATE_BREAKAWAY_FROM_JOB |
                     EXTENDED_STARTUPINFO_PRESENT,
@@ -839,7 +772,7 @@ auto EnableProfilePrivileges(const HANDLE token) {
 auto RunServiceDispatcher() {
     [[gsl::suppress("type.3",
         justification: "The SCM retains a mutable historical parameter for an input-only service name.")]]
-    auto *const service_name = const_cast<PWSTR>(kServiceName.c_str());
+    auto *const service_name = const_cast<PWSTR>(kServiceName.data());
     auto entries = std::array{
         SERVICE_TABLE_ENTRYW{
             .lpServiceName = service_name,
@@ -888,12 +821,14 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
         }
         if (option == kInstallOption) {
             if (arguments.size() == 1) {
-                InstallService(InstallMode::CreateOnly);
+                InstallService(InstallMode::CreateOnly,
+                    kMinimumPreshutdownMilliseconds);
                 return 0;
             }
             if ((arguments.size() == 2) &&
                 (std::wstring_view(arguments[1]) == kUpdateOption)) {
-                InstallService(InstallMode::CreateOrUpdate);
+                InstallService(InstallMode::CreateOrUpdate,
+                    kMinimumPreshutdownMilliseconds);
                 return 0;
             }
             throw std::invalid_argument(

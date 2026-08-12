@@ -296,7 +296,10 @@ function Invoke-WslBackup {
     $control_path = "/tmp/devicefs-$([guid]::NewGuid().ToString('N'))"
     $pid_file = "$control_path.pid"
     $stop_file = "$control_path.stop"
-    $fish_program_path = Join-Path $PSScriptRoot 'start-pbs.fish'
+    $fish_program_path = $env:DEVICEFS_BACKUP_FISH_PROGRAM_PATH
+    if (!$fish_program_path) {
+        throw 'The Fish program path was not supplied by backup-supervisor.'
+    }
     if (!(Test-Path -LiteralPath $fish_program_path -PathType Leaf)) {
         throw "Could not locate Fish program: ${fish_program_path}"
     }

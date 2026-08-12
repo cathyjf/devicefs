@@ -129,6 +129,9 @@ auto PublishBackupPaths(
         kFishProgramEnvironment, artifacts / kFishProgramName);
     PublishEnvironmentVariable(
         kSystemTempEnvironment, SystemTempDirectory());
+    PublishEnvironmentVariable(L"POWERSHELL_TELEMETRY_OPTOUT", L"1");
+    PublishEnvironmentVariable(L"POWERSHELL_DIAGNOSTICS_OPTOUT", L"1");
+    PublishEnvironmentVariable(L"POWERSHELL_UPDATECHECK", L"Off");
 }
 
 [[nodiscard]] auto PowerShellPath() {

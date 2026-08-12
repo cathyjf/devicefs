@@ -174,8 +174,15 @@ private:
 
 export class Log {
 public:
-    explicit Log(const std::filesystem::path &path) {
-        std::filesystem::create_directory(path.parent_path());
+    explicit Log(const std::filesystem::path &directory) {
+        // Missing time-zone data should remove line timestamps and select the
+        // fixed fallback filename, not prevent the backup from running.
+        try {
+            zone_ = std::chrono::current_zone();
+        } catch (...) {}
+
+        std::filesystem::create_directory(directory);
+        const auto path = directory / LogFilename();
         file_.reset(CreateFileW(path.c_str(),
             GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
             nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
@@ -209,11 +216,6 @@ public:
                     : std::string_view{"\r\n"});
             }
         }
-        // A missing time-zone database should remove timestamps, not prevent
-        // the backup from running.
-        try {
-            zone_ = std::chrono::current_zone();
-        } catch (...) {}
     }
 
     template <typename... Arguments>
@@ -267,6 +269,18 @@ public:
     }
 
 private:
+    [[nodiscard]] auto LogFilename() const -> std::wstring {
+        if (zone_ != nullptr) {
+            try {
+                const auto now = std::chrono::floor<std::chrono::seconds>(
+                    std::chrono::system_clock::now());
+                return std::format(L"{:%F}-backup.log",
+                    std::chrono::zoned_seconds{zone_, now});
+            } catch (...) {}
+        }
+        return L"backup.log";
+    }
+
     template <typename Character>
     auto WriteRaw(const std::basic_string_view<Character> output) -> void {
         static_assert(sizeof(Character) == 1);

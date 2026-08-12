@@ -81,8 +81,7 @@ constexpr auto kPowerShellPath =
 constexpr auto kWslPath =
     wil::zwstring_view(L"C:\\Program Files\\WSL\\wsl.exe");
 constexpr auto kOrchestratorName = std::wstring_view(L"Orchestrate-Backup.ps1");
-constexpr auto kLogRelativePath =
-    std::wstring_view(L"logs\\backup-supervisor.log");
+constexpr auto kLogDirectory = std::wstring_view(L"logs");
 constexpr auto kPasswordRelativePath =
     std::wstring_view(L"credentials\\pbs-vss.password");
 constexpr auto kBackupLockRelativePath =
@@ -581,7 +580,7 @@ auto TryWriteFailure(
                 "service start arguments are not supported");
         }
         const auto installation = InstallationDirectory();
-        log.emplace(installation / kLogRelativePath);
+        log.emplace(installation / kLogDirectory);
         const auto directory = ExtractEmbeddedArtifacts();
         const auto remove_artifacts = wil::scope_exit([&] {
             auto ignored = std::error_code{};

@@ -414,8 +414,9 @@ public:
         const wil::zwstring_view application,
         std::wstring &command,
         const HANDLE program_input) {
+        const auto attribute_count = 3;
         auto attribute_bytes = SIZE_T{};
-        InitializeProcThreadAttributeList(nullptr, 3, 0, &attribute_bytes);
+        InitializeProcThreadAttributeList(nullptr, attribute_count, 0, &attribute_bytes);
         if ((attribute_bytes == 0) ||
             (GetLastError() != ERROR_INSUFFICIENT_BUFFER)) {
             WinError("could not size the process attribute list");
@@ -429,7 +430,7 @@ public:
         auto *const attributes = static_cast<PPROC_THREAD_ATTRIBUTE_LIST>(
             attribute_storage.get());
         if (!InitializeProcThreadAttributeList(
-                attributes, 3, 0, &attribute_bytes)) {
+                attributes, attribute_count, 0, &attribute_bytes)) {
             WinError("could not initialize the process attribute list");
         }
         auto jobs = std::array{job};

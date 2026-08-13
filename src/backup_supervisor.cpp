@@ -49,6 +49,7 @@ import devicefs.filesystem;
 import devicefs.supervisor.embedded_artifacts;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.logging_console;
+import devicefs.supervisor.find_powershell;
 import devicefs.supervisor.process_diagnostics;
 
 #if defined(__INTELLISENSE__) && !defined(__cpp_lib_start_lifetime_as)
@@ -125,10 +126,6 @@ auto PublishBackupEnvironment(
     PublishEnvironmentVariable(L"DEVICEFS_BACKUP_NO_WRITERS",
         no_writers ? L"1" : MaybeZwstringView{std::nullopt}
     );
-}
-
-[[nodiscard]] auto PowerShellPath() {
-    return ProgramFilesDirectory() / L"PowerShell" / L"7" / L"pwsh.exe";
 }
 
 [[nodiscard]] auto WslPath() {

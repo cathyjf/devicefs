@@ -35,7 +35,7 @@
 
 
 // Main header
-#include "stdafx.h"
+#include "shadow.h"
 
 
 // Query all the shadow copies in the given set

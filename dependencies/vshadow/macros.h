@@ -153,7 +153,6 @@ const int MAX_VPRINTF_BUFFER_SIZE = 4096;
         ft.WriteLine(L"\nERROR: COM call %s failed.", GEN_WSTRINGIZE(Text));                \
         ft.WriteLine(L"- Returned HRESULT = 0x%08lx", hrInternal);                          \
         ft.WriteLine(L"- Error text: %s", FunctionTracer::HResult2String(hrInternal).c_str());      \
-        ft.WriteLine(L"- Please re-run VSHADOW.EXE with the /tracing option to get more details");\
         throw(hrInternal);                                                                  \
     }                                                                                       \
 }
@@ -184,7 +183,6 @@ const int MAX_VPRINTF_BUFFER_SIZE = 4096;
         ft.WriteLine(L"\nERROR: Win32 call %s failed.", GEN_WSTRINGIZE(Text));          \
         ft.WriteLine(L"- GetLastError() == %ld", dwLastError);                              \
         ft.WriteLine(L"- Error text: %s", FunctionTracer::HResult2String(hrInternal).c_str());      \
-        ft.WriteLine(L"- Please re-run VSHADOW.EXE with the /tracing option to get more details");\
         throw(hrInternal);                                                                  \
     }                                                                                       \
 }

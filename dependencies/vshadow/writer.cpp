@@ -35,7 +35,7 @@
 
 
 // Main header
-#include "stdafx.h"
+#include "shadow.h"
 
 
 
@@ -101,7 +101,7 @@ void VssClient::GatherWriterMetadataToScreen()
 }
 
 // Gather writers status
-void VssClient::GatherWriterStatus()
+void VssClient::GatherWriterStatus(bool bCancellable)
 {
     FunctionTracer ft(DBG_INFO);
 
@@ -111,7 +111,7 @@ void VssClient::GatherWriterStatus()
     CHECK_COM(m_pVssObject->GatherWriterStatus(&pAsync));
 
     // Waits for the async operation to finish and checks the result
-    WaitAndCheckForAsyncOperation(pAsync);
+    WaitAndCheckForAsyncOperation(pAsync, bCancellable);
 }
 
 

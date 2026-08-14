@@ -35,7 +35,7 @@
 
 
 // Main header
-#include "stdafx.h"
+#include "shadow.h"
 
 
 
@@ -251,6 +251,7 @@ void VssClient::DiscoverNonShadowedExcludedComponents(
             // If yes, exclude the component
             for (unsigned iVol = 0; iVol < component.affectedVolumes.size(); iVol++)
             {
+#ifdef VSS_SERVER
                 if (ClusterIsPathOnSharedVolume(component.affectedVolumes[iVol].c_str()))
                 {
                     wstring wsUniquePath(MAX_PATH, L'\0');
@@ -260,6 +261,7 @@ void VssClient::DiscoverNonShadowedExcludedComponents(
 
                     component.affectedVolumes[iVol] = wsUniquePath;
                 }
+#endif
 
                 if (!FindStringInList(component.affectedVolumes[iVol], shadowSourceVolumes))
                 {
@@ -718,7 +720,7 @@ bool VssClient::IsWriterSelected(GUID guidInstanceId)
 
 
 // Check the status for all selected writers
-void VssClient::CheckSelectedWriterStatus()
+void VssClient::CheckSelectedWriterStatus(bool bCancellable)
 {
     FunctionTracer ft(DBG_INFO);
 
@@ -726,7 +728,7 @@ void VssClient::CheckSelectedWriterStatus()
         return;
 
     // Gather writer status to detect potential errors
-    GatherWriterStatus();
+    GatherWriterStatus(bCancellable);
     
     // Gets the number of writers in the gathered status info
     // (WARNING: GatherWriterStatus must be called before)

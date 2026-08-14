@@ -48,19 +48,42 @@ target_sources(devicefs-filesystem PUBLIC
         src/modules/filesystem.ixx
 )
 
+add_library(vshadow STATIC
+    dependencies/vshadow/create.cpp
+    dependencies/vshadow/query.cpp
+    dependencies/vshadow/select.cpp
+    dependencies/vshadow/tracing.cpp
+    dependencies/vshadow/vssclient.cpp
+    dependencies/vshadow/writer.cpp
+)
+target_include_directories(vshadow SYSTEM PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/dependencies"
+)
+target_compile_definitions(vshadow PRIVATE
+    UNICODE _UNICODE _WIN32_WINNT=0x0A00 _MSVC_STL_HARDENING=1
+)
+target_compile_options(vshadow PRIVATE
+    /W3 /WX- /permissive /EHsc /utf-8 /guard:cf /guard:ehcont /sdl
+    /analyze-
+)
+set_target_properties(vshadow PROPERTIES
+    VS_GLOBAL_EnableCppCoreCheck false
+    VS_GLOBAL_RunCodeAnalysis false
+)
+target_link_libraries(vshadow PRIVATE
+    ole32 oleaut32 uuid vssapi
+)
+
 add_executable(devicefs src/main.cpp)
 target_link_libraries(devicefs PRIVATE devicefs-filesystem)
 
 add_executable(backup-supervisor
     src/backup_supervisor.cpp
 )
-target_link_libraries(backup-supervisor PRIVATE devicefs-filesystem)
+target_link_libraries(backup-supervisor PRIVATE devicefs-filesystem vshadow)
 
-set(ORCHESTRATOR_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/orchestrator")
-set(ORCHESTRATOR_ARTIFACTS
-    "${ORCHESTRATOR_DIRECTORY}/Orchestrate-Backup.ps1"
-    "${ORCHESTRATOR_DIRECTORY}/Complete-Backup.ps1"
-    "${ORCHESTRATOR_DIRECTORY}/start-pbs.fish"
+set(START_PBS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/supervisor/artifacts/start-pbs.fish"
 )
 set(ARTIFACT_RESOURCE_SCRIPT
     "${CMAKE_CURRENT_BINARY_DIR}/backup-supervisor-artifacts-$<CONFIG>.rc"
@@ -69,15 +92,13 @@ set(ARTIFACT_RESOURCE
     "${CMAKE_CURRENT_BINARY_DIR}/backup-supervisor-artifacts-$<CONFIG>.res"
 )
 file(GENERATE OUTPUT "${ARTIFACT_RESOURCE_SCRIPT}" CONTENT
-"ORCHESTRATE_BACKUP DEVICEFS_ARTIFACT \"${ORCHESTRATOR_DIRECTORY}/Orchestrate-Backup.ps1\"
-COMPLETE_BACKUP DEVICEFS_ARTIFACT \"${ORCHESTRATOR_DIRECTORY}/Complete-Backup.ps1\"
-START_PBS DEVICEFS_ARTIFACT \"${ORCHESTRATOR_DIRECTORY}/start-pbs.fish\"
-")
+    "START_PBS DEVICEFS_ARTIFACT \"${START_PBS}\"\n"
+)
 add_custom_command(
     OUTPUT "${ARTIFACT_RESOURCE}"
     COMMAND "${CMAKE_RC_COMPILER}" /nologo /fo "${ARTIFACT_RESOURCE}"
         "${ARTIFACT_RESOURCE_SCRIPT}"
-    DEPENDS "${ARTIFACT_RESOURCE_SCRIPT}" ${ORCHESTRATOR_ARTIFACTS}
+    DEPENDS "${ARTIFACT_RESOURCE_SCRIPT}" "${START_PBS}"
     VERBATIM
 )
 add_custom_target(backup-supervisor-artifacts
@@ -91,8 +112,8 @@ target_sources(backup-supervisor PRIVATE
         src/modules/supervisor/embedded_artifacts.ixx
         src/modules/supervisor/installation.ixx
         src/modules/supervisor/logging_console.ixx
-        src/modules/supervisor/find_powershell.ixx
         src/modules/supervisor/process_diagnostics.ixx
+        src/modules/supervisor/vshadow.ixx
 )
 
 if(DEVICEFS_MEASURE_FREE_CLUSTER_DATA)
@@ -145,5 +166,5 @@ target_compile_definitions(devicefs-filesystem PRIVATE
 
 target_compile_definitions(backup-supervisor PRIVATE _WIN32_WINNT=0x0A00)
 target_link_libraries(backup-supervisor PRIVATE
-    advapi32 ntdll ole32 shell32 userenv uuid windowsapp
+    advapi32 ntdll ole32 shell32 userenv
 )

@@ -18,50 +18,16 @@ module;
 
 #include <windows.h>
 
-// wil/stl.h uses these facilities without including their standard headers.
-#include <algorithm>
-#include <cstdint>
-
-#include <wil/stl.h>
-#include <wil/win32_helpers.h>
-
-#include <cstddef>
-#include <filesystem>
 #include <span>
 #include <stdexcept>
-#include <string>
 
 export module devicefs.supervisor.embedded_artifacts;
 
 import devicefs.common;
 
-export [[nodiscard]] auto SystemTempDirectory() {
-    auto windows_directory = std::wstring{};
-    const auto error = wil::AdaptFixedSizeToAllocatedResult(
-        windows_directory,
-        [](wchar_t *const buffer, const std::size_t capacity,
-            std::size_t *const required) -> HRESULT {
-            *required = GetSystemWindowsDirectoryW(
-                buffer, static_cast<UINT>(capacity));
-            RETURN_LAST_ERROR_IF(*required == 0);
-            if (*required < capacity) {
-                ++*required;
-            }
-            return S_OK;
-        });
-    if (FAILED(error)) {
-        WinError(
-            "could not obtain the system Windows directory",
-            ExplicitWin32Error{
-                static_cast<DWORD>(HRESULT_CODE(error))});
-    }
-    return std::filesystem::path(windows_directory) / L"SystemTemp";
-}
-
-export [[nodiscard]] auto EmbeddedProgram(
-    const wil::zwstring_view resource_name) {
+export [[nodiscard]] auto StartPbsProgram() {
     const auto resource = FindResourceW(
-        nullptr, resource_name.c_str(), L"DEVICEFS_ARTIFACT");
+        nullptr, L"START_PBS", L"DEVICEFS_ARTIFACT");
     if (resource == nullptr) {
         WinError("could not find an embedded backup program");
     }

@@ -36,9 +36,9 @@
 
 #pragma once
 
+#ifdef VSS_SERVER
 #include <resapi.h>
-#include "stdafx.h"
-
+#endif
 
 //for IsUNCPath method
 #define     UNC_PATH_PREFIX1        (L"\\\\?\\UNC\\")
@@ -297,8 +297,10 @@ inline bool IsVolume(wstring volumePath)
     // If the last character is not '\\', append one
     volumePath = AppendBackslash(volumePath);
 
+#ifdef VSS_SERVER
     if (!ClusterIsPathOnSharedVolume(volumePath.c_str()))
     {
+#endif
         // Get the volume name
         wstring volumeName(MAX_PATH, L'\0');
         if (!GetVolumeNameForVolumeMountPoint( volumePath.c_str(), WString2Buffer(volumeName), (DWORD)volumeName.length()))
@@ -309,11 +311,13 @@ inline bool IsVolume(wstring volumePath)
         {
             bIsVolume = true;
         }
+#ifdef VSS_SERVER
     }
     else
     {
         bIsVolume = ::PathFileExists(volumePath.c_str()) == TRUE;
     }
+#endif
 
     ft.Trace(DBG_INFO, L"IsVolume returns %s", (bIsVolume) ? L"TRUE" : L"FALSE");
     return bIsVolume;
@@ -366,6 +370,7 @@ inline wstring GetUniqueVolumeNameForPath(wstring path, bool bIsBackup=false)
     path = AppendBackslash(path);
     if(!IsUNCPath((VSS_PWSZ)path.c_str()))
     {
+#ifdef VSS_SERVER
         if (bIsBackup && ClusterIsPathOnSharedVolume(path.c_str()))
         {
             DWORD cchVolumeRootPath = MAX_PATH;
@@ -385,6 +390,7 @@ inline wstring GetUniqueVolumeNameForPath(wstring path, bool bIsBackup=false)
         }
         else
         {
+#endif
             // Get the root path of the volume
         
             CHECK_WIN32(GetVolumePathNameW((LPCWSTR)path.c_str(), WString2Buffer(volumeRootPath), (DWORD)volumeRootPath.length()));
@@ -393,7 +399,9 @@ inline wstring GetUniqueVolumeNameForPath(wstring path, bool bIsBackup=false)
             // Get the unique volume name
             CHECK_WIN32(GetVolumeNameForVolumeMountPointW((LPCWSTR)volumeRootPath.c_str(), WString2Buffer(volumeUniqueName), (DWORD)volumeUniqueName.length()));
             ft.Trace(DBG_INFO, L"- Unique volume name: %s ...", volumeUniqueName.c_str());
+#ifdef VSS_SERVER
         }
+#endif
     }
     else
     {
@@ -435,6 +443,7 @@ inline bool GetUniqueVolumeNameForPathNoThrow(wstring path, wstring &volname)
     wstring volumeRootPath(MAX_PATH, L'\0');
     wstring volumeUniqueName(MAX_PATH, L'\0');
 
+#ifdef VSS_SERVER
     if (ClusterIsPathOnSharedVolume(path.c_str()))
     {
         DWORD dwRet = ClusterGetVolumePathName(path.c_str(), 
@@ -449,6 +458,7 @@ inline bool GetUniqueVolumeNameForPathNoThrow(wstring path, wstring &volname)
     }
     else
     {
+#endif
         // Get the root path of the volume
         if (!GetVolumePathNameW((LPCWSTR)path.c_str(),
                                 WString2Buffer(volumeRootPath),
@@ -470,7 +480,9 @@ inline bool GetUniqueVolumeNameForPathNoThrow(wstring path, wstring &volname)
         }
 
         ft.Trace(DBG_INFO, L"- Unique volume name: %s ...", volumeUniqueName.c_str());
+#ifdef VSS_SERVER
     }
+#endif
     
     volname = volumeUniqueName;
 

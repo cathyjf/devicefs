@@ -36,6 +36,28 @@
 
 #pragma once
 
+#include <windows.h>
+#include <winbase.h>
+
+#include "macros.h"
+
+#include <iostream>
+#include <tchar.h>
+#define _ATL_CSTRING_EXPLICIT_CONSTRUCTORS
+
+#pragma warning(push)
+#pragma warning(disable: 4189)
+#include <atlbase.h>
+#pragma warning(pop)
+
+#include <vector>
+#include <map>
+#include <algorithm>
+#include <string>
+#include <fstream>
+using namespace std;
+
+#include <strsafe.h>
 
 // VSS includes
 #include <vss.h>

@@ -35,7 +35,7 @@
 
 
 // Main header
-#include "stdafx.h"
+#include "shadow.h"
 
 
 
@@ -43,6 +43,8 @@
 VssClient::VssClient()
 {
     m_bCoInitializeCalled = false;
+    m_hCancellationEvent = NULL;
+    m_bSnapshotSetCreated = false;
     m_dwContext = VSS_CTX_BACKUP;
     m_latestSnapshotSetID = GUID_NULL;
     m_bDuringRestore = false;
@@ -63,9 +65,11 @@ VssClient::~VssClient()
 
 
 // Initialize the COM infrastructure and the internal pointers
-void VssClient::Initialize(DWORD dwContext, wstring xmlDoc, bool bDuringRestore)
+void VssClient::Initialize(DWORD dwContext, wstring xmlDoc, bool bDuringRestore, HANDLE hCancellationEvent)
 {
     FunctionTracer ft(DBG_INFO);
+
+    m_hCancellationEvent = hCancellationEvent;
 
     // Initialize COM 
     CHECK_COM( CoInitialize(NULL) );
@@ -104,16 +108,12 @@ void VssClient::Initialize(DWORD dwContext, wstring xmlDoc, bool bDuringRestore)
         else
             CHECK_COM(m_pVssObject->InitializeForBackup(CComBSTR(xmlDoc.c_str())))
 
-#ifdef VSS_SERVER
-
         // Set the context, if different than the default context
         if (dwContext != VSS_CTX_BACKUP)
         {
             ft.WriteLine(L"- Setting the VSS context to: 0x%08lx", dwContext);
             CHECK_COM(m_pVssObject->SetContext(dwContext) );
         }
-
-#endif
 
     }
 
@@ -127,18 +127,54 @@ void VssClient::Initialize(DWORD dwContext, wstring xmlDoc, bool bDuringRestore)
 
 
 // Waits for the completion of the asynchronous operation
-void VssClient::WaitAndCheckForAsyncOperation(IVssAsync* pAsync)
+bool VssClient::WaitAndCheckForAsyncOperation(
+    IVssAsync* pAsync,
+    bool bCancellable,
+    bool bDeferCancellation)
 {
     FunctionTracer ft(DBG_INFO);
 
     ft.WriteLine(L"(Waiting for the asynchronous operation to finish...)");
 
-    // Wait until the async operation finishes
-    CHECK_COM(pAsync->Wait());
-
-    // Check the result of the asynchronous operation
     HRESULT hrReturned = S_OK;
-    CHECK_COM(pAsync->QueryStatus(&hrReturned, NULL));
+    bool bCancellationRequested = false;
+
+    if (!bCancellable || (m_hCancellationEvent == NULL))
+    {
+        // Wait until the async operation finishes
+        CHECK_COM(pAsync->Wait());
+
+        // Check the result of the asynchronous operation
+        CHECK_COM(pAsync->QueryStatus(&hrReturned, NULL));
+    }
+    else
+    {
+        do
+        {
+            CHECK_COM(pAsync->QueryStatus(&hrReturned, NULL));
+            if (hrReturned != VSS_S_ASYNC_PENDING)
+                break;
+
+            DWORD dwWait = WaitForSingleObject(m_hCancellationEvent, 100);
+            if ((dwWait == WAIT_OBJECT_0) && !bCancellationRequested)
+            {
+                CHECK_COM(pAsync->Cancel());
+                bCancellationRequested = true;
+            }
+            else if (dwWait == WAIT_OBJECT_0)
+            {
+                Sleep(100);
+            }
+            else if (dwWait == WAIT_FAILED)
+            {
+                CHECK_WIN32_ERROR(GetLastError(), "WaitForSingleObject");
+            }
+        }
+        while (true);
+    }
+
+    if (hrReturned == VSS_S_ASYNC_CANCELLED)
+        throw(HRESULT_FROM_WIN32(ERROR_CANCELLED));
 
     // Check if the async operation succeeded...
     if(FAILED(hrReturned))
@@ -146,9 +182,22 @@ void VssClient::WaitAndCheckForAsyncOperation(IVssAsync* pAsync)
         ft.WriteLine(L"Error during the last asynchronous operation.");
         ft.WriteLine(L"- Returned HRESULT = 0x%08lx", hrReturned);
         ft.WriteLine(L"- Error text: %s", FunctionTracer::HResult2String(hrReturned).c_str());
-        ft.WriteLine(L"- Please re-run VSHADOW.EXE with the /tracing option to get more details");
         throw(hrReturned);
     }
+
+    if (bCancellable && (m_hCancellationEvent != NULL))
+    {
+        DWORD dwWait = WaitForSingleObject(m_hCancellationEvent, 0);
+        if (dwWait == WAIT_OBJECT_0)
+            bCancellationRequested = true;
+        else if (dwWait == WAIT_FAILED)
+            CHECK_WIN32_ERROR(GetLastError(), "WaitForSingleObject");
+    }
+
+    if (bCancellationRequested && !bDeferCancellation)
+        throw(HRESULT_FROM_WIN32(ERROR_CANCELLED));
+
+    return bCancellationRequested;
 }
 
 

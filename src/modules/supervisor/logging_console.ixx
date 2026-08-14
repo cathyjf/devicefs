@@ -412,16 +412,15 @@ public:
     [[nodiscard]] auto StartProcess(
         const HANDLE job,
         const wil::zwstring_view application,
-        std::wstring &command,
-        const HANDLE program_input) {
-        const auto attribute_count = 3;
+        std::wstring &command) {
+        const auto attribute_count = 2;
         auto attribute_bytes = SIZE_T{};
         InitializeProcThreadAttributeList(nullptr, attribute_count, 0, &attribute_bytes);
         if ((attribute_bytes == 0) ||
             (GetLastError() != ERROR_INSUFFICIENT_BUFFER)) {
             WinError("could not size the process attribute list");
         }
-        auto attribute_storage = wil::unique_process_heap(
+        const auto attribute_storage = wil::unique_process_heap(
             HeapAlloc(GetProcessHeap(), 0, attribute_bytes));
         if (!attribute_storage) {
             WinError("could not allocate the process attribute list",
@@ -434,7 +433,6 @@ public:
             WinError("could not initialize the process attribute list");
         }
         auto jobs = std::array{job};
-        auto program_handles = std::array{program_input};
         const auto delete_attributes = wil::scope_exit(
             [=] { DeleteProcThreadAttributeList(attributes); });
         if (!UpdateProcThreadAttribute(attributes, 0,
@@ -447,20 +445,13 @@ public:
                 sizeof(jobs), nullptr, nullptr)) {
             WinError("could not assign the child process to its job");
         }
-        if (!UpdateProcThreadAttribute(attributes, 0,
-                PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-                program_handles.data(), sizeof(program_handles),
-                nullptr, nullptr)) {
-            WinError("could not inherit the PowerShell program channel");
-        }
-
         auto startup = STARTUPINFOEXW{
             .StartupInfo = {.cb = sizeof(STARTUPINFOEXW)},
             .lpAttributeList = attributes,
         };
         auto process = wil::unique_process_information{};
         if (!CreateProcessW(application.c_str(), command.data(),
-                nullptr, nullptr, TRUE,
+                nullptr, nullptr, FALSE,
                 CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
                 nullptr, nullptr,
                 &startup.StartupInfo, &process)) {
@@ -472,9 +463,7 @@ public:
     }
 
     auto Finish() {
-        input_read_.reset();
         input_write_.reset();
-        output_write_.reset();
         console_.reset();
         const auto error = output_task_.get();
         if (error != ERROR_SUCCESS) {

@@ -55,7 +55,7 @@ public:
     ~VssClient();
 
     // Initialize the internal pointers
-    void Initialize(DWORD dwContext = VSS_CTX_BACKUP, wstring xmlDoc = L"", bool bDuringRestore = false);
+    void Initialize(DWORD dwContext = VSS_CTX_BACKUP, wstring xmlDoc = L"", bool bDuringRestore = false, HANDLE hCancellationEvent = NULL);
 
     //
     //  Shadow copy creation related methods
@@ -92,6 +92,12 @@ public:
 
     // Marks all selected components as succeeded for backup
     void SetBackupSucceeded(bool succeeded);
+
+    // Return the devices for the snapshots in the latest set
+    vector<wstring> GetLatestSnapshotDevices();
+
+    // Notify VSS that an in-progress backup did not complete
+    void CompleteFailedBackup();
 
     //
     //  Shadow copy query related methods
@@ -168,7 +174,7 @@ public:
     void GatherWriterMetadataToScreen();
 
     // Gather writer status
-    void GatherWriterStatus();
+    void GatherWriterStatus(bool bCancellable = true);
 
     // Initialize writer metadata
     void InitializeWriterMetadata();
@@ -263,13 +269,16 @@ public:
     bool IsWriterSelected(GUID guidInstanceId);
 
     // Check the status for all selected writers
-    void CheckSelectedWriterStatus();
+    void CheckSelectedWriterStatus(bool bCancellable = true);
 
 
 private:
 
     // Waits for the async operation to finish
-    void WaitAndCheckForAsyncOperation(IVssAsync*  pAsync);
+    bool WaitAndCheckForAsyncOperation(
+        IVssAsync* pAsync,
+        bool bCancellable = true,
+        bool bDeferCancellation = false);
 
 
 
@@ -282,6 +291,12 @@ private:
     // TRUE if CoInitialize() was already called 
     // Needed to pair each succesfull call to CoInitialize with a corresponding CoUninitialize
     bool                            m_bCoInitializeCalled;
+
+    // Cancellation event owned by the application
+    HANDLE                          m_hCancellationEvent;
+
+    // TRUE once DoSnapshotSet has completed successfully
+    bool                            m_bSnapshotSetCreated;
 
     // VSS context
     DWORD                           m_dwContext;

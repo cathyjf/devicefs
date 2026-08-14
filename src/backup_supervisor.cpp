@@ -29,10 +29,14 @@
 #include <array>
 #include <bit>
 #include <cstddef>
+#include <chrono>
+#include <exception>
 #include <cstdio>
 #include <filesystem>
-#include <format>
 #include <fstream>
+#include <format>
+#include <future>
+#include <iostream>
 #include <iterator>
 #include <memory>
 #include <optional>
@@ -41,6 +45,8 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -49,8 +55,8 @@ import devicefs.filesystem;
 import devicefs.supervisor.embedded_artifacts;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.logging_console;
-import devicefs.supervisor.find_powershell;
 import devicefs.supervisor.process_diagnostics;
+import devicefs.supervisor.vshadow;
 
 #if defined(__INTELLISENSE__) && !defined(__cpp_lib_start_lifetime_as)
 // IntelliSense uses EDG, which does not yet expose these C++23 functions.
@@ -65,152 +71,48 @@ namespace {
 
 constexpr auto kCancellationEventName =
     wil::zwstring_view(L"Local\\devicefs-backup-stop");
-constexpr auto kCancellationEventEnvironment =
-    wil::zwstring_view(L"DEVICEFS_BACKUP_STOP_EVENT");
-constexpr auto kBackupLockEnvironment =
-    wil::zwstring_view(L"DEVICEFS_BACKUP_LOCK_PATH");
-constexpr auto kSupervisorPathEnvironment =
-    wil::zwstring_view(L"DEVICEFS_BACKUP_SUPERVISOR_PATH");
-constexpr auto kSystemTempEnvironment =
-    wil::zwstring_view(L"DEVICEFS_BACKUP_SYSTEM_TEMP_PATH");
-constexpr auto kDeviceFsOption = std::wstring_view(L"--devicefs");
-constexpr auto kHelperOption =
-    std::wstring_view(L"--run-wsl-as-pbs-vss");
-constexpr auto kWriteStartPbsOption =
-    std::wstring_view(L"--write-start-pbs");
-constexpr auto kForegroundOption = std::wstring_view(L"--foreground");
-constexpr auto kNoWritersOption = std::wstring_view(L"--no-writers");
-constexpr auto kInstallOption = std::wstring_view(L"--install-service");
-constexpr auto kUpdateOption = std::wstring_view(L"--update");
-constexpr auto kPbsUser = wil::zwstring_view(L"pbs-vss");
-constexpr auto kLocalDomain = wil::zwstring_view(L".");
-constexpr auto kGracefulStopMilliseconds = DWORD{300000};
-constexpr auto kStrayProcessWaitMilliseconds = DWORD{5000};
-constexpr auto kForcedProcessWaitMilliseconds = DWORD{30000};
-constexpr auto kStopWaitHintMilliseconds = kGracefulStopMilliseconds +
-    kStrayProcessWaitMilliseconds + kForcedProcessWaitMilliseconds;
-constexpr auto kMinimumPreshutdownMilliseconds =
-    kStopWaitHintMilliseconds + 25000;
-constexpr auto kJobPollMilliseconds = DWORD{100};
-constexpr auto kInternalFailure = DWORD{1};
-constexpr auto kAcceptedControls =
-    DWORD{SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN};
-constexpr auto kWslCreationFlags =
-    DWORD{CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT};
+constexpr auto kOrchestrateOption = std::wstring_view(L"--orchestrate");
+constexpr auto kCancelledExitCode = 130;
 
-using MaybeZwstringView = std::optional<wil::zwstring_view>;
+[[nodiscard]] auto RunNativeBackup(
+    const HANDLE cancellation_event, const bool no_writers) -> int;
 
-auto PublishEnvironmentVariable(
-    const wil::zwstring_view variable,
-    const MaybeZwstringView value) {
-    if (!SetEnvironmentVariableW(
-            variable.c_str(), value ? value->c_str() : nullptr)) {
-        WinError("could not update an environment variable");
-    }
-}
-
-auto PublishBackupEnvironment(
-    const PersistentPaths &persistent,
-    const bool no_writers) {
-    PublishEnvironmentVariable(
-        kBackupLockEnvironment, persistent.backup_lock);
-    PublishEnvironmentVariable(
-        kSupervisorPathEnvironment, CurrentExecutablePath());
-    PublishEnvironmentVariable(
-        kSystemTempEnvironment, SystemTempDirectory());
-    PublishEnvironmentVariable(L"POWERSHELL_TELEMETRY_OPTOUT", L"1");
-    PublishEnvironmentVariable(L"POWERSHELL_DIAGNOSTICS_OPTOUT", L"1");
-    PublishEnvironmentVariable(L"POWERSHELL_UPDATECHECK", L"Off");
-    PublishEnvironmentVariable(
-        L"DEVICEFS_RUN_VHSADOW_CALLBACK", std::nullopt);
-    PublishEnvironmentVariable(L"DEVICEFS_BACKUP_NO_WRITERS",
-        no_writers ? L"1" : MaybeZwstringView{std::nullopt}
-    );
-}
-
-[[nodiscard]] auto WslPath() {
-    return ProgramFilesDirectory() / L"WSL" / L"wsl.exe";
-}
-
-struct PowerShellProgramPipe {
-    wil::unique_handle read;
-    wil::unique_handle write;
-};
-
-[[nodiscard]] auto CreatePowerShellProgramPipe() {
-    auto result = PowerShellProgramPipe{};
-    auto security = SECURITY_ATTRIBUTES{
-        .nLength = sizeof(SECURITY_ATTRIBUTES),
-        .lpSecurityDescriptor = nullptr,
-        .bInheritHandle = TRUE,
-    };
-    if (!CreatePipe(result.read.addressof(), result.write.addressof(),
-            &security, 0)) {
-        WinError("could not create the embedded PowerShell program channel");
-    }
-    return result;
-}
-
-[[nodiscard]] auto PowerShellCommand(const HANDLE program_input) {
-    const auto handle = std::bit_cast<std::intptr_t>(program_input);
-    return std::format(
-        LR"powershell(if ($PSVersionTable.PSVersion -lt [version]'7.4') {{
-    throw 'PowerShell 7.4 or later is required.'
-}}
-$ErrorActionPreference = 'Stop'
-$reader = [IO.StreamReader]::new(
-    [IO.Pipes.AnonymousPipeClientStream]::new(
-        [IO.Pipes.PipeDirection]::In, '{}'),
-    [Text.UTF8Encoding]::new($false, $true), $false)
-$source = $reader.ReadToEnd()
-$reader.Dispose()
-$program = [scriptblock]::Create($source)
-& $program
-)powershell",
-        handle);
-}
-
-auto WritePowerShellProgram(
-    wil::unique_handle destination,
-    const std::span<const char> program) {
-    [[gsl::suppress("type.1",
-        justification: "Embedded PowerShell programs are bounded far below MAXDWORD.")]]
-    const auto program_size = static_cast<DWORD>(program.size());
-    auto written = DWORD{};
-    if (!WriteFile(destination.get(), program.data(), program_size,
-            &written, nullptr)) {
-        WinError("could not write the embedded PowerShell program");
-    }
-}
-
-auto WriteStartPbs() {
-    const auto program = EmbeddedProgram(L"START_PBS");
-    [[gsl::suppress("type.1",
-        justification: "The embedded Fish program is bounded far below MAXDWORD.")]]
-    const auto program_size = static_cast<DWORD>(program.size());
-    auto written = DWORD{};
-    if (!WriteFile(GetStdHandle(STD_OUTPUT_HANDLE),
-            program.data(), program_size,
-            &written, nullptr)) {
-        WinError("could not write the embedded Fish program");
-    }
-    if (written != program_size) {
-        WinError("could not write the complete embedded Fish program",
-            ExplicitWin32Error{ERROR_WRITE_FAULT});
-    }
-}
-
-[[nodiscard]] auto CreateCancellationEvent() {
+[[nodiscard]] auto CreateCancellationEvent(const wchar_t *const name) {
     auto event = wil::unique_event_nothrow{};
     auto already_exists = false;
     if (!event.try_create(wil::EventOptions::ManualReset,
-            kCancellationEventName.c_str(), nullptr, &already_exists)) {
+            name, nullptr, &already_exists)) {
         WinError("could not create the cancellation event");
     }
     if (already_exists) {
         throw std::runtime_error("the cancellation event already exists");
     }
     return event;
+}
+
+[[nodiscard]] auto OpenCancellationEvent() {
+    auto event = wil::unique_event_nothrow{};
+    if (!event.try_open(
+            kCancellationEventName.c_str(), SYNCHRONIZE)) {
+        WinError("could not open the backup cancellation event");
+    }
+    return event;
+}
+
+[[nodiscard]] auto AcquireBackupLock(
+    const std::filesystem::path &path) {
+    auto lock = wil::unique_hfile(CreateFileW(
+        path.c_str(), GENERIC_READ, 0, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!lock) {
+        const auto error = GetLastError();
+        if (error == ERROR_SHARING_VIOLATION) {
+            throw std::runtime_error("a backup is already running");
+        }
+        WinError("could not open the backup lock file",
+            ExplicitWin32Error{error});
+    }
+    return lock;
 }
 
 [[nodiscard]] auto CreateChildJob() {
@@ -228,27 +130,30 @@ auto WriteStartPbs() {
     return job;
 }
 
+[[nodiscard]] auto WaitForProcess(
+    const HANDLE process, const DWORD timeout) {
+    const auto result = WaitForSingleObject(process, timeout);
+    if (result == WAIT_FAILED) {
+        WinError("could not wait for a backup process");
+    }
+    return result == WAIT_OBJECT_0;
+}
+
+[[nodiscard]] auto ProcessExitCode(const HANDLE process) {
+    auto result = DWORD{};
+    if (!GetExitCodeProcess(process, &result)) {
+        WinError("could not obtain a backup process exit code");
+    }
+    return result;
+}
+
 struct BackupProcess {
+    static constexpr auto kPollMilliseconds = DWORD{100};
+    static constexpr auto kForcedWaitMilliseconds = DWORD{30000};
+
     LoggingConsole console;
     wil::unique_process_information process;
-    wil::unique_handle program_write;
     wil::unique_handle job;
-
-    [[nodiscard]] auto Wait(const DWORD timeout) const {
-        const auto result = WaitForSingleObject(process.hProcess, timeout);
-        if (result == WAIT_FAILED) {
-            WinError("could not wait for the backup orchestrator");
-        }
-        return result == WAIT_OBJECT_0;
-    }
-
-    [[nodiscard]] auto ExitCode() const {
-        auto result = DWORD{};
-        if (!GetExitCodeProcess(process.hProcess, &result)) {
-            WinError("could not obtain the backup orchestrator exit code");
-        }
-        return result;
-    }
 
     [[nodiscard]] auto WaitForAll(const DWORD timeout) const {
         const auto deadline = GetTickCount64() + timeout;
@@ -265,7 +170,7 @@ struct BackupProcess {
             if (GetTickCount64() >= deadline) {
                 return false;
             }
-            Sleep(kJobPollMilliseconds);
+            Sleep(kPollMilliseconds);
         }
     }
 
@@ -273,7 +178,7 @@ struct BackupProcess {
         if (!TerminateJobObject(job.get(), exit_code)) {
             WinError("could not terminate the backup process job");
         }
-        if (!WaitForAll(kForcedProcessWaitMilliseconds)) {
+        if (!WaitForAll(kForcedWaitMilliseconds)) {
             throw std::runtime_error(
                 "backup processes survived job termination");
         }
@@ -297,31 +202,25 @@ template <typename Start>
     const HANDLE standard_input,
     const HANDLE standard_output,
     const HANDLE standard_error,
-    const HANDLE program_input,
-    const HANDLE job,
-    const DWORD additional_startup_flags,
     const Start &start,
     const wil::zstring_view operation) {
-    auto child_handles = std::array{
+    const auto child_handles = std::array{
         DuplicateInheritableHandle(standard_input),
         DuplicateInheritableHandle(standard_output),
         DuplicateInheritableHandle(standard_error),
     };
     auto inherited_handles = std::array{
         child_handles[0].get(), child_handles[1].get(), child_handles[2].get(),
-        program_input,
     };
-    const auto inherited_handle_count =
-        program_input == nullptr ? 3uz : inherited_handles.size();
-    const auto attribute_count = job == nullptr ? 1u : 2u;
+    constexpr auto kAttributeCount = DWORD{1};
     auto attribute_bytes = SIZE_T{};
     InitializeProcThreadAttributeList(
-        nullptr, attribute_count, 0, &attribute_bytes);
+        nullptr, kAttributeCount, 0, &attribute_bytes);
     if ((attribute_bytes == 0) || (GetLastError() != ERROR_INSUFFICIENT_BUFFER)) {
         WinError("could not size the process attribute list");
     }
     // Process-heap allocations are 16-byte aligned on the required x64 target.
-    auto attribute_storage = wil::unique_process_heap(
+    const auto attribute_storage = wil::unique_process_heap(
         HeapAlloc(GetProcessHeap(), 0, attribute_bytes));
     if (!attribute_storage) {
         WinError("could not allocate the process attribute list",
@@ -330,30 +229,22 @@ template <typename Start>
     auto *const attributes = static_cast<PPROC_THREAD_ATTRIBUTE_LIST>(
         attribute_storage.get());
     if (!InitializeProcThreadAttributeList(
-            attributes, attribute_count, 0, &attribute_bytes)) {
+            attributes, kAttributeCount, 0, &attribute_bytes)) {
         WinError("could not initialize the process attribute list");
     }
-    auto jobs = std::array{job};
     const auto delete_attributes = wil::scope_exit(
         [=] { DeleteProcThreadAttributeList(attributes); });
     if (!UpdateProcThreadAttribute(attributes, 0,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
             inherited_handles.data(),
-            inherited_handle_count * sizeof(HANDLE), nullptr, nullptr)) {
+            sizeof(inherited_handles), nullptr, nullptr)) {
         WinError("could not restrict inherited process handles");
-    }
-
-    if ((job != nullptr) &&
-        !UpdateProcThreadAttribute(attributes, 0,
-            PROC_THREAD_ATTRIBUTE_JOB_LIST, jobs.data(),
-            sizeof(jobs), nullptr, nullptr)) {
-        WinError("could not assign the child process to its job");
     }
 
     auto startup = STARTUPINFOEXW{
         .StartupInfo = {
             .cb = sizeof(STARTUPINFOEXW),
-            .dwFlags = STARTF_USESTDHANDLES | additional_startup_flags,
+            .dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES,
             .wShowWindow = SW_HIDE,
             .hStdInput = inherited_handles[0],
             .hStdOutput = inherited_handles[1],
@@ -368,72 +259,38 @@ template <typename Start>
     return process;
 }
 
-[[nodiscard]] auto RunPowerShellProgram(
-    const wil::zwstring_view resource,
-    const bool non_interactive) {
-    const auto program = EmbeddedProgram(resource);
-    auto pipe = CreatePowerShellProgramPipe();
-    const auto powershell = PowerShellPath();
-    const auto powershell_command = PowerShellCommand(pipe.read.get());
-    auto arguments = std::vector<std::wstring_view>{
-        powershell.native(),
-        L"-NoLogo", L"-NoProfile",
-    };
-    if (non_interactive) {
-        arguments.push_back(L"-NonInteractive");
-    }
-    arguments.push_back(L"-Command");
-    arguments.push_back(powershell_command);
-    auto command = wil::ArgvToCommandLine(arguments);
-    auto process = StartProcessWithHandles(
-        GetStdHandle(STD_INPUT_HANDLE),
-        GetStdHandle(STD_OUTPUT_HANDLE),
-        GetStdHandle(STD_ERROR_HANDLE),
-        pipe.read.get(),
-        nullptr,
-        0,
-        [&](STARTUPINFOW *const startup, PROCESS_INFORMATION *const result) {
-            return CreateProcessW(powershell.c_str(), command.data(),
-                nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT,
-                nullptr, nullptr, startup, result);
-        },
-        "could not start an embedded PowerShell program");
-    pipe.read.reset();
-    WritePowerShellProgram(std::move(pipe.write), program);
-    if (WaitForSingleObject(process.hProcess, INFINITE) == WAIT_FAILED) {
-        WinError("could not wait for an embedded PowerShell program");
-    }
-    auto exit_code = DWORD{};
-    if (!GetExitCodeProcess(process.hProcess, &exit_code)) {
-        WinError("could not obtain an embedded PowerShell program exit code");
-    }
-    return std::bit_cast<int>(exit_code);
-}
-
 [[nodiscard]] auto StartOrchestrator(Log &log) {
     auto console = LoggingConsole(log);
     auto job = CreateChildJob();
-    auto pipe = CreatePowerShellProgramPipe();
-    const auto powershell = PowerShellPath();
-    const auto program = PowerShellCommand(pipe.read.get());
-    const auto arguments = std::to_array<std::wstring_view>({
-        powershell.native(),
-        L"-NoLogo", L"-NoProfile", L"-NonInteractive", L"-Command",
-        program,
-    });
+    const auto supervisor = CurrentExecutablePath();
+    const auto arguments = std::array<std::wstring_view, 2>{
+        supervisor.native(), kOrchestrateOption};
     auto command = wil::ArgvToCommandLine(arguments);
     auto process = console.StartProcess(
-        job.get(), wil::zwstring_view(powershell.native()),
-        command, pipe.read.get());
+        job.get(), wil::zwstring_view(supervisor.native()), command);
     return BackupProcess{
         .console = std::move(console),
         .process = std::move(process),
-        .program_write = std::move(pipe.write),
         .job = std::move(job),
     };
 }
 
 struct ServiceContext {
+    static constexpr auto kInitialPendingCheckpoint = DWORD{1};
+    static constexpr auto kForcedCleanupCheckpoint =
+        kInitialPendingCheckpoint + 1;
+    static constexpr auto kStartWaitHintMilliseconds = DWORD{30000};
+    static constexpr auto kGracefulStopMilliseconds = DWORD{300000};
+    static constexpr auto kStrayProcessWaitMilliseconds = DWORD{5000};
+    static constexpr auto kStopWaitHintMilliseconds =
+        kGracefulStopMilliseconds + kStrayProcessWaitMilliseconds +
+        BackupProcess::kForcedWaitMilliseconds;
+    static constexpr auto kPreshutdownMarginMilliseconds = DWORD{25000};
+    static constexpr auto kMinimumPreshutdownMilliseconds =
+        kStopWaitHintMilliseconds + kPreshutdownMarginMilliseconds;
+    static constexpr auto kAcceptedControls =
+        DWORD{SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN};
+
     SERVICE_STATUS_HANDLE status_handle = nullptr;
     wil::unique_event_nothrow cancellation_event;
 };
@@ -449,7 +306,7 @@ auto SetServiceState(
         .dwServiceType = SERVICE_WIN32_OWN_PROCESS,
         .dwCurrentState = state,
         .dwControlsAccepted = state == SERVICE_RUNNING
-            ? kAcceptedControls
+            ? ServiceContext::kAcceptedControls
             : 0,
         .dwWin32ExitCode = win32_error,
         .dwServiceSpecificExitCode = service_error,
@@ -484,10 +341,6 @@ struct ServiceOutcome {
 [[nodiscard]] auto RunBackup(
     ServiceContext &context,
     Log &log) {
-    PublishEnvironmentVariable(
-        kCancellationEventEnvironment, kCancellationEventName);
-
-    const auto program = EmbeddedProgram(L"ORCHESTRATE_BACKUP");
     auto backup = StartOrchestrator(log);
     log.Write("backup-supervisor: backup starting");
     if (!SetServiceState(context, SERVICE_RUNNING)) {
@@ -495,13 +348,12 @@ struct ServiceOutcome {
     }
     auto report_stopping = wil::scope_exit([&] {
         SetServiceState(context, SERVICE_STOP_PENDING,
-            ERROR_SUCCESS, 0, 1, kStopWaitHintMilliseconds);
+            ERROR_SUCCESS, 0, ServiceContext::kInitialPendingCheckpoint,
+            ServiceContext::kStopWaitHintMilliseconds);
     });
     if (ResumeThread(backup.process.hThread) == MAXDWORD) {
         WinError("could not resume the backup orchestrator");
     }
-    WritePowerShellProgram(
-        std::move(backup.program_write), program);
 
     const auto waits = std::array{
         backup.process.hProcess, context.cancellation_event.get(),
@@ -512,28 +364,34 @@ struct ServiceOutcome {
         WinError("could not wait for the backup orchestrator");
     }
     SetServiceState(context, SERVICE_STOP_PENDING,
-        ERROR_SUCCESS, 0, 1, kStopWaitHintMilliseconds);
+        ERROR_SUCCESS, 0, ServiceContext::kInitialPendingCheckpoint,
+        ServiceContext::kStopWaitHintMilliseconds);
     report_stopping.release();
+    const auto cancellation_signaled =
+        context.cancellation_event.is_signaled();
 
-    const auto cancelled = context.cancellation_event.is_signaled();
     auto forced = false;
-    if (cancelled && !backup.Wait(kGracefulStopMilliseconds)) {
+    if (cancellation_signaled && !WaitForProcess(
+            backup.process.hProcess,
+            ServiceContext::kGracefulStopMilliseconds)) {
         log.Write(
             "backup-supervisor: graceful stop timed out; terminating the process job");
         LogJobProcesses(log, backup.job.get());
         SetServiceState(context, SERVICE_STOP_PENDING,
-            ERROR_SUCCESS, 0, 2, kForcedProcessWaitMilliseconds);
+            ERROR_SUCCESS, 0, ServiceContext::kForcedCleanupCheckpoint,
+            BackupProcess::kForcedWaitMilliseconds);
         backup.TerminateAndWait(ERROR_CANCELLED);
         forced = true;
     }
 
-    const auto child_exit_code = backup.ExitCode();
-    if (!backup.WaitForAll(kStrayProcessWaitMilliseconds)) {
+    const auto child_exit_code = ProcessExitCode(backup.process.hProcess);
+    if (!backup.WaitForAll(ServiceContext::kStrayProcessWaitMilliseconds)) {
         log.Write(
             "backup-supervisor: terminating child processes left behind by the orchestrator");
         LogJobProcesses(log, backup.job.get());
         SetServiceState(context, SERVICE_STOP_PENDING,
-            ERROR_SUCCESS, 0, 2, kForcedProcessWaitMilliseconds);
+            ERROR_SUCCESS, 0, ServiceContext::kForcedCleanupCheckpoint,
+            BackupProcess::kForcedWaitMilliseconds);
         backup.TerminateAndWait(ERROR_PROCESS_ABORTED);
         forced = true;
     }
@@ -544,12 +402,12 @@ struct ServiceOutcome {
             "backup-supervisor: backup failed after forced process termination; "
             "orchestrator exit code {}",
             child_exit_code);
-    } else if ((child_exit_code == 0) && cancelled) {
+    } else if ((child_exit_code == 0) && cancellation_signaled) {
         log.Write(
             "backup-supervisor: backup completed before cancellation took effect");
     } else if (child_exit_code == 0) {
         log.Write("backup-supervisor: backup completed successfully");
-    } else if (cancelled) {
+    } else if (cancellation_signaled) {
         log.Write(
             "backup-supervisor: backup cancelled; orchestrator exit code {}",
             child_exit_code);
@@ -562,7 +420,7 @@ struct ServiceOutcome {
     if (forced) {
         return ServiceOutcome{.win32_error = ERROR_TIMEOUT};
     }
-    if (cancelled || (child_exit_code == 0)) {
+    if (cancellation_signaled || (child_exit_code == 0)) {
         return ServiceOutcome{};
     }
     return ServiceOutcome{
@@ -580,6 +438,7 @@ auto TryWriteFailure(
 
 [[nodiscard]] auto RunService(
     ServiceContext &context, const DWORD argc) noexcept {
+    constexpr auto kInternalFailure = DWORD{1};
     auto result = ServiceOutcome{};
     auto log = std::optional<Log>{};
     try {
@@ -590,8 +449,8 @@ auto TryWriteFailure(
         }
         const auto persistent = ResolvePersistentPaths();
         log.emplace(persistent.logs);
-        PublishBackupEnvironment(persistent, false);
-        context.cancellation_event = CreateCancellationEvent();
+        context.cancellation_event = CreateCancellationEvent(
+            kCancellationEventName.c_str());
         result = RunBackup(context, *log);
     } catch (const std::system_error &error) {
         result.win32_error = std::bit_cast<DWORD>(error.code().value());
@@ -615,17 +474,86 @@ auto TryWriteFailure(
 }
 
 [[nodiscard]] auto RunForeground(const bool no_writers) {
+    const auto input = GetStdHandle(STD_INPUT_HANDLE);
     auto console_mode = DWORD{};
-    if (!GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &console_mode)) {
+    if (!GetConsoleMode(input, &console_mode)) {
         throw std::runtime_error(
             "--foreground requires an attached console");
     }
-    PublishEnvironmentVariable(
-        kCancellationEventEnvironment, std::nullopt);
-
     const auto persistent = ResolvePersistentPaths();
-    PublishBackupEnvironment(persistent, no_writers);
-    return RunPowerShellProgram(L"ORCHESTRATE_BACKUP", false);
+    const auto backup_lock = AcquireBackupLock(persistent.backup_lock);
+    const auto cancellation_event = CreateCancellationEvent(nullptr);
+
+    if (!SetConsoleMode(
+            input, console_mode & ~DWORD{ENABLE_PROCESSED_INPUT})) {
+        WinError("could not enable foreground cancellation input");
+    }
+    auto restore_console_mode = wil::scope_exit([&] {
+        static_cast<void>(SetConsoleMode(input, console_mode));
+    });
+
+    auto backup = std::async(std::launch::async,
+        RunNativeBackup, cancellation_event.get(), no_writers);
+    auto cancel_on_monitor_failure = wil::scope_exit([&] {
+        static_cast<void>(SetEvent(cancellation_event.get()));
+    });
+    constexpr auto kPollInterval = std::chrono::milliseconds{100};
+    constexpr auto kInputBatchSize = 16uz;
+    while (backup.wait_for(kPollInterval) !=
+        std::future_status::ready) {
+        auto available = DWORD{};
+        if (!GetNumberOfConsoleInputEvents(input, &available)) {
+            WinError("could not inspect foreground console input");
+        }
+        while (available != 0) {
+            auto records = std::array<INPUT_RECORD, kInputBatchSize>{};
+            auto read = DWORD{};
+            const auto count = std::min<DWORD>(
+                available, DWORD{records.size()});
+            if (!ReadConsoleInputW(input, records.data(), count, &read)) {
+                WinError("could not read foreground console input");
+            }
+            for (const auto &record : std::span{records}.first(read)) {
+                if ((record.EventType != KEY_EVENT) ||
+                    !record.Event.KeyEvent.bKeyDown ||
+                    (record.Event.KeyEvent.wVirtualKeyCode != L'C') ||
+                    ((record.Event.KeyEvent.dwControlKeyState &
+                        (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) == 0)) {
+                    continue;
+                }
+                if (cancellation_event.is_signaled()) {
+                    continue;
+                }
+                if (!SetEvent(cancellation_event.get())) {
+                    WinError("could not request backup cancellation");
+                }
+                std::wcout <<
+                    L"Cancellation requested; waiting for backup cleanup.\n";
+            }
+            if (!GetNumberOfConsoleInputEvents(input, &available)) {
+                WinError("could not inspect foreground console input");
+            }
+        }
+    }
+    cancel_on_monitor_failure.release();
+    const auto result = [&] {
+        try {
+            const auto backup_result = backup.get();
+            return cancellation_event.is_signaled()
+                ? kCancelledExitCode
+                : backup_result;
+        } catch (...) {
+            if (cancellation_event.is_signaled()) {
+                return kCancelledExitCode;
+            }
+            throw;
+        }
+    }();
+    if (!SetConsoleMode(input, console_mode)) {
+        WinError("could not restore the foreground console input mode");
+    }
+    restore_console_mode.release();
+    return result;
 }
 
 auto WINAPI ServiceMain(
@@ -637,11 +565,17 @@ auto WINAPI ServiceMain(
         return;
     }
     SetServiceState(context, SERVICE_START_PENDING,
-        ERROR_SUCCESS, 0, 1, 30000);
+        ERROR_SUCCESS, 0, ServiceContext::kInitialPendingCheckpoint,
+        ServiceContext::kStartWaitHintMilliseconds);
     const auto result = RunService(context, argc);
     SetServiceState(context, SERVICE_STOPPED,
         result.win32_error, result.service_error);
 }
+
+constexpr auto kPbsUser = wil::zwstring_view(L"pbs-vss");
+constexpr auto kLocalDomain = wil::zwstring_view(L".");
+constexpr auto kWslCreationFlags = DWORD{
+    CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT};
 
 [[nodiscard]] auto ReadPbsVssPassword(
     const std::filesystem::path &password_path) {
@@ -670,44 +604,107 @@ auto WINAPI ServiceMain(
     return token;
 }
 
-auto EnableProfilePrivileges(const HANDLE token) {
-    constexpr auto privilege_names = std::array{
+class ProfilePrivilegeEnabler {
+    static constexpr auto kPrivilegeNames = std::array{
         wil::zwstring_view(SE_BACKUP_NAME),
         wil::zwstring_view(SE_RESTORE_NAME),
     };
-    constexpr auto storage_size =
+    static constexpr auto kStateSize =
         offsetof(TOKEN_PRIVILEGES, Privileges) +
-        (privilege_names.size() * sizeof(LUID_AND_ATTRIBUTES));
-    alignas(TOKEN_PRIVILEGES)
-    auto storage = std::array<std::byte, storage_size>{};
-    auto entries = std::span{
-        std::start_lifetime_as_array<LUID_AND_ATTRIBUTES>(
-            storage.data() + offsetof(TOKEN_PRIVILEGES, Privileges),
-            privilege_names.size()),
-        privilege_names.size(),
-    };
-    for (auto index = 0uz; index < privilege_names.size(); ++index) {
-        auto &entry = entries[index];
-        if (!LookupPrivilegeValueW(
-                nullptr, privilege_names[index].c_str(), &entry.Luid)) {
-            WinError("could not identify a user-profile privilege");
+        (kPrivilegeNames.size() * sizeof(LUID_AND_ATTRIBUTES));
+
+  public:
+    explicit ProfilePrivilegeEnabler(const HANDLE process) {
+        if (!OpenProcessToken(process,
+                TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                token_.addressof())) {
+            WinError("could not open the backup-supervisor process token");
         }
-        entry.Attributes = SE_PRIVILEGE_ENABLED;
+
+        alignas(TOKEN_PRIVILEGES)
+        auto state_storage = std::array<std::byte, kStateSize>{};
+        auto entries = std::span{
+            std::start_lifetime_as_array<LUID_AND_ATTRIBUTES>(
+                state_storage.data() +
+                    offsetof(TOKEN_PRIVILEGES, Privileges),
+                kPrivilegeNames.size()),
+            kPrivilegeNames.size(),
+        };
+        for (auto index = 0uz; index < kPrivilegeNames.size(); ++index) {
+            auto &entry = entries[index];
+            if (!LookupPrivilegeValueW(
+                    nullptr, kPrivilegeNames[index].c_str(), &entry.Luid)) {
+                WinError("could not identify a user-profile privilege");
+            }
+            entry.Attributes = SE_PRIVILEGE_ENABLED;
+        }
+        auto *const state =
+            std::start_lifetime_as<TOKEN_PRIVILEGES>(state_storage.data());
+        state->PrivilegeCount = DWORD{kPrivilegeNames.size()};
+
+        static_cast<void>(std::start_lifetime_as_array<LUID_AND_ATTRIBUTES>(
+            previous_state_storage_.data() +
+                offsetof(TOKEN_PRIVILEGES, Privileges),
+            kPrivilegeNames.size()));
+        auto *const previous_state = std::start_lifetime_as<TOKEN_PRIVILEGES>(
+            previous_state_storage_.data());
+        auto previous_state_size = DWORD{};
+        if (!AdjustTokenPrivileges(
+                token_.get(), FALSE, state,
+                DWORD{kStateSize}, previous_state,
+                &previous_state_size)) {
+            WinError("could not enable the user-profile privileges");
+        }
+        previous_state_ = previous_state;
+        const auto error = GetLastError();
+        if (error != ERROR_SUCCESS) {
+            static_cast<void>(RestoreNoThrow());
+            WinError("could not enable the user-profile privileges",
+                ExplicitWin32Error{error});
+        }
     }
-    auto *const privileges =
-        std::start_lifetime_as<TOKEN_PRIVILEGES>(storage.data());
-    privileges->PrivilegeCount = DWORD{privilege_names.size()};
-    if (!AdjustTokenPrivileges(
-            token, FALSE, privileges,
-            0, nullptr, nullptr)) {
-        WinError("could not enable the user-profile privileges");
+
+    ProfilePrivilegeEnabler(const ProfilePrivilegeEnabler &) = delete;
+    auto operator=(const ProfilePrivilegeEnabler &)
+        -> ProfilePrivilegeEnabler & = delete;
+    ProfilePrivilegeEnabler(ProfilePrivilegeEnabler &&) = delete;
+    auto operator=(ProfilePrivilegeEnabler &&)
+        -> ProfilePrivilegeEnabler & = delete;
+
+    ~ProfilePrivilegeEnabler() {
+        static_cast<void>(RestoreNoThrow());
     }
-    const auto error = GetLastError();
-    if (error != ERROR_SUCCESS) {
-        WinError("could not enable the user-profile privileges",
-            ExplicitWin32Error{error});
+
+    auto Restore() {
+        const auto error = RestoreNoThrow();
+        if (error != ERROR_SUCCESS) {
+            WinError("could not restore the user-profile privileges",
+                ExplicitWin32Error{error});
+        }
     }
-}
+
+  private:
+    [[nodiscard]] auto RestoreNoThrow() noexcept -> DWORD {
+        if (previous_state_ == nullptr) {
+            return DWORD{ERROR_SUCCESS};
+        }
+        if (!AdjustTokenPrivileges(
+                token_.get(), FALSE, previous_state_,
+                0, nullptr, nullptr)) {
+            return GetLastError();
+        }
+        const auto error = GetLastError();
+        if (error == ERROR_SUCCESS) {
+            previous_state_ = nullptr;
+        }
+        return error;
+    }
+
+    wil::unique_handle token_;
+    alignas(TOKEN_PRIVILEGES)
+    std::array<std::byte, kStateSize> previous_state_storage_{};
+    TOKEN_PRIVILEGES *previous_state_ = nullptr;
+};
 
 [[nodiscard]] auto RunningAsLocalSystem() {
     auto result = false;
@@ -725,11 +722,14 @@ auto EnableProfilePrivileges(const HANDLE token) {
     const wil::zwstring_view password,
     const std::filesystem::path &wsl_path,
     std::wstring &command,
-    const std::filesystem::path &working_directory) {
-    auto child_handles = std::array{
-        DuplicateInheritableHandle(GetStdHandle(STD_INPUT_HANDLE)),
-        DuplicateInheritableHandle(GetStdHandle(STD_OUTPUT_HANDLE)),
-        DuplicateInheritableHandle(GetStdHandle(STD_ERROR_HANDLE)),
+    const std::filesystem::path &working_directory,
+    const HANDLE standard_input,
+    const HANDLE standard_output,
+    const HANDLE standard_error) {
+    const auto child_handles = std::array{
+        DuplicateInheritableHandle(standard_input),
+        DuplicateInheritableHandle(standard_output),
+        DuplicateInheritableHandle(standard_error),
     };
     auto startup = STARTUPINFOW{
         .cb = sizeof(STARTUPINFOW),
@@ -753,48 +753,144 @@ auto EnableProfilePrivileges(const HANDLE token) {
     return process;
 }
 
-[[nodiscard]] auto WaitForWsl(
-    const wil::unique_process_information &process) {
-    if (WaitForSingleObject(process.hProcess, INFINITE) == WAIT_FAILED) {
-        WinError("could not wait for WSL");
+struct ProfileCloser {
+    HANDLE token = nullptr;
+
+    auto operator()(void *const profile) const noexcept {
+        static_cast<void>(UnloadUserProfile(token, profile));
     }
-    auto exit_code = DWORD{};
-    if (!GetExitCodeProcess(process.hProcess, &exit_code)) {
-        WinError("could not obtain the WSL exit code");
+};
+
+using LoadedProfile =
+    std::unique_ptr<std::remove_pointer_t<HANDLE>, ProfileCloser>;
+
+[[nodiscard]] auto CopyPipeOutput(
+    const HANDLE source, const HANDLE destination) noexcept {
+    constexpr auto kBufferSize = DWORD{4096};
+    auto buffer = std::array<std::byte, kBufferSize>{};
+    while (true) {
+        auto read = DWORD{};
+        if (!ReadFile(source, buffer.data(), kBufferSize,
+                &read, nullptr)) {
+            const auto error = GetLastError();
+            return error == ERROR_BROKEN_PIPE ? ERROR_SUCCESS : error;
+        }
+        if (read == 0) {
+            return DWORD{ERROR_SUCCESS};
+        }
+        auto offset = DWORD{};
+        while (offset < read) {
+            auto written = DWORD{};
+            if (!WriteFile(destination, buffer.data() + offset,
+                    read - offset, &written, nullptr)) {
+                return GetLastError();
+            }
+            if (written == 0) {
+                return DWORD{ERROR_WRITE_FAULT};
+            }
+            offset += written;
+        }
     }
-    return std::bit_cast<int>(exit_code);
 }
 
-[[nodiscard]] auto RunWslAsPbsVss(
-    const std::span<const wchar_t *const> arguments) {
-    if (arguments.empty()) {
-        throw std::invalid_argument(
-            "--run-wsl-as-pbs-vss requires at least one WSL argument");
+class PipeCopy {
+  public:
+    PipeCopy(wil::unique_handle source, const HANDLE destination) {
+        auto task = std::packaged_task<DWORD()>(
+            [source = std::move(source), destination]() noexcept {
+                return CopyPipeOutput(source.get(), destination);
+            });
+        result_ = task.get_future();
+        worker_ = std::thread(std::move(task));
     }
+
+    PipeCopy(const PipeCopy &) = delete;
+    auto operator=(const PipeCopy &) -> PipeCopy & = delete;
+    PipeCopy(PipeCopy &&) = default;
+    auto operator=(PipeCopy &&) -> PipeCopy & = delete;
+
+    [[gsl::suppress("26447",
+        justification: "A still-running pipe copy must be detached when its WSL operation is abandoned.")]]
+    ~PipeCopy() {
+        if (worker_.joinable()) {
+            worker_.detach();
+        }
+    }
+
+    auto Finish() {
+        worker_.join();
+        return result_.get();
+    }
+
+  private:
+    std::future<DWORD> result_;
+    std::thread worker_;
+};
+
+struct WslProcess {
+    wil::unique_handle token;
+    LoadedProfile profile;
+    wil::unique_process_information process;
+    std::optional<PipeCopy> standard_output;
+    std::optional<PipeCopy> standard_error;
+
+    WslProcess() = default;
+    WslProcess(const WslProcess &) = delete;
+    auto operator=(const WslProcess &) -> WslProcess & = delete;
+    WslProcess(WslProcess &&) = default;
+    auto operator=(WslProcess &&) -> WslProcess & = delete;
+
+    ~WslProcess() {
+        if (profile && (process.hProcess != nullptr) &&
+            (WaitForSingleObject(process.hProcess, 0) != WAIT_OBJECT_0)) {
+            // UnloadUserProfile must not run until the child has exited. An
+            // abandoned WSL process therefore retains the loaded profile and
+            // its associated token until this process exits.
+            static_cast<void>(profile.release());
+            static_cast<void>(token.release());
+        }
+    }
+
+    auto FinishOutput() {
+        auto first_error = DWORD{ERROR_SUCCESS};
+        if (standard_output) {
+            first_error = standard_output->Finish();
+        }
+        if (standard_error) {
+            const auto error = standard_error->Finish();
+            if (first_error == ERROR_SUCCESS) {
+                first_error = error;
+            }
+        }
+        if (first_error != ERROR_SUCCESS) {
+            WinError("could not copy WSL output",
+                ExplicitWin32Error{first_error});
+        }
+    }
+};
+
+[[nodiscard]] auto StartWslAsPbsVss(
+    const std::span<const std::wstring_view> arguments,
+    const HANDLE standard_input,
+    const HANDLE standard_output,
+    const HANDLE standard_error) {
     const auto persistent = ResolvePersistentPaths();
     const auto password = ReadPbsVssPassword(persistent.password);
-    const auto wsl_path = WslPath();
+    const auto wsl_path = ProgramFilesDirectory() / L"WSL" / L"wsl.exe";
     auto argument_views = std::vector<std::wstring_view>{wsl_path.native()};
     argument_views.append_range(arguments);
     auto command = wil::ArgvToCommandLine(argument_views);
     const auto wsl_directory = wsl_path.parent_path();
     if (!RunningAsLocalSystem()) {
-        return WaitForWsl(
-            StartWslWithLogon(
-                password, wsl_path, command, wsl_directory));
+        auto result = WslProcess{};
+        result.process = StartWslWithLogon(
+            password, wsl_path, command, wsl_directory,
+            standard_input, standard_output, standard_error);
+        return result;
     }
 
-    auto pbs_token = LogOnPbsVss(password);
-
-    auto helper_token = wil::unique_handle{};
-    if (!OpenProcessToken(GetCurrentProcess(),
-            TOKEN_ADJUST_PRIVILEGES,
-            helper_token.addressof())) {
-        WinError("could not open the backup-supervisor process token");
-    }
-    // LoadUserProfileW requires these privileges on its LocalSystem caller.
-    // They are not added to the pbs-vss token used to start WSL.
-    EnableProfilePrivileges(helper_token.get());
+    auto result = WslProcess{};
+    result.token = LogOnPbsVss(password);
 
     [[gsl::suppress("type.3",
         justification: "LoadUserProfileW retains a mutable historical parameter for an input-only username.")]]
@@ -804,41 +900,472 @@ auto EnableProfilePrivileges(const HANDLE token) {
         .dwFlags = PI_NOUI,
         .lpUserName = profile_user,
     };
-    if (!LoadUserProfileW(pbs_token.get(), &profile)) {
-        WinError("could not load the pbs-vss profile");
+    {
+        // LoadUserProfileW requires these privileges on its LocalSystem
+        // caller. They are not added to the pbs-vss token used to start WSL.
+        auto privileges = ProfilePrivilegeEnabler{GetCurrentProcess()};
+        if (!LoadUserProfileW(result.token.get(), &profile)) {
+            WinError("could not load the pbs-vss profile");
+        }
+        result.profile = LoadedProfile{
+            profile.hProfile, ProfileCloser{result.token.get()}};
+        privileges.Restore();
     }
-    const auto unload_profile = [pbs_token = pbs_token.get()](
-        void *const profile_handle) noexcept {
-        static_cast<void>(UnloadUserProfile(pbs_token, profile_handle));
-    };
-    auto loaded_profile = std::unique_ptr<void, decltype(unload_profile)>(
-        profile.hProfile, unload_profile);
 
     auto environment = wil::unique_environment_block{};
     if (!CreateEnvironmentBlock(
-            environment.addressof(), pbs_token.get(), FALSE)) {
+            environment.addressof(), result.token.get(), FALSE)) {
         WinError("could not create the pbs-vss environment");
     }
 
     // CreateProcessWithTokenW has no bInheritHandles parameter, so it cannot
     // satisfy PROC_THREAD_ATTRIBUTE_HANDLE_LIST's documented requirements.
     // WSL manages its own infrastructure, so exclude it from the backup job.
+    result.process = StartProcessWithHandles(
+        standard_input,
+        standard_output,
+        standard_error,
+        [&](STARTUPINFOW *const startup, PROCESS_INFORMATION *const process) {
+            return CreateProcessAsUserW(
+                result.token.get(), wsl_path.c_str(), command.data(),
+                nullptr, nullptr, TRUE,
+                kWslCreationFlags | CREATE_BREAKAWAY_FROM_JOB |
+                    EXTENDED_STARTUPINFO_PRESENT,
+                environment.get(), wsl_directory.c_str(), startup, process);
+        },
+        "could not start WSL as pbs-vss");
+    return result;
+}
+
+[[nodiscard]] auto StartWslFish(
+    const std::span<const std::wstring_view> arguments,
+    const std::span<const char> program) {
+    auto input_read = wil::unique_handle{};
+    auto input_write = wil::unique_handle{};
+    if (!CreatePipe(input_read.addressof(), input_write.addressof(),
+            nullptr, 0)) {
+        WinError("could not create the Fish program channel");
+    }
+    auto output_read = wil::unique_handle{};
+    auto output_write = wil::unique_handle{};
+    if (!CreatePipe(output_read.addressof(), output_write.addressof(),
+            nullptr, 0)) {
+        WinError("could not create the WSL output channel");
+    }
+    auto error_read = wil::unique_handle{};
+    auto error_write = wil::unique_handle{};
+    if (!CreatePipe(error_read.addressof(), error_write.addressof(),
+            nullptr, 0)) {
+        WinError("could not create the WSL error channel");
+    }
+
+    auto wsl_arguments = std::vector<std::wstring_view>{
+        L"--distribution", L"Debian",
+        L"--exec", L"/usr/bin/fish", L"-c", L"source - $argv",
+    };
+    wsl_arguments.append_range(arguments);
+    auto process = StartWslAsPbsVss(
+        wsl_arguments,
+        input_read.get(),
+        output_write.get(),
+        error_write.get());
+    input_read.reset();
+    output_write.reset();
+    error_write.reset();
+    process.standard_output.emplace(
+        std::move(output_read), GetStdHandle(STD_OUTPUT_HANDLE));
+    process.standard_error.emplace(
+        std::move(error_read), GetStdHandle(STD_ERROR_HANDLE));
+
+    [[gsl::suppress("type.1",
+        justification: "Embedded Fish programs are bounded far below MAXDWORD.")]]
+    const auto size = static_cast<DWORD>(program.size());
+    auto written = DWORD{};
+    if (!WriteFile(
+            input_write.get(), program.data(), size, &written, nullptr)) {
+        WinError("could not write a Fish program to WSL");
+    }
+    if (written != size) {
+        WinError("could not write the complete Fish program to WSL",
+            ExplicitWin32Error{ERROR_WRITE_FAULT});
+    }
+    input_write.reset();
+    return process;
+}
+
+[[nodiscard]] auto FinishWsl(WslProcess &process) {
+    process.FinishOutput();
+    return std::bit_cast<int>(ProcessExitCode(process.process.hProcess));
+}
+
+enum class WslBackupSignal {
+    Term,
+    Kill,
+};
+
+struct WslBackupSignalText {
+    std::wstring_view argument;
+    std::string_view diagnostic;
+};
+
+[[nodiscard]] constexpr auto SignalText(
+    const WslBackupSignal signal) noexcept {
+    switch (signal) {
+    case WslBackupSignal::Term:
+        return WslBackupSignalText{L"TERM", "TERM"};
+    case WslBackupSignal::Kill:
+        return WslBackupSignalText{L"KILL", "KILL"};
+    }
+    std::unreachable();
+}
+
+auto SendWslBackupSignal(
+    const std::wstring_view pid_file,
+    const std::wstring_view stop_file,
+    const WslBackupSignal signal) {
+    constexpr auto kControlMilliseconds = DWORD{15000};
+    constexpr auto program = std::string_view(
+        "touch $argv[2]; "
+        "if test -s $argv[1]; kill -s $argv[3] (cat $argv[1]); end");
+    const auto text = SignalText(signal);
+    const auto arguments = std::array{
+        pid_file, stop_file, text.argument};
+    auto request = StartWslFish(
+        arguments, std::span<const char>{program});
+    if (!WaitForProcess(
+            request.process.hProcess, kControlMilliseconds)) {
+        throw std::runtime_error(std::format(
+            "the WSL {} request did not exit before its timeout",
+            text.diagnostic));
+    }
+    const auto exit_code = FinishWsl(request);
+    if (exit_code != 0) {
+        throw std::runtime_error(std::format(
+            "the WSL {} request exited with code {}",
+            text.diagnostic, exit_code));
+    }
+}
+
+auto TryWriteError(
+    const char *const context,
+    const std::exception &error) noexcept {
+    std::fwprintf(stderr, L"backup-supervisor: %hs: %hs\n",
+        context, error.what());
+}
+
+auto TrySendWslBackupSignal(
+    const std::wstring_view pid_file,
+    const std::wstring_view stop_file,
+    const WslBackupSignal signal) noexcept {
+    try {
+        SendWslBackupSignal(pid_file, stop_file, signal);
+    } catch (const std::exception &error) {
+        TryWriteError("could not signal the WSL backup", error);
+    }
+}
+
+[[nodiscard]] auto UniqueName() {
+    auto id = GUID{};
+    const auto error = CoCreateGuid(&id);
+    if (FAILED(error)) {
+        [[gsl::suppress("type.1",
+            justification: "HRESULT_CODE returns the Win32-sized error code carried by the HRESULT.")]]
+        const auto win32_error =
+            static_cast<DWORD>(HRESULT_CODE(error));
+        WinError("could not create a unique backup identifier",
+            ExplicitWin32Error{win32_error});
+    }
+    return std::format(
+        L"{:08x}{:04x}{:04x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        id.Data1, id.Data2, id.Data3,
+        id.Data4[0], id.Data4[1], id.Data4[2], id.Data4[3],
+        id.Data4[4], id.Data4[5], id.Data4[6], id.Data4[7]);
+}
+
+[[nodiscard]] auto RunWslBackup(const HANDLE cancellation_event) {
+    constexpr auto kPollMilliseconds = DWORD{100};
+    constexpr auto kTermMilliseconds = DWORD{45000};
+    constexpr auto kKillMilliseconds = DWORD{30000};
+    const auto control_path = std::format(
+        L"/tmp/devicefs-{}", UniqueName());
+    const auto pid_file = std::format(L"{}.pid", control_path);
+    const auto stop_file = std::format(L"{}.stop", control_path);
+    const auto computer_name =
+        wil::GetEnvironmentVariableW<std::wstring>(L"COMPUTERNAME");
+    const auto arguments = std::array<std::wstring_view, 3>{
+        pid_file, stop_file, computer_name};
+    auto backup = StartWslFish(arguments, StartPbsProgram());
+
+    while (true) {
+        if (WaitForProcess(
+                backup.process.hProcess, kPollMilliseconds)) {
+            return FinishWsl(backup);
+        }
+        const auto cancelled = WaitForSingleObject(cancellation_event, 0);
+        if (cancelled == WAIT_FAILED) {
+            WinError("could not inspect the backup cancellation event");
+        }
+        if (cancelled == WAIT_OBJECT_0) {
+            break;
+        }
+    }
+
+    TrySendWslBackupSignal(pid_file, stop_file, WslBackupSignal::Term);
+    if (!WaitForProcess(
+            backup.process.hProcess, kTermMilliseconds)) {
+        TrySendWslBackupSignal(pid_file, stop_file, WslBackupSignal::Kill);
+        if (!WaitForProcess(
+                backup.process.hProcess, kKillMilliseconds)) {
+            throw std::runtime_error(
+                "the WSL backup did not exit after the KILL request");
+        }
+    }
+    const auto exit_code = FinishWsl(backup);
+    if (exit_code != 0) {
+        std::wcout << L"The WSL backup exited with code " << exit_code
+                   << L" during cancellation.\n";
+    }
+    return kCancelledExitCode;
+}
+
+struct DeviceFsProcess {
+    static constexpr auto kPollMilliseconds = DWORD{100};
+    static constexpr auto kStartMilliseconds = DWORD{30000};
+    static constexpr auto kShutdownMilliseconds = DWORD{60000};
+    static constexpr auto kMountTarget = std::wstring_view(L"X:");
+    static constexpr auto kMountDriveMask =
+        DWORD{1} << (kMountTarget.front() - L'A');
+
+    wil::unique_process_information process;
+    std::filesystem::path readiness_path;
+    std::wstring stop_event_name;
+};
+
+[[nodiscard]] auto StartDeviceFs(
+    const std::span<const devicefs::vshadow::Snapshot> snapshots) {
+    const auto supervisor = CurrentExecutablePath();
+    auto stop_event_name = std::format(
+        L"Global\\devicefs-stop-{}", UniqueName());
+    auto arguments = std::vector<std::wstring>{
+        supervisor.native(),
+        L"--devicefs",
+        L"--zero-free-clusters",
+        L"--mount", std::wstring{DeviceFsProcess::kMountTarget},
+        L"--read-user", std::wstring{kPbsUser.c_str()},
+        L"--stop-event", stop_event_name,
+    };
+    auto readiness_path = std::filesystem::path{};
+    for (const auto &snapshot : snapshots) {
+        auto filename = std::format(
+            L"volume-{}.img", snapshot.original_volume.substr(11, 36));
+        if (readiness_path.empty()) {
+            readiness_path = std::filesystem::path(
+                std::format(L"{}\\", DeviceFsProcess::kMountTarget)) /
+                filename;
+        }
+        arguments.emplace_back(L"--map");
+        arguments.emplace_back(std::move(filename));
+        arguments.emplace_back(snapshot.device);
+    }
+    auto command = wil::ArgvToCommandLine(arguments);
+    std::wcout << L"Setting up virtual filesystem: " << command << L'\n';
     auto process = StartProcessWithHandles(
         GetStdHandle(STD_INPUT_HANDLE),
         GetStdHandle(STD_OUTPUT_HANDLE),
         GetStdHandle(STD_ERROR_HANDLE),
-        nullptr,
-        nullptr,
-        STARTF_USESHOWWINDOW,
         [&](STARTUPINFOW *const startup, PROCESS_INFORMATION *const result) {
-            return CreateProcessAsUserW(pbs_token.get(), wsl_path.c_str(), command.data(),
+            return CreateProcessW(
+                supervisor.c_str(), command.data(),
                 nullptr, nullptr, TRUE,
-                kWslCreationFlags | CREATE_BREAKAWAY_FROM_JOB |
-                    EXTENDED_STARTUPINFO_PRESENT,
-                environment.get(), wsl_directory.c_str(), startup, result);
+                EXTENDED_STARTUPINFO_PRESENT,
+                nullptr, nullptr, startup, result);
         },
-        "could not start WSL as pbs-vss");
-    return WaitForWsl(process);
+        "could not start devicefs");
+    return DeviceFsProcess{
+        .process = std::move(process),
+        .readiness_path = std::move(readiness_path),
+        .stop_event_name = std::move(stop_event_name),
+    };
+}
+
+[[nodiscard]] auto WaitForDeviceFs(
+    const DeviceFsProcess &devicefs,
+    const HANDLE cancellation_event) {
+    const auto deadline =
+        GetTickCount64() + DeviceFsProcess::kStartMilliseconds;
+    while (true) {
+        if (WaitForProcess(devicefs.process.hProcess,
+                DeviceFsProcess::kPollMilliseconds)) {
+            throw std::runtime_error(std::format(
+                "devicefs exited during startup with code {}.",
+                ProcessExitCode(devicefs.process.hProcess)));
+        }
+        const auto cancelled = WaitForSingleObject(cancellation_event, 0);
+        if (cancelled == WAIT_FAILED) {
+            WinError("could not inspect the backup cancellation event");
+        }
+        if (cancelled == WAIT_OBJECT_0) {
+            return false;
+        }
+        auto exists_error = std::error_code{};
+        if (std::filesystem::is_regular_file(
+                devicefs.readiness_path, exists_error)) {
+            return true;
+        }
+        if (GetTickCount64() >= deadline) {
+            throw std::runtime_error(
+                "devicefs did not mount X: before the startup timeout elapsed");
+        }
+    }
+}
+
+auto StopDeviceFs(
+    const DeviceFsProcess &devicefs,
+    const bool backup_succeeded) {
+    const auto deadline =
+        GetTickCount64() + DeviceFsProcess::kShutdownMilliseconds;
+    auto stop_requested = false;
+    while (!WaitForProcess(devicefs.process.hProcess, 0)) {
+        if (!stop_requested) {
+            auto stop_event = wil::unique_event_nothrow{};
+            if (stop_event.try_open(
+                    devicefs.stop_event_name.c_str(),
+                    EVENT_MODIFY_STATE)) {
+                if (!SetEvent(stop_event.get())) {
+                    WinError("could not request devicefs shutdown");
+                }
+                stop_requested = true;
+            } else {
+                const auto error = GetLastError();
+                if (error != ERROR_FILE_NOT_FOUND) {
+                    WinError("could not open the devicefs shutdown event",
+                        ExplicitWin32Error{error});
+                }
+            }
+        }
+        if (WaitForProcess(
+                devicefs.process.hProcess,
+                DeviceFsProcess::kPollMilliseconds)) {
+            break;
+        }
+        if (GetTickCount64() >= deadline) {
+            throw std::runtime_error(
+                "devicefs did not exit before the shutdown timeout elapsed");
+        }
+    }
+    if (!backup_succeeded) {
+        return;
+    }
+    const auto exit_code = ProcessExitCode(devicefs.process.hProcess);
+    if (!stop_requested) {
+        throw std::runtime_error(std::format(
+            "devicefs exited before shutdown was requested with code {}.",
+            exit_code));
+    }
+    if (exit_code != 0) {
+        throw std::runtime_error(std::format(
+            "devicefs exited with code {}.", exit_code));
+    }
+}
+
+auto TryStopDeviceFs(const DeviceFsProcess &devicefs) noexcept {
+    try {
+        StopDeviceFs(devicefs, false);
+    } catch (const std::exception &error) {
+        TryWriteError("devicefs cleanup failed", error);
+    }
+}
+
+[[nodiscard]] auto RunSnapshotBackup(
+    const HANDLE cancellation_event,
+    const std::span<const devicefs::vshadow::Snapshot> snapshots) {
+    const auto cancelled = WaitForSingleObject(cancellation_event, 0);
+    if (cancelled == WAIT_FAILED) {
+        WinError("could not inspect the backup cancellation event");
+    }
+    if (cancelled == WAIT_OBJECT_0) {
+        return kCancelledExitCode;
+    }
+
+    const auto logical_drives = GetLogicalDrives();
+    if (logical_drives == 0) {
+        WinError("could not enumerate drive letters");
+    }
+    if ((logical_drives & DeviceFsProcess::kMountDriveMask) != 0) {
+        throw std::runtime_error("mount target is already present: X:");
+    }
+
+    const auto devicefs = StartDeviceFs(snapshots);
+    auto cleanup = wil::scope_exit([&] {
+        TryStopDeviceFs(devicefs);
+    });
+
+    auto result = kCancelledExitCode;
+    if (WaitForDeviceFs(devicefs, cancellation_event)) {
+        result = RunWslBackup(cancellation_event);
+    }
+
+    cleanup.release();
+    try {
+        StopDeviceFs(devicefs, result == 0);
+    } catch (const std::exception &error) {
+        if (result == 0) {
+            throw;
+        }
+        TryWriteError("devicefs cleanup failed", error);
+    }
+    return result;
+}
+
+[[nodiscard]] auto RunNativeBackup(
+    const HANDLE cancellation_event,
+    const bool no_writers) -> int {
+    const auto cancelled = WaitForSingleObject(cancellation_event, 0);
+    if (cancelled == WAIT_FAILED) {
+        WinError("could not inspect the backup cancellation event");
+    }
+    if (cancelled == WAIT_OBJECT_0) {
+        return kCancelledExitCode;
+    }
+
+    constexpr auto volumes =
+        std::to_array<std::wstring_view>({L"C:", L"D:", L"E:"});
+    constexpr auto kCallbackFailureExitCode = 2;
+    try {
+        return devicefs::vshadow::Run(
+            cancellation_event,
+            !no_writers,
+            volumes,
+            [=](const std::span<const devicefs::vshadow::Snapshot> snapshots) {
+                try {
+                    return RunSnapshotBackup(cancellation_event, snapshots);
+                } catch (const wil::ResultException &error) {
+                    std::fwprintf(stderr, L"backup-supervisor: %hs\n",
+                        error.what());
+                    return kCallbackFailureExitCode;
+                } catch (const std::runtime_error &error) {
+                    std::fwprintf(stderr, L"backup-supervisor: %hs\n",
+                        error.what());
+                    return kCallbackFailureExitCode;
+                }
+            });
+    } catch (const std::system_error &error) {
+        const auto cancellation_signaled =
+            WaitForSingleObject(cancellation_event, 0);
+        if (cancellation_signaled == WAIT_FAILED) {
+            WinError("could not inspect the backup cancellation event");
+        }
+        if ((cancellation_signaled == WAIT_OBJECT_0) &&
+            (error.code() == std::error_code(
+                ERROR_CANCELLED, std::system_category()))) {
+            return kCancelledExitCode;
+        }
+        if (error.code() == std::error_code(
+                ERROR_CANCELLED, std::system_category())) {
+            throw devicefs::vshadow::OperationError(error.what());
+        }
+        throw;
+    }
 }
 
 auto RunServiceDispatcher() {
@@ -876,19 +1403,10 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
         const auto arguments =
             std::span<const wchar_t *const>{argv + 1, argv + argc};
         if (!arguments.empty() &&
-            (std::wstring_view(arguments.front()) == kDeviceFsOption)) {
+            (std::wstring_view(arguments.front()) == L"--devicefs")) {
             return devicefs::Main(arguments);
         }
         if (arguments.empty()) {
-            auto callback = std::array<wchar_t, 2>{};
-            if ((GetEnvironmentVariableW(
-                    L"DEVICEFS_RUN_VHSADOW_CALLBACK",
-                    callback.data(), DWORD{callback.size()}) == 1) &&
-                (callback.front() == L'1')) {
-                PublishEnvironmentVariable(
-                    L"DEVICEFS_RUN_VHSADOW_CALLBACK", std::nullopt);
-                return RunPowerShellProgram(L"COMPLETE_BACKUP", true);
-            }
             PrintHelp();
             return 0;
         }
@@ -900,45 +1418,48 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
             }
             return RunServiceDispatcher();
         }
-        if (option == kInstallOption) {
+        if (option == kOrchestrateOption) {
+            if (arguments.size() != 1) {
+                throw std::invalid_argument(
+                    "--orchestrate does not accept arguments");
+            }
+            const auto persistent = ResolvePersistentPaths();
+            const auto backup_lock = AcquireBackupLock(
+                persistent.backup_lock);
+            const auto cancellation_event = OpenCancellationEvent();
+            return RunNativeBackup(cancellation_event.get(), false);
+        }
+        if (option == L"--install-service") {
             if (arguments.size() == 1) {
                 InstallService(InstallMode::CreateOnly,
-                    kMinimumPreshutdownMilliseconds);
+                    ServiceContext::kMinimumPreshutdownMilliseconds);
                 return 0;
             }
             if ((arguments.size() == 2) &&
-                (std::wstring_view(arguments[1]) == kUpdateOption)) {
+                (std::wstring_view(arguments[1]) == L"--update")) {
                 InstallService(InstallMode::CreateOrUpdate,
-                    kMinimumPreshutdownMilliseconds);
+                    ServiceContext::kMinimumPreshutdownMilliseconds);
                 return 0;
             }
             throw std::invalid_argument(
                 "--install-service accepts only the optional --update argument");
         }
-        if (option == kForegroundOption) {
+        if (option == L"--foreground") {
             if (arguments.size() == 1) {
                 return RunForeground(false);
             }
             if ((arguments.size() == 2) &&
-                (std::wstring_view(arguments[1]) == kNoWritersOption)) {
+                (std::wstring_view(arguments[1]) == L"--no-writers")) {
                 return RunForeground(true);
             }
             throw std::invalid_argument(
                 "--foreground accepts only the optional --no-writers argument");
         }
-        if (option == kHelperOption) {
-            return RunWslAsPbsVss(arguments.subspan(1));
-        }
-        if (option == kWriteStartPbsOption) {
-            if (arguments.size() != 1) {
-                throw std::invalid_argument(
-                    "--write-start-pbs does not accept arguments");
-            }
-            WriteStartPbs();
-            return 0;
-        }
         throw std::invalid_argument("unknown backup-supervisor argument");
     } catch (const std::invalid_argument &error) {
+        std::fwprintf(stderr, L"backup-supervisor: %hs\n", error.what());
+        return 2;
+    } catch (const devicefs::vshadow::OperationError &error) {
         std::fwprintf(stderr, L"backup-supervisor: %hs\n", error.what());
         return 2;
     } catch (const std::runtime_error &error) {

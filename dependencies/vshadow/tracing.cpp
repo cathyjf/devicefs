@@ -36,7 +36,7 @@
 
 
 // Main header
-#include "stdafx.h"
+#include "shadow.h"
 
 
 

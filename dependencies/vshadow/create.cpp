@@ -35,7 +35,7 @@
 
 
 // Main header
-#include "stdafx.h"
+#include "shadow.h"
 
 
 
@@ -150,7 +150,11 @@ void VssClient::DoSnapshotSet()
     CHECK_COM(m_pVssObject->DoSnapshotSet(&pAsync));
 
     // Waits for the async operation to finish and checks the result
-    WaitAndCheckForAsyncOperation(pAsync);
+    bool bCancellationRequested =
+        WaitAndCheckForAsyncOperation(pAsync, true, true);
+    m_bSnapshotSetCreated = true;
+    if (bCancellationRequested)
+        throw(HRESULT_FROM_WIN32(ERROR_CANCELLED));
 
     // Do not attempt to continue with delayed snapshot ...
     if (m_dwContext & VSS_VOLSNAP_ATTR_DELAYED_POSTSNAPSHOT)
@@ -191,11 +195,49 @@ void VssClient::BackupComplete(bool succeeded)
     CHECK_COM(m_pVssObject->BackupComplete(&pAsync));
 
     // Waits for the async operation to finish and checks the result
-    WaitAndCheckForAsyncOperation(pAsync);
+    WaitAndCheckForAsyncOperation(pAsync, false);
 
     // Check selected writer status
-    CheckSelectedWriterStatus();
+    CheckSelectedWriterStatus(false);
 
+}
+
+
+// Return the devices for the snapshots in the latest set
+vector<wstring> VssClient::GetLatestSnapshotDevices()
+{
+    FunctionTracer ft(DBG_INFO);
+
+    vector<wstring> snapshotDevices;
+    for (unsigned i = 0; i < m_latestSnapshotIdList.size(); i++)
+    {
+        VSS_SNAPSHOT_PROP Snap = {};
+        CHECK_COM(m_pVssObject->GetSnapshotProperties(m_latestSnapshotIdList[i], &Snap));
+
+        // Automatically call VssFreeSnapshotProperties on this structure at the end of scope
+        CAutoSnapPointer snapAutoCleanup(&Snap);
+
+        snapshotDevices.push_back(Snap.m_pwszSnapshotDeviceObject);
+    }
+
+    return snapshotDevices;
+}
+
+
+// Notify VSS that an in-progress backup did not complete
+void VssClient::CompleteFailedBackup()
+{
+    FunctionTracer ft(DBG_INFO);
+
+    if (m_bSnapshotSetCreated)
+    {
+        if ((m_dwContext & VSS_VOLSNAP_ATTR_NO_WRITERS) == 0)
+            BackupComplete(false);
+        return;
+    }
+
+    if (m_latestSnapshotSetID != GUID_NULL)
+        CHECK_COM(m_pVssObject->AbortBackup());
 }
 
 

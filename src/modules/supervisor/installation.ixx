@@ -289,7 +289,7 @@ export auto InstallService(
         persistent.credentials, private_directory,
         "credentials directory");
 
-    // Orchestrate-Backup holds the same file without sharing for the full
+    // The backup orchestrator holds the same file without sharing for the full
     // backup. This open therefore fails instead of stopping an active backup,
     // and prevents another backup from starting while installation is active.
     auto backup_lock = OpenBackupLock(

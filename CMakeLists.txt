@@ -112,6 +112,7 @@ target_sources(backup-supervisor PRIVATE
         src/modules/supervisor/embedded_artifacts.ixx
         src/modules/supervisor/installation.ixx
         src/modules/supervisor/logging_console.ixx
+        src/modules/supervisor/native_backup.ixx
         src/modules/supervisor/process_diagnostics.ixx
         src/modules/supervisor/vshadow.ixx
 )

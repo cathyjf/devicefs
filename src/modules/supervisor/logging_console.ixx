@@ -33,6 +33,7 @@ module;
 #include <format>
 #include <functional>
 #include <future>
+#include <memory>
 #include <new>
 #include <span>
 #include <string>
@@ -420,14 +421,17 @@ public:
             (GetLastError() != ERROR_INSUFFICIENT_BUFFER)) {
             WinError("could not size the process attribute list");
         }
-        const auto attribute_storage = wil::unique_process_heap(
-            HeapAlloc(GetProcessHeap(), 0, attribute_bytes));
-        if (!attribute_storage) {
-            WinError("could not allocate the process attribute list",
-                ExplicitWin32Error{ERROR_NOT_ENOUGH_MEMORY});
-        }
+        const auto attribute_storage = [&] {
+            try {
+                return std::make_unique_for_overwrite<std::byte[]>(
+                    attribute_bytes);
+            } catch (const std::bad_alloc &) {
+                WinError("could not allocate the process attribute list",
+                    ExplicitWin32Error{ERROR_NOT_ENOUGH_MEMORY});
+            }
+        }();
         auto *const attributes = static_cast<PPROC_THREAD_ATTRIBUTE_LIST>(
-            attribute_storage.get());
+            static_cast<void *>(attribute_storage.get()));
         if (!InitializeProcThreadAttributeList(
                 attributes, attribute_count, 0, &attribute_bytes)) {
             WinError("could not initialize the process attribute list");

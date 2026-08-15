@@ -458,10 +458,22 @@ auto ReadFields(
     const JsonObject &object,
     const ConfigurationFields &fields,
     const std::string_view parent) -> void {
+    const auto member_path = [parent](const std::string_view name) {
+        return parent.empty()
+            ? std::string{name}
+            : std::format("{}.{}", parent, name);
+    };
+    for (const auto &entry : object) {
+        const auto name = winrt::to_string(entry.Key());
+        if (std::ranges::find(
+                fields, std::string_view{name},
+                &ConfigurationField::name) == fields.end()) {
+            const auto member = member_path(name);
+            ConfigurationError(member, "is not recognized");
+        }
+    }
     for (const auto &field : fields) {
-        const auto member = parent.empty()
-            ? std::string{field.name}
-            : std::format("{}.{}", parent, field.name);
+        const auto member = member_path(field.name);
         const auto name = winrt::to_hstring(field.name);
         if (!object.HasKey(name)) {
             if (std::visit(DefaultFieldReader{}, field.destination)) {

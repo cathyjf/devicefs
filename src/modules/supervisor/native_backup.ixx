@@ -24,6 +24,7 @@ module;
 #include <cstdint>
 
 #include <wil/resource.h>
+#include <wil/safecast.h>
 #include <wil/stl.h>
 #include <wil/token_helpers.h>
 #include <wil/win32_helpers.h>
@@ -34,11 +35,9 @@ module;
 #include <exception>
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
 #include <format>
 #include <future>
 #include <iostream>
-#include <iterator>
 #include <memory>
 #include <new>
 #include <optional>
@@ -55,6 +54,7 @@ module;
 export module devicefs.supervisor.native_backup;
 
 import devicefs.common;
+import devicefs.supervisor.configuration;
 import devicefs.supervisor.embedded_artifacts;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.vshadow;
@@ -164,34 +164,18 @@ template <typename Start>
     return process;
 }
 
-constexpr auto kPbsUser = wil::zwstring_view(L"pbs-vss");
 constexpr auto kLocalDomain = wil::zwstring_view(L".");
 constexpr auto kWslCreationFlags = DWORD{
     CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT};
 
-[[nodiscard]] auto ReadPbsVssPassword(
-    const std::filesystem::path &password_path) {
-    auto file = std::ifstream(password_path, std::ios::binary);
-    if (!file.is_open()) {
-        throw std::runtime_error("could not open the pbs-vss password file");
-    }
-    auto password = std::string(
-        std::istreambuf_iterator<char>{file}, {});
-    while (!password.empty() &&
-        ((password.back() == '\r') || (password.back() == '\n'))) {
-        password.pop_back();
-    }
-    return std::filesystem::path(
-        std::u8string(password.begin(), password.end())).native();
-}
-
-[[nodiscard]] auto LogOnPbsVss(
+[[nodiscard]] auto LogOnWindowsAccount(
+    const wil::zwstring_view username,
     const wil::zwstring_view password) {
     auto token = wil::unique_handle{};
-    if (!LogonUserW(kPbsUser.c_str(), kLocalDomain.c_str(), password.c_str(),
+    if (!LogonUserW(username.c_str(), kLocalDomain.c_str(), password.c_str(),
             LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT,
             token.addressof())) {
-        WinError("could not log on pbs-vss");
+        WinError("could not log on the configured WSL account");
     }
     return token;
 }
@@ -311,6 +295,7 @@ class ProfilePrivilegeEnabler {
 }
 
 [[nodiscard]] auto StartWslWithLogon(
+    const wil::zwstring_view username,
     const wil::zwstring_view password,
     const std::filesystem::path &wsl_path,
     std::wstring &command,
@@ -336,11 +321,11 @@ class ProfilePrivilegeEnabler {
     // launch path below, is available only when the caller is not LocalSystem.
     // Manual backups create no supervisor job, so do not request breakaway.
     if (!CreateProcessWithLogonW(
-            kPbsUser.c_str(), kLocalDomain.c_str(), password.c_str(),
+            username.c_str(), kLocalDomain.c_str(), password.c_str(),
             LOGON_WITH_PROFILE, wsl_path.c_str(), command.data(),
             kWslCreationFlags,
             nullptr, working_directory.c_str(), &startup, &process)) {
-        WinError("could not start WSL as pbs-vss");
+        WinError("could not start WSL as the configured account");
     }
     return process;
 }
@@ -461,13 +446,12 @@ struct WslProcess {
     }
 };
 
-[[nodiscard]] auto StartWslAsPbsVss(
+[[nodiscard]] auto StartWslAsConfiguredUser(
+    const BackupConfiguration &configuration,
     const std::span<const std::wstring_view> arguments,
     const HANDLE standard_input,
     const HANDLE standard_output,
     const HANDLE standard_error) {
-    const auto persistent = ResolvePersistentPaths();
-    const auto password = ReadPbsVssPassword(persistent.password);
     const auto wsl_path = ProgramFilesDirectory() / L"WSL" / L"wsl.exe";
     auto argument_views = std::vector<std::wstring_view>{wsl_path.native()};
     argument_views.append_range(arguments);
@@ -476,17 +460,22 @@ struct WslProcess {
     if (!RunningAsLocalSystem()) {
         auto result = WslProcess{};
         result.process = StartWslWithLogon(
-            password, wsl_path, command, wsl_directory,
+            configuration.windows_username,
+            configuration.windows_password,
+            wsl_path, command, wsl_directory,
             standard_input, standard_output, standard_error);
         return result;
     }
 
     auto result = WslProcess{};
-    result.token = LogOnPbsVss(password);
+    result.token = LogOnWindowsAccount(
+        configuration.windows_username,
+        configuration.windows_password);
 
     [[gsl::suppress("type.3",
         justification: "LoadUserProfileW retains a mutable historical parameter for an input-only username.")]]
-    auto *const profile_user = const_cast<PWSTR>(kPbsUser.c_str());
+    auto *const profile_user =
+        const_cast<PWSTR>(configuration.windows_username.c_str());
     auto profile = PROFILEINFOW{
         .dwSize = sizeof(PROFILEINFOW),
         .dwFlags = PI_NOUI,
@@ -494,10 +483,10 @@ struct WslProcess {
     };
     {
         // LoadUserProfileW requires these privileges on its LocalSystem
-        // caller. They are not added to the pbs-vss token used to start WSL.
+        // caller. They are not added to the user token used to start WSL.
         auto privileges = ProfilePrivilegeEnabler{GetCurrentProcess()};
         if (!LoadUserProfileW(result.token.get(), &profile)) {
-            WinError("could not load the pbs-vss profile");
+            WinError("could not load the configured WSL account profile");
         }
         result.profile = LoadedProfile{
             profile.hProfile, ProfileCloser{result.token.get()}};
@@ -507,7 +496,7 @@ struct WslProcess {
     auto environment = wil::unique_environment_block{};
     if (!CreateEnvironmentBlock(
             environment.addressof(), result.token.get(), FALSE)) {
-        WinError("could not create the pbs-vss environment");
+        WinError("could not create the configured WSL account environment");
     }
 
     // CreateProcessWithTokenW has no bInheritHandles parameter, so it cannot
@@ -525,18 +514,20 @@ struct WslProcess {
                     EXTENDED_STARTUPINFO_PRESENT,
                 environment.get(), wsl_directory.c_str(), startup, process);
         },
-        "could not start WSL as pbs-vss");
+        "could not start WSL as the configured account");
     return result;
 }
 
 [[nodiscard]] auto StartWslFish(
+    const BackupConfiguration &configuration,
     const std::span<const std::wstring_view> arguments,
-    const std::span<const char> program) {
+    const std::span<const char> program,
+    const std::span<const char8_t> standard_input) {
     auto input_read = wil::unique_handle{};
     auto input_write = wil::unique_handle{};
     if (!CreatePipe(input_read.addressof(), input_write.addressof(),
             nullptr, 0)) {
-        WinError("could not create the Fish program channel");
+        WinError("could not create the WSL input channel");
     }
     auto output_read = wil::unique_handle{};
     auto output_write = wil::unique_handle{};
@@ -552,11 +543,20 @@ struct WslProcess {
     }
 
     auto wsl_arguments = std::vector<std::wstring_view>{
-        L"--distribution", L"Debian",
-        L"--exec", L"/usr/bin/fish", L"-c", L"source - $argv",
+        L"--distribution", configuration.wsl_distribution,
     };
+    if (configuration.wsl_linux_user) {
+        wsl_arguments.push_back(L"--user");
+        wsl_arguments.push_back(*configuration.wsl_linux_user);
+    }
+    wsl_arguments.append_range(std::array<std::wstring_view, 5>{
+        L"--exec", L"/usr/bin/fish", L"--no-config", L"-c",
+        L"read --null --global DEVICEFS_FISH_PROGRAM; "
+        L"and eval $DEVICEFS_FISH_PROGRAM",
+    });
     wsl_arguments.append_range(arguments);
-    auto process = StartWslAsPbsVss(
+    auto process = StartWslAsConfiguredUser(
+        configuration,
         wsl_arguments,
         input_read.get(),
         output_write.get(),
@@ -569,18 +569,25 @@ struct WslProcess {
     process.standard_error.emplace(
         std::move(error_read), GetStdHandle(STD_ERROR_HANDLE));
 
-    [[gsl::suppress("type.1",
-        justification: "Embedded Fish programs are bounded far below MAXDWORD.")]]
-    const auto size = static_cast<DWORD>(program.size());
-    auto written = DWORD{};
-    if (!WriteFile(
-            input_write.get(), program.data(), size, &written, nullptr)) {
-        WinError("could not write a Fish program to WSL");
-    }
-    if (written != size) {
-        WinError("could not write the complete Fish program to WSL",
-            ExplicitWin32Error{ERROR_WRITE_FAULT});
-    }
+    const auto write_input = [&](const auto input) {
+        if (input.empty()) {
+            return;
+        }
+        const auto size = wil::safe_cast<DWORD>(input.size_bytes());
+        auto written = DWORD{};
+        if (!WriteFile(input_write.get(), input.data(), size,
+                &written, nullptr)) {
+            WinError("could not write the WSL input");
+        }
+        if (written != size) {
+            WinError("could not write the complete WSL input",
+                ExplicitWin32Error{ERROR_WRITE_FAULT});
+        }
+    };
+    constexpr auto kProgramTerminator = std::array{char{0}};
+    write_input(program);
+    write_input(std::span<const char>{kProgramTerminator});
+    write_input(standard_input);
     input_write.reset();
     return process;
 }
@@ -622,8 +629,16 @@ auto SendWslBackupSignal(
     const auto text = SignalText(signal);
     const auto arguments = std::array{
         pid_file, stop_file, text.argument};
-    auto request = StartWslFish(
-        arguments, std::span<const char>{program});
+    auto request = [&] {
+        const auto persistent = ResolvePersistentPaths();
+        const auto configuration =
+            ReadBackupConfiguration(persistent.configuration);
+        return StartWslFish(
+            configuration,
+            arguments,
+            std::span<const char>{program},
+            std::span<const char8_t>{});
+    }();
     if (!WaitForProcess(
             request.process.hProcess, kControlMilliseconds)) {
         throw std::runtime_error(std::format(
@@ -686,7 +701,34 @@ auto TrySendWslBackupSignal(
         wil::GetEnvironmentVariableW<std::wstring>(L"COMPUTERNAME");
     const auto arguments = std::array<std::wstring_view, 3>{
         pid_file, stop_file, computer_name};
-    auto backup = StartWslFish(arguments, StartPbsProgram());
+    auto backup = [&] {
+        const auto persistent = ResolvePersistentPaths();
+        const auto configuration =
+            ReadBackupConfiguration(persistent.configuration);
+        auto input = SecureUtf8String{};
+        // start-pbs.fish consumes these NUL-delimited records in order. Add
+        // future records here and matching Fish reads before the remaining key
+        // document, which proxmox-backup-client reads through fd 0.
+        const auto append_record = [&](const std::u8string_view value) {
+            input.append(value);
+            input.push_back(u8'\0');
+        };
+        append_record(configuration.wsl_client_path);
+        append_record(configuration.pbs_server);
+        const auto port = std::to_string(configuration.pbs_port);
+        append_record(std::u8string{port.begin(), port.end()});
+        append_record(configuration.pbs_datastore);
+        append_record(configuration.pbs_auth_id);
+        append_record(configuration.pbs_namespace);
+        append_record(configuration.pbs_fingerprint);
+        append_record(configuration.pbs_authentication_secret);
+        input.append(configuration.pbs_encryption_key);
+        return StartWslFish(
+            configuration,
+            arguments,
+            StartPbsProgram(),
+            std::span<const char8_t>{input.data(), input.size()});
+    }();
 
     while (true) {
         if (WaitForProcess(
@@ -734,7 +776,8 @@ struct DeviceFsProcess {
 };
 
 [[nodiscard]] auto StartDeviceFs(
-    const std::span<const devicefs::vshadow::Snapshot> snapshots) {
+    const std::span<const devicefs::vshadow::Snapshot> snapshots,
+    const std::wstring_view read_user) {
     const auto supervisor = CurrentExecutablePath();
     auto stop_event_name = std::format(
         L"Global\\devicefs-stop-{}", UniqueName());
@@ -743,7 +786,7 @@ struct DeviceFsProcess {
         L"--devicefs",
         L"--zero-free-clusters",
         L"--mount", std::wstring{DeviceFsProcess::kMountTarget},
-        L"--read-user", std::wstring{kPbsUser.c_str()},
+        L"--read-user", std::wstring{read_user},
         L"--stop-event", stop_event_name,
     };
     auto readiness_path = std::filesystem::path{};
@@ -870,7 +913,8 @@ auto TryStopDeviceFs(const DeviceFsProcess &devicefs) noexcept {
 
 [[nodiscard]] auto RunSnapshotBackup(
     const HANDLE cancellation_event,
-    const std::span<const devicefs::vshadow::Snapshot> snapshots) {
+    const std::span<const devicefs::vshadow::Snapshot> snapshots,
+    const std::wstring_view read_user) {
     const auto cancelled = WaitForSingleObject(cancellation_event, 0);
     if (cancelled == WAIT_FAILED) {
         WinError("could not inspect the backup cancellation event");
@@ -887,7 +931,7 @@ auto TryStopDeviceFs(const DeviceFsProcess &devicefs) noexcept {
         throw std::runtime_error("mount target is already present: X:");
     }
 
-    const auto devicefs = StartDeviceFs(snapshots);
+    const auto devicefs = StartDeviceFs(snapshots, read_user);
     auto cleanup = wil::scope_exit([&] {
         TryStopDeviceFs(devicefs);
     });
@@ -922,17 +966,31 @@ export [[nodiscard]] auto RunNativeBackup(
         return kCancelledExitCode;
     }
 
-    constexpr auto volumes =
-        std::to_array<std::wstring_view>({L"C:", L"D:", L"E:"});
+    const auto [read_user, configured_volumes] = [] {
+        const auto persistent = ResolvePersistentPaths();
+        auto configuration =
+            ReadBackupConfiguration(persistent.configuration);
+        return std::pair{
+            std::move(configuration.windows_username),
+            std::move(configuration.volumes),
+        };
+    }();
+    auto volumes = std::vector<std::wstring_view>{};
+    for (const auto &volume : configured_volumes) {
+        volumes.push_back(volume);
+    }
     constexpr auto kCallbackFailureExitCode = 2;
     try {
         return devicefs::vshadow::Run(
             cancellation_event,
             !no_writers,
             volumes,
-            [=](const std::span<const devicefs::vshadow::Snapshot> snapshots) {
+            [&](const std::span<const devicefs::vshadow::Snapshot> snapshots) {
                 try {
-                    return RunSnapshotBackup(cancellation_event, snapshots);
+                    return RunSnapshotBackup(
+                        cancellation_event,
+                        snapshots,
+                        read_user);
                 } catch (const wil::ResultException &error) {
                     std::fwprintf(stderr, L"backup-supervisor: %hs\n",
                         error.what());

@@ -25,6 +25,7 @@ module;
 #include <cstdint>
 
 #include <wil/resource.h>
+#include <wil/safecast.h>
 #include <wil/stl.h>
 #include <wil/win32_helpers.h>
 
@@ -39,6 +40,7 @@ module;
 export module devicefs.supervisor.installation;
 
 import devicefs.common;
+import devicefs.supervisor.configuration;
 
 export enum class InstallMode {
     CreateOnly,
@@ -49,7 +51,7 @@ export struct PersistentPaths {
     std::filesystem::path root;
     std::filesystem::path logs;
     std::filesystem::path credentials;
-    std::filesystem::path password;
+    std::filesystem::path configuration;
     std::filesystem::path backup_lock;
 };
 
@@ -64,7 +66,7 @@ constexpr auto kProductDirectoryName = std::wstring_view(L"devicefs");
 constexpr auto kExecutableName = std::wstring_view(L"backup-supervisor.exe");
 constexpr auto kLogDirectoryName = std::wstring_view(L"logs");
 constexpr auto kCredentialsDirectoryName = std::wstring_view(L"credentials");
-constexpr auto kPasswordName = std::wstring_view(L"pbs-vss.password");
+constexpr auto kConfigurationName = std::wstring_view(L"backup.json");
 constexpr auto kBackupLockName =
     std::wstring_view(L"pbs-vss-backup.lock");
 constexpr auto kServiceDisplayName = std::wstring_view(L"DeviceFs Backup");
@@ -181,6 +183,39 @@ auto EnsureDirectory(
     return file;
 }
 
+auto CreateConfigurationTemplate(
+    const std::filesystem::path &path,
+    const SecurityDescriptor &security) {
+    auto attributes = security.Attributes();
+    auto file = wil::unique_hfile(CreateFileW(
+        path.c_str(), GENERIC_WRITE, 0,
+        &attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!file) {
+        const auto error = GetLastError();
+        if (error == ERROR_FILE_EXISTS) {
+            return;
+        }
+        WinError("could not create the backup configuration",
+            ExplicitWin32Error{error});
+    }
+    auto remove_incomplete_file = wil::scope_exit([&] {
+        file.reset();
+        static_cast<void>(DeleteFileW(path.c_str()));
+    });
+    const auto configuration_template = GenerateConfigurationTemplate();
+    const auto size = wil::safe_cast<DWORD>(configuration_template.size());
+    auto written = DWORD{};
+    if (!WriteFile(file.get(), configuration_template.data(), size,
+            &written, nullptr)) {
+        WinError("could not write the backup configuration template");
+    }
+    if (written != size) {
+        WinError("could not write the complete backup configuration template",
+            ExplicitWin32Error{ERROR_WRITE_FAULT});
+    }
+    remove_incomplete_file.release();
+}
+
 auto InstallExecutable(
     const std::filesystem::path &source,
     const std::filesystem::path &destination,
@@ -240,7 +275,7 @@ export [[nodiscard]] auto ResolvePersistentPaths() {
         kProductDirectoryName;
     result.logs = result.root / kLogDirectoryName;
     result.credentials = result.root / kCredentialsDirectoryName;
-    result.password = result.credentials / kPasswordName;
+    result.configuration = result.credentials / kConfigurationName;
     result.backup_lock = result.credentials / kBackupLockName;
     return result;
 }
@@ -294,6 +329,9 @@ export auto InstallService(
     // and prevents another backup from starting while installation is active.
     auto backup_lock = OpenBackupLock(
         persistent.backup_lock, private_file);
+
+    CreateConfigurationTemplate(
+        persistent.configuration, private_file);
 
     EnsureDirectory(
         persistent.logs, public_directory,

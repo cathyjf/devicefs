@@ -4,13 +4,26 @@
 set vss_mount_point /mnt/vss
 
 function unmount_vss
-    timeout --kill-after=1s 5s fish -c 'while ! sudo umount $argv[1]; sleep 1; end' $vss_mount_point
+    timeout --kill-after=1s 5s fish --no-config -c 'while ! sudo -n umount $argv[1]; sleep 1; end' $vss_mount_point
 end
 
 set pid_file $argv[1]
 set stop_file $argv[2]
 set backup_id $argv[3]
-sudo mount $vss_mount_point || exit $status
+# Keep these reads in the same order as RunWslBackup's NUL-delimited records,
+# adding future records before the final key document.
+read --null --global DEVICEFS_PBS_CLIENT || exit
+read --null --global --export PBS_SERVER || exit
+read --null --global --export PBS_PORT || exit
+read --null --global --export PBS_DATASTORE || exit
+read --null --global --export PBS_AUTH_ID || exit
+read --null --global DEVICEFS_PBS_NAMESPACE || exit
+if test -n "$DEVICEFS_PBS_NAMESPACE"
+    set --global --export PBS_NAMESPACE $DEVICEFS_PBS_NAMESPACE
+end
+read --null --global --export PBS_FINGERPRINT || exit
+read --null --global --export PBS_PASSWORD || exit
+sudo -n mount $vss_mount_point || exit
 if test -e $stop_file
     unmount_vss
     set unmount_exit_code $status
@@ -20,13 +33,14 @@ if test -e $stop_file
     end
     exit 143
 end
-set backup_argv backup --backup-id $backup_id
+set backup_argv backup --keyfd 0 --backup-id $backup_id
 for image_path in $vss_mount_point/*.img
     set image_filename (path basename $image_path)
     set --append backup_argv "$image_filename:$image_path"
 end
-~/bin/proxmox-backup-client $backup_argv &
+$DEVICEFS_PBS_CLIENT $backup_argv &
 set backup_pid $last_pid
+set --erase PBS_PASSWORD
 set -g backup_exit_code 1
 function record_backup_exit --on-process-exit $backup_pid
     set -g backup_exit_code $argv[3]

@@ -18,28 +18,46 @@ module;
 
 #include <windows.h>
 
+#include <format>
 #include <span>
 #include <stdexcept>
+#include <string_view>
 
 export module devicefs.supervisor.embedded_artifacts;
 
 import devicefs.common;
 
-export [[nodiscard]] auto StartPbsProgram() {
+namespace {
+
+[[nodiscard]] auto LoadProgram(
+    const wchar_t *const name,
+    const std::string_view description) {
     const auto resource = FindResourceW(
-        nullptr, L"START_PBS", L"DEVICEFS_ARTIFACT");
+        nullptr, name, L"DEVICEFS_ARTIFACT");
     if (resource == nullptr) {
-        WinError("could not find an embedded backup program");
+        WinError("could not find {}", description);
     }
     const auto loaded = LoadResource(nullptr, resource);
     if (loaded == nullptr) {
-        WinError("could not load an embedded backup program");
+        WinError("could not load {}", description);
     }
     const auto size = SizeofResource(nullptr, resource);
     const auto *const data = LockResource(loaded);
     if (data == nullptr) {
-        throw std::runtime_error("could not access an embedded backup program");
+        throw std::runtime_error(std::format(
+            "could not access {}", description));
     }
     return std::span{
         static_cast<const char *>(data), size};
+}
+
+} // namespace
+
+export [[nodiscard]] auto StartPbsProgram() {
+    return LoadProgram(L"START_PBS", "an embedded backup program");
+}
+
+export [[nodiscard]] auto DeviceToFifoProgram() {
+    return LoadProgram(
+        L"DEVICE_TO_FIFO", "the embedded device-to-FIFO relay");
 }

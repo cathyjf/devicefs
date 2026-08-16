@@ -372,17 +372,12 @@ auto TryWriteFailure(
     return result;
 }
 
-[[nodiscard]] auto RunForeground(const bool no_writers) {
-    const auto input = GetStdHandle(STD_INPUT_HANDLE);
-    auto console_mode = DWORD{};
-    if (!GetConsoleMode(input, &console_mode)) {
-        throw std::runtime_error(
-            "--foreground requires an attached console");
-    }
-    const auto persistent = ResolvePersistentPaths();
-    const auto backup_lock = AcquireBackupLock(persistent.backup_lock);
+template <typename Operation>
+[[nodiscard]] auto RunForegroundOperation(
+    const HANDLE input,
+    const DWORD console_mode,
+    Operation operation) {
     const auto cancellation_event = CreateCancellationEvent(nullptr);
-
     if (!SetConsoleMode(
             input, console_mode & ~DWORD{ENABLE_PROCESSED_INPUT})) {
         WinError("could not enable foreground cancellation input");
@@ -391,14 +386,14 @@ auto TryWriteFailure(
         static_cast<void>(SetConsoleMode(input, console_mode));
     });
 
-    auto backup = std::async(std::launch::async,
-        RunNativeBackup, cancellation_event.get(), no_writers);
+    auto result = std::async(
+        std::launch::async, std::move(operation), cancellation_event.get());
     auto cancel_on_monitor_failure = wil::scope_exit([&] {
         static_cast<void>(SetEvent(cancellation_event.get()));
     });
     constexpr auto kPollInterval = std::chrono::milliseconds{100};
     constexpr auto kInputBatchSize = 16uz;
-    while (backup.wait_for(kPollInterval) !=
+    while (result.wait_for(kPollInterval) !=
         std::future_status::ready) {
         auto available = DWORD{};
         if (!GetNumberOfConsoleInputEvents(input, &available)) {
@@ -435,12 +430,12 @@ auto TryWriteFailure(
         }
     }
     cancel_on_monitor_failure.release();
-    const auto result = [&] {
+    const auto operation_result = [&] {
         try {
-            const auto backup_result = backup.get();
+            const auto completed_result = result.get();
             return cancellation_event.is_signaled()
                 ? kCancelledExitCode
-                : backup_result;
+                : completed_result;
         } catch (...) {
             if (cancellation_event.is_signaled()) {
                 return kCancelledExitCode;
@@ -452,7 +447,23 @@ auto TryWriteFailure(
         WinError("could not restore the foreground console input mode");
     }
     restore_console_mode.release();
-    return result;
+    return operation_result;
+}
+
+[[nodiscard]] auto RunForeground(const bool no_writers) {
+    const auto input = GetStdHandle(STD_INPUT_HANDLE);
+    auto console_mode = DWORD{};
+    if (!GetConsoleMode(input, &console_mode)) {
+        throw std::runtime_error(
+            "--foreground requires an attached console");
+    }
+    const auto persistent = ResolvePersistentPaths();
+    const auto backup_lock = AcquireBackupLock(persistent.backup_lock);
+    return RunForegroundOperation(
+        input, console_mode,
+        [no_writers](const HANDLE cancellation_event) {
+            return RunNativeBackup(cancellation_event, no_writers);
+        });
 }
 
 auto WINAPI ServiceMain(
@@ -493,6 +504,7 @@ auto PrintHelp() {
         L"Usage:\n"
         L"  backup-supervisor.exe --devicefs [devicefs arguments]\n"
         L"  backup-supervisor.exe --foreground [--no-writers]\n"
+        L"  backup-supervisor.exe --device-to-fifo DEVICE FIFO_PATH\n"
         L"  backup-supervisor.exe --install-service [--update]\n"
         L"  backup-supervisor.exe --run-service\n",
         stdout);
@@ -531,6 +543,27 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
                 persistent.backup_lock);
             const auto cancellation_event = OpenCancellationEvent();
             return RunNativeBackup(cancellation_event.get(), false);
+        }
+        if (option == L"--device-to-fifo") {
+            if (arguments.size() != 3) {
+                throw std::invalid_argument(
+                    "--device-to-fifo requires DEVICE and FIFO_PATH");
+            }
+            const auto input = GetStdHandle(STD_INPUT_HANDLE);
+            auto console_mode = DWORD{};
+            if (!GetConsoleMode(input, &console_mode)) {
+                throw std::runtime_error(
+                    "--device-to-fifo requires an attached console");
+            }
+            const auto device = std::wstring_view{arguments[1]};
+            const auto fifo_path = std::wstring_view{arguments[2]};
+            return RunForegroundOperation(
+                input, console_mode,
+                [device, fifo_path](
+                    const HANDLE cancellation_event) {
+                    return RunDeviceToFifo(
+                        cancellation_event, device, fifo_path);
+                });
         }
         if (option == L"--install-service") {
             if (arguments.size() == 1) {

@@ -70,10 +70,15 @@ template <class T> auto start_lifetime_as_array(void *, size_t) noexcept -> T *;
 
 export constexpr auto kCancelledExitCode = 130;
 
-namespace {
+export [[nodiscard]] auto RunDeviceToFifo(
+    HANDLE cancellation_event,
+    std::wstring_view device,
+    std::wstring_view fifo_path) -> int;
+
+namespace internal {
 
 [[nodiscard]] auto WaitForProcess(
-    const HANDLE process, const DWORD timeout) {
+    const HANDLE process, const DWORD timeout) -> bool {
     const auto result = WaitForSingleObject(process, timeout);
     if (result == WAIT_FAILED) {
         WinError("could not wait for a backup process");
@@ -518,11 +523,16 @@ struct WslProcess {
     return result;
 }
 
-[[nodiscard]] auto StartWslFish(
+struct StartedWslFish {
+    wil::unique_handle standard_input;
+    wil::unique_handle standard_output;
+    wil::unique_handle standard_error;
+    WslProcess process;
+};
+
+[[nodiscard]] auto StartWslFishProcess(
     const BackupConfiguration &configuration,
-    const std::span<const std::wstring_view> arguments,
-    const std::span<const char> program,
-    const std::span<const char8_t> standard_input) {
+    const std::span<const std::wstring_view> arguments) -> StartedWslFish {
     auto input_read = wil::unique_handle{};
     auto input_write = wil::unique_handle{};
     if (!CreatePipe(input_read.addressof(), input_write.addressof(),
@@ -549,10 +559,11 @@ struct WslProcess {
         wsl_arguments.push_back(L"--user");
         wsl_arguments.push_back(*configuration.wsl_linux_user);
     }
-    wsl_arguments.append_range(std::array<std::wstring_view, 5>{
+    wsl_arguments.append_range(std::array<std::wstring_view, 6>{
         L"--exec", L"/usr/bin/fish", L"--no-config", L"-c",
         L"read --null --global DEVICEFS_FISH_PROGRAM; "
         L"and eval $DEVICEFS_FISH_PROGRAM",
+        L"--",
     });
     wsl_arguments.append_range(arguments);
     auto process = StartWslAsConfiguredUser(
@@ -564,10 +575,24 @@ struct WslProcess {
     input_read.reset();
     output_write.reset();
     error_write.reset();
-    process.standard_output.emplace(
-        std::move(output_read), GetStdHandle(STD_OUTPUT_HANDLE));
-    process.standard_error.emplace(
-        std::move(error_read), GetStdHandle(STD_ERROR_HANDLE));
+    return StartedWslFish{
+        .standard_input = std::move(input_write),
+        .standard_output = std::move(output_read),
+        .standard_error = std::move(error_read),
+        .process = std::move(process),
+    };
+}
+
+[[nodiscard]] auto StartWslFish(
+    const BackupConfiguration &configuration,
+    const std::span<const std::wstring_view> arguments,
+    const std::span<const char> program,
+    const std::span<const char8_t> standard_input) {
+    auto started = StartWslFishProcess(configuration, arguments);
+    started.process.standard_output.emplace(
+        std::move(started.standard_output), GetStdHandle(STD_OUTPUT_HANDLE));
+    started.process.standard_error.emplace(
+        std::move(started.standard_error), GetStdHandle(STD_ERROR_HANDLE));
 
     const auto write_input = [&](const auto input) {
         if (input.empty()) {
@@ -575,7 +600,7 @@ struct WslProcess {
         }
         const auto size = wil::safe_cast<DWORD>(input.size_bytes());
         auto written = DWORD{};
-        if (!WriteFile(input_write.get(), input.data(), size,
+        if (!WriteFile(started.standard_input.get(), input.data(), size,
                 &written, nullptr)) {
             WinError("could not write the WSL input");
         }
@@ -588,11 +613,11 @@ struct WslProcess {
     write_input(program);
     write_input(std::span<const char>{kProgramTerminator});
     write_input(standard_input);
-    input_write.reset();
-    return process;
+    started.standard_input.reset();
+    return std::move(started.process);
 }
 
-[[nodiscard]] auto FinishWsl(WslProcess &process) {
+[[nodiscard]] auto FinishWsl(WslProcess &process) -> int {
     process.FinishOutput();
     return std::bit_cast<int>(ProcessExitCode(process.process.hProcess));
 }
@@ -953,7 +978,7 @@ auto TryStopDeviceFs(const DeviceFsProcess &devicefs) noexcept {
     return result;
 }
 
-} // namespace
+} // namespace internal
 
 export [[nodiscard]] auto RunNativeBackup(
     const HANDLE cancellation_event,
@@ -987,7 +1012,7 @@ export [[nodiscard]] auto RunNativeBackup(
             volumes,
             [&](const std::span<const devicefs::vshadow::Snapshot> snapshots) {
                 try {
-                    return RunSnapshotBackup(
+                    return internal::RunSnapshotBackup(
                         cancellation_event,
                         snapshots,
                         read_user);

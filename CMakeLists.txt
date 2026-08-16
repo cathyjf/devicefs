@@ -79,11 +79,15 @@ target_link_libraries(devicefs PRIVATE devicefs-filesystem)
 
 add_executable(backup-supervisor
     src/backup_supervisor.cpp
+    src/modules/supervisor/native_backup_fifo.cpp
 )
 target_link_libraries(backup-supervisor PRIVATE devicefs-filesystem vshadow)
 
 set(START_PBS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/supervisor/artifacts/start-pbs.fish"
+)
+set(DEVICE_TO_FIFO
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/supervisor/artifacts/device-to-fifo.fish"
 )
 set(ARTIFACT_RESOURCE_SCRIPT
     "${CMAKE_CURRENT_BINARY_DIR}/backup-supervisor-artifacts-$<CONFIG>.rc"
@@ -92,13 +96,14 @@ set(ARTIFACT_RESOURCE
     "${CMAKE_CURRENT_BINARY_DIR}/backup-supervisor-artifacts-$<CONFIG>.res"
 )
 file(GENERATE OUTPUT "${ARTIFACT_RESOURCE_SCRIPT}" CONTENT
-    "START_PBS DEVICEFS_ARTIFACT \"${START_PBS}\"\n"
+    "START_PBS DEVICEFS_ARTIFACT \"${START_PBS}\"
+    DEVICE_TO_FIFO DEVICEFS_ARTIFACT \"${DEVICE_TO_FIFO}\"\n"
 )
 add_custom_command(
     OUTPUT "${ARTIFACT_RESOURCE}"
     COMMAND "${CMAKE_RC_COMPILER}" /nologo /fo "${ARTIFACT_RESOURCE}"
         "${ARTIFACT_RESOURCE_SCRIPT}"
-    DEPENDS "${ARTIFACT_RESOURCE_SCRIPT}" "${START_PBS}"
+    DEPENDS "${ARTIFACT_RESOURCE_SCRIPT}" "${START_PBS}" "${DEVICE_TO_FIFO}"
     VERBATIM
 )
 add_custom_target(backup-supervisor-artifacts

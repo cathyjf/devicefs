@@ -105,6 +105,7 @@ struct Options {
     std::wstring read_user;
     std::wstring stop_event{kDefaultStopEvent};
     std::vector<Mapping> mappings;
+    bool cache = false;
     bool extended_dasd = true;
     bool zero_free_clusters = false;
     bool help = false;
@@ -144,6 +145,7 @@ auto Usage(std::wostream &out) {
         << L"  --map NAME DEVICE      Virtual filename and block device (repeatable)\n"
         << L"  --stop-event NAME      Named shutdown event (default: "
         << kDefaultStopEvent << L")\n"
+        << L"  --cache                Enable file-data caching (requires read-only volumes)\n"
         << L"  --no-extended-dasd-io  Do not issue FSCTL_ALLOW_EXTENDED_DASD_IO\n"
         << L"  --zero-free-clusters   Return zeros for free clusters on read-only NTFS volumes\n"
         << L"  -h, --help             Show this help\n\n"
@@ -176,6 +178,8 @@ auto Usage(std::wostream &out) {
             const auto *const name = next(i);
             const auto *const device = next(i);
             result.mappings.push_back({.name = name, .device = device});
+        } else if (arg == L"--cache") {
+            result.cache = true;
         } else if (arg == L"--no-extended-dasd-io") {
             result.extended_dasd = false;
         } else if (arg == L"--zero-free-clusters") {
@@ -380,19 +384,6 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
 
 [[nodiscard]] auto LoadAllocationBitmap(
     const HANDLE device, const UINT64 device_size, const UINT64 map_number) {
-    auto file_system_flags = DWORD{};
-    if (!GetVolumeInformationByHandleW(
-            device, nullptr, 0, nullptr, nullptr, &file_system_flags, nullptr, 0)) {
-        WinError(
-            "could not query filesystem flags for --map #{}", map_number);
-    }
-    // A retained allocation bitmap is safe only while the source cannot change.
-    if ((file_system_flags & FILE_READ_ONLY_VOLUME) == 0) {
-        throw std::runtime_error(std::format(
-            "--zero-free-clusters requires a read-only volume for --map #{}",
-            map_number));
-    }
-
     auto volume = NTFS_VOLUME_DATA_BUFFER{};
     const auto volume_error =
         Ioctl(device, FSCTL_GET_NTFS_VOLUME_DATA, &volume, sizeof(volume));
@@ -483,7 +474,7 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
 
 [[nodiscard]] auto OpenDevice(
     const Mapping &mapping, const bool extended_dasd,
-    const bool zero_free_clusters, const UINT64 map_number) {
+    const bool cache, const bool zero_free_clusters, const UINT64 map_number) {
     auto handle = wil::unique_hfile(CreateFileW(mapping.device.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
@@ -537,6 +528,19 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
                    << mapping.device << L"': " << error.message().c_str() << L"\n";
     }
 
+    if (cache || zero_free_clusters) {
+        auto file_system_flags = DWORD{};
+        if (!GetVolumeInformationByHandleW(handle.get(), nullptr, 0, nullptr,
+                nullptr, &file_system_flags, nullptr, 0)) {
+            WinError(
+                "could not query filesystem flags for --map #{}", map_number);
+        }
+        if ((file_system_flags & FILE_READ_ONLY_VOLUME) == 0) {
+            const auto option = cache ? "--cache" : "--zero-free-clusters";
+            throw std::runtime_error(std::format(
+                "{} requires a read-only volume for --map #{}", option, map_number));
+        }
+    }
     auto allocation_bitmap = zero_free_clusters
         ? LoadAllocationBitmap(handle.get(), size, map_number)
         : AllocationBitmap{};
@@ -578,13 +582,15 @@ auto g_dispatcher_stopped_unexpectedly = false;
 class DeviceFs {
 public:
     [[nodiscard]] DeviceFs(
-        DeviceFiles files, wil::unique_hlocal_security_descriptor security, Mount mount)
+        DeviceFiles files, wil::unique_hlocal_security_descriptor security,
+        Mount mount, const bool cache)
         : files_(std::move(files)), security_(std::move(security)), mount_(std::move(mount)) {
         auto params = FSP_FSCTL_VOLUME_PARAMS{
             .Version = sizeof(FSP_FSCTL_VOLUME_PARAMS),
             .SectorSize = kAdvertisedSectorSize,
             .SectorsPerAllocationUnit = 1,
             .MaxComponentLength = kMaxNameLength,
+            .FileInfoTimeout = cache ? MAXUINT32 : 0,
             .CasePreservedNames = 1,
             .UnicodeOnDisk = 1,
             .PersistentAcls = 1,
@@ -921,7 +927,7 @@ auto Run(const Options &options) {
         const auto &mapping = options.mappings[i];
         files.emplace(Lowercase(mapping.name),
             OpenDevice(mapping, options.extended_dasd,
-                options.zero_free_clusters, i + 1));
+                options.cache, options.zero_free_clusters, i + 1));
     }
 
     auto stop_event = wil::unique_event_nothrow{};
@@ -947,7 +953,7 @@ auto Run(const Options &options) {
             }
         }
         auto filesystem = DeviceFs(
-            std::move(files), std::move(security), options.mount);
+            std::move(files), std::move(security), options.mount, options.cache);
         g_stop_event = stop_event.get();
         g_stopped_event = stopped_event.get();
         filesystem.Start();

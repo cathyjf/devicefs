@@ -107,7 +107,7 @@ struct Options {
     std::vector<Mapping> mappings;
     bool cache = false;
     bool extended_dasd = true;
-    bool zero_free_clusters = false;
+    bool synthetic_free_clusters = false;
     bool help = false;
 };
 
@@ -140,15 +140,15 @@ auto Usage(std::wostream &out) {
     out << L"Usage: devicefs --mount TARGET --read-user USER"
            L" --map NAME DEVICE [--map NAME DEVICE ...] [OPTIONS]\n\n"
         << L"Options:\n"
-        << L"  --mount TARGET         Drive letter, directory, or network prefix\n"
-        << L"  --read-user USER       User granted read access\n"
-        << L"  --map NAME DEVICE      Virtual filename and block device (repeatable)\n"
-        << L"  --stop-event NAME      Named shutdown event (default: "
+        << L"  --mount TARGET             Drive letter, directory, or network prefix\n"
+        << L"  --read-user USER           User granted read access\n"
+        << L"  --map NAME DEVICE          Virtual filename and block device (repeatable)\n"
+        << L"  --stop-event NAME          Named shutdown event (default: "
         << kDefaultStopEvent << L")\n"
-        << L"  --cache                Enable file-data caching (requires read-only volumes)\n"
-        << L"  --no-extended-dasd-io  Do not issue FSCTL_ALLOW_EXTENDED_DASD_IO\n"
-        << L"  --zero-free-clusters   Return zeros for free clusters on read-only NTFS volumes\n"
-        << L"  -h, --help             Show this help\n\n"
+        << L"  --cache                    Enable file-data caching (requires read-only volumes)\n"
+        << L"  --no-extended-dasd-io      Do not issue FSCTL_ALLOW_EXTENDED_DASD_IO\n"
+        << L"  --synthetic-free-clusters  Return zeros for free clusters on read-only NTFS volumes\n"
+        << L"  -h, --help                 Show this help\n\n"
         << L"Example:\n"
         << L"  devicefs --mount X: --read-user 'pbs-vss' `\n"
         << L"    --map C.img '\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy12'\n";
@@ -182,8 +182,8 @@ auto Usage(std::wostream &out) {
             result.cache = true;
         } else if (arg == L"--no-extended-dasd-io") {
             result.extended_dasd = false;
-        } else if (arg == L"--zero-free-clusters") {
-            result.zero_free_clusters = true;
+        } else if (arg == L"--synthetic-free-clusters") {
+            result.synthetic_free_clusters = true;
         } else {
             throw std::invalid_argument(std::format("unknown option at argument {}", i));
         }
@@ -338,7 +338,7 @@ struct AllocationBitmap {
         return false;
     }
 
-    auto ZeroFreeClusters(
+    auto SynthesizeFreeClusters(
         const std::span<BYTE> output,
         const UINT64 offset) const noexcept {
         if (!storage || output.empty()) {
@@ -474,7 +474,8 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
 
 [[nodiscard]] auto OpenDevice(
     const Mapping &mapping, const bool extended_dasd,
-    const bool cache, const bool zero_free_clusters, const UINT64 map_number) {
+    const bool cache, const bool synthetic_free_clusters,
+    const UINT64 map_number) {
     auto handle = wil::unique_hfile(CreateFileW(mapping.device.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
@@ -528,7 +529,7 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
                    << mapping.device << L"': " << error.message().c_str() << L"\n";
     }
 
-    if (cache || zero_free_clusters) {
+    if (cache || synthetic_free_clusters) {
         auto file_system_flags = DWORD{};
         if (!GetVolumeInformationByHandleW(handle.get(), nullptr, 0, nullptr,
                 nullptr, &file_system_flags, nullptr, 0)) {
@@ -536,12 +537,12 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
                 "could not query filesystem flags for --map #{}", map_number);
         }
         if ((file_system_flags & FILE_READ_ONLY_VOLUME) == 0) {
-            const auto option = cache ? "--cache" : "--zero-free-clusters";
+            const auto option = cache ? "--cache" : "--synthetic-free-clusters";
             throw std::runtime_error(std::format(
                 "{} requires a read-only volume for --map #{}", option, map_number));
         }
     }
-    auto allocation_bitmap = zero_free_clusters
+    auto allocation_bitmap = synthetic_free_clusters
         ? LoadAllocationBitmap(handle.get(), size, map_number)
         : AllocationBitmap{};
     return DeviceFile{
@@ -789,7 +790,7 @@ private:
             if (!NT_SUCCESS(status)) {
                 return status;
             }
-            file->allocation_bitmap.ZeroFreeClusters(output, offset);
+            file->allocation_bitmap.SynthesizeFreeClusters(output, offset);
             return STATUS_SUCCESS;
         }
 
@@ -810,7 +811,7 @@ private:
 
         *transferred = wanted;
         std::ranges::copy(bounce.subspan(prefix, wanted), output.begin());
-        file->allocation_bitmap.ZeroFreeClusters(output, offset);
+        file->allocation_bitmap.SynthesizeFreeClusters(output, offset);
         return STATUS_SUCCESS;
     }
 
@@ -928,7 +929,7 @@ auto Run(const Options &options) {
         const auto &mapping = options.mappings[i];
         files.emplace(Lowercase(mapping.name),
             OpenDevice(mapping, options.extended_dasd,
-                options.cache, options.zero_free_clusters, i + 1));
+                options.cache, options.synthetic_free_clusters, i + 1));
     }
 
     auto stop_event = wil::unique_event_nothrow{};
@@ -948,7 +949,7 @@ auto Run(const Options &options) {
     auto wait_error = DWORD{};
     {
         if constexpr (kMeasureFreeClusterData) {
-            if (options.zero_free_clusters) {
+            if (options.synthetic_free_clusters) {
                 std::wcerr << L"devicefs: free-cluster measurement is enabled; "
                               L"free-only reads will access the source device\n";
             }

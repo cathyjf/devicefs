@@ -7,14 +7,14 @@
 
 <#
 .SYNOPSIS
-Exercises devicefs --zero-free-clusters against a disposable read-only VHD.
+Exercises devicefs --synthetic-free-clusters against a disposable read-only VHD.
 
 .DESCRIPTION
 Creates a fixed VHD containing one NTFS volume without assigning a drive
 letter. The test selects a free cluster while the VHD is attached read-only,
 detaches the VHD, writes a nonzero pattern into that cluster, and attaches the
 VHD read-only again. It then compares direct volume reads with normal and
-zeroing devicefs views using an independently queried NTFS allocation bitmap.
+synthetic devicefs views using an independently queried NTFS allocation bitmap.
 
 The VHD is detached during cleanup. Use -KeepArtifactsOnFailure to retain the
 detached VHD and logs after a failure.
@@ -203,7 +203,7 @@ function Start-DeviceFsTestProcess {
         [Parameter(Mandatory)]
         [string] $SourceDevice,
 
-        [switch] $ZeroFreeClusters
+        [switch] $SyntheticFreeClusters
     )
 
     $start_info = [Diagnostics.ProcessStartInfo]::new()
@@ -220,8 +220,8 @@ function Start-DeviceFsTestProcess {
             '--map', 'volume.img', $SourceDevice)) {
         $start_info.ArgumentList.Add($argument)
     }
-    if ($ZeroFreeClusters) {
-        $start_info.ArgumentList.Add('--zero-free-clusters')
+    if ($SyntheticFreeClusters) {
+        $start_info.ArgumentList.Add('--synthetic-free-clusters')
     }
 
     $process = [Diagnostics.Process]::Start($start_info)
@@ -387,7 +387,7 @@ $source_mount = $null
 $source_partition = $null
 $source_access_path_added = $false
 $normal_invocation = $null
-$zeroed_invocation = $null
+$synthetic_invocation = $null
 $comparison = $null
 $primary_error = $null
 $cleanup_errors = [Collections.Generic.List[Exception]]::new()
@@ -408,7 +408,7 @@ try {
     $source_mount = [IO.Path]::Combine($test_root, 'source')
     New-Item -ItemType Directory -Path $source_mount | Out-Null
     $normal_mount = [IO.Path]::Combine($test_root, 'normal')
-    $zeroed_mount = [IO.Path]::Combine($test_root, 'zeroed')
+    $synthetic_mount = [IO.Path]::Combine($test_root, 'synthetic')
 
     $requested_disk_length = [UInt64]$VhdSizeMiB * 1MB
     New-VHD -Path $vhd_path -SizeBytes $requested_disk_length `
@@ -584,17 +584,17 @@ try {
         -ReadUser $read_user -StopEvent "Local\devicefs-test-$run_id-normal" `
         -SourceDevice $source_device
     Wait-DeviceFsReady $normal_invocation
-    $zeroed_invocation = Start-DeviceFsTestProcess `
-        -Executable $DeviceFsPath -MountPath $zeroed_mount `
-        -ReadUser $read_user -StopEvent "Local\devicefs-test-$run_id-zeroed" `
-        -SourceDevice $source_device -ZeroFreeClusters
-    Wait-DeviceFsReady $zeroed_invocation
+    $synthetic_invocation = Start-DeviceFsTestProcess `
+        -Executable $DeviceFsPath -MountPath $synthetic_mount `
+        -ReadUser $read_user -StopEvent "Local\devicefs-test-$run_id-synthetic" `
+        -SourceDevice $source_device -SyntheticFreeClusters
+    Wait-DeviceFsReady $synthetic_invocation
 
     $normal_image = $normal_invocation.ImagePath
-    $zeroed_image = $zeroed_invocation.ImagePath
+    $synthetic_image = $synthetic_invocation.ImagePath
     $cluster_size = [long]$bitmap.ClusterSize
     $null = [DeviceFsTestNative]::CompareRange(
-        $source_device, $normal_image, $zeroed_image, $bitmap,
+        $source_device, $normal_image, $synthetic_image, $bitmap,
         $witness_offset, [int]$cluster_size)
 
     foreach ($test_case in @(
@@ -625,19 +625,19 @@ try {
             }
         )) {
         $null = [DeviceFsTestNative]::CompareRange(
-            $source_device, $normal_image, $zeroed_image, $bitmap,
+            $source_device, $normal_image, $synthetic_image, $bitmap,
             $test_case.Offset, $test_case.Length)
     }
 
     $comparison = [DeviceFsTestNative]::CompareViews(
-        $source_device, $normal_image, $zeroed_image, $bitmap,
+        $source_device, $normal_image, $synthetic_image, $bitmap,
         $comparison_chunk_size)
     Assert-Condition ($comparison.BytesCompared -eq $bitmap.Length) `
         'The full comparison did not cover the complete volume.'
 } catch {
     $primary_error = $_
 } finally {
-    foreach ($invocation in @($zeroed_invocation, $normal_invocation)) {
+    foreach ($invocation in @($synthetic_invocation, $normal_invocation)) {
         if ($null -eq $invocation) {
             continue
         }
@@ -730,4 +730,4 @@ if ($cleanup_errors.Count -ne 0) {
 Write-Host ("PASS: compared $($comparison.BytesCompared) bytes; " +
     "$($comparison.FreeBytes) bytes belonged to free clusters, including " +
     "$($bitmap.ClusterSize) controlled nonzero witness bytes that " +
-    'the option zeroed.')
+    'the synthetic view replaced with zeros.')

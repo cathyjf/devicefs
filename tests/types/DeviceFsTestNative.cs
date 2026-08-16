@@ -472,7 +472,7 @@ public static class DeviceFsTestNative {
     }
 
     private static void CompareChunk(byte[] source, byte[] normal,
-        byte[] zeroed, long offset, int count, NtfsBitmap bitmap,
+        byte[] synthetic, long offset, int count, NtfsBitmap bitmap,
         ComparisonSummary summary) {
         var end = checked(offset + count);
         var position = offset;
@@ -493,12 +493,12 @@ public static class DeviceFsTestNative {
                 }
 
                 var expected = allocated ? source[i] : (byte)0;
-                if (zeroed[i] != expected) {
+                if (synthetic[i] != expected) {
                     throw new InvalidDataException(
-                        $"zeroing devicefs view differs at offset 0x{absolute:X}, " +
+                        $"synthetic devicefs view differs at offset 0x{absolute:X}, " +
                         $"LCN {cluster}: allocated={allocated}, " +
                         $"source=0x{source[i]:X2}, expected=0x{expected:X2}, " +
-                        $"actual=0x{zeroed[i]:X2}");
+                        $"actual=0x{synthetic[i]:X2}");
                 }
 
                 if (!allocated) {
@@ -513,7 +513,7 @@ public static class DeviceFsTestNative {
     }
 
     public static ComparisonSummary CompareViews(string sourceDevicePath,
-        string normalImagePath, string zeroedImagePath, NtfsBitmap bitmap,
+        string normalImagePath, string syntheticImagePath, NtfsBitmap bitmap,
         int chunkSize) {
         if (chunkSize <= 0) {
             throw new ArgumentOutOfRangeException(nameof(chunkSize));
@@ -523,32 +523,32 @@ public static class DeviceFsTestNative {
         using var normal = new FileStream(normalImagePath, FileMode.Open,
             FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1,
             FileOptions.SequentialScan);
-        using var zeroed = new FileStream(zeroedImagePath, FileMode.Open,
+        using var synthetic = new FileStream(syntheticImagePath, FileMode.Open,
             FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1,
             FileOptions.SequentialScan);
         var length = QueryLength(source);
         var sectorSize = QuerySectorSize(source);
         if ((length != bitmap.Length) ||
             (sectorSize != bitmap.SectorSize) ||
-            (normal.Length != length) || (zeroed.Length != length)) {
+            (normal.Length != length) || (synthetic.Length != length)) {
             throw new InvalidDataException(
                 "source, bitmap, and devicefs view geometry do not agree");
         }
 
         var normalBytes = new byte[chunkSize];
-        var zeroedBytes = new byte[chunkSize];
+        var syntheticBytes = new byte[chunkSize];
         var summary = new ComparisonSummary();
         for (var offset = 0L; offset < length;) {
             var current = (int)Math.Min((long)chunkSize, length - offset);
             if ((ReadManaged(normal, normalBytes, current) != current) ||
-                (ReadManaged(zeroed, zeroedBytes, current) != current)) {
+                (ReadManaged(synthetic, syntheticBytes, current) != current)) {
                 throw new EndOfStreamException(
                     "a devicefs view completed a sequential read short");
             }
 
             var sourceBytes = ReadDeviceAt(
                 source, length, sectorSize, offset, current);
-            CompareChunk(sourceBytes, normalBytes, zeroedBytes,
+            CompareChunk(sourceBytes, normalBytes, syntheticBytes,
                 offset, current, bitmap, summary);
             offset += current;
         }
@@ -557,7 +557,7 @@ public static class DeviceFsTestNative {
     }
 
     public static ComparisonSummary CompareRange(string sourceDevicePath,
-        string normalImagePath, string zeroedImagePath,
+        string normalImagePath, string syntheticImagePath,
         NtfsBitmap bitmap, long offset, int requestedLength) {
         if ((offset < 0) || (requestedLength < 0) ||
             (offset > bitmap.Length)) {
@@ -568,18 +568,18 @@ public static class DeviceFsTestNative {
             bitmap.Length - offset);
         var source = ReadDeviceAt(sourceDevicePath, offset, requestedLength);
         var normalBytes = new byte[requestedLength];
-        var zeroedBytes = new byte[requestedLength];
+        var syntheticBytes = new byte[requestedLength];
         using var normal = new FileStream(normalImagePath, FileMode.Open,
             FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1,
             FileOptions.RandomAccess);
-        using var zeroed = new FileStream(zeroedImagePath, FileMode.Open,
+        using var synthetic = new FileStream(syntheticImagePath, FileMode.Open,
             FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1,
             FileOptions.RandomAccess);
         normal.Position = offset;
-        zeroed.Position = offset;
+        synthetic.Position = offset;
         var normalCount = normal.Read(normalBytes, 0, requestedLength);
-        var zeroedCount = zeroed.Read(zeroedBytes, 0, requestedLength);
-        if ((normalCount != count) || (zeroedCount != count)) {
+        var syntheticCount = synthetic.Read(syntheticBytes, 0, requestedLength);
+        if ((normalCount != count) || (syntheticCount != count)) {
             throw new InvalidDataException(
                 "a devicefs view returned an unexpected targeted-read length");
         }
@@ -590,7 +590,7 @@ public static class DeviceFsTestNative {
         }
 
         var summary = new ComparisonSummary();
-        CompareChunk(source, normalBytes, zeroedBytes,
+        CompareChunk(source, normalBytes, syntheticBytes,
             offset, count, bitmap, summary);
         return summary;
     }

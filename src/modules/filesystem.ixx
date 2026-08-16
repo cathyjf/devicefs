@@ -746,8 +746,9 @@ private:
         };
         const auto read = [&](void *const output, const UINT64 position,
                               const auto count, auto *const done) {
-            auto event = wil::unique_event_nothrow{};
-            if (!event.try_create(wil::EventOptions::ManualReset, nullptr)) {
+            // ReadFile resets the event; each dispatcher thread uses it serially.
+            thread_local auto event = wil::unique_event_nothrow{};
+            if (!event && !event.try_create(wil::EventOptions::ManualReset, nullptr)) {
                 return failure(GetLastError());
             }
             auto operation = OVERLAPPED{};

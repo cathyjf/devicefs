@@ -809,7 +809,7 @@ struct DeviceFsProcess {
     auto arguments = std::vector<std::wstring>{
         supervisor.native(),
         L"--devicefs",
-        L"--zero-free-clusters",
+        L"--zero-free-clusters", L"--cache",
         L"--mount", std::wstring{DeviceFsProcess::kMountTarget},
         L"--read-user", std::wstring{read_user},
         L"--stop-event", stop_event_name,

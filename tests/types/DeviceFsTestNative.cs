@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -56,14 +57,29 @@ public sealed class ComparisonSummary {
     public long FreeBytes { get; internal set; }
 }
 
+public sealed class ClusterRange {
+    public long StartingCluster { get; }
+    public long ClusterCount { get; }
+
+    internal ClusterRange(long startingCluster, long clusterCount) {
+        StartingCluster = startingCluster;
+        ClusterCount = clusterCount;
+    }
+}
+
 public static class DeviceFsTestNative {
     private const uint GenericRead = 0x80000000;
+    private const uint TokenQuery = 0x00000008;
+    private const uint TokenAdjustPrivileges = 0x00000020;
+    private const uint SePrivilegeEnabled = 0x00000002;
     private const uint FileShareRead = 0x00000001;
     private const uint FileShareWrite = 0x00000002;
     private const uint FileShareDelete = 0x00000004;
     private const uint OpenExisting = 3;
     private const uint SecurityIdentification = 0x00010000;
     private const uint SecuritySqosPresent = 0x00100000;
+    private const uint FileFlagOpenReparsePoint = 0x00200000;
+    private const uint FileFlagBackupSemantics = 0x02000000;
     private const uint FileReadOnlyVolume = 0x00080000;
     private const uint MemCommit = 0x00001000;
     private const uint MemReserve = 0x00002000;
@@ -78,10 +94,21 @@ public static class DeviceFsTestNative {
     private const int VolumeBitmapStructureSize = 24;
     private const int VolumeDiskExtentsSize = 32;
     private const int RetrievalPointerBaseSize = 8;
+    private const int RetrievalPointersHeaderSize = 16;
+    private const int RetrievalPointersExtentSize = 16;
+    private const int FileStreamInfo = 7;
+    private const int FileStreamInfoHeaderSize = 24;
+    private const int InitialStreamInformationSize = 4096;
+    private const int ErrorHandleEof = 38;
+    private const int ErrorInsufficientBuffer = 122;
+    private const int ErrorMoreData = 234;
+    private const int ErrorNotAllAssigned = 1300;
+    private const string BackupPrivilegeName = "SeBackupPrivilege";
 
     // These control codes are normally produced by Windows SDK CTL_CODE macros.
     private const uint FsctlGetNtfsVolumeData = 0x00090064;
     private const uint FsctlGetVolumeBitmap = 0x0009006F;
+    private const uint FsctlGetRetrievalPointers = 0x00090073;
     private const uint FsctlAllowExtendedDasdIo = 0x00090083;
     private const uint FsctlGetRetrievalPointerBase = 0x00090234;
     private const uint IoctlDiskGetDriveGeometry = 0x00070000;
@@ -116,6 +143,91 @@ public static class DeviceFsTestNative {
         }
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Luid {
+        public uint LowPart;
+        public int HighPart;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LuidAndAttributes {
+        public Luid Luid;
+        public uint Attributes;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenPrivileges {
+        public uint PrivilegeCount;
+        public LuidAndAttributes Privileges;
+    }
+
+    private sealed class BackupPrivilegeScope : IDisposable {
+        private SafeAccessTokenHandle token;
+        private TokenPrivileges previousState;
+
+        public BackupPrivilegeScope() {
+            if (!OpenProcessToken(GetCurrentProcess(),
+                    TokenAdjustPrivileges | TokenQuery, out var openedToken)) {
+                throw LastError("could not open the PowerShell process token");
+            }
+
+            try {
+                if (!LookupPrivilegeValue(
+                        null, BackupPrivilegeName, out var luid)) {
+                    throw LastError("could not identify SeBackupPrivilege");
+                }
+                var requestedState = new TokenPrivileges {
+                    PrivilegeCount = 1,
+                    Privileges = new LuidAndAttributes {
+                        Luid = luid,
+                        Attributes = SePrivilegeEnabled,
+                    },
+                };
+                Marshal.SetLastPInvokeError(0);
+                if (!AdjustTokenPrivileges(openedToken, false,
+                        ref requestedState,
+                        (uint)Marshal.SizeOf<TokenPrivileges>(),
+                        out previousState, out _)) {
+                    throw LastError("could not enable SeBackupPrivilege");
+                }
+                var error = Marshal.GetLastWin32Error();
+                if (error != 0) {
+                    var operation = error == ErrorNotAllAssigned
+                        ? "the process token does not contain SeBackupPrivilege"
+                        : "could not enable SeBackupPrivilege";
+                    throw Win32Error(operation, error);
+                }
+                token = openedToken;
+            } catch {
+                openedToken.Dispose();
+                throw;
+            }
+        }
+
+        public void Dispose() {
+            if (token == null) {
+                return;
+            }
+
+            // A count of zero means that the privilege was already in the
+            // requested state and AdjustTokenPrivileges changed nothing.
+            if (previousState.PrivilegeCount != 0) {
+                var state = previousState;
+                Marshal.SetLastPInvokeError(0);
+                var restored = RestoreTokenPrivileges(
+                    token, false, ref state, 0, IntPtr.Zero, IntPtr.Zero);
+                var error = Marshal.GetLastWin32Error();
+                if (!restored || (error != 0)) {
+                    throw Win32Error(
+                        "could not restore SeBackupPrivilege", error);
+                }
+            }
+
+            token.Dispose();
+            token = null;
+        }
+    }
+
     private sealed class AlignedBuffer : SafeHandleZeroOrMinusOneIsInvalid {
         public AlignedBuffer(int size) : base(true) {
             if (size <= 0) {
@@ -140,6 +252,37 @@ public static class DeviceFsTestNative {
         uint desiredAccess, uint shareMode, IntPtr securityAttributes,
         uint creationDisposition, uint flagsAndAttributes,
         IntPtr templateFile);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr process,
+        uint desiredAccess, out SafeAccessTokenHandle token);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode,
+        EntryPoint = "LookupPrivilegeValueW", SetLastError = true)]
+    private static extern bool LookupPrivilegeValue(string systemName,
+        string name, out Luid luid);
+
+    [DllImport("advapi32.dll", EntryPoint = "AdjustTokenPrivileges",
+        SetLastError = true)]
+    private static extern bool AdjustTokenPrivileges(
+        SafeAccessTokenHandle token, bool disableAllPrivileges,
+        ref TokenPrivileges newState, uint bufferLength,
+        out TokenPrivileges previousState, out uint returnLength);
+
+    [DllImport("advapi32.dll", EntryPoint = "AdjustTokenPrivileges",
+        SetLastError = true)]
+    private static extern bool RestoreTokenPrivileges(
+        SafeAccessTokenHandle token, bool disableAllPrivileges,
+        ref TokenPrivileges newState, uint bufferLength,
+        IntPtr previousState, IntPtr returnLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandleEx(
+        SafeFileHandle file, int informationClass, IntPtr information,
+        uint bufferSize);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool DeviceIoControl(SafeFileHandle device,
@@ -216,6 +359,22 @@ public static class DeviceFsTestNative {
             device.Dispose();
             throw;
         }
+    }
+
+    private static SafeFileHandle OpenObjectForExtents(string path) {
+        var handle = CreateFile(path, GenericRead,
+            FileShareRead | FileShareWrite | FileShareDelete,
+            IntPtr.Zero, OpenExisting,
+            SecuritySqosPresent | SecurityIdentification |
+                FileFlagOpenReparsePoint | FileFlagBackupSemantics,
+            IntPtr.Zero);
+        if (handle.IsInvalid) {
+            var error = LastError($"could not open '{path}'");
+            handle.Dispose();
+            throw error;
+        }
+
+        return handle;
     }
 
     private static IoResult Control(SafeFileHandle device, uint code,
@@ -456,6 +615,240 @@ public static class DeviceFsTestNative {
         using var device = OpenRawReadDevice(devicePath);
         return ReadDeviceAt(device, QueryLength(device),
             QuerySectorSize(device), offset, count);
+    }
+
+    public static IDisposable EnableBackupPrivilege() {
+        return new BackupPrivilegeScope();
+    }
+
+    private static void AddAllocatedClusterRanges(SafeFileHandle handle,
+        string path, List<ClusterRange> ranges) {
+        var input = new byte[sizeof(long)];
+        var output = new byte[RetrievalPointersHeaderSize +
+            (256 * RetrievalPointersExtentSize)];
+        var startingVcn = 0L;
+        while (true) {
+            Buffer.BlockCopy(
+                BitConverter.GetBytes(startingVcn), 0, input, 0, input.Length);
+            var completed = DeviceIoControl(handle,
+                FsctlGetRetrievalPointers, input, (uint)input.Length,
+                output, (uint)output.Length, out var returned, IntPtr.Zero);
+            var error = completed ? 0 : Marshal.GetLastWin32Error();
+            if ((!completed) && (error == ErrorHandleEof)) {
+                return;
+            }
+            if ((!completed) && (error != ErrorMoreData)) {
+                throw Win32Error(
+                    $"could not retrieve the extents of '{path}'", error);
+            }
+            if (returned < RetrievalPointersHeaderSize) {
+                throw new InvalidDataException(
+                    $"extent data for '{path}' was incomplete");
+            }
+
+            var extentCount = BitConverter.ToUInt32(output, 0);
+            var required = checked(RetrievalPointersHeaderSize +
+                ((long)extentCount * RetrievalPointersExtentSize));
+            if (required > returned) {
+                throw new InvalidDataException(
+                    $"extent data for '{path}' was truncated");
+            }
+
+            var currentVcn = BitConverter.ToInt64(output, 8);
+            for (var index = 0; index < extentCount; ++index) {
+                var offset = checked(RetrievalPointersHeaderSize +
+                    (index * RetrievalPointersExtentSize));
+                var nextVcn = BitConverter.ToInt64(output, offset);
+                var lcn = BitConverter.ToInt64(output, offset + sizeof(long));
+                if (nextVcn <= currentVcn) {
+                    throw new InvalidDataException(
+                        $"extent data for '{path}' did not advance");
+                }
+                if (lcn < -1) {
+                    throw new InvalidDataException(
+                        $"extent data for '{path}' contained an invalid LCN");
+                }
+                if (lcn >= 0) {
+                    ranges.Add(new ClusterRange(lcn, nextVcn - currentVcn));
+                }
+                currentVcn = nextVcn;
+            }
+
+            if (completed) {
+                return;
+            }
+            if ((extentCount == 0) || (currentVcn <= startingVcn)) {
+                throw new InvalidDataException(
+                    $"partial extent data for '{path}' did not advance");
+            }
+            startingVcn = currentVcn;
+        }
+    }
+
+    private static string[] ParseNamedDataStreams(IntPtr buffer,
+        int bufferSize, string path) {
+        var result = new List<string>();
+        var offset = 0;
+        while (true) {
+            var remaining = bufferSize - offset;
+            if (remaining < FileStreamInfoHeaderSize) {
+                throw new InvalidDataException(
+                    $"stream information for '{path}' was truncated");
+            }
+
+            var entry = IntPtr.Add(buffer, offset);
+            var nextEntryOffset = unchecked((uint)Marshal.ReadInt32(entry));
+            var nameByteLength = unchecked(
+                (uint)Marshal.ReadInt32(entry, sizeof(uint)));
+            if ((nameByteLength % sizeof(char)) != 0) {
+                throw new InvalidDataException(
+                    $"stream information for '{path}' contained an " +
+                    "invalid name length");
+            }
+
+            var recordSize = checked(
+                (long)FileStreamInfoHeaderSize + nameByteLength);
+            if (recordSize > remaining) {
+                throw new InvalidDataException(
+                    $"stream information for '{path}' was truncated");
+            }
+
+            var characterCount = checked((int)(nameByteLength / sizeof(char)));
+            var name = characterCount == 0
+                ? string.Empty
+                : Marshal.PtrToStringUni(
+                    IntPtr.Add(entry, FileStreamInfoHeaderSize),
+                    characterCount);
+            if (name == null) {
+                throw new InvalidDataException(
+                    $"stream information for '{path}' contained an " +
+                    "invalid name");
+            }
+
+            if ((name.Length != 0) &&
+                !string.Equals(name, "::$DATA",
+                    StringComparison.OrdinalIgnoreCase)) {
+                if ((name[0] != ':') ||
+                    !name.EndsWith(":$DATA",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    (name.IndexOf('\0') >= 0) ||
+                    (name.IndexOf('\\') >= 0) || (name.IndexOf('/') >= 0)) {
+                    throw new InvalidDataException(
+                        $"stream information for '{path}' contained an " +
+                        "invalid stream name");
+                }
+                result.Add(name);
+            }
+
+            if (nextEntryOffset == 0) {
+                return result.ToArray();
+            }
+            if (((nextEntryOffset % sizeof(long)) != 0) ||
+                (nextEntryOffset < recordSize) ||
+                (nextEntryOffset > remaining - FileStreamInfoHeaderSize)) {
+                throw new InvalidDataException(
+                    $"stream information for '{path}' contained an " +
+                    "invalid entry offset");
+            }
+            offset = checked(offset + (int)nextEntryOffset);
+        }
+    }
+
+    private static string[] GetNamedDataStreams(SafeFileHandle handle,
+        string path) {
+        var bufferSize = InitialStreamInformationSize;
+        while (true) {
+            using var buffer = new AlignedBuffer(bufferSize);
+            if (GetFileInformationByHandleEx(handle, FileStreamInfo,
+                    buffer.DangerousGetHandle(), (uint)bufferSize)) {
+                return ParseNamedDataStreams(
+                    buffer.DangerousGetHandle(), bufferSize, path);
+            }
+
+            var error = Marshal.GetLastWin32Error();
+            if (error == ErrorHandleEof) {
+                return Array.Empty<string>();
+            }
+            if ((error != ErrorInsufficientBuffer) &&
+                (error != ErrorMoreData)) {
+                throw Win32Error(
+                    $"could not enumerate streams of '{path}'", error);
+            }
+            if (bufferSize > (int.MaxValue / 2)) {
+                throw new InvalidDataException(
+                    $"stream information for '{path}' was too large");
+            }
+            bufferSize *= 2;
+        }
+    }
+
+    public static ClusterRange[] GetAllocatedClusterRanges(string path,
+        bool enumerateNamedDataStreams) {
+        var ranges = new List<ClusterRange>();
+        using var handle = OpenObjectForExtents(path);
+        AddAllocatedClusterRanges(handle, path, ranges);
+        if (!enumerateNamedDataStreams) {
+            return ranges.ToArray();
+        }
+
+        foreach (var streamName in GetNamedDataStreams(handle, path)) {
+            var streamPath = path + streamName;
+            using var streamHandle = OpenObjectForExtents(streamPath);
+            AddAllocatedClusterRanges(streamHandle, streamPath, ranges);
+        }
+        return ranges.ToArray();
+    }
+
+    public static long[] GetDifferingBlockOffsets(string firstDevicePath,
+        string secondDevicePath, int blockSize) {
+        if (blockSize <= 0) {
+            throw new ArgumentOutOfRangeException(nameof(blockSize));
+        }
+
+        using var first = OpenRawReadDevice(firstDevicePath);
+        using var second = OpenRawReadDevice(secondDevicePath);
+        var length = QueryLength(first);
+        if (QueryLength(second) != length) {
+            throw new InvalidDataException("device lengths differ");
+        }
+
+        var firstSectorSize = QuerySectorSize(first);
+        var secondSectorSize = QuerySectorSize(second);
+        const int blocksPerRead = 256;
+        var readSize = checked(blockSize * blocksPerRead);
+        var result = new List<long>();
+        for (var offset = 0L; offset < length; offset += readSize) {
+            var count = (int)Math.Min((long)readSize, length - offset);
+            var firstBytes = ReadDeviceAt(
+                first, length, firstSectorSize, offset, count);
+            var secondBytes = ReadDeviceAt(
+                second, length, secondSectorSize, offset, count);
+            for (var index = 0; index < count; index += blockSize) {
+                var current = Math.Min(blockSize, count - index);
+                if (!firstBytes.AsSpan(index, current).SequenceEqual(
+                        secondBytes.AsSpan(index, current))) {
+                    result.Add(offset + index);
+                }
+            }
+        }
+
+        return result.ToArray();
+    }
+
+    public static void CopyDeviceToFile(string devicePath,
+        string destinationPath) {
+        using var source = OpenRawReadDevice(devicePath);
+        var length = QueryLength(source);
+        var sectorSize = QuerySectorSize(source);
+        using var destination = new FileStream(destinationPath,
+            FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+        const int readSize = 4 * 1024 * 1024;
+        for (var offset = 0L; offset < length; offset += readSize) {
+            var count = (int)Math.Min((long)readSize, length - offset);
+            var bytes = ReadDeviceAt(
+                source, length, sectorSize, offset, count);
+            destination.Write(bytes, 0, bytes.Length);
+        }
     }
 
     private static int ReadManaged(FileStream stream, byte[] buffer,

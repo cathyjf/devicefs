@@ -34,6 +34,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $file_backed_virtual_bus_type = [UInt16]15
+. ([IO.Path]::Combine(
+        $PSScriptRoot, 'include', 'DeviceFsTestProcess.ps1'))
 
 function Assert-Condition {
     param(
@@ -184,182 +186,6 @@ function Mount-ValidatedReadOnlyVhd {
             ($bitmap.ClusterSize -eq $Fixture.ClusterSize)) `
         'The read-only NTFS bitmap geometry is inconsistent with the fixture.'
     return $bitmap
-}
-
-function Start-DeviceFsTestProcess {
-    param(
-        [Parameter(Mandatory)]
-        [string] $Executable,
-
-        [Parameter(Mandatory)]
-        [string] $MountPath,
-
-        [Parameter(Mandatory)]
-        [string] $ReadUser,
-
-        [Parameter(Mandatory)]
-        [string] $StopEvent,
-
-        [Parameter(Mandatory)]
-        [string] $SourceDevice,
-
-        [switch] $SyntheticFreeClusters
-    )
-
-    $start_info = [Diagnostics.ProcessStartInfo]::new()
-    $start_info.FileName = $Executable
-    $start_info.WorkingDirectory = [IO.Path]::GetDirectoryName($Executable)
-    $start_info.UseShellExecute = $false
-    $start_info.CreateNoWindow = $true
-    $start_info.RedirectStandardOutput = $true
-    $start_info.RedirectStandardError = $true
-    foreach ($argument in @(
-            '--mount', $MountPath,
-            '--read-user', $ReadUser,
-            '--stop-event', $StopEvent,
-            '--map', 'volume.img', $SourceDevice)) {
-        $start_info.ArgumentList.Add($argument)
-    }
-    if ($SyntheticFreeClusters) {
-        $start_info.ArgumentList.Add('--synthetic-free-clusters')
-    }
-
-    $process = [Diagnostics.Process]::Start($start_info)
-    return [pscustomobject]@{
-        Process = $process
-        StandardOutputTask = $process.StandardOutput.ReadToEndAsync()
-        StandardErrorTask = $process.StandardError.ReadToEndAsync()
-        StopEvent = $StopEvent
-        ImagePath = [IO.Path]::Combine($MountPath, 'volume.img')
-        OutputLog = "$MountPath.stdout.log"
-        ErrorLog = "$MountPath.stderr.log"
-        OutputCollected = $false
-        StartupExitObserved = $false
-    }
-}
-
-function Save-TestProcessOutput {
-    param(
-        [Parameter(Mandatory)]
-        $Invocation
-    )
-
-    if ($Invocation.OutputCollected) {
-        return
-    }
-    if (-not $Invocation.Process.HasExited) {
-        throw "Cannot collect output from running test process " +
-            "$($Invocation.Process.Id)."
-    }
-
-    $Invocation.Process.WaitForExit()
-    $stdout = $Invocation.StandardOutputTask.GetAwaiter().GetResult()
-    $stderr = $Invocation.StandardErrorTask.GetAwaiter().GetResult()
-    [IO.File]::WriteAllText($Invocation.OutputLog, $stdout)
-    [IO.File]::WriteAllText($Invocation.ErrorLog, $stderr)
-    $Invocation.OutputCollected = $true
-}
-
-function Wait-DeviceFsReady {
-    param(
-        [Parameter(Mandatory)]
-        $Invocation,
-
-        [int] $TimeoutSeconds = 30
-    )
-
-    $deadline = [Environment]::TickCount64 + ($TimeoutSeconds * 1000)
-    while ([Environment]::TickCount64 -lt $deadline) {
-        if ($Invocation.Process.HasExited) {
-            $Invocation.StartupExitObserved = $true
-            Save-TestProcessOutput $Invocation
-            $stdout = [IO.File]::ReadAllText($Invocation.OutputLog)
-            $stderr = [IO.File]::ReadAllText($Invocation.ErrorLog)
-            throw "devicefs exited during startup with code " +
-                "$($Invocation.Process.ExitCode).`n$stdout$stderr"
-        }
-
-        $stream = $null
-        try {
-            $stream = [IO.File]::Open(
-                $Invocation.ImagePath,
-                [IO.FileMode]::Open,
-                [IO.FileAccess]::Read,
-                [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
-            return
-        } catch [IO.IOException] {
-            # The WinFsp mount is not ready yet.
-        } finally {
-            if ($null -ne $stream) {
-                $stream.Dispose()
-            }
-        }
-
-        Start-Sleep -Milliseconds 100
-    }
-
-    throw "Timed out waiting for '$($Invocation.ImagePath)' to become readable."
-}
-
-function Stop-DeviceFsTestProcess {
-    param(
-        [Parameter(Mandatory)]
-        $Invocation,
-
-        [int] $TimeoutSeconds = 30
-    )
-
-    $process = $Invocation.Process
-    $process_id = $process.Id
-    if ($process.HasExited) {
-        Save-TestProcessOutput $Invocation
-        throw "devicefs process $process_id exited before shutdown was requested."
-    }
-
-    $signal_error = $null
-    $timed_out = $false
-    try {
-        $event = [Threading.EventWaitHandle]::OpenExisting($Invocation.StopEvent)
-        try {
-            if (-not $event.Set()) {
-                throw "Could not signal '$($Invocation.StopEvent)'."
-            }
-        } finally {
-            $event.Dispose()
-        }
-    } catch {
-        $signal_error = $_
-    }
-
-    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-        $timed_out = $true
-        try {
-            if (-not $process.HasExited) {
-                $process.Kill()
-            }
-        } catch [InvalidOperationException] {
-            if (-not $process.HasExited) {
-                throw
-            }
-        }
-        if ((-not $process.HasExited) -and
-            (-not $process.WaitForExit($TimeoutSeconds * 1000))) {
-            throw "devicefs process $process_id remained alive after termination."
-        }
-    }
-
-    Save-TestProcessOutput $Invocation
-    if ($timed_out) {
-        throw "devicefs process $process_id did not stop within " +
-            "$TimeoutSeconds seconds."
-    }
-    if ($null -ne $signal_error) {
-        throw $signal_error
-    }
-    if ($process.ExitCode -ne 0) {
-        throw "devicefs process $process_id exited with code " +
-            "$($process.ExitCode)."
-    }
 }
 
 if (-not $IsWindows) {
@@ -582,16 +408,17 @@ try {
     $normal_invocation = Start-DeviceFsTestProcess `
         -Executable $DeviceFsPath -MountPath $normal_mount `
         -ReadUser $read_user -StopEvent "Local\devicefs-test-$run_id-normal" `
-        -SourceDevice $source_device
+        -Mappings ([ordered]@{ 'volume.img' = $source_device })
     Wait-DeviceFsReady $normal_invocation
     $synthetic_invocation = Start-DeviceFsTestProcess `
         -Executable $DeviceFsPath -MountPath $synthetic_mount `
         -ReadUser $read_user -StopEvent "Local\devicefs-test-$run_id-synthetic" `
-        -SourceDevice $source_device -SyntheticFreeClusters
+        -Mappings ([ordered]@{ 'volume.img' = $source_device }) `
+        -SyntheticFreeClusters
     Wait-DeviceFsReady $synthetic_invocation
 
-    $normal_image = $normal_invocation.ImagePath
-    $synthetic_image = $synthetic_invocation.ImagePath
+    $normal_image = $normal_invocation.ImagePaths['volume.img']
+    $synthetic_image = $synthetic_invocation.ImagePaths['volume.img']
     $cluster_size = [long]$bitmap.ClusterSize
     $null = [DeviceFsTestNative]::CompareRange(
         $source_device, $normal_image, $synthetic_image, $bitmap,

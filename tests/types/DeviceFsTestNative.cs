@@ -67,6 +67,17 @@ public sealed class ClusterRange {
     }
 }
 
+public sealed class AllocationChangeBlocks {
+    public long[] BecameAllocated { get; }
+    public long[] BecameFree { get; }
+
+    internal AllocationChangeBlocks(long[] becameAllocated,
+        long[] becameFree) {
+        BecameAllocated = becameAllocated;
+        BecameFree = becameFree;
+    }
+}
+
 public static class DeviceFsTestNative {
     private const uint GenericRead = 0x80000000;
     private const uint TokenQuery = 0x00000008;
@@ -799,30 +810,75 @@ public static class DeviceFsTestNative {
         return ranges.ToArray();
     }
 
-    public static long[] GetDifferingBlockOffsets(string firstDevicePath,
-        string secondDevicePath, int blockSize) {
+    public static AllocationChangeBlocks GetAllocationChangeBlocks(
+        NtfsBitmap before, NtfsBitmap after, int blockSize) {
+        if ((before == null) || (after == null)) {
+            throw new ArgumentNullException();
+        }
+        if (blockSize <= 0) {
+            throw new ArgumentOutOfRangeException(nameof(blockSize));
+        }
+        if ((before.Length != after.Length) ||
+            (before.SectorSize != after.SectorSize) ||
+            (before.ClusterSize != after.ClusterSize) ||
+            (before.ClusterCount != after.ClusterCount)) {
+            throw new InvalidDataException("NTFS bitmap geometries differ");
+        }
+
+        var becameAllocated = new List<long>();
+        var becameFree = new List<long>();
+        for (var cluster = 0L; cluster < before.ClusterCount; ++cluster) {
+            var wasAllocated = before.IsAllocated(cluster);
+            var isAllocated = after.IsAllocated(cluster);
+            if (wasAllocated == isAllocated) {
+                continue;
+            }
+
+            var result = isAllocated ? becameAllocated : becameFree;
+            var start = checked(cluster * (long)before.ClusterSize);
+            var end = Math.Min(before.Length,
+                checked(start + before.ClusterSize));
+            for (var offset = start - (start % blockSize);
+                offset < end; offset += blockSize) {
+                if ((result.Count == 0) || (result[^1] != offset)) {
+                    result.Add(offset);
+                }
+            }
+        }
+
+        return new AllocationChangeBlocks(
+            becameAllocated.ToArray(), becameFree.ToArray());
+    }
+
+    public static long[] GetDifferingFileBlockOffsets(string firstImagePath,
+        string secondImagePath, int blockSize) {
         if (blockSize <= 0) {
             throw new ArgumentOutOfRangeException(nameof(blockSize));
         }
 
-        using var first = OpenRawReadDevice(firstDevicePath);
-        using var second = OpenRawReadDevice(secondDevicePath);
-        var length = QueryLength(first);
-        if (QueryLength(second) != length) {
-            throw new InvalidDataException("device lengths differ");
+        using var first = new FileStream(firstImagePath, FileMode.Open,
+            FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1,
+            FileOptions.SequentialScan);
+        using var second = new FileStream(secondImagePath, FileMode.Open,
+            FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1,
+            FileOptions.SequentialScan);
+        var length = first.Length;
+        if (second.Length != length) {
+            throw new InvalidDataException("image lengths differ");
         }
 
-        var firstSectorSize = QuerySectorSize(first);
-        var secondSectorSize = QuerySectorSize(second);
         const int blocksPerRead = 256;
         var readSize = checked(blockSize * blocksPerRead);
+        var firstBytes = new byte[readSize];
+        var secondBytes = new byte[readSize];
         var result = new List<long>();
         for (var offset = 0L; offset < length; offset += readSize) {
             var count = (int)Math.Min((long)readSize, length - offset);
-            var firstBytes = ReadDeviceAt(
-                first, length, firstSectorSize, offset, count);
-            var secondBytes = ReadDeviceAt(
-                second, length, secondSectorSize, offset, count);
+            if ((ReadManaged(first, firstBytes, count) != count) ||
+                (ReadManaged(second, secondBytes, count) != count)) {
+                throw new EndOfStreamException(
+                    "a devicefs image completed a sequential read short");
+            }
             for (var index = 0; index < count; index += blockSize) {
                 var current = Math.Min(blockSize, count - index);
                 if (!firstBytes.AsSpan(index, current).SequenceEqual(

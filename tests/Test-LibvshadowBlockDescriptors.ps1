@@ -7,33 +7,42 @@
 
 <#
 .SYNOPSIS
-Checks descriptors plus System Volume Information extents against differences.
+Checks a conservative VSS change map against devicefs synthetic views.
 
 .DESCRIPTION
-Creates a fixed VHD containing one NTFS volume, writes a file, takes a VSS
-snapshot, overwrites one allocated range, and takes another snapshot. It
-compares the snapshots in 16 KiB blocks, copies the source volume to an ordinary
-file, and constructs a conservative map from an unmodified vshadowinfo
-executable. It also adds every 16 KiB block intersecting allocated file-data,
-named data-stream, or directory extents reachable at or beneath System Volume
-Information in either snapshot. The test must run as SYSTEM so it can enumerate
-that directory. It temporarily enables SeBackupPrivilege while querying those
-extents. Named streams of reparse points are not queried, and reparse targets
-are not followed.
+Creates a fixed VHD containing one NTFS volume and retains three VSS snapshots
+around two mutation intervals. Each interval includes a large in-place
+overwrite, a file creation, a file deletion, and a sector-sized overwrite of a
+fixed file. One devicefs process exposes all three snapshots with
+--synthetic-free-clusters, and the test compares consecutive views in 16 KiB
+blocks. For each interval it constructs a conservative map from the preceding
+snapshot's vshadowinfo store, changes to the NTFS allocation bitmap, and
+allocated file-data, named data-stream, or directory extents reachable at or
+beneath System Volume Information in either endpoint snapshot.
 
-The descriptor set includes the 16 KiB block containing every in-range original
-and store-data offset printed for every snapshot store, plus each forwarder's
+The test must run as SYSTEM so it can enumerate System Volume Information. It
+temporarily enables SeBackupPrivilege while querying those extents. Named
+streams of reparse points are not queried, and reparse targets are not followed.
+
+For each snapshot store, the descriptor set includes the 16 KiB block
+containing every in-range original and store-data offset, plus each forwarder's
 in-range relative offset. File, directory, and named data-stream extents are
 obtained directly from NTFS with FSCTL_GET_RETRIEVAL_POINTERS.
 
-The VHD and snapshots are removed during cleanup. Use -KeepArtifactsOnFailure
-to retain the detached VHD and vshadowinfo output after a failure.
+Each large overwrite is sufficient to exercise a chained VSS block list. The
+test also requires every map component to contribute independently and rejects
+a map covering the entire volume. The VHD and snapshots are removed during
+cleanup. Use -KeepArtifactsOnFailure to retain the detached VHD, process logs,
+and vshadowinfo output after a failure.
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
     [string] $VShadowInfoPath,
+
+    [Parameter(Mandatory)]
+    [string] $DeviceFsPath,
 
     [switch] $KeepArtifactsOnFailure
 )
@@ -45,6 +54,9 @@ $microsoft_software_provider =
     [Guid]'b5946137-7b9f-4925-af80-51abd60b20d5'
 $vss_block_size = 16KB
 $vshadow_forwarder_flag = 1
+$vshadow_overlay_flag = 2
+. ([IO.Path]::Combine(
+        $PSScriptRoot, 'include', 'DeviceFsTestProcess.ps1'))
 
 function Assert-Condition {
     param(
@@ -133,6 +145,84 @@ function Read-FileRange {
     return ,$bytes
 }
 
+function Write-FilePattern {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+
+        [Parameter(Mandatory)]
+        [long] $Offset,
+
+        [Parameter(Mandatory)]
+        [long] $Length,
+
+        [Parameter(Mandatory)]
+        [byte] $Value,
+
+        [switch] $CreateNew
+    )
+
+    $buffer_size = [int][Math]::Min([long]1MB, $Length)
+    $buffer = [byte[]]::new($buffer_size)
+    [Array]::Fill[byte]($buffer, $Value)
+    $mode = if ($CreateNew) {
+        [IO.FileMode]::CreateNew
+    } else {
+        [IO.FileMode]::Open
+    }
+    $stream = [IO.File]::Open(
+        $Path, $mode, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try {
+        $stream.Position = $Offset
+        for ($remaining = $Length; $remaining -gt 0;) {
+            $count = [int][Math]::Min($buffer.Length, $remaining)
+            $stream.Write($buffer, 0, $count)
+            $remaining -= $count
+        }
+        $stream.Flush($true)
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Get-ObjectBlockOffsets {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+
+        [Parameter(Mandatory)]
+        [NtfsBitmap] $Bitmap,
+
+        [Parameter(Mandatory)]
+        [int] $BlockSize,
+
+        [Parameter(Mandatory)]
+        [bool] $EnumerateNamedDataStreams
+    )
+
+    $blocks = [Collections.Generic.HashSet[long]]::new()
+    $ranges = [DeviceFsTestNative]::GetAllocatedClusterRanges(
+        $Path, $EnumerateNamedDataStreams)
+    foreach ($range in $ranges) {
+        Assert-Condition (
+            ($range.StartingCluster -ge 0) -and
+                ($range.ClusterCount -gt 0) -and
+                ($range.ClusterCount -le $Bitmap.ClusterCount) -and
+                ($range.StartingCluster -le
+                    ($Bitmap.ClusterCount - $range.ClusterCount))) `
+            "NTFS returned an invalid extent for '$Path'."
+        $start = [long](
+            $range.StartingCluster * [long]$Bitmap.ClusterSize)
+        $end = [long](
+            $start + ($range.ClusterCount * [long]$Bitmap.ClusterSize))
+        for ($offset = $start - ($start % $BlockSize);
+            $offset -lt $end; $offset += $BlockSize) {
+            $null = $blocks.Add($offset)
+        }
+    }
+    return ,$blocks
+}
+
 function Get-TreeBlockOffsets {
     param(
         [Parameter(Mandatory)]
@@ -153,27 +243,204 @@ function Get-TreeBlockOffsets {
     foreach ($object in $objects) {
         $is_reparse_point = (($object.Attributes -band
                 [IO.FileAttributes]::ReparsePoint) -ne 0)
-        $ranges = [DeviceFsTestNative]::GetAllocatedClusterRanges(
-            $object.FullName, -not $is_reparse_point)
-        foreach ($range in $ranges) {
-            Assert-Condition (
-                ($range.StartingCluster -ge 0) -and
-                    ($range.ClusterCount -gt 0) -and
-                    ($range.ClusterCount -le $Bitmap.ClusterCount) -and
-                    ($range.StartingCluster -le
-                        ($Bitmap.ClusterCount - $range.ClusterCount))) `
-                "NTFS returned an invalid extent for '$($object.FullName)'."
-            $start = [long](
-                $range.StartingCluster * [long]$Bitmap.ClusterSize)
-            $end = [long](
-                $start + ($range.ClusterCount * [long]$Bitmap.ClusterSize))
-            for ($offset = $start - ($start % $BlockSize);
-                $offset -lt $end; $offset += $BlockSize) {
-                $null = $blocks.Add($offset)
-            }
+        $object_blocks = Get-ObjectBlockOffsets $object.FullName $Bitmap `
+            $BlockSize (-not $is_reparse_point)
+        foreach ($offset in $object_blocks) {
+            $null = $blocks.Add($offset)
         }
     }
     return ,$blocks
+}
+
+function Find-AllocationTransitionCluster {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+
+        [Parameter(Mandatory)]
+        [NtfsBitmap] $Before,
+
+        [Parameter(Mandatory)]
+        [NtfsBitmap] $After,
+
+        [Parameter(Mandatory)]
+        [bool] $BecameAllocated
+    )
+
+    foreach ($range in [DeviceFsTestNative]::GetAllocatedClusterRanges(
+            $Path, $false)) {
+        Assert-Condition (
+            ($range.StartingCluster -ge 0) -and
+                ($range.ClusterCount -gt 0) -and
+                ($range.ClusterCount -le $After.ClusterCount) -and
+                ($range.StartingCluster -le
+                    ($After.ClusterCount - $range.ClusterCount))) `
+            "NTFS returned an invalid extent for '$Path'."
+        $end = $range.StartingCluster + $range.ClusterCount
+        for ($cluster = $range.StartingCluster; $cluster -lt $end; ++$cluster) {
+            $was_allocated = $Before.IsAllocated($cluster)
+            $is_allocated = $After.IsAllocated($cluster)
+            if (($is_allocated -eq $BecameAllocated) -and
+                ($was_allocated -ne $is_allocated)) {
+                return $cluster
+            }
+        }
+    }
+
+    $direction = if ($BecameAllocated) {
+        'free to allocated'
+    } else {
+        'allocated to free'
+    }
+    throw "'$Path' did not contain a $direction cluster."
+}
+
+function Assert-ControlledOverwrite {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Description,
+
+        [Parameter(Mandatory)]
+        [string] $BeforePath,
+
+        [Parameter(Mandatory)]
+        [string] $AfterPath,
+
+        [Parameter(Mandatory)]
+        [NtfsBitmap] $BeforeBitmap,
+
+        [Parameter(Mandatory)]
+        [NtfsBitmap] $AfterBitmap,
+
+        [Parameter(Mandatory)]
+        $Differences,
+
+        [Parameter(Mandatory)]
+        $OriginalBlocks,
+
+        [Parameter(Mandatory)]
+        $AllocationBlocks,
+
+        [Parameter(Mandatory)]
+        $SviBlocks,
+
+        [Parameter(Mandatory)]
+        [int] $BlockSize
+    )
+
+    $before_blocks = Get-ObjectBlockOffsets `
+        $BeforePath $BeforeBitmap $BlockSize $false
+    $after_blocks = Get-ObjectBlockOffsets `
+        $AfterPath $AfterBitmap $BlockSize $false
+    Assert-Condition ($before_blocks.SetEquals($after_blocks)) `
+        "$Description changed its 16 KiB allocation between snapshots."
+
+    $controlled = 0
+    foreach ($offset in $before_blocks) {
+        if ($Differences.Contains($offset) -and
+            $OriginalBlocks.Contains($offset) -and
+            (-not $AllocationBlocks.Contains($offset)) -and
+            (-not $SviBlocks.Contains($offset))) {
+            ++$controlled
+        }
+    }
+    # One 16 KiB block-list record holds at most 508 descriptors.
+    Assert-Condition ($controlled -gt 512) (
+        "$Description did not produce more than 512 stable changed blocks " +
+        "in its VSS store's original-offset records.")
+    return $controlled
+}
+
+function Test-DeltaCoverage {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Name,
+
+        [Parameter(Mandatory)]
+        $Differences,
+
+        [Parameter(Mandatory)]
+        $DescriptorBlocks,
+
+        [Parameter(Mandatory)]
+        $AllocationBlocks,
+
+        [Parameter(Mandatory)]
+        $SviBlocks,
+
+        [Parameter(Mandatory)]
+        [string] $ArtifactRoot,
+
+        [Parameter(Mandatory)]
+        [long] $VolumeLength,
+
+        [Parameter(Mandatory)]
+        [int] $BlockSize
+    )
+
+    $combined = [Collections.Generic.HashSet[long]]::new()
+    foreach ($set in @($DescriptorBlocks, $AllocationBlocks, $SviBlocks)) {
+        foreach ($offset in $set) {
+            $null = $combined.Add($offset)
+        }
+    }
+
+    # Bits represent descriptor, allocation-change, and SVI coverage.
+    $coverage_masks = [long[]]::new(8)
+    $missing = [Collections.Generic.List[long]]::new()
+    foreach ($offset in $Differences) {
+        $mask = 0
+        if ($DescriptorBlocks.Contains($offset)) {
+            $mask = $mask -bor 1
+        }
+        if ($AllocationBlocks.Contains($offset)) {
+            $mask = $mask -bor 2
+        }
+        if ($SviBlocks.Contains($offset)) {
+            $mask = $mask -bor 4
+        }
+        ++$coverage_masks[$mask]
+        if ($mask -eq 0) {
+            $missing.Add($offset)
+        }
+    }
+
+    foreach ($artifact in @(
+            @('synthetic-changed-blocks', $Differences),
+            @('descriptor-blocks', $DescriptorBlocks),
+            @('allocation-change-blocks', $AllocationBlocks),
+            @('system-volume-information-blocks', $SviBlocks),
+            @('candidate-blocks', $combined))) {
+        [IO.File]::WriteAllLines(
+            [IO.Path]::Combine(
+                $ArtifactRoot, "$Name-$($artifact[0]).txt"),
+            @($artifact[1] | Sort-Object |
+                ForEach-Object { '0x{0:X}' -f $_ }))
+    }
+
+    if ($missing.Count -ne 0) {
+        $sample = @($missing | Select-Object -First 8 |
+            ForEach-Object { '0x{0:X}' -f $_ }) -join ', '
+        throw "$Name conservative map missed $($missing.Count) changed " +
+            "block(s): $sample"
+    }
+
+    $volume_blocks = [long][Math]::Ceiling(
+        $VolumeLength / [double]$BlockSize)
+    Assert-Condition ($combined.Count -lt $volume_blocks) `
+        "$Name conservative map covered the entire volume."
+    return [pscustomobject]@{
+        Name = $Name
+        DifferenceCount = $Differences.Count
+        DescriptorOnly = $coverage_masks[1]
+        AllocationOnly = $coverage_masks[2]
+        SviOnly = $coverage_masks[4]
+        Overlapping = $coverage_masks[3] + $coverage_masks[5] +
+            $coverage_masks[6] + $coverage_masks[7]
+        CandidateCount = $combined.Count
+        Overincluded = $combined.Count - $Differences.Count
+        CandidatePercent = 100.0 * $combined.Count / $volume_blocks
+    }
 }
 
 if (-not [Environment]::Is64BitProcess) {
@@ -181,6 +448,7 @@ if (-not [Environment]::Is64BitProcess) {
 }
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $is_system = $identity.IsSystem
+$read_user = $identity.Name
 $identity.Dispose()
 if (-not $is_system) {
     throw 'This integration test must run as NT AUTHORITY\SYSTEM.'
@@ -189,9 +457,15 @@ if (-not $is_system) {
 $VShadowInfoPath = (Resolve-Path -LiteralPath $VShadowInfoPath).Path
 Assert-Condition ([IO.File]::Exists($VShadowInfoPath)) `
     "vshadowinfo was not found at '$VShadowInfoPath'."
+$DeviceFsPath = (Resolve-Path -LiteralPath $DeviceFsPath).Path
+Assert-Condition ([IO.File]::Exists($DeviceFsPath)) `
+    "devicefs was not found at '$DeviceFsPath'."
 
 $native_source_path = [IO.Path]::Combine(
     $PSScriptRoot, 'types', 'DeviceFsTestNative.cs')
+if ($null -ne ([Management.Automation.PSTypeName]'DeviceFsTestNative').Type) {
+    throw 'DeviceFsTestNative is already loaded. Run the test in a fresh pwsh process.'
+}
 Add-Type -Path $native_source_path
 
 $run_id = [Guid]::NewGuid().ToString('N')
@@ -205,13 +479,24 @@ $primary_error = $null
 $cleanup_errors = [Collections.Generic.List[Exception]]::new()
 $image_detached = $false
 $backup_privilege = $null
+$devicefs_invocation = $null
+$devicefs_process_gone = $true
+$delta_results = $null
+$controlled_ab = 0
+$controlled_bc = 0
+$repeated_hot_blocks = 0
+$forwarder_count = 0
+$overlay_count = 0
 
 $source_label = "DFSVSS-$($run_id.Substring(0, 17))"
 $uninitialized_partition_style = [UInt16]0
 $test_vhd_size = [UInt64](1GB)
 $ntfs_cluster_size = 4096
-$witness_offset = 512KB
-$witness_length = 4096
+$overwrite_length = 12MB
+$transition_file_length = 4MB
+$hot_file_length = 16KB
+$sector_write_length = 512
+$sample_length = 4096
 
 try {
     $test_root = Join-Path $env:WINDIR 'SystemTemp' `
@@ -220,6 +505,7 @@ try {
     $vhd_path = [IO.Path]::Combine($test_root, 'test.vhd')
     $source_mount = [IO.Path]::Combine($test_root, 'source')
     New-Item -ItemType Directory -Path $source_mount | Out-Null
+    $synthetic_mount = [IO.Path]::Combine($test_root, 'synthetic')
 
     New-VHD -Path $vhd_path -SizeBytes $test_vhd_size `
         -Fixed | Out-Null
@@ -284,18 +570,17 @@ try {
         "VSS storage configuration failed with exit code " +
         "$storage_exit_code`: $($storage_output -join [Environment]::NewLine)")
 
-    $witness_path = [IO.Path]::Combine($source_mount, 'witness.bin')
-    $baseline = [byte[]]::new(1MB)
-    [Array]::Fill[byte]($baseline, 0x31)
-    $stream = [IO.File]::Open(
-        $witness_path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write,
-        [IO.FileShare]::Read)
-    try {
-        $stream.Write($baseline, 0, $baseline.Length)
-        $stream.Flush($true)
-    } finally {
-        $stream.Dispose()
-    }
+    $bulk_ab_path = [IO.Path]::Combine($source_mount, 'bulk-ab.bin')
+    $bulk_bc_path = [IO.Path]::Combine($source_mount, 'bulk-bc.bin')
+    $hot_path = [IO.Path]::Combine($source_mount, 'hot.bin')
+    $deleted_ab_path = [IO.Path]::Combine($source_mount, 'deleted-ab.bin')
+    $turnover_path = [IO.Path]::Combine($source_mount, 'turnover.bin')
+    $created_bc_path = [IO.Path]::Combine($source_mount, 'created-bc.bin')
+    Write-FilePattern $bulk_ab_path 0 $overwrite_length 0x31 -CreateNew
+    Write-FilePattern $bulk_bc_path 0 $overwrite_length 0x41 -CreateNew
+    Write-FilePattern $hot_path 0 $hot_file_length 0x11 -CreateNew
+    Write-FilePattern $deleted_ab_path 0 $transition_file_length 0x52 `
+        -CreateNew
 
     $snapshot_a = New-TestShadowCopy $source_volume_name $snapshot_ids
     Assert-Condition (
@@ -303,18 +588,13 @@ try {
             $snapshot_a.Differential) `
         'Snapshot A was not made by the Microsoft differential provider.'
 
-    $replacement = [byte[]]::new($witness_length)
-    [Array]::Fill[byte]($replacement, 0xA5)
-    $stream = [IO.File]::Open(
-        $witness_path, [IO.FileMode]::Open, [IO.FileAccess]::Write,
-        [IO.FileShare]::Read)
-    try {
-        $stream.Position = $witness_offset
-        $stream.Write($replacement, 0, $replacement.Length)
-        $stream.Flush($true)
-    } finally {
-        $stream.Dispose()
-    }
+    # Allocate the new file before deleting the old one so both transition
+    # directions are represented by distinct clusters.
+    Write-FilePattern $turnover_path 0 $transition_file_length 0xC3 `
+        -CreateNew
+    Write-FilePattern $bulk_ab_path 0 $overwrite_length 0xA5
+    Write-FilePattern $hot_path 0 $sector_write_length 0xB2
+    Remove-Item -LiteralPath $deleted_ab_path -Force
 
     $snapshot_b = New-TestShadowCopy $source_volume_name $snapshot_ids
     Assert-Condition (
@@ -322,32 +602,214 @@ try {
             $snapshot_b.Differential) `
         'Snapshot B was not made by the Microsoft differential provider.'
 
-    $snapshot_a_file = "$($snapshot_a.DeviceObject)\witness.bin"
-    $snapshot_b_file = "$($snapshot_b.DeviceObject)\witness.bin"
-    $expected_baseline = [byte[]]::new($witness_length)
-    [Array]::Fill[byte]($expected_baseline, 0x31)
-    Assert-BytesEqual $expected_baseline `
-        (Read-FileRange $snapshot_a_file $witness_offset $witness_length) `
-        'Snapshot A witness'
-    Assert-BytesEqual $replacement `
-        (Read-FileRange $snapshot_b_file $witness_offset $witness_length) `
-        'Snapshot B witness'
+    Write-FilePattern $created_bc_path 0 $transition_file_length 0xD3 `
+        -CreateNew
+    Write-FilePattern $bulk_bc_path 0 $overwrite_length 0xB5
+    Write-FilePattern $hot_path $sector_write_length `
+        $sector_write_length 0xD4
+    Remove-Item -LiteralPath $turnover_path -Force
 
-    $differences = @([DeviceFsTestNative]::GetDifferingBlockOffsets(
-        $snapshot_a.DeviceObject, $snapshot_b.DeviceObject, $vss_block_size))
-    Assert-Condition ($differences.Count -ne 0) `
-        'The snapshot comparison found no changed blocks.'
+    $snapshot_c = New-TestShadowCopy $source_volume_name $snapshot_ids
+    Assert-Condition (
+        ([Guid]$snapshot_c.ProviderID -eq $microsoft_software_provider) -and
+            $snapshot_c.Differential) `
+        'Snapshot C was not made by the Microsoft differential provider.'
+
+    $snapshot_a_bulk_ab = "$($snapshot_a.DeviceObject)\bulk-ab.bin"
+    $snapshot_b_bulk_ab = "$($snapshot_b.DeviceObject)\bulk-ab.bin"
+    $snapshot_c_bulk_ab = "$($snapshot_c.DeviceObject)\bulk-ab.bin"
+    $snapshot_a_bulk_bc = "$($snapshot_a.DeviceObject)\bulk-bc.bin"
+    $snapshot_b_bulk_bc = "$($snapshot_b.DeviceObject)\bulk-bc.bin"
+    $snapshot_c_bulk_bc = "$($snapshot_c.DeviceObject)\bulk-bc.bin"
+    $snapshot_a_hot = "$($snapshot_a.DeviceObject)\hot.bin"
+    $snapshot_b_hot = "$($snapshot_b.DeviceObject)\hot.bin"
+    $snapshot_c_hot = "$($snapshot_c.DeviceObject)\hot.bin"
+    $snapshot_a_deleted_ab =
+        "$($snapshot_a.DeviceObject)\deleted-ab.bin"
+    $snapshot_a_turnover = "$($snapshot_a.DeviceObject)\turnover.bin"
+    $snapshot_a_created_bc =
+        "$($snapshot_a.DeviceObject)\created-bc.bin"
+    $snapshot_b_deleted_ab =
+        "$($snapshot_b.DeviceObject)\deleted-ab.bin"
+    $snapshot_b_turnover = "$($snapshot_b.DeviceObject)\turnover.bin"
+    $snapshot_b_created_bc =
+        "$($snapshot_b.DeviceObject)\created-bc.bin"
+    $snapshot_c_deleted_ab =
+        "$($snapshot_c.DeviceObject)\deleted-ab.bin"
+    $snapshot_c_turnover = "$($snapshot_c.DeviceObject)\turnover.bin"
+    $snapshot_c_created_bc =
+        "$($snapshot_c.DeviceObject)\created-bc.bin"
+    Assert-Condition (
+        (Test-Path -LiteralPath $snapshot_a_deleted_ab -PathType Leaf) -and
+            (-not (Test-Path -LiteralPath $snapshot_a_turnover)) -and
+            (-not (Test-Path -LiteralPath $snapshot_a_created_bc)) -and
+            (-not (Test-Path -LiteralPath $snapshot_b_deleted_ab)) -and
+            (Test-Path -LiteralPath $snapshot_b_turnover -PathType Leaf) -and
+            (-not (Test-Path -LiteralPath $snapshot_b_created_bc)) -and
+            (-not (Test-Path -LiteralPath $snapshot_c_deleted_ab)) -and
+            (-not (Test-Path -LiteralPath $snapshot_c_turnover)) -and
+            (Test-Path -LiteralPath $snapshot_c_created_bc -PathType Leaf)) `
+        'The snapshot file-presence matrix did not match the mutations.'
+
+    $expected_ab_before = [byte[]]::new($sample_length)
+    [Array]::Fill[byte]($expected_ab_before, 0x31)
+    $expected_ab_after = [byte[]]::new($sample_length)
+    [Array]::Fill[byte]($expected_ab_after, 0xA5)
+    $expected_bc_before = [byte[]]::new($sample_length)
+    [Array]::Fill[byte]($expected_bc_before, 0x41)
+    $expected_bc_after = [byte[]]::new($sample_length)
+    [Array]::Fill[byte]($expected_bc_after, 0xB5)
+    foreach ($offset in @(0, ($overwrite_length / 2),
+            ($overwrite_length - $sample_length))) {
+        Assert-BytesEqual $expected_ab_before `
+            (Read-FileRange $snapshot_a_bulk_ab $offset $sample_length) `
+            "Snapshot A bulk A-B sample at $offset"
+        foreach ($path in @($snapshot_b_bulk_ab, $snapshot_c_bulk_ab)) {
+            Assert-BytesEqual $expected_ab_after `
+                (Read-FileRange $path $offset $sample_length) `
+                "Post-overwrite bulk A-B sample at $offset"
+        }
+        foreach ($path in @($snapshot_a_bulk_bc, $snapshot_b_bulk_bc)) {
+            Assert-BytesEqual $expected_bc_before `
+                (Read-FileRange $path $offset $sample_length) `
+                "Pre-overwrite bulk B-C sample at $offset"
+        }
+        Assert-BytesEqual $expected_bc_after `
+            (Read-FileRange $snapshot_c_bulk_bc $offset $sample_length) `
+            "Snapshot C bulk B-C sample at $offset"
+    }
+
+    foreach ($fixture in @(
+            @($snapshot_a_deleted_ab, [byte]0x52, 'A deleted A-B'),
+            @($snapshot_b_turnover, [byte]0xC3, 'B turnover'),
+            @($snapshot_c_created_bc, [byte]0xD3, 'C created B-C'))) {
+        $expected = [byte[]]::new($sample_length)
+        [Array]::Fill[byte]($expected, $fixture[1])
+        Assert-BytesEqual $expected `
+            (Read-FileRange $fixture[0] 0 $sample_length) `
+            "Snapshot $($fixture[2]) sample"
+    }
+
+    $expected_hot_a = [byte[]]::new($hot_file_length)
+    [Array]::Fill[byte]($expected_hot_a, 0x11)
+    $expected_hot_b = [byte[]]$expected_hot_a.Clone()
+    $expected_hot_c = [byte[]]$expected_hot_a.Clone()
+    for ($i = 0; $i -lt $sector_write_length; ++$i) {
+        $expected_hot_b[$i] = 0xB2
+        $expected_hot_c[$i] = 0xB2
+        $expected_hot_c[$i + $sector_write_length] = 0xD4
+    }
+    Assert-BytesEqual $expected_hot_a `
+        (Read-FileRange $snapshot_a_hot 0 $hot_file_length) `
+        'Snapshot A hot file'
+    Assert-BytesEqual $expected_hot_b `
+        (Read-FileRange $snapshot_b_hot 0 $hot_file_length) `
+        'Snapshot B hot file'
+    Assert-BytesEqual $expected_hot_c `
+        (Read-FileRange $snapshot_c_hot 0 $hot_file_length) `
+        'Snapshot C hot file'
 
     $bitmap_a = [DeviceFsTestNative]::GetNtfsBitmap(
         $snapshot_a.DeviceObject, $true)
     $bitmap_b = [DeviceFsTestNative]::GetNtfsBitmap(
         $snapshot_b.DeviceObject, $true)
+    $bitmap_c = [DeviceFsTestNative]::GetNtfsBitmap(
+        $snapshot_c.DeviceObject, $true)
     Assert-Condition (
         ($bitmap_a.Length -eq $source_identity.Length) -and
             ($bitmap_b.Length -eq $source_identity.Length) -and
+            ($bitmap_c.Length -eq $source_identity.Length) -and
             ($bitmap_a.ClusterSize -eq $ntfs_cluster_size) -and
-            ($bitmap_b.ClusterSize -eq $ntfs_cluster_size)) `
+            ($bitmap_b.ClusterSize -eq $ntfs_cluster_size) -and
+            ($bitmap_c.ClusterSize -eq $ntfs_cluster_size)) `
         'The snapshot NTFS geometry does not match the source volume.'
+
+    $created_ab_lcn = Find-AllocationTransitionCluster `
+        $snapshot_b_turnover $bitmap_a $bitmap_b $true
+    $deleted_ab_lcn = Find-AllocationTransitionCluster `
+        $snapshot_a_deleted_ab $bitmap_a $bitmap_b $false
+    $created_bc_lcn = Find-AllocationTransitionCluster `
+        $snapshot_c_created_bc $bitmap_b $bitmap_c $true
+    $deleted_bc_lcn = Find-AllocationTransitionCluster `
+        $snapshot_b_turnover $bitmap_b $bitmap_c $false
+    $allocation_changes_ab = [DeviceFsTestNative]::GetAllocationChangeBlocks(
+        $bitmap_a, $bitmap_b, $vss_block_size)
+    $allocation_changes_bc = [DeviceFsTestNative]::GetAllocationChangeBlocks(
+        $bitmap_b, $bitmap_c, $vss_block_size)
+    Assert-Condition (
+        ($allocation_changes_ab.BecameAllocated.Count -ne 0) -and
+            ($allocation_changes_ab.BecameFree.Count -ne 0) -and
+            ($allocation_changes_bc.BecameAllocated.Count -ne 0) -and
+            ($allocation_changes_bc.BecameFree.Count -ne 0)) `
+        'Both deltas did not contain both allocation-transition directions.'
+    $allocation_blocks_ab = [Collections.Generic.HashSet[long]]::new()
+    foreach ($offset in @($allocation_changes_ab.BecameAllocated) +
+        @($allocation_changes_ab.BecameFree)) {
+        $null = $allocation_blocks_ab.Add($offset)
+    }
+    $allocation_blocks_bc = [Collections.Generic.HashSet[long]]::new()
+    foreach ($offset in @($allocation_changes_bc.BecameAllocated) +
+        @($allocation_changes_bc.BecameFree)) {
+        $null = $allocation_blocks_bc.Add($offset)
+    }
+
+    $devicefs_invocation = Start-DeviceFsTestProcess `
+        -Executable $DeviceFsPath -MountPath $synthetic_mount `
+        -ReadUser $read_user -StopEvent "Local\devicefs-vss-$run_id" `
+        -Mappings ([ordered]@{
+            'snapshot-a.img' = $snapshot_a.DeviceObject
+            'snapshot-b.img' = $snapshot_b.DeviceObject
+            'snapshot-c.img' = $snapshot_c.DeviceObject
+        }) -SyntheticFreeClusters
+    Wait-DeviceFsReady $devicefs_invocation
+    $snapshot_a_image =
+        $devicefs_invocation.ImagePaths['snapshot-a.img']
+    $snapshot_b_image =
+        $devicefs_invocation.ImagePaths['snapshot-b.img']
+    $snapshot_c_image =
+        $devicefs_invocation.ImagePaths['snapshot-c.img']
+    Assert-Condition (
+        ([IO.FileInfo]::new($snapshot_a_image).Length -eq
+            $source_identity.Length) -and
+            ([IO.FileInfo]::new($snapshot_b_image).Length -eq
+                $source_identity.Length) -and
+            ([IO.FileInfo]::new($snapshot_c_image).Length -eq
+                $source_identity.Length)) `
+        'The devicefs image lengths do not match the source volume.'
+    $differences_ab = [Collections.Generic.HashSet[long]]::new()
+    foreach ($offset in [DeviceFsTestNative]::GetDifferingFileBlockOffsets(
+        $snapshot_a_image, $snapshot_b_image, $vss_block_size))
+    {
+        $null = $differences_ab.Add($offset)
+    }
+    $differences_bc = [Collections.Generic.HashSet[long]]::new()
+    foreach ($offset in [DeviceFsTestNative]::GetDifferingFileBlockOffsets(
+        $snapshot_b_image, $snapshot_c_image, $vss_block_size))
+    {
+        $null = $differences_bc.Add($offset)
+    }
+    Assert-Condition (
+        ($differences_ab.Count -ne 0) -and ($differences_bc.Count -ne 0)) `
+        'A devicefs synthetic delta contained no changed blocks.'
+
+    $created_ab_block = $created_ab_lcn * [long]$ntfs_cluster_size
+    $created_ab_block -= $created_ab_block % $vss_block_size
+    $deleted_ab_block = $deleted_ab_lcn * [long]$ntfs_cluster_size
+    $deleted_ab_block -= $deleted_ab_block % $vss_block_size
+    $created_bc_block = $created_bc_lcn * [long]$ntfs_cluster_size
+    $created_bc_block -= $created_bc_block % $vss_block_size
+    $deleted_bc_block = $deleted_bc_lcn * [long]$ntfs_cluster_size
+    $deleted_bc_block -= $deleted_bc_block % $vss_block_size
+    Assert-Condition (
+        $differences_ab.Contains($created_ab_block) -and
+            $differences_ab.Contains($deleted_ab_block) -and
+            $differences_bc.Contains($created_bc_block) -and
+            $differences_bc.Contains($deleted_bc_block)) `
+        'The synthetic views did not expose every controlled allocation change.'
+
+    Stop-DeviceFsTestProcess $devicefs_invocation
+    $devicefs_invocation.Process.Dispose()
+    $devicefs_invocation = $null
 
     $svi_relative_path = 'System Volume Information'
     $backup_privilege = [DeviceFsTestNative]::EnableBackupPrivilege()
@@ -357,17 +819,28 @@ try {
     $svi_blocks_b = Get-TreeBlockOffsets `
         "$($snapshot_b.DeviceObject)\$svi_relative_path" `
         $bitmap_b $vss_block_size
+    $svi_blocks_c = Get-TreeBlockOffsets `
+        "$($snapshot_c.DeviceObject)\$svi_relative_path" `
+        $bitmap_c $vss_block_size
     $backup_privilege.Dispose()
     $backup_privilege = $null
-    $svi_blocks = [Collections.Generic.HashSet[long]]::new()
     Assert-Condition (
-        ($svi_blocks_a.Count -ne 0) -and ($svi_blocks_b.Count -ne 0)) `
+        ($svi_blocks_a.Count -ne 0) -and
+            ($svi_blocks_b.Count -ne 0) -and
+            ($svi_blocks_c.Count -ne 0)) `
         'System Volume Information did not contain allocated extents.'
-    foreach ($offset in $svi_blocks_a) {
-        $null = $svi_blocks.Add($offset)
+
+    $svi_blocks_ab = [Collections.Generic.HashSet[long]]::new()
+    foreach ($set in @($svi_blocks_a, $svi_blocks_b)) {
+        foreach ($offset in $set) {
+            $null = $svi_blocks_ab.Add($offset)
+        }
     }
-    foreach ($offset in $svi_blocks_b) {
-        $null = $svi_blocks.Add($offset)
+    $svi_blocks_bc = [Collections.Generic.HashSet[long]]::new()
+    foreach ($set in @($svi_blocks_b, $svi_blocks_c)) {
+        foreach ($offset in $set) {
+            $null = $svi_blocks_bc.Add($offset)
+        }
     }
 
     $vshadow_source = [IO.Path]::Combine(
@@ -385,23 +858,40 @@ try {
     Assert-Condition ($vshadow_exit_code -eq 0) `
         "vshadowinfo exited with code $($vshadow_exit_code): $vshadow_error"
 
-    foreach ($snapshot in @($snapshot_a, $snapshot_b)) {
-        $copy_id = ([Guid]$snapshot.ID).ToString()
-        Assert-Condition (
-            $vshadow_output.Contains(
-                $copy_id, [StringComparison]::OrdinalIgnoreCase)) `
-            "vshadowinfo did not report snapshot $copy_id."
-    }
-
-    $candidate = [Collections.Generic.HashSet[long]]::new()
+    $stores = [Collections.Generic.List[object]]::new()
+    $current_store = $null
     $original = $null
     $relative = $null
     $store_offset = $null
-    $reported_descriptor_count = 0
-    $descriptor_count = 0
     foreach ($line in $vshadow_output -split '\r?\n') {
-        if ($line -match '^\s+Number of blocks\s+:\s+(\d+)$') {
-            $reported_descriptor_count += [Convert]::ToInt32($Matches[1])
+        if ($line -match '^Store:\s+(\d+)$') {
+            $current_store = [pscustomobject]@{
+                Index = [Convert]::ToInt32($Matches[1])
+                CopyId = $null
+                PrintedCount = -1
+                RecordCount = 0
+                OriginalBlocks =
+                    [Collections.Generic.HashSet[long]]::new()
+                DescriptorBlocks =
+                    [Collections.Generic.HashSet[long]]::new()
+                ForwarderCount = 0
+                OverlayCount = 0
+            }
+            $stores.Add($current_store)
+        } elseif ($line -match
+            '^\s+Shadow copy ID\s+:\s+([0-9a-f-]{36})$') {
+            Assert-Condition (
+                ($null -ne $current_store) -and
+                    ($null -eq $current_store.CopyId)) `
+                'vshadowinfo printed a misplaced shadow copy ID.'
+            $current_store.CopyId = [Guid]$Matches[1]
+        } elseif ($line -match '^\s+Number of blocks\s+:\s+(\d+)$') {
+            Assert-Condition (
+                ($null -ne $current_store) -and
+                    ($current_store.PrintedCount -eq -1)) `
+                'vshadowinfo printed a misplaced block count.'
+            $current_store.PrintedCount =
+                [Convert]::ToInt32($Matches[1])
         } elseif ($line -match
             '^\s+Original offset\s+:\s+0x([0-9a-f]+)$') {
             $original = [Convert]::ToInt64($Matches[1], 16)
@@ -412,76 +902,184 @@ try {
             $store_offset = [Convert]::ToInt64($Matches[1], 16)
         } elseif ($line -match '^\s+Flags\s+:\s+0x([0-9a-f]+)$') {
             Assert-Condition (
-                ($null -ne $original) -and ($null -ne $relative) -and
+                ($null -ne $current_store) -and
+                    ($null -ne $current_store.CopyId) -and
+                    ($current_store.PrintedCount -ge 0) -and
+                    ($null -ne $original) -and ($null -ne $relative) -and
                     ($null -ne $store_offset)) `
                 'vshadowinfo printed an incomplete block descriptor.'
             $flags = [Convert]::ToUInt32($Matches[1], 16)
+            if (($original -ge 0) -and
+                ($original -lt $source_identity.Length)) {
+                $original_block =
+                    $original - ($original % $vss_block_size)
+                $null = $current_store.OriginalBlocks.Add($original_block)
+            }
             $offsets = @($original, $store_offset)
             if (($flags -band $vshadow_forwarder_flag) -ne 0) {
                 $offsets += $relative
+                ++$current_store.ForwarderCount
+            }
+            if (($flags -band $vshadow_overlay_flag) -ne 0) {
+                ++$current_store.OverlayCount
             }
             foreach ($offset in $offsets) {
                 if (($offset -ge 0) -and
                     ($offset -lt $source_identity.Length)) {
                     $block_offset =
                         $offset - ($offset % $vss_block_size)
-                    $null = $candidate.Add($block_offset)
+                    $null =
+                        $current_store.DescriptorBlocks.Add($block_offset)
                 }
             }
-            ++$descriptor_count
+            ++$current_store.RecordCount
             $original = $null
             $relative = $null
             $store_offset = $null
         }
     }
     Assert-Condition (
-        $descriptor_count -eq $reported_descriptor_count) `
-        'vshadowinfo block descriptor output was incomplete.'
+        ($null -eq $original) -and ($null -eq $relative) -and
+            ($null -eq $store_offset)) `
+        'vshadowinfo ended within a block descriptor.'
+    Assert-Condition ($stores.Count -eq 3) `
+        'vshadowinfo did not report exactly three VSS stores.'
 
-    $combined = [Collections.Generic.HashSet[long]]::new()
-    foreach ($offset in $candidate) {
-        $null = $combined.Add($offset)
-    }
-    foreach ($offset in $svi_blocks) {
-        $null = $combined.Add($offset)
+    $store_by_copy_id = @{}
+    foreach ($store in $stores) {
+        Assert-Condition (
+            ($null -ne $store.CopyId) -and
+                ($store.PrintedCount -ge 0) -and
+                ($store.RecordCount -eq $store.PrintedCount)) `
+            "vshadowinfo output for store $($store.Index) was incomplete."
+        $key = $store.CopyId.ToString('D')
+        Assert-Condition (-not $store_by_copy_id.ContainsKey($key)) `
+            "vshadowinfo reported snapshot $key more than once."
+        $store_by_copy_id[$key] = $store
     }
 
-    $descriptor_covered = 0
-    $svi_covered = 0
-    $missing = [Collections.Generic.List[long]]::new()
-    foreach ($offset in $differences) {
-        if ($candidate.Contains($offset)) {
-            ++$descriptor_covered
-        } elseif ($svi_blocks.Contains($offset)) {
-            ++$svi_covered
-        } else {
-            $missing.Add($offset)
+    $snapshot_a_id = ([Guid]$snapshot_a.ID).ToString('D')
+    $snapshot_b_id = ([Guid]$snapshot_b.ID).ToString('D')
+    $snapshot_c_id = ([Guid]$snapshot_c.ID).ToString('D')
+    foreach ($id in @($snapshot_a_id, $snapshot_b_id, $snapshot_c_id)) {
+        Assert-Condition ($store_by_copy_id.ContainsKey($id)) `
+            "vshadowinfo did not report snapshot $id."
+    }
+    $store_a = $store_by_copy_id[$snapshot_a_id]
+    $store_b = $store_by_copy_id[$snapshot_b_id]
+    $store_c = $store_by_copy_id[$snapshot_c_id]
+
+    $delta_ab = Test-DeltaCoverage 'a-b' $differences_ab `
+        $store_a.DescriptorBlocks $allocation_blocks_ab $svi_blocks_ab `
+        $test_root $source_identity.Length $vss_block_size
+    $delta_bc = Test-DeltaCoverage 'b-c' $differences_bc `
+        $store_b.DescriptorBlocks $allocation_blocks_bc $svi_blocks_bc `
+        $test_root $source_identity.Length $vss_block_size
+    $delta_results = @($delta_ab, $delta_bc)
+
+    $controlled_ab = Assert-ControlledOverwrite `
+        'A-B bulk overwrite' $snapshot_a_bulk_ab $snapshot_b_bulk_ab `
+        $bitmap_a $bitmap_b $differences_ab $store_a.OriginalBlocks `
+        $allocation_blocks_ab $svi_blocks_ab $vss_block_size
+    $controlled_bc = Assert-ControlledOverwrite `
+        'B-C bulk overwrite' $snapshot_b_bulk_bc $snapshot_c_bulk_bc `
+        $bitmap_b $bitmap_c $differences_bc $store_b.OriginalBlocks `
+        $allocation_blocks_bc $svi_blocks_bc $vss_block_size
+
+    $cold_ab_blocks_b = Get-ObjectBlockOffsets `
+        $snapshot_b_bulk_ab $bitmap_b $vss_block_size $false
+    $cold_ab_blocks_c = Get-ObjectBlockOffsets `
+        $snapshot_c_bulk_ab $bitmap_c $vss_block_size $false
+    Assert-Condition ($cold_ab_blocks_b.SetEquals($cold_ab_blocks_c)) `
+        'The unchanged A-B bulk file moved between snapshots B and C.'
+    foreach ($cold_check in @(
+            @('B', $cold_ab_blocks_b, $store_b.DescriptorBlocks),
+            @('C A-B', $cold_ab_blocks_c, $store_c.DescriptorBlocks),
+            @('C B-C',
+                (Get-ObjectBlockOffsets $snapshot_c_bulk_bc $bitmap_c `
+                    $vss_block_size $false),
+                $store_c.DescriptorBlocks))) {
+        $absent = 0
+        foreach ($offset in $cold_check[1]) {
+            if (-not $cold_check[2].Contains($offset)) {
+                ++$absent
+            }
+        }
+        Assert-Condition ($absent -gt 512) (
+            "Store $($cold_check[0]) did not leave more than 512 known-cold " +
+            'file blocks outside its candidate map.')
+    }
+
+    $hot_blocks_a = Get-ObjectBlockOffsets `
+        $snapshot_a_hot $bitmap_a $vss_block_size $false
+    $hot_blocks_b = Get-ObjectBlockOffsets `
+        $snapshot_b_hot $bitmap_b $vss_block_size $false
+    $hot_blocks_c = Get-ObjectBlockOffsets `
+        $snapshot_c_hot $bitmap_c $vss_block_size $false
+    Assert-Condition (
+        $hot_blocks_a.SetEquals($hot_blocks_b) -and
+            $hot_blocks_a.SetEquals($hot_blocks_c)) `
+        'The hot file moved on disk between snapshots.'
+    $repeated_hot_blocks = 0
+    foreach ($offset in $hot_blocks_a) {
+        if ($differences_ab.Contains($offset) -and
+            $differences_bc.Contains($offset) -and
+            $store_a.OriginalBlocks.Contains($offset) -and
+            $store_b.OriginalBlocks.Contains($offset)) {
+            ++$repeated_hot_blocks
         }
     }
-    [IO.File]::WriteAllLines(
-        [IO.Path]::Combine($test_root, 'actual-changed-blocks.txt'),
-        @($differences | ForEach-Object { '0x{0:X}' -f $_ }))
-    [IO.File]::WriteAllLines(
-        [IO.Path]::Combine($test_root, 'descriptor-blocks.txt'),
-        @($candidate | Sort-Object | ForEach-Object { '0x{0:X}' -f $_ }))
-    [IO.File]::WriteAllLines(
-        [IO.Path]::Combine(
-            $test_root, 'system-volume-information-blocks.txt'),
-        @($svi_blocks | Sort-Object | ForEach-Object { '0x{0:X}' -f $_ }))
-    [IO.File]::WriteAllLines(
-        [IO.Path]::Combine($test_root, 'candidate-blocks.txt'),
-        @($combined | Sort-Object | ForEach-Object { '0x{0:X}' -f $_ }))
+    Assert-Condition ($repeated_hot_blocks -ne 0) `
+        'No stable hot-file block appeared in both preceding VSS stores.'
 
-    if ($missing.Count -ne 0) {
-        $sample = @($missing | Select-Object -First 8 |
-            ForEach-Object { '0x{0:X}' -f $_ }) -join ', '
-        throw "the conservative map missed $($missing.Count) changed " +
-            "block(s): $sample"
-    }
+    $descriptor_only = $delta_ab.DescriptorOnly + $delta_bc.DescriptorOnly
+    $allocation_only = $delta_ab.AllocationOnly + $delta_bc.AllocationOnly
+    $svi_only = $delta_ab.SviOnly + $delta_bc.SviOnly
+    Assert-Condition (
+        ($descriptor_only -ne 0) -and ($allocation_only -ne 0) -and
+            ($svi_only -ne 0)) `
+        'The fixture did not independently exercise every map component.'
+
+    $forwarder_count = $store_a.ForwarderCount +
+        $store_b.ForwarderCount + $store_c.ForwarderCount
+    $overlay_count = $store_a.OverlayCount +
+        $store_b.OverlayCount + $store_c.OverlayCount
 
 } catch {
     $primary_error = $_
 } finally {
+    if ($null -ne $devicefs_invocation) {
+        try {
+            if (-not $devicefs_invocation.StartupExitObserved) {
+                Stop-DeviceFsTestProcess $devicefs_invocation
+            }
+        } catch {
+            $cleanup_errors.Add($_.Exception)
+        } finally {
+            $gone = $false
+            try {
+                $gone = $devicefs_invocation.Process.HasExited
+            } catch {
+                $cleanup_errors.Add($_.Exception)
+            }
+            if ($gone) {
+                if (-not $devicefs_invocation.OutputCollected) {
+                    try {
+                        Save-TestProcessOutput $devicefs_invocation
+                    } catch {
+                        $cleanup_errors.Add($_.Exception)
+                    }
+                }
+                $devicefs_invocation.Process.Dispose()
+            } else {
+                $devicefs_process_gone = $false
+                Write-Warning (
+                    "devicefs process $($devicefs_invocation.Process.Id) " +
+                    'remains alive; snapshots and the VHD will be preserved.')
+            }
+        }
+    }
+
     if ($null -ne $backup_privilege) {
         try {
             $backup_privilege.Dispose()
@@ -491,20 +1089,22 @@ try {
         }
     }
 
-    for ($i = $snapshot_ids.Count - 1; $i -ge 0; --$i) {
-        try {
-            $snapshot_id = $snapshot_ids[$i]
-            $matches = @(Get-CimInstance -ClassName Win32_ShadowCopy |
-                Where-Object { [Guid]$_.ID -eq $snapshot_id })
-            foreach ($snapshot in $matches) {
-                Remove-CimInstance -InputObject $snapshot
+    if ($devicefs_process_gone) {
+        for ($i = $snapshot_ids.Count - 1; $i -ge 0; --$i) {
+            try {
+                $snapshot_id = $snapshot_ids[$i]
+                $matches = @(Get-CimInstance -ClassName Win32_ShadowCopy |
+                    Where-Object { [Guid]$_.ID -eq $snapshot_id })
+                foreach ($snapshot in $matches) {
+                    Remove-CimInstance -InputObject $snapshot
+                }
+            } catch {
+                $cleanup_errors.Add($_.Exception)
             }
-        } catch {
-            $cleanup_errors.Add($_.Exception)
         }
     }
 
-    if ($source_access_path_added) {
+    if ($devicefs_process_gone -and $source_access_path_added) {
         try {
             Remove-PartitionAccessPath -InputObject $source_partition `
                 -AccessPath $source_mount -Confirm:$false
@@ -513,7 +1113,8 @@ try {
         }
     }
 
-    if (($null -ne $vhd_path) -and [IO.File]::Exists($vhd_path)) {
+    if ($devicefs_process_gone -and
+        ($null -ne $vhd_path) -and [IO.File]::Exists($vhd_path)) {
         try {
             $current_image = Get-DiskImage -ImagePath $vhd_path
             if ($current_image.Attached) {
@@ -525,11 +1126,13 @@ try {
             $cleanup_errors.Add($_.Exception)
         }
     } else {
-        $image_detached = $true
+        $image_detached = ($null -eq $vhd_path) -or
+            (-not [IO.File]::Exists($vhd_path))
     }
 
     $preserve = (($null -ne $primary_error) -and $KeepArtifactsOnFailure) -or
-        ($cleanup_errors.Count -ne 0) -or (-not $image_detached)
+        ($cleanup_errors.Count -ne 0) -or (-not $devicefs_process_gone) -or
+        (-not $image_detached)
     if (($null -ne $test_root) -and
         (Test-Path -LiteralPath $test_root) -and (-not $preserve)) {
         try {
@@ -555,14 +1158,23 @@ if ($cleanup_errors.Count -ne 0) {
         $cleanup_errors)
 }
 
-$overincluded = $combined.Count - $differences.Count
-$volume_blocks = [Math]::Ceiling(
-    $source_identity.Length / [double]$vss_block_size)
-$candidate_percent = 100.0 * $combined.Count / $volume_blocks
+foreach ($delta in $delta_results) {
+    Write-Host (
+        "PASS $($delta.Name): $($delta.DifferenceCount) changed 16 KiB " +
+        "block(s) were covered. Exclusive coverage was " +
+        "$($delta.DescriptorOnly) descriptor, " +
+        "$($delta.AllocationOnly) allocation, and " +
+        "$($delta.SviOnly) System Volume Information block(s); " +
+        "$($delta.Overlapping) block(s) had overlapping coverage. " +
+        'The map contains ' +
+        "$($delta.CandidateCount) block(s) " +
+        ("({0:F2}% of the volume); " -f $delta.CandidatePercent) +
+        "$($delta.Overincluded) candidate block(s) were additional.")
+}
 Write-Host (
-    "PASS: $($differences.Count) changed 16 KiB block(s) were covered: " +
-    "$descriptor_covered by descriptors and $svi_covered only by System " +
-    "Volume Information extents. The conservative map contains " +
-    "$($combined.Count) block(s) " +
-    ("({0:F2}% of the volume); " -f $candidate_percent) +
-    "$overincluded candidate block(s) were additional.")
+    "The fixture verified $controlled_ab and $controlled_bc stable bulk " +
+    "original-offset blocks across the two chained stores and " +
+    "$repeated_hot_blocks repeated hot-file block(s). vshadowinfo reported " +
+    "$forwarder_count forwarder and $overlay_count overlay descriptor(s); " +
+    'their occurrence is informational because the provider chooses the ' +
+    'private on-disk encoding.')

@@ -7,6 +7,8 @@ function unmount_vss
     timeout --kill-after=1s 5s fish --no-config -c 'while ! sudo -n umount $argv[1]; sleep 1; end' $vss_mount_point
 end
 
+argparse /parallel-images -- $argv || exit
+
 set pid_file $argv[1]
 set stop_file $argv[2]
 set backup_id $argv[3]
@@ -34,6 +36,9 @@ if test -e $stop_file
     exit 143
 end
 set backup_argv backup --keyfd 0 --backup-id $backup_id
+if set --query _flag_parallel_images
+    set --append backup_argv --parallel-images
+end
 for image_path in $vss_mount_point/*.img
     set image_filename (path basename $image_path)
     set --append backup_argv "$image_filename:$image_path"

@@ -62,6 +62,7 @@ export struct BackupConfiguration {
     std::u8string pbs_datastore;
     std::u8string pbs_auth_id;
     std::u8string pbs_namespace;
+    bool pbs_parallelize_image_upload = false;
     std::u8string pbs_fingerprint;
     SecureUtf8String pbs_authentication_secret;
     SecureUtf8String pbs_encryption_key;
@@ -188,6 +189,13 @@ struct OptionalUtf8StringDestination {
     static constexpr auto kTemplateValue = std::string_view{"\"\""};
 };
 
+struct OptionalBooleanDestination {
+    explicit OptionalBooleanDestination(bool &value) noexcept : value(value) {}
+
+    std::reference_wrapper<bool> value;
+    static constexpr auto kTemplateValue = std::string_view{"false"};
+};
+
 struct PortDestination {
     PortDestination(
         std::uint16_t &value,
@@ -224,6 +232,7 @@ using FieldDestination = std::variant<
     Utf8TextDestination<SecureUtf8String>,
     OptionalWideStringDestination,
     OptionalUtf8StringDestination,
+    OptionalBooleanDestination,
     PortDestination,
     SerializedJsonObjectDestination,
     NonemptyWideStringArrayDestination,
@@ -264,6 +273,8 @@ struct ConfigurationField {
             {"auth_id", Utf8TextDestination{configuration.pbs_auth_id}},
             {"namespace",
                 OptionalUtf8StringDestination{configuration.pbs_namespace}},
+            {"parallelize_image_upload", OptionalBooleanDestination{
+                configuration.pbs_parallelize_image_upload}},
             {"fingerprint",
                 Utf8TextDestination{configuration.pbs_fingerprint}},
             {"authentication_secret", Utf8TextDestination{
@@ -329,6 +340,12 @@ struct DefaultFieldReader {
         return true;
     }
 
+    auto operator()(
+        const OptionalBooleanDestination &destination) const noexcept {
+        destination.value.get() = false;
+        return true;
+    }
+
     auto operator()(const PortDestination &destination) const noexcept {
         destination.value.get() = destination.default_value;
         return true;
@@ -388,6 +405,15 @@ struct FieldReader {
         const OptionalUtf8StringDestination &destination) const -> void {
         destination.value.get() = ToUtf8<std::u8string>(
             ReadString(value.get(), member));
+    }
+
+    auto operator()(
+        const OptionalBooleanDestination &destination) const -> void {
+        const auto &json_value = value.get();
+        if (json_value.ValueType() != JsonValueType::Boolean) {
+            ConfigurationError(member, "must be a boolean");
+        }
+        destination.value.get() = json_value.GetBoolean();
     }
 
     auto operator()(const PortDestination &destination) const -> void {

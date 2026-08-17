@@ -724,12 +724,15 @@ auto TrySendWslBackupSignal(
     const auto stop_file = std::format(L"{}.stop", control_path);
     const auto computer_name =
         wil::GetEnvironmentVariableW<std::wstring>(L"COMPUTERNAME");
-    const auto arguments = std::array<std::wstring_view, 3>{
-        pid_file, stop_file, computer_name};
     auto backup = [&] {
         const auto persistent = ResolvePersistentPaths();
         const auto configuration =
             ReadBackupConfiguration(persistent.configuration);
+        auto arguments = std::vector<std::wstring_view>{
+            pid_file, stop_file, computer_name};
+        if (configuration.pbs_parallelize_image_upload) {
+            arguments.push_back(L"--parallel-images");
+        }
         auto input = SecureUtf8String{};
         // start-pbs.fish consumes these NUL-delimited records in order. Add
         // future records here and matching Fish reads before the remaining key

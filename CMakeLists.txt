@@ -18,6 +18,10 @@ option(DEVICEFS_MEASURE_FREE_CLUSTER_DATA
     "Measure nonzero data in bitmap-free clusters (diagnostic builds only)"
     OFF
 )
+option(DEVICEFS_MEASURE_READ_PATH
+    "Measure the filesystem read path without changing its behavior"
+    OFF
+)
 
 cmake_host_system_information(
     RESULT WINFSP_ROOT
@@ -123,11 +127,11 @@ target_sources(backup-supervisor PRIVATE
         src/modules/supervisor/vshadow.ixx
 )
 
-if(DEVICEFS_MEASURE_FREE_CLUSTER_DATA)
-    target_sources(devicefs-filesystem PRIVATE
+if(DEVICEFS_MEASURE_FREE_CLUSTER_DATA OR DEVICEFS_MEASURE_READ_PATH)
+    target_sources(devicefs-filesystem PUBLIC
         FILE_SET measurement_modules
         TYPE CXX_MODULES
-        FILES src/modules/free_cluster_measurement.ixx
+        FILES src/modules/filesystem_measurement.ixx
     )
 endif()
 
@@ -169,6 +173,7 @@ target_link_options(devicefs-filesystem INTERFACE
 )
 target_compile_definitions(devicefs-filesystem PRIVATE
     DEVICEFS_MEASURE_FREE_CLUSTER_DATA=$<BOOL:${DEVICEFS_MEASURE_FREE_CLUSTER_DATA}>
+    DEVICEFS_MEASURE_READ_PATH=$<BOOL:${DEVICEFS_MEASURE_READ_PATH}>
 )
 
 target_compile_definitions(backup-supervisor PRIVATE _WIN32_WINNT=0x0A00)

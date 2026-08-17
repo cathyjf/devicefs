@@ -13,7 +13,8 @@
       "architecture": "x64",
       "binaryDir": "${sourceDir}/build/windows-x64",
       "cacheVariables": {
-        "DEVICEFS_MEASURE_FREE_CLUSTER_DATA": false
+        "DEVICEFS_MEASURE_FREE_CLUSTER_DATA": false,
+        "DEVICEFS_MEASURE_READ_PATH": false
       }
     },
     {
@@ -22,7 +23,8 @@
       "inherits": "windows-x64",
       "binaryDir": "${sourceDir}/build/windows-x64-instrumented",
       "cacheVariables": {
-        "DEVICEFS_MEASURE_FREE_CLUSTER_DATA": true
+        "DEVICEFS_MEASURE_FREE_CLUSTER_DATA": false,
+        "DEVICEFS_MEASURE_READ_PATH": true
       }
     }
   ],

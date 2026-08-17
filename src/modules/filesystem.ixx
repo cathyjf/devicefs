@@ -53,8 +53,8 @@ export module devicefs.filesystem;
 
 import devicefs.common;
 
-#if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
-import devicefs.free_cluster_measurement;
+#if DEVICEFS_MEASURE_FREE_CLUSTER_DATA || DEVICEFS_MEASURE_READ_PATH
+import devicefs.filesystem_measurement;
 #endif
 
 #if defined(__INTELLISENSE__) && !defined(__cpp_lib_start_lifetime_as)
@@ -690,7 +690,7 @@ private:
     _Success_(return == STATUS_SUCCESS)
     static auto Open(FSP_FILE_SYSTEM *const fs,
         _In_z_ wchar_t *const name,
-        UINT32, const UINT32 access,
+        [[maybe_unused]] const UINT32 create_options, const UINT32 access,
         _Outptr_result_maybenull_ void **const context,
         _Out_ FSP_FSCTL_FILE_INFO *const info) noexcept {
         return NtCallback([&] {
@@ -703,6 +703,11 @@ private:
             if (access & kWriteAccess) {
                 return STATUS_MEDIA_WRITE_PROTECTED;
             }
+#if DEVICEFS_MEASURE_READ_PATH
+            if (!root) {
+                self.read_measurement_.RecordOpen(create_options);
+            }
+#endif
             [[gsl::suppress("type.3",
                 justification: "WinFsp stores an opaque context as void *, but DeviceFile is immutable.")]]
             *context = const_cast<DeviceFile *>(file);
@@ -712,7 +717,8 @@ private:
     }
 
     _Success_(return == STATUS_SUCCESS)
-    static auto Read(FSP_FILE_SYSTEM *, _In_opt_ void *const context,
+    static auto Read([[maybe_unused]] FSP_FILE_SYSTEM *const fs,
+        _In_opt_ void *const context,
         _Out_writes_bytes_to_(length, *transferred) void *const buffer,
         const UINT64 offset, const ULONG length,
         _Out_ ULONG *const transferred) noexcept {
@@ -733,8 +739,14 @@ private:
         const auto wanted = static_cast<std::remove_cv_t<decltype(length)>>(
             std::min(UINT64{length}, file->info.FileSize - offset));
         const auto output = std::span<BYTE>{static_cast<BYTE *>(buffer), wanted};
+#if DEVICEFS_MEASURE_READ_PATH
+        auto observation = Self(fs).read_measurement_.BeginRead(length, wanted);
+#endif
         if constexpr (!kMeasureFreeClusterData) {
             if (!file->allocation_bitmap.HasAllocatedClusters(offset, wanted)) {
+#if DEVICEFS_MEASURE_READ_PATH
+                observation.RecordSynthetic();
+#endif
                 std::ranges::fill(output, 0);
                 *transferred = wanted;
                 return STATUS_SUCCESS;
@@ -757,12 +769,18 @@ private:
             operation.Offset = parts.LowPart;
             operation.OffsetHigh = parts.HighPart;
             operation.hEvent = event.get();
+#if DEVICEFS_MEASURE_READ_PATH
+            observation.BeginSourceRead();
+#endif
             // GetOverlappedResult supplies the byte count for either completion path.
             if (!ReadFile(file->handle.get(), output, count, nullptr, &operation)) {
                 const auto error = GetLastError();
                 if (error != ERROR_IO_PENDING) {
                     return failure(error);
                 }
+#if DEVICEFS_MEASURE_READ_PATH
+                observation.RecordSourcePending();
+#endif
             }
             if (!GetOverlappedResult(file->handle.get(), &operation, done, TRUE)) {
                 return failure(GetLastError());
@@ -770,6 +788,9 @@ private:
             if (*done != count) {
                 return failure(ERROR_READ_FAULT);
             }
+#if DEVICEFS_MEASURE_READ_PATH
+            observation.FinishSourceRead(*done);
+#endif
             return STATUS_SUCCESS;
         };
 
@@ -812,6 +833,9 @@ private:
         *transferred = wanted;
         std::ranges::copy(bounce.subspan(prefix, wanted), output.begin());
         file->allocation_bitmap.SynthesizeFreeClusters(output, offset);
+#if DEVICEFS_MEASURE_READ_PATH
+        observation.RecordBounce();
+#endif
         return STATUS_SUCCESS;
     }
 
@@ -871,6 +895,9 @@ private:
             }
         }
 #endif
+#if DEVICEFS_MEASURE_READ_PATH
+        Self(fs).read_measurement_.Report();
+#endif
         if (normally) {
             return;
         }
@@ -882,6 +909,9 @@ private:
     const DeviceFiles files_;
     const wil::unique_hlocal_security_descriptor security_;
     const Mount mount_;
+#if DEVICEFS_MEASURE_READ_PATH
+    mutable ReadPathMeasurement read_measurement_;
+#endif
     // Declared last so it stops callbacks before the state they reference is destroyed.
     UniqueFileSystem fs_;
 };

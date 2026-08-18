@@ -24,7 +24,8 @@ The default parameter set tests vss-descriptor-dump. Supply only
 -VShadowInfoPath to test stock vshadowinfo instead. Supplying both parser paths
 adds exact descriptor parity checks against the same source image.
 When vss-descriptor-dump is used, the test also reports non-failing probes that
-read raw VSS metadata from each interval's later endpoint snapshot.
+compare raw VSS metadata from snapshot B while it is latest and after snapshot
+C makes it no longer latest, as well as from C while C is latest.
 
 The test must run as SYSTEM so it can enumerate System Volume Information. It
 temporarily enables SeBackupPrivilege while querying those extents. Named
@@ -637,6 +638,48 @@ try {
         $sector_write_length 0xD4
     Remove-Item -LiteralPath $turnover_path -Force
 
+    # Test B immediately before it has a successor. This is supplemental
+    # evidence about whether only the latest snapshot has an unstable raw VSS
+    # metadata view.
+    if ($use_descriptor_dump) {
+        try {
+            $latest_b_copy_id = ([Guid]$snapshot_a.ID).ToString('D')
+            $latest_b_stdout = [IO.Path]::Combine(
+                $test_root, 'endpoint-b-while-latest-select-a.stdout.txt')
+            $latest_b_stderr = [IO.Path]::Combine(
+                $test_root, 'endpoint-b-while-latest-select-a.stderr.txt')
+            & $VssDescriptorDumpPath --source $snapshot_b.DeviceObject `
+                --snapshot-id $latest_b_copy_id `
+                >$latest_b_stdout 2>$latest_b_stderr
+            $latest_b_exit_code = $LASTEXITCODE
+            if ($latest_b_exit_code -ne 0) {
+                $latest_b_error =
+                    ([IO.File]::ReadAllText($latest_b_stderr) -replace
+                        '\r?\n', ' ').Trim()
+                $endpoint_raw_diagnostics.Add(
+                    "snapshot B while latest selecting store A: parser " +
+                    "exited $($latest_b_exit_code): $latest_b_error")
+            } else {
+                $latest_b_result = ConvertFrom-VssDescriptorDumpOutput `
+                    ([IO.File]::ReadAllText($latest_b_stdout)) `
+                    $latest_b_copy_id 0 $vshadow_forwarder_flag `
+                    $vshadow_overlay_flag $source_identity.Length `
+                    $vss_block_size
+                $endpoint_raw_diagnostics.Add(
+                    "snapshot B while latest selecting store A: parsed " +
+                    "$($latest_b_result.DescriptorCount) descriptor(s) from " +
+                    "$($latest_b_result.ListBlockCount) list block(s); " +
+                    "volume size $($latest_b_result.VolumeSize), expected " +
+                    "$($source_identity.Length)")
+            }
+        } catch {
+            $message = ($_.Exception.Message -replace '\r?\n', ' ').Trim()
+            $endpoint_raw_diagnostics.Add(
+                "snapshot B while latest selecting store A: probe could " +
+                "not be completed: $message")
+        }
+    }
+
     $snapshot_c = New-TestShadowCopy $source_volume_name $snapshot_ids
     Assert-Condition (
         ([Guid]$snapshot_c.ProviderID -eq $microsoft_software_provider) -and
@@ -912,12 +955,12 @@ try {
                 }
             }
         }
-        # Read the later raw endpoint while selecting the preceding store.
-        # These results are diagnostic and never affect the test verdict.
+        # Compare B after it has a successor with latest snapshot C. These
+        # results are diagnostic and never affect the test verdict.
         foreach ($probe in @(
                 [pscustomobject]@{
-                    Name = 'snapshot B selecting store A'
-                    Artifact = 'endpoint-b-select-a'
+                    Name = 'snapshot B after C selecting store A'
+                    Artifact = 'endpoint-b-after-c-select-a'
                     Source = $snapshot_b.DeviceObject
                     CopyId = $requests[0]
                     StoreIndex = 0
@@ -926,8 +969,8 @@ try {
                     SviBlocks = $svi_blocks_ab
                 },
                 [pscustomobject]@{
-                    Name = 'snapshot C selecting store B'
-                    Artifact = 'endpoint-c-select-b'
+                    Name = 'snapshot C while latest selecting store B'
+                    Artifact = 'endpoint-c-while-latest-select-b'
                     Source = $snapshot_c.DeviceObject
                     CopyId = $requests[1]
                     StoreIndex = 1

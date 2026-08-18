@@ -16,11 +16,15 @@ overwrite, a file creation, a file deletion, and a sector-sized overwrite of a
 fixed file. One devicefs process exposes all three snapshots with
 --synthetic-free-clusters, and the test compares consecutive views in 16 KiB
 blocks. For each interval it constructs a conservative map from the preceding
-snapshot's vshadowinfo store, changes to the NTFS allocation bitmap, and
+snapshot's VSS descriptor store, changes to the NTFS allocation bitmap, and
 allocated file-data, named data-stream, or directory extents reachable at or
 beneath System Volume Information in either endpoint snapshot.
 
-Use -UseVssDescriptorDump to test vss-descriptor-dump instead of vshadowinfo.
+The default parameter set tests vss-descriptor-dump. Supply only
+-VShadowInfoPath to test stock vshadowinfo instead. Supplying both parser paths
+adds exact descriptor parity checks against the same source image.
+When vss-descriptor-dump is used, the test also reports non-failing probes that
+read raw VSS metadata from each interval's later endpoint snapshot.
 
 The test must run as SYSTEM so it can enumerate System Volume Information. It
 temporarily enables SeBackupPrivilege while querying those extents. Named
@@ -35,24 +39,28 @@ Each large overwrite is sufficient to exercise a chained VSS block list. The
 test also requires every map component to contribute independently and rejects
 a map covering the entire volume. The VHD and snapshots are removed during
 cleanup. Use -KeepArtifactsOnFailure to retain the detached VHD, process logs,
-and vshadowinfo output after a failure.
+and descriptor-tool output after a failure.
 #>
 
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'DescriptorDump')]
 param(
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory, Position = 0, ParameterSetName = 'DescriptorDump')]
+    [Parameter(Mandatory, Position = 0, ParameterSetName = 'Parity')]
+    [string] $VssDescriptorDumpPath,
+
+    [Parameter(Mandatory, ParameterSetName = 'VShadowInfo')]
+    [Parameter(Mandatory, ParameterSetName = 'Parity')]
     [string] $VShadowInfoPath,
 
     [Parameter(Mandatory)]
     [string] $DeviceFsPath,
 
-    [switch] $KeepArtifactsOnFailure,
-
-    [switch] $UseVssDescriptorDump
+    [switch] $KeepArtifactsOnFailure
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $false
 $file_backed_virtual_bus_type = [UInt16]15
 $microsoft_software_provider =
     [Guid]'b5946137-7b9f-4925-af80-51abd60b20d5'
@@ -355,51 +363,6 @@ function Assert-ControlledOverwrite {
     return $controlled
 }
 
-function Convert-VssDescriptorDumpOutput {
-    param(
-        [AllowEmptyString()][string] $Output,
-        [Guid] $ExpectedCopyId,
-        [int] $StoreIndex
-    )
-
-    $header_pattern = (
-        '\Aschema-version\t1\r?\n' +
-        'snapshot-id\t(?<copy>[0-9a-f-]{36})\r?\n' +
-        'store-id\t[0-9a-f-]{36}\r?\n' +
-        'volume-size\t\d+\r?\n' +
-        'list-block-count\t\d+\r?\n' +
-        'descriptor-count\t(?<count>\d+)\r?\n' +
-        'forwarder-count\t\d+\r?\n' +
-        'overlay-count\t\d+\r?\n')
-    Assert-Condition ($Output -match $header_pattern) `
-        'vss-descriptor-dump printed an invalid header.'
-    $copy_id = [Guid]$Matches['copy']
-    $descriptor_output = $Output.Substring($Matches[0].Length)
-    Assert-Condition ($copy_id -eq $ExpectedCopyId) (
-        "vss-descriptor-dump returned snapshot $copy_id for request " +
-        "$ExpectedCopyId.")
-
-    $converted = [Collections.Generic.List[string]]::new()
-    $converted.Add("Store: $StoreIndex")
-    $converted.Add("    Shadow copy ID : $copy_id")
-    $converted.Add("    Number of blocks : $($Matches['count'])")
-    foreach ($line in $descriptor_output -split '\r?\n') {
-        if ($line.Length -ne 0) {
-            Assert-Condition (
-                $line -match
-                    ('^descriptor\t([0-9a-f]{16})\t' +
-                        '([0-9a-f]{16})\t([0-9a-f]{16})\t' +
-                        '([0-9a-f]{8})\t([0-9a-f]{8})$')) `
-                "vss-descriptor-dump printed an unexpected line: $line"
-            $converted.Add("    Original offset : 0x$($Matches[1])")
-            $converted.Add("    Relative offset : 0x$($Matches[2])")
-            $converted.Add("    Offset : 0x$($Matches[3])")
-            $converted.Add("    Flags : 0x$($Matches[4])")
-        }
-    }
-    return [string]::Join([Environment]::NewLine, $converted)
-}
-
 function Test-DeltaCoverage {
     param(
         [Parameter(Mandatory)]
@@ -503,9 +466,23 @@ if (-not $is_system) {
     throw 'This integration test must run as NT AUTHORITY\SYSTEM.'
 }
 
-$VShadowInfoPath = (Resolve-Path -LiteralPath $VShadowInfoPath).Path
-Assert-Condition ([IO.File]::Exists($VShadowInfoPath)) `
-    "vshadowinfo was not found at '$VShadowInfoPath'."
+$use_descriptor_dump =
+    $PSCmdlet.ParameterSetName -ne 'VShadowInfo'
+$parity_requested = $PSCmdlet.ParameterSetName -eq 'Parity'
+if ($use_descriptor_dump) {
+    . ([IO.Path]::Combine(
+            $PSScriptRoot, 'include', 'VssDescriptorOutput.ps1'))
+    $VssDescriptorDumpPath =
+        (Resolve-Path -LiteralPath $VssDescriptorDumpPath).Path
+    Assert-Condition ([IO.File]::Exists($VssDescriptorDumpPath)) `
+        "vss-descriptor-dump was not found at '$VssDescriptorDumpPath'."
+}
+if ($PSCmdlet.ParameterSetName -ne 'DescriptorDump') {
+    $VShadowInfoPath =
+        (Resolve-Path -LiteralPath $VShadowInfoPath).Path
+    Assert-Condition ([IO.File]::Exists($VShadowInfoPath)) `
+        "vshadowinfo was not found at '$VShadowInfoPath'."
+}
 $DeviceFsPath = (Resolve-Path -LiteralPath $DeviceFsPath).Path
 Assert-Condition ([IO.File]::Exists($DeviceFsPath)) `
     "devicefs was not found at '$DeviceFsPath'."
@@ -536,6 +513,8 @@ $controlled_bc = 0
 $repeated_hot_blocks = 0
 $forwarder_count = 0
 $overlay_count = 0
+$parity_failures = [Collections.Generic.List[string]]::new()
+$endpoint_raw_diagnostics = [Collections.Generic.List[string]]::new()
 
 $source_label = "DFSVSS-$($run_id.Substring(0, 17))"
 $uninitialized_partition_style = [UInt16]0
@@ -896,13 +875,14 @@ try {
         $test_root, 'vshadow-source-volume.img')
     [DeviceFsTestNative]::CopyDeviceToFile(
         $source_volume_name, $vshadow_source)
-    if ($UseVssDescriptorDump) {
+    if ($use_descriptor_dump) {
         $requests = @(
             ([Guid]$snapshot_a.ID).ToString('D')
             ([Guid]$snapshot_b.ID).ToString('D')
             ([Guid]$snapshot_c.ID).ToString('D')
         )
         $converted = [Collections.Generic.List[string]]::new()
+        $dump_by_copy_id = @{}
         $failures = [Collections.Generic.List[string]]::new()
         for ($i = 0; $i -lt $requests.Count; ++$i) {
             $name = [char]([int][char]'a' + $i)
@@ -910,7 +890,7 @@ try {
                 $test_root, "vss-descriptor-dump-$name.stdout.txt")
             $stderr = [IO.Path]::Combine(
                 $test_root, "vss-descriptor-dump-$name.stderr.txt")
-            & $VShadowInfoPath --source $vshadow_source `
+            & $VssDescriptorDumpPath --source $vshadow_source `
                 --snapshot-id $requests[$i] >$stdout 2>$stderr
             $exit_code = $LASTEXITCODE
             if ($exit_code -ne 0) {
@@ -920,12 +900,172 @@ try {
                     "snapshot $($requests[$i]) exited $($exit_code): $error_text")
             } else {
                 try {
-                    $converted.Add((Convert-VssDescriptorDumpOutput `
-                            ([IO.File]::ReadAllText($stdout)) `
-                            $requests[$i] $i))
+                    $result = ConvertFrom-VssDescriptorDumpOutput `
+                        ([IO.File]::ReadAllText($stdout)) $requests[$i] $i `
+                        $vshadow_forwarder_flag $vshadow_overlay_flag `
+                        $source_identity.Length $vss_block_size
+                    $converted.Add($result.VshadowInfoProjection)
+                    $dump_by_copy_id[$requests[$i]] = $result
                 } catch {
                     $failures.Add(
                         "snapshot $($requests[$i]): $($_.Exception.Message)")
+                }
+            }
+        }
+        # Read the later raw endpoint while selecting the preceding store.
+        # These results are diagnostic and never affect the test verdict.
+        foreach ($probe in @(
+                [pscustomobject]@{
+                    Name = 'snapshot B selecting store A'
+                    Artifact = 'endpoint-b-select-a'
+                    Source = $snapshot_b.DeviceObject
+                    CopyId = $requests[0]
+                    StoreIndex = 0
+                    Differences = $differences_ab
+                    AllocationBlocks = $allocation_blocks_ab
+                    SviBlocks = $svi_blocks_ab
+                },
+                [pscustomobject]@{
+                    Name = 'snapshot C selecting store B'
+                    Artifact = 'endpoint-c-select-b'
+                    Source = $snapshot_c.DeviceObject
+                    CopyId = $requests[1]
+                    StoreIndex = 1
+                    Differences = $differences_bc
+                    AllocationBlocks = $allocation_blocks_bc
+                    SviBlocks = $svi_blocks_bc
+                })) {
+            try {
+                $stdout = [IO.Path]::Combine(
+                    $test_root, "$($probe.Artifact).stdout.txt")
+                $stderr = [IO.Path]::Combine(
+                    $test_root, "$($probe.Artifact).stderr.txt")
+                & $VssDescriptorDumpPath --source $probe.Source `
+                    --snapshot-id $probe.CopyId >$stdout 2>$stderr
+                $exit_code = $LASTEXITCODE
+                if ($exit_code -ne 0) {
+                    $error_text =
+                        ([IO.File]::ReadAllText($stderr) -replace
+                            '\r?\n', ' ').Trim()
+                    $endpoint_raw_diagnostics.Add(
+                        "$($probe.Name): parser exited $($exit_code): " +
+                        $error_text)
+                    continue
+                }
+                $result = ConvertFrom-VssDescriptorDumpOutput `
+                    ([IO.File]::ReadAllText($stdout)) $probe.CopyId `
+                    $probe.StoreIndex `
+                    $vshadow_forwarder_flag $vshadow_overlay_flag `
+                    $source_identity.Length $vss_block_size
+                $combined = [Collections.Generic.HashSet[long]]::new()
+                foreach ($set in @($result.DescriptorBlocks,
+                        $probe.AllocationBlocks, $probe.SviBlocks)) {
+                    foreach ($offset in $set) {
+                        $null = $combined.Add($offset)
+                    }
+                }
+                $missing = [Collections.Generic.List[long]]::new()
+                $descriptor_only = 0
+                foreach ($offset in $probe.Differences) {
+                    $descriptor = $result.DescriptorBlocks.Contains($offset)
+                    $allocation = $probe.AllocationBlocks.Contains($offset)
+                    $svi = $probe.SviBlocks.Contains($offset)
+                    if (-not ($descriptor -or $allocation -or $svi)) {
+                        $missing.Add($offset)
+                    } elseif ($descriptor -and (-not $allocation) -and
+                        (-not $svi)) {
+                        ++$descriptor_only
+                    }
+                }
+                if ($missing.Count -eq 0) {
+                    $coverage =
+                        "covered all $($probe.Differences.Count) changed block(s)"
+                } else {
+                    $sample = @($missing | Select-Object -First 8 |
+                        ForEach-Object { '0x{0:X}' -f $_ }) -join ', '
+                    $coverage =
+                        "missed $($missing.Count) of " +
+                        "$($probe.Differences.Count) changed block(s): $sample"
+                }
+                $volume_blocks = [long][Math]::Ceiling(
+                    $source_identity.Length / [double]$vss_block_size)
+                $candidate_percent =
+                    100.0 * $combined.Count / $volume_blocks
+                $volume_size = if (
+                    $result.VolumeSize -eq [uint64]$source_identity.Length) {
+                    'volume size matched'
+                } else {
+                    "volume size $($result.VolumeSize) differed from " +
+                    "$($source_identity.Length)"
+                }
+                $endpoint_raw_diagnostics.Add(
+                    "$($probe.Name): parsed $($result.DescriptorCount) " +
+                    "descriptor(s) from $($result.ListBlockCount) list " +
+                    "block(s); $coverage; descriptors alone covered " +
+                    "$descriptor_only changed block(s); the map contained " +
+                    "$($combined.Count) block(s) " +
+                    ("({0:F2}% of the volume); $volume_size" -f
+                        $candidate_percent))
+            } catch {
+                $message = ($_.Exception.Message -replace '\r?\n', ' ').Trim()
+                $endpoint_raw_diagnostics.Add(
+                    "$($probe.Name): probe could not be completed: $message")
+            }
+        }
+        if ($parity_requested) {
+            $reference_stdout = [IO.Path]::Combine(
+                $test_root, 'vshadowinfo.stdout.txt')
+            $reference_stderr = [IO.Path]::Combine(
+                $test_root, 'vshadowinfo.stderr.txt')
+            & $VShadowInfoPath -a $vshadow_source `
+                >$reference_stdout 2>$reference_stderr
+            $reference_exit_code = $LASTEXITCODE
+            if ($reference_exit_code -ne 0) {
+                $reference_error =
+                    ([IO.File]::ReadAllText($reference_stderr) -replace
+                        '\r?\n', ' ').Trim()
+                $parity_failures.Add(
+                    "vshadowinfo exited $($reference_exit_code): " +
+                    $reference_error)
+            } else {
+                try {
+                    $reference_stores =
+                        ConvertFrom-VshadowInfoDescriptorOutput `
+                            ([IO.File]::ReadAllText($reference_stdout)) `
+                            $vshadow_forwarder_flag $vshadow_overlay_flag
+                    if ($reference_stores.Count -ne $requests.Count) {
+                        $parity_failures.Add(
+                            "vshadowinfo reported $($reference_stores.Count) " +
+                            "stores; expected $($requests.Count)")
+                    }
+                    for ($i = 0; $i -lt $requests.Count; ++$i) {
+                        $copy_id = $requests[$i]
+                        if (-not $reference_stores.ContainsKey($copy_id)) {
+                            $parity_failures.Add(
+                                "vshadowinfo did not report snapshot $copy_id")
+                            continue
+                        }
+                        if (-not $dump_by_copy_id.ContainsKey($copy_id)) {
+                            continue
+                        }
+                        $differences = @(Compare-VssDescriptorStores `
+                                $reference_stores[$copy_id] `
+                                $dump_by_copy_id[$copy_id])
+                        if ($differences.Count -ne 0) {
+                            $name = [char]([int][char]'a' + $i)
+                            $artifact = [IO.Path]::Combine(
+                                $test_root, "descriptor-parity-$name.txt")
+                            [IO.File]::WriteAllLines($artifact, $differences)
+                            $parity_failures.Add(
+                                "snapshot $copy_id had " +
+                                "$($differences.Count) parity difference(s); " +
+                                "first: $($differences[0])")
+                        }
+                    }
+                } catch {
+                    $parity_failures.Add(
+                        "could not parse vshadowinfo for parity: " +
+                        $_.Exception.Message)
                 }
             }
         }
@@ -1219,7 +1359,9 @@ try {
             (-not [IO.File]::Exists($vhd_path))
     }
 
-    $preserve = (($null -ne $primary_error) -and $KeepArtifactsOnFailure) -or
+    $preserve = ((($null -ne $primary_error) -or
+            ($parity_failures.Count -ne 0)) -and
+            $KeepArtifactsOnFailure) -or
         ($cleanup_errors.Count -ne 0) -or (-not $devicefs_process_gone) -or
         (-not $image_detached)
     if (($null -ne $test_root) -and
@@ -1236,6 +1378,9 @@ try {
     }
 }
 
+foreach ($diagnostic in $endpoint_raw_diagnostics) {
+    Write-Host "INFO raw endpoint $diagnostic"
+}
 if ($null -ne $primary_error) {
     foreach ($cleanup_error in $cleanup_errors) {
         Write-Warning "Cleanup also failed: $($cleanup_error.Message)"
@@ -1267,3 +1412,12 @@ Write-Host (
     "$forwarder_count forwarder and $overlay_count overlay descriptor(s); " +
     'their occurrence is informational because the provider chooses the ' +
     'private on-disk encoding.')
+if ($parity_requested) {
+    if ($parity_failures.Count -ne 0) {
+        throw ('Descriptor parser parity failed: ' +
+            ($parity_failures -join '; '))
+    }
+    Write-Host (
+        'PASS descriptor parity: vss-descriptor-dump matched vshadowinfo ' +
+        'for all three stores on the same source image.')
+}

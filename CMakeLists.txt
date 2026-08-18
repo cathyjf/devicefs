@@ -44,13 +44,25 @@ if(NOT EXISTS "${WINFSP_INCLUDE_DIR}/winfsp/winfsp.h" OR NOT EXISTS "${WINFSP_LI
     )
 endif()
 
+add_library(devicefs-common STATIC)
+target_sources(devicefs-common PUBLIC
+    FILE_SET CXX_MODULES
+    FILES src/modules/common.ixx
+)
+
 add_library(devicefs-filesystem STATIC)
 target_sources(devicefs-filesystem PUBLIC
     FILE_SET CXX_MODULES
-    FILES
-        src/modules/common.ixx
-        src/modules/filesystem.ixx
+    FILES src/modules/filesystem.ixx
 )
+target_link_libraries(devicefs-filesystem PRIVATE devicefs-common)
+
+add_library(devicefs-vss-block-descriptors STATIC)
+target_sources(devicefs-vss-block-descriptors PUBLIC
+    FILE_SET CXX_MODULES
+    FILES src/modules/vss_block_descriptors.ixx
+)
+target_link_libraries(devicefs-vss-block-descriptors PRIVATE devicefs-common)
 
 add_library(vshadow STATIC
     dependencies/vshadow/create.cpp
@@ -79,13 +91,20 @@ target_link_libraries(vshadow PRIVATE
 )
 
 add_executable(devicefs src/main.cpp)
-target_link_libraries(devicefs PRIVATE devicefs-filesystem)
+target_link_libraries(devicefs PRIVATE devicefs-common devicefs-filesystem)
+
+add_executable(vss-descriptor-dump src/vss_descriptor_dump.cpp)
+target_link_libraries(vss-descriptor-dump PRIVATE
+    devicefs-common devicefs-vss-block-descriptors ole32
+)
 
 add_executable(backup-supervisor
     src/backup_supervisor.cpp
     src/modules/supervisor/native_backup_fifo.cpp
 )
-target_link_libraries(backup-supervisor PRIVATE devicefs-filesystem vshadow)
+target_link_libraries(backup-supervisor PRIVATE
+    devicefs-common devicefs-filesystem vshadow
+)
 
 set(START_PBS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/supervisor/artifacts/start-pbs.fish"
@@ -135,7 +154,13 @@ if(DEVICEFS_MEASURE_FREE_CLUSTER_DATA OR DEVICEFS_MEASURE_READ_PATH)
     )
 endif()
 
-foreach(target devicefs-filesystem devicefs backup-supervisor)
+foreach(target
+        devicefs-common
+        devicefs-filesystem
+        devicefs-vss-block-descriptors
+        devicefs
+        vss-descriptor-dump
+        backup-supervisor)
     set_target_properties(${target} PROPERTIES
         VS_GLOBAL_EnableCppCoreCheck true
         VS_GLOBAL_RunCodeAnalysis true
@@ -152,7 +177,7 @@ foreach(target devicefs-filesystem devicefs backup-supervisor)
     )
 endforeach()
 
-foreach(target devicefs backup-supervisor)
+foreach(target devicefs vss-descriptor-dump backup-supervisor)
     target_link_options(${target} PRIVATE
         /GUARD:CF /guard:ehcont /CETCOMPAT
     )

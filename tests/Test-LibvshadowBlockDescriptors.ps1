@@ -642,42 +642,49 @@ try {
     # evidence about whether only the latest snapshot has an unstable raw VSS
     # metadata view.
     if ($use_descriptor_dump) {
-        try {
-            $latest_b_copy_id = ([Guid]$snapshot_a.ID).ToString('D')
-            $latest_b_stdout = [IO.Path]::Combine(
-                $test_root, 'endpoint-b-while-latest-select-a.stdout.txt')
-            $latest_b_stderr = [IO.Path]::Combine(
-                $test_root, 'endpoint-b-while-latest-select-a.stderr.txt')
-            & $VssDescriptorDumpPath --source $snapshot_b.DeviceObject `
-                --snapshot-id $latest_b_copy_id `
-                >$latest_b_stdout 2>$latest_b_stderr
-            $latest_b_exit_code = $LASTEXITCODE
-            if ($latest_b_exit_code -ne 0) {
-                $latest_b_error =
-                    ([IO.File]::ReadAllText($latest_b_stderr) -replace
-                        '\r?\n', ' ').Trim()
+        $probe_b_select_a = {
+            param(
+                [string] $Timing,
+                [string] $Artifact
+            )
+
+            try {
+                $copy_id = ([Guid]$snapshot_a.ID).ToString('D')
+                $stdout = [IO.Path]::Combine(
+                    $test_root, "$Artifact.stdout.txt")
+                $stderr = [IO.Path]::Combine(
+                    $test_root, "$Artifact.stderr.txt")
+                & $VssDescriptorDumpPath --source $snapshot_b.DeviceObject `
+                    --snapshot-id $copy_id >$stdout 2>$stderr
+                $exit_code = $LASTEXITCODE
+                if ($exit_code -ne 0) {
+                    $error_text =
+                        ([IO.File]::ReadAllText($stderr) -replace
+                            '\r?\n', ' ').Trim()
+                    $endpoint_raw_diagnostics.Add(
+                        "snapshot B $Timing selecting store A: parser " +
+                        "exited $($exit_code): $error_text")
+                } else {
+                    $result = ConvertFrom-VssDescriptorDumpOutput `
+                        ([IO.File]::ReadAllText($stdout)) $copy_id 0 `
+                        $vshadow_forwarder_flag $vshadow_overlay_flag `
+                        $source_identity.Length $vss_block_size
+                    $endpoint_raw_diagnostics.Add(
+                        "snapshot B $Timing selecting store A: parsed " +
+                        "$($result.DescriptorCount) descriptor(s) from " +
+                        "$($result.ListBlockCount) list block(s); volume " +
+                        "size $($result.VolumeSize), expected " +
+                        "$($source_identity.Length)")
+                }
+            } catch {
+                $message = ($_.Exception.Message -replace '\r?\n', ' ').Trim()
                 $endpoint_raw_diagnostics.Add(
-                    "snapshot B while latest selecting store A: parser " +
-                    "exited $($latest_b_exit_code): $latest_b_error")
-            } else {
-                $latest_b_result = ConvertFrom-VssDescriptorDumpOutput `
-                    ([IO.File]::ReadAllText($latest_b_stdout)) `
-                    $latest_b_copy_id 0 $vshadow_forwarder_flag `
-                    $vshadow_overlay_flag $source_identity.Length `
-                    $vss_block_size
-                $endpoint_raw_diagnostics.Add(
-                    "snapshot B while latest selecting store A: parsed " +
-                    "$($latest_b_result.DescriptorCount) descriptor(s) from " +
-                    "$($latest_b_result.ListBlockCount) list block(s); " +
-                    "volume size $($latest_b_result.VolumeSize), expected " +
-                    "$($source_identity.Length)")
+                    "snapshot B $Timing selecting store A: probe could not " +
+                    "be completed: $message")
             }
-        } catch {
-            $message = ($_.Exception.Message -replace '\r?\n', ' ').Trim()
-            $endpoint_raw_diagnostics.Add(
-                "snapshot B while latest selecting store A: probe could " +
-                "not be completed: $message")
         }
+        & $probe_b_select_a 'while latest immediately before C' `
+            'endpoint-b-while-latest-select-a'
     }
 
     $snapshot_c = New-TestShadowCopy $source_volume_name $snapshot_ids
@@ -685,6 +692,11 @@ try {
         ([Guid]$snapshot_c.ProviderID -eq $microsoft_software_provider) -and
             $snapshot_c.Differential) `
         'Snapshot C was not made by the Microsoft differential provider.'
+    # Repeat the identical B/select-A read before any other post-C work.
+    if ($use_descriptor_dump) {
+        & $probe_b_select_a 'immediately after C' `
+            'endpoint-b-immediately-after-c-select-a'
+    }
 
     $snapshot_a_bulk_ab = "$($snapshot_a.DeviceObject)\bulk-ab.bin"
     $snapshot_b_bulk_ab = "$($snapshot_b.DeviceObject)\bulk-ab.bin"

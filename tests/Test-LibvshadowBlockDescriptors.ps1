@@ -20,6 +20,8 @@ snapshot's vshadowinfo store, changes to the NTFS allocation bitmap, and
 allocated file-data, named data-stream, or directory extents reachable at or
 beneath System Volume Information in either endpoint snapshot.
 
+Use -UseVssDescriptorDump to test vss-descriptor-dump instead of vshadowinfo.
+
 The test must run as SYSTEM so it can enumerate System Volume Information. It
 temporarily enables SeBackupPrivilege while querying those extents. Named
 streams of reparse points are not queried, and reparse targets are not followed.
@@ -44,7 +46,9 @@ param(
     [Parameter(Mandatory)]
     [string] $DeviceFsPath,
 
-    [switch] $KeepArtifactsOnFailure
+    [switch] $KeepArtifactsOnFailure,
+
+    [switch] $UseVssDescriptorDump
 )
 
 Set-StrictMode -Version Latest
@@ -349,6 +353,51 @@ function Assert-ControlledOverwrite {
         "$Description did not produce more than 512 stable changed blocks " +
         "in its VSS store's original-offset records.")
     return $controlled
+}
+
+function Convert-VssDescriptorDumpOutput {
+    param(
+        [AllowEmptyString()][string] $Output,
+        [Guid] $ExpectedCopyId,
+        [int] $StoreIndex
+    )
+
+    $header_pattern = (
+        '\Aschema-version\t1\r?\n' +
+        'snapshot-id\t(?<copy>[0-9a-f-]{36})\r?\n' +
+        'store-id\t[0-9a-f-]{36}\r?\n' +
+        'volume-size\t\d+\r?\n' +
+        'list-block-count\t\d+\r?\n' +
+        'descriptor-count\t(?<count>\d+)\r?\n' +
+        'forwarder-count\t\d+\r?\n' +
+        'overlay-count\t\d+\r?\n')
+    Assert-Condition ($Output -match $header_pattern) `
+        'vss-descriptor-dump printed an invalid header.'
+    $copy_id = [Guid]$Matches['copy']
+    $descriptor_output = $Output.Substring($Matches[0].Length)
+    Assert-Condition ($copy_id -eq $ExpectedCopyId) (
+        "vss-descriptor-dump returned snapshot $copy_id for request " +
+        "$ExpectedCopyId.")
+
+    $converted = [Collections.Generic.List[string]]::new()
+    $converted.Add("Store: $StoreIndex")
+    $converted.Add("    Shadow copy ID : $copy_id")
+    $converted.Add("    Number of blocks : $($Matches['count'])")
+    foreach ($line in $descriptor_output -split '\r?\n') {
+        if ($line.Length -ne 0) {
+            Assert-Condition (
+                $line -match
+                    ('^descriptor\t([0-9a-f]{16})\t' +
+                        '([0-9a-f]{16})\t([0-9a-f]{16})\t' +
+                        '([0-9a-f]{8})\t([0-9a-f]{8})$')) `
+                "vss-descriptor-dump printed an unexpected line: $line"
+            $converted.Add("    Original offset : 0x$($Matches[1])")
+            $converted.Add("    Relative offset : 0x$($Matches[2])")
+            $converted.Add("    Offset : 0x$($Matches[3])")
+            $converted.Add("    Flags : 0x$($Matches[4])")
+        }
+    }
+    return [string]::Join([Environment]::NewLine, $converted)
 }
 
 function Test-DeltaCoverage {
@@ -847,16 +896,56 @@ try {
         $test_root, 'vshadow-source-volume.img')
     [DeviceFsTestNative]::CopyDeviceToFile(
         $source_volume_name, $vshadow_source)
-    $vshadow_stdout = [IO.Path]::Combine(
-        $test_root, 'vshadowinfo.stdout.txt')
-    $vshadow_stderr = [IO.Path]::Combine(
-        $test_root, 'vshadowinfo.stderr.txt')
-    & $VShadowInfoPath -a $vshadow_source >$vshadow_stdout 2>$vshadow_stderr
-    $vshadow_exit_code = $LASTEXITCODE
-    $vshadow_output = [IO.File]::ReadAllText($vshadow_stdout)
-    $vshadow_error = [IO.File]::ReadAllText($vshadow_stderr)
-    Assert-Condition ($vshadow_exit_code -eq 0) `
-        "vshadowinfo exited with code $($vshadow_exit_code): $vshadow_error"
+    if ($UseVssDescriptorDump) {
+        $requests = @(
+            ([Guid]$snapshot_a.ID).ToString('D')
+            ([Guid]$snapshot_b.ID).ToString('D')
+            ([Guid]$snapshot_c.ID).ToString('D')
+        )
+        $converted = [Collections.Generic.List[string]]::new()
+        $failures = [Collections.Generic.List[string]]::new()
+        for ($i = 0; $i -lt $requests.Count; ++$i) {
+            $name = [char]([int][char]'a' + $i)
+            $stdout = [IO.Path]::Combine(
+                $test_root, "vss-descriptor-dump-$name.stdout.txt")
+            $stderr = [IO.Path]::Combine(
+                $test_root, "vss-descriptor-dump-$name.stderr.txt")
+            & $VShadowInfoPath --source $vshadow_source `
+                --snapshot-id $requests[$i] >$stdout 2>$stderr
+            $exit_code = $LASTEXITCODE
+            if ($exit_code -ne 0) {
+                $error_text = ([IO.File]::ReadAllText($stderr) -replace
+                    '\r?\n', ' ').Trim()
+                $failures.Add(
+                    "snapshot $($requests[$i]) exited $($exit_code): $error_text")
+            } else {
+                try {
+                    $converted.Add((Convert-VssDescriptorDumpOutput `
+                            ([IO.File]::ReadAllText($stdout)) `
+                            $requests[$i] $i))
+                } catch {
+                    $failures.Add(
+                        "snapshot $($requests[$i]): $($_.Exception.Message)")
+                }
+            }
+        }
+        Assert-Condition ($failures.Count -eq 0) (
+            'vss-descriptor-dump failed: ' + ($failures -join '; '))
+        $vshadow_output = [string]::Join(
+            [Environment]::NewLine, $converted)
+    } else {
+        $vshadow_stdout = [IO.Path]::Combine(
+            $test_root, 'vshadowinfo.stdout.txt')
+        $vshadow_stderr = [IO.Path]::Combine(
+            $test_root, 'vshadowinfo.stderr.txt')
+        & $VShadowInfoPath -a $vshadow_source `
+            >$vshadow_stdout 2>$vshadow_stderr
+        $vshadow_exit_code = $LASTEXITCODE
+        $vshadow_output = [IO.File]::ReadAllText($vshadow_stdout)
+        $vshadow_error = [IO.File]::ReadAllText($vshadow_stderr)
+        Assert-Condition ($vshadow_exit_code -eq 0) `
+            "vshadowinfo exited with code $($vshadow_exit_code): $vshadow_error"
+    }
 
     $stores = [Collections.Generic.List[object]]::new()
     $current_store = $null
@@ -1174,7 +1263,7 @@ foreach ($delta in $delta_results) {
 Write-Host (
     "The fixture verified $controlled_ab and $controlled_bc stable bulk " +
     "original-offset blocks across the two chained stores and " +
-    "$repeated_hot_blocks repeated hot-file block(s). vshadowinfo reported " +
+    "$repeated_hot_blocks repeated hot-file block(s). The tool reported " +
     "$forwarder_count forwarder and $overlay_count overlay descriptor(s); " +
     'their occurrence is informational because the provider chooses the ' +
     'private on-disk encoding.')

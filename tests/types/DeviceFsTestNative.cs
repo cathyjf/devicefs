@@ -67,6 +67,16 @@ public sealed class ClusterRange {
     }
 }
 
+public sealed class NativeFileSystemEntry {
+    public string FullName { get; }
+    public FileAttributes Attributes { get; }
+
+    internal NativeFileSystemEntry(string fullName, FileAttributes attributes) {
+        FullName = fullName;
+        Attributes = attributes;
+    }
+}
+
 public sealed class AllocationChangeBlocks {
     public long[] BecameAllocated { get; }
     public long[] BecameFree { get; }
@@ -108,8 +118,13 @@ public static class DeviceFsTestNative {
     private const int RetrievalPointersHeaderSize = 16;
     private const int RetrievalPointersExtentSize = 16;
     private const int FileStreamInfo = 7;
+    private const int FileAttributeTagInfo = 9;
+    private const int FileFullDirectoryInfo = 14;
+    private const int FileFullDirectoryRestartInfo = 15;
     private const int FileStreamInfoHeaderSize = 24;
     private const int InitialStreamInformationSize = 4096;
+    private const int DirectoryInformationBufferSize = 64 * 1024;
+    private const int ErrorNoMoreFiles = 18;
     private const int ErrorHandleEof = 38;
     private const int ErrorInsufficientBuffer = 122;
     private const int ErrorMoreData = 234;
@@ -152,6 +167,25 @@ public static class DeviceFsTestNative {
             Buffer = buffer;
             BytesReturned = bytesReturned;
         }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileAttributeTagInformation {
+        public FileAttributes FileAttributes;
+        public uint ReparseTag;
+    }
+
+    // FILE_FULL_DIR_INFO ends its fixed header immediately before FileName.
+    [StructLayout(LayoutKind.Explicit, Size = 68)]
+    private struct FileFullDirectoryInformationHeader {
+        [FieldOffset(0)]
+        public uint NextEntryOffset;
+
+        [FieldOffset(56)]
+        public FileAttributes FileAttributes;
+
+        [FieldOffset(60)]
+        public uint FileNameLength;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -791,6 +825,124 @@ public static class DeviceFsTestNative {
             }
             bufferSize *= 2;
         }
+    }
+
+    private static FileAttributes GetFileAttributes(
+        SafeFileHandle handle, string path) {
+        var size = Marshal.SizeOf<FileAttributeTagInformation>();
+        using var buffer = new AlignedBuffer(size);
+        if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo,
+                buffer.DangerousGetHandle(), (uint)size)) {
+            throw LastError($"could not query the attributes of '{path}'");
+        }
+
+        return Marshal.PtrToStructure<FileAttributeTagInformation>(
+            buffer.DangerousGetHandle()).FileAttributes;
+    }
+
+    private static void EnumerateDirectoryTree(string path,
+        SafeFileHandle directory, List<NativeFileSystemEntry> result) {
+        var headerSize = Marshal.SizeOf<
+            FileFullDirectoryInformationHeader>();
+        using var buffer = new AlignedBuffer(DirectoryInformationBufferSize);
+        var informationClass = FileFullDirectoryRestartInfo;
+        while (true) {
+            if (!GetFileInformationByHandleEx(directory, informationClass,
+                    buffer.DangerousGetHandle(),
+                    DirectoryInformationBufferSize)) {
+                var error = Marshal.GetLastWin32Error();
+                if (error == ErrorNoMoreFiles) {
+                    return;
+                }
+                throw Win32Error(
+                    $"could not enumerate the directory '{path}'", error);
+            }
+            informationClass = FileFullDirectoryInfo;
+
+            var offset = 0;
+            while (true) {
+                var remaining = DirectoryInformationBufferSize - offset;
+                if (remaining < headerSize) {
+                    throw new InvalidDataException(
+                        $"directory information for '{path}' was truncated");
+                }
+
+                var entryAddress = IntPtr.Add(
+                    buffer.DangerousGetHandle(), offset);
+                var entry = Marshal.PtrToStructure<
+                    FileFullDirectoryInformationHeader>(entryAddress);
+                if ((entry.FileNameLength % sizeof(char)) != 0) {
+                    throw new InvalidDataException(
+                        $"directory information for '{path}' contained an " +
+                        "invalid name length");
+                }
+                var recordSize = checked(
+                    (long)headerSize + entry.FileNameLength);
+                if (recordSize > remaining) {
+                    throw new InvalidDataException(
+                        $"directory information for '{path}' was truncated");
+                }
+
+                var characterCount = checked(
+                    (int)(entry.FileNameLength / sizeof(char)));
+                var name = characterCount == 0
+                    ? string.Empty
+                    : Marshal.PtrToStringUni(
+                        IntPtr.Add(entryAddress, headerSize), characterCount);
+                if ((name == null) || (name.Length == 0) ||
+                    (name.IndexOf('\0') >= 0) || (name.IndexOf('\\') >= 0) ||
+                    (name.IndexOf('/') >= 0)) {
+                    throw new InvalidDataException(
+                        $"directory information for '{path}' contained an " +
+                        "invalid name");
+                }
+
+                if ((name != ".") && (name != "..")) {
+                    var childPath = path.EndsWith("\\",
+                            StringComparison.Ordinal)
+                        ? path + name
+                        : path + "\\" + name;
+                    result.Add(new NativeFileSystemEntry(
+                        childPath, entry.FileAttributes));
+                    if (((entry.FileAttributes & FileAttributes.Directory) !=
+                            0) &&
+                        ((entry.FileAttributes & FileAttributes.ReparsePoint) ==
+                            0)) {
+                        using var child = OpenObjectForExtents(childPath);
+                        EnumerateDirectoryTree(childPath, child, result);
+                    }
+                }
+
+                if (entry.NextEntryOffset == 0) {
+                    break;
+                }
+                if (((entry.NextEntryOffset % sizeof(long)) != 0) ||
+                    (entry.NextEntryOffset < recordSize) ||
+                    (entry.NextEntryOffset > remaining - headerSize)) {
+                    throw new InvalidDataException(
+                        $"directory information for '{path}' contained an " +
+                        "invalid entry offset");
+                }
+                offset = checked(offset + (int)entry.NextEntryOffset);
+            }
+        }
+    }
+
+    public static NativeFileSystemEntry[] EnumerateTreeObjects(string root) {
+        if (string.IsNullOrEmpty(root)) {
+            throw new ArgumentException(
+                "the tree root must not be empty", nameof(root));
+        }
+
+        var result = new List<NativeFileSystemEntry>();
+        using var handle = OpenObjectForExtents(root);
+        var attributes = GetFileAttributes(handle, root);
+        result.Add(new NativeFileSystemEntry(root, attributes));
+        if (((attributes & FileAttributes.Directory) != 0) &&
+            ((attributes & FileAttributes.ReparsePoint) == 0)) {
+            EnumerateDirectoryTree(root, handle, result);
+        }
+        return result.ToArray();
     }
 
     public static ClusterRange[] GetAllocatedClusterRanges(string path,

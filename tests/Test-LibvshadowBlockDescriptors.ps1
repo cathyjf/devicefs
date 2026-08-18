@@ -27,9 +27,11 @@ When vss-descriptor-dump is used, the test also reports non-failing probes that
 compare raw VSS metadata from snapshot B while it is latest and after snapshot
 C makes it no longer latest, as well as from C while C is latest.
 
-The test must run as SYSTEM so it can enumerate System Volume Information. It
-temporarily enables SeBackupPrivilege while querying those extents. Named
-streams of reparse points are not queried, and reparse targets are not followed.
+The test must run elevated under an account whose token contains
+SeBackupPrivilege. It temporarily enables that privilege while natively
+enumerating System Volume Information and querying those extents, then restores
+the token's prior privilege state. Named streams of reparse points are not
+queried, and reparse targets are not followed.
 
 For each snapshot store, the descriptor set includes the 16 KiB block
 containing every in-range original and store-data offset, plus each forwarder's
@@ -249,10 +251,7 @@ function Get-TreeBlockOffsets {
     )
 
     $blocks = [Collections.Generic.HashSet[long]]::new()
-    $objects = @(
-        Get-Item -LiteralPath $Root -Force
-        Get-ChildItem -LiteralPath $Root -Force -Recurse
-    )
+    $objects = @([DeviceFsTestNative]::EnumerateTreeObjects($Root))
     foreach ($object in $objects) {
         $is_reparse_point = (($object.Attributes -band
                 [IO.FileAttributes]::ReparsePoint) -ne 0)
@@ -460,12 +459,8 @@ if (-not [Environment]::Is64BitProcess) {
     throw 'This integration test requires 64-bit PowerShell.'
 }
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$is_system = $identity.IsSystem
 $read_user = $identity.Name
 $identity.Dispose()
-if (-not $is_system) {
-    throw 'This integration test must run as NT AUTHORITY\SYSTEM.'
-}
 
 $use_descriptor_dump =
     $PSCmdlet.ParameterSetName -ne 'VShadowInfo'

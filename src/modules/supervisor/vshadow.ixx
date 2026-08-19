@@ -17,10 +17,12 @@
 module;
 
 #include <vshadow/shadow.h>
+#include <wil/resource.h>
 
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <format>
 #include <functional>
@@ -66,7 +68,7 @@ class Backup {
     Backup(const HANDLE cancellation_event, const bool use_writers)
         : use_writers_{use_writers} {
         client_.Initialize(
-            use_writers ? VSS_CTX_BACKUP : VSS_CTX_FILE_SHARE_BACKUP,
+            use_writers ? VSS_CTX_APP_ROLLBACK : VSS_CTX_NAS_ROLLBACK,
             L"", false, cancellation_event);
     }
 
@@ -78,6 +80,8 @@ class Backup {
     [[gsl::suppress("26439",
         justification: "Normal destruction reports VSS completion failure; failure cleanup cannot replace an exception already unwinding.")]]
     ~Backup() noexcept(false) {
+        const auto delete_snapshot_set = wil::scope_exit(
+            [this]() noexcept { TryDeleteCreatedSnapshotSet(); });
         try {
             if (completion_ == Completion::Failure) {
                 client_.CompleteFailedBackup();
@@ -122,6 +126,18 @@ class Backup {
     }
 
   private:
+    auto TryDeleteCreatedSnapshotSet() noexcept -> void {
+        const auto error = client_.TryDeleteCreatedSnapshotSet();
+        if (FAILED(error)) {
+            std::fwprintf(stderr,
+                L"backup-supervisor: could not delete the persistent VSS "
+                L"snapshot set (HRESULT 0x%08X); the snapshot set may "
+                L"remain.\n",
+                static_cast<unsigned int>(
+                    std::bit_cast<std::uint32_t>(error)));
+        }
+    }
+
     VssClient client_;
     const bool use_writers_;
     Completion completion_ = Completion::None;

@@ -242,6 +242,21 @@ void VssClient::CompleteFailedBackup()
 }
 
 
+HRESULT VssClient::TryDeleteCreatedSnapshotSet() noexcept
+{
+    if (!m_bSnapshotSetCreated)
+    {
+        return S_OK;
+    }
+
+    LONG deletedSnapshots;
+    VSS_ID nondeletedSnapshotID;
+    return m_pVssObject->DeleteSnapshots(
+        m_latestSnapshotSetID, VSS_OBJECT_SNAPSHOT_SET, FALSE,
+        &deletedSnapshots, &nondeletedSnapshotID);
+}
+
+
 // Save the backup components document
 void VssClient::SaveBackupComponentsDocument(wstring fileName)
 {

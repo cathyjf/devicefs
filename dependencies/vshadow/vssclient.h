@@ -99,6 +99,8 @@ public:
     // Notify VSS that an in-progress backup did not complete
     void CompleteFailedBackup();
 
+    HRESULT TryDeleteCreatedSnapshotSet() noexcept;
+
     //
     //  Shadow copy query related methods
     //

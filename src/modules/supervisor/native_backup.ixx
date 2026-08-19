@@ -985,7 +985,8 @@ auto TryStopDeviceFs(const DeviceFsProcess &devicefs) noexcept {
 
 export [[nodiscard]] auto RunNativeBackup(
     const HANDLE cancellation_event,
-    const bool no_writers) -> int {
+    const bool no_writers,
+    const std::span<const std::wstring> volume_override) -> int {
     const auto cancelled = WaitForSingleObject(cancellation_event, 0);
     if (cancelled == WAIT_FAILED) {
         WinError("could not inspect the backup cancellation event");
@@ -994,7 +995,7 @@ export [[nodiscard]] auto RunNativeBackup(
         return kCancelledExitCode;
     }
 
-    const auto [read_user, configured_volumes] = [] {
+    auto [read_user, selected_volumes] = [] {
         const auto persistent = ResolvePersistentPaths();
         auto configuration =
             ReadBackupConfiguration(persistent.configuration);
@@ -1003,8 +1004,12 @@ export [[nodiscard]] auto RunNativeBackup(
             std::move(configuration.volumes),
         };
     }();
+    if (!volume_override.empty()) {
+        selected_volumes.assign(
+            volume_override.begin(), volume_override.end());
+    }
     auto volumes = std::vector<std::wstring_view>{};
-    for (const auto &volume : configured_volumes) {
+    for (const auto &volume : selected_volumes) {
         volumes.push_back(volume);
     }
     constexpr auto kCallbackFailureExitCode = 2;

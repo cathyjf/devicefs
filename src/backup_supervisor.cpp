@@ -34,9 +34,11 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 import devicefs.common;
 import devicefs.filesystem;
@@ -450,7 +452,58 @@ template <typename Operation>
     return operation_result;
 }
 
-[[nodiscard]] auto RunForeground(const bool no_writers) {
+struct ForegroundOptions {
+    bool no_writers = false;
+    std::vector<std::wstring> volume_override;
+};
+
+[[nodiscard]] auto ParseVolumeList(std::wstring_view source) {
+    auto result = std::vector<std::wstring>{};
+    constexpr auto kWhitespace = std::wstring_view{L" \t\r\n\f\v"};
+    while (true) {
+        const auto separator = source.find(L',');
+        const auto field = source.substr(0, separator);
+        const auto first = field.find_first_not_of(kWhitespace);
+        if (first == std::wstring_view::npos) {
+            throw std::invalid_argument(
+                "--volume/--volumes must not contain an empty volume");
+        }
+        const auto last = field.find_last_not_of(kWhitespace);
+        result.emplace_back(field.substr(first, last - first + 1));
+        if (separator == std::wstring_view::npos) {
+            return result;
+        }
+        source.remove_prefix(separator + 1);
+    }
+}
+
+[[nodiscard]] auto ParseForegroundOptions(
+    const std::span<const wchar_t *const> arguments) {
+    auto result = ForegroundOptions{};
+    auto raw_volume_override = std::optional<std::wstring_view>{};
+    for (auto index = 0uz; index < arguments.size(); ++index) {
+        const auto argument = std::wstring_view{arguments[index]};
+        if (argument == L"--no-writers") {
+            result.no_writers = true;
+        } else if ((argument == L"--volume") ||
+            (argument == L"--volumes")) {
+            if (++index == arguments.size()) {
+                throw std::invalid_argument(
+                    "--volume/--volumes requires a value");
+            }
+            raw_volume_override = arguments[index];
+        } else {
+            throw std::invalid_argument(
+                "--foreground received an unknown argument");
+        }
+    }
+    if (raw_volume_override) {
+        result.volume_override = ParseVolumeList(*raw_volume_override);
+    }
+    return result;
+}
+
+[[nodiscard]] auto RunForeground(ForegroundOptions options) {
     const auto input = GetStdHandle(STD_INPUT_HANDLE);
     auto console_mode = DWORD{};
     if (!GetConsoleMode(input, &console_mode)) {
@@ -461,8 +514,11 @@ template <typename Operation>
     const auto backup_lock = AcquireBackupLock(persistent.backup_lock);
     return RunForegroundOperation(
         input, console_mode,
-        [no_writers](const HANDLE cancellation_event) {
-            return RunNativeBackup(cancellation_event, no_writers);
+        [options = std::move(options)](const HANDLE cancellation_event) {
+            return RunNativeBackup(
+                cancellation_event,
+                options.no_writers,
+                options.volume_override);
         });
 }
 
@@ -503,7 +559,9 @@ auto PrintHelp() {
     std::fputws(
         L"Usage:\n"
         L"  backup-supervisor.exe --devicefs [devicefs arguments]\n"
-        L"  backup-supervisor.exe --foreground [--no-writers]\n"
+        L"  backup-supervisor.exe --foreground [--no-writers] "
+        L"[--volumes VOLUME[,VOLUME...]]\n"
+        L"      --volumes overrides configured volumes.\n"
         L"  backup-supervisor.exe --device-to-fifo DEVICE FIFO_PATH\n"
         L"  backup-supervisor.exe --install-service [--update]\n"
         L"  backup-supervisor.exe --run-service\n",
@@ -542,7 +600,7 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
             const auto backup_lock = AcquireBackupLock(
                 persistent.backup_lock);
             const auto cancellation_event = OpenCancellationEvent();
-            return RunNativeBackup(cancellation_event.get(), false);
+            return RunNativeBackup(cancellation_event.get(), false, {});
         }
         if (option == L"--device-to-fifo") {
             if (arguments.size() != 3) {
@@ -581,15 +639,8 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
                 "--install-service accepts only the optional --update argument");
         }
         if (option == L"--foreground") {
-            if (arguments.size() == 1) {
-                return RunForeground(false);
-            }
-            if ((arguments.size() == 2) &&
-                (std::wstring_view(arguments[1]) == L"--no-writers")) {
-                return RunForeground(true);
-            }
-            throw std::invalid_argument(
-                "--foreground accepts only the optional --no-writers argument");
+            return RunForeground(
+                ParseForegroundOptions(arguments.subspan(1)));
         }
         throw std::invalid_argument("unknown backup-supervisor argument");
     } catch (const std::invalid_argument &error) {

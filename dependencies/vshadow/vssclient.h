@@ -62,7 +62,7 @@ public:
     //
 
     // Method to create a shadow copy set with the given volumes
-    void CreateSnapshotSet(
+    pair<VSS_ID, vector<VSS_ID>> CreateSnapshotSet(
         vector<wstring> volumeList, 
         wstring outputXmlFile,     
         vector<wstring> excludedWriterList,

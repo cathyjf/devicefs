@@ -77,6 +77,12 @@ export [[nodiscard]] auto RunDeviceToFifo(
 
 namespace internal {
 
+[[nodiscard]] auto SnapshotImageName(
+    const devicefs::vshadow::Snapshot &) -> std::wstring;
+
+[[nodiscard]] auto SerializeSnapshotManifest(
+    const devicefs::vshadow::SnapshotSet &) -> std::u8string;
+
 [[nodiscard]] auto WaitForProcess(
     const HANDLE process, const DWORD timeout) -> bool {
     const auto result = WaitForSingleObject(process, timeout);
@@ -714,7 +720,9 @@ auto TrySendWslBackupSignal(
         id.Data4[4], id.Data4[5], id.Data4[6], id.Data4[7]);
 }
 
-[[nodiscard]] auto RunWslBackup(const HANDLE cancellation_event) {
+[[nodiscard]] auto RunWslBackup(
+    const HANDLE cancellation_event,
+    const std::u8string_view snapshot_manifest) {
     constexpr auto kPollMilliseconds = DWORD{100};
     constexpr auto kTermMilliseconds = DWORD{45000};
     constexpr auto kKillMilliseconds = DWORD{30000};
@@ -750,6 +758,7 @@ auto TrySendWslBackupSignal(
         append_record(configuration.pbs_namespace);
         append_record(configuration.pbs_fingerprint);
         append_record(configuration.pbs_authentication_secret);
+        append_record(snapshot_manifest);
         input.append(configuration.pbs_encryption_key);
         return StartWslFish(
             configuration,
@@ -819,8 +828,7 @@ struct DeviceFsProcess {
     };
     auto readiness_path = std::filesystem::path{};
     for (const auto &snapshot : snapshots) {
-        auto filename = std::format(
-            L"volume-{}.img", snapshot.original_volume.substr(11, 36));
+        auto filename = SnapshotImageName(snapshot);
         if (readiness_path.empty()) {
             readiness_path = std::filesystem::path(
                 std::format(L"{}\\", DeviceFsProcess::kMountTarget)) /
@@ -941,7 +949,7 @@ auto TryStopDeviceFs(const DeviceFsProcess &devicefs) noexcept {
 
 [[nodiscard]] auto RunSnapshotBackup(
     const HANDLE cancellation_event,
-    const std::span<const devicefs::vshadow::Snapshot> snapshots,
+    const devicefs::vshadow::SnapshotSet &snapshot_set,
     const std::wstring_view read_user) {
     const auto cancelled = WaitForSingleObject(cancellation_event, 0);
     if (cancelled == WAIT_FAILED) {
@@ -959,14 +967,15 @@ auto TryStopDeviceFs(const DeviceFsProcess &devicefs) noexcept {
         throw std::runtime_error("mount target is already present: X:");
     }
 
-    const auto devicefs = StartDeviceFs(snapshots, read_user);
+    const auto snapshot_manifest = SerializeSnapshotManifest(snapshot_set);
+    const auto devicefs = StartDeviceFs(snapshot_set.snapshots, read_user);
     auto cleanup = wil::scope_exit([&] {
         TryStopDeviceFs(devicefs);
     });
 
     auto result = kCancelledExitCode;
     if (WaitForDeviceFs(devicefs, cancellation_event)) {
-        result = RunWslBackup(cancellation_event);
+        result = RunWslBackup(cancellation_event, snapshot_manifest);
     }
 
     cleanup.release();
@@ -1018,11 +1027,11 @@ export [[nodiscard]] auto RunNativeBackup(
             cancellation_event,
             !no_writers,
             volumes,
-            [&](const std::span<const devicefs::vshadow::Snapshot> snapshots) {
+            [&](const devicefs::vshadow::SnapshotSet &snapshot_set) {
                 try {
                     return internal::RunSnapshotBackup(
                         cancellation_event,
-                        snapshots,
+                        snapshot_set,
                         read_user);
                 } catch (const wil::ResultException &error) {
                     std::fwprintf(stderr, L"backup-supervisor: %hs\n",

@@ -36,8 +36,14 @@ export module devicefs.supervisor.vshadow;
 export namespace devicefs::vshadow {
 
 struct Snapshot {
+    GUID identifier{};
     std::wstring original_volume;
     std::wstring device;
+};
+
+struct SnapshotSet {
+    GUID identifier{};
+    std::vector<Snapshot> snapshots;
 };
 
 class OperationError : public std::runtime_error {
@@ -89,29 +95,26 @@ class Backup {
     [[nodiscard]] auto Run(
         const std::vector<std::wstring> &canonical_volumes,
         const std::function<int(
-            std::span<const devicefs::vshadow::Snapshot>)> &operation) -> int {
-        try {
-            client_.CreateSnapshotSet(canonical_volumes, L"", {}, {});
-        } catch (const HRESULT error) {
-            if (error == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
-                completion_ = Completion::Failure;
-            }
-            throw;
-        }
+            const devicefs::vshadow::SnapshotSet &)> &operation) -> int {
         completion_ = Completion::Failure;
+        const auto [snapshot_set_identifier, snapshot_identifiers] =
+            client_.CreateSnapshotSet(canonical_volumes, L"", {}, {});
 
         const auto snapshot_devices = client_.GetLatestSnapshotDevices();
-        auto snapshots = std::vector<devicefs::vshadow::Snapshot>{};
+        auto snapshot_set = devicefs::vshadow::SnapshotSet{
+            .identifier = snapshot_set_identifier,
+        };
+        snapshot_set.snapshots.reserve(canonical_volumes.size());
         for (auto index = std::size_t{};
-             index < snapshot_devices.size(); ++index) {
-            snapshots.push_back({
+            index < canonical_volumes.size(); ++index) {
+            snapshot_set.snapshots.push_back({
+                .identifier = snapshot_identifiers[index],
                 .original_volume = canonical_volumes[index],
                 .device = snapshot_devices[index],
             });
         }
 
-        const auto result = operation(
-            std::span<const devicefs::vshadow::Snapshot>{snapshots});
+        const auto result = operation(snapshot_set);
         if (result == 0) {
             completion_ = Completion::Success;
         }
@@ -142,7 +145,7 @@ export namespace devicefs::vshadow {
     const HANDLE cancellation_event,
     const bool use_writers,
     const std::span<const std::wstring_view> volumes,
-    const std::function<int(std::span<const Snapshot>)> &operation) -> int {
+    const std::function<int(const SnapshotSet &)> &operation) -> int {
     try {
         auto canonical_volumes = std::vector<std::wstring>{};
         for (const auto volume : volumes) {

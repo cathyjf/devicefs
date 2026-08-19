@@ -39,7 +39,7 @@
 
 
 
-void VssClient::CreateSnapshotSet(
+pair<VSS_ID, vector<VSS_ID>> VssClient::CreateSnapshotSet(
     vector<wstring> volumeList, 
     wstring outputXmlFile,     
     vector<wstring> excludedWriterList,
@@ -77,7 +77,7 @@ void VssClient::CreateSnapshotSet(
     if (m_dwContext & VSS_VOLSNAP_ATTR_DELAYED_POSTSNAPSHOT)
     {
         ft.WriteLine(L"\nFast snapshot created. Exiting... \n");
-        return;
+        return {m_latestSnapshotSetID, m_latestSnapshotIdList};
     }
 
     // Saves the backup components document, if needed
@@ -90,6 +90,7 @@ void VssClient::CreateSnapshotSet(
         ft.WriteLine(L"\nList of created shadow copies: \n");
         QuerySnapshotSet(m_latestSnapshotSetID);
     }
+    return {m_latestSnapshotSetID, m_latestSnapshotIdList};
 }
 
 

@@ -25,6 +25,7 @@ if test -n "$DEVICEFS_PBS_NAMESPACE"
 end
 read --null --global --export PBS_FINGERPRINT || exit
 read --null --global --export PBS_PASSWORD || exit
+read --null --global DEVICEFS_MANIFEST || exit
 sudo -n mount $vss_mount_point || exit
 if test -e $stop_file
     unmount_vss
@@ -43,8 +44,18 @@ for image_path in $vss_mount_point/*.img
     set image_filename (path basename $image_path)
     set --append backup_argv "$image_filename:$image_path"
 end
-$DEVICEFS_PBS_CLIENT $backup_argv &
+if set -l jq (command -v jq)
+    # If jq is installed, use it to prettify the manifest.
+    set -l manifest_ (echo -- $DEVICEFS_MANIFEST | $jq | string collect)
+    if ! string match -q -r '[^0]' $pipestatus
+        set DEVICEFS_MANIFEST $manifest_
+    end
+end
+printf 'Backup manifest:\n%s\n' $DEVICEFS_MANIFEST
+$DEVICEFS_PBS_CLIENT $backup_argv \
+    'devicefs-manifest.conf:'(echo -- $DEVICEFS_MANIFEST | psub --file) &
 set backup_pid $last_pid
+set --erase DEVICEFS_MANIFEST
 set --erase PBS_PASSWORD
 set -g backup_exit_code 1
 function record_backup_exit --on-process-exit $backup_pid

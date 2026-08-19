@@ -101,6 +101,7 @@ target_link_libraries(vss-descriptor-dump PRIVATE
 add_executable(backup-supervisor
     src/backup_supervisor.cpp
     src/modules/supervisor/native_backup_fifo.cpp
+    src/modules/supervisor/native_backup_manifest.cpp
 )
 target_link_libraries(backup-supervisor PRIVATE
     devicefs-common devicefs-filesystem vshadow
@@ -144,6 +145,7 @@ target_sources(backup-supervisor PRIVATE
         src/modules/supervisor/native_backup.ixx
         src/modules/supervisor/process_diagnostics.ixx
         src/modules/supervisor/vshadow.ixx
+        src/modules/supervisor/winrt_apartment.ixx
 )
 
 if(DEVICEFS_MEASURE_FREE_CLUSTER_DATA OR DEVICEFS_MEASURE_READ_PATH)

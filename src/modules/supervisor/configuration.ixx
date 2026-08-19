@@ -17,7 +17,6 @@
 module;
 
 #include <windows.h>
-#include <roapi.h>
 
 #include <winrt/Windows.Data.Json.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -48,6 +47,8 @@ module;
 
 export module devicefs.supervisor.configuration;
 
+import devicefs.supervisor.winrt_apartment;
+
 export using SecureUtf8String = std::basic_string<
     char8_t, std::char_traits<char8_t>, wil::secure_allocator<char8_t>>;
 
@@ -74,39 +75,6 @@ namespace {
 using winrt::Windows::Data::Json::JsonObject;
 using winrt::Windows::Data::Json::IJsonValue;
 using winrt::Windows::Data::Json::JsonValueType;
-
-class ConfigurationApartment {
-  public:
-    ConfigurationApartment()
-        : uninitialize_([] {
-            try {
-                return wil::RoInitialize(RO_INIT_SINGLETHREADED);
-            } catch (const wil::ResultException &) {
-                throw std::runtime_error(
-                    "could not initialize the Windows Runtime while reading "
-                    "the backup configuration");
-            }
-        }()) {}
-
-    ConfigurationApartment(const ConfigurationApartment &) = delete;
-    auto operator=(const ConfigurationApartment &)
-        -> ConfigurationApartment & = delete;
-    ConfigurationApartment(ConfigurationApartment &&) = delete;
-    auto operator=(ConfigurationApartment &&)
-        -> ConfigurationApartment & = delete;
-
-    ~ConfigurationApartment() {
-        // When this->uninitialize_ is destroyed, it will call RoUninitialize.
-        // RoUninitialize may unload the DLLs that implement the cached JSON factories.
-        // Subsequently, a later attempt to use the JSON implementation will crash.
-        // To avoid this, clear the factory cache before calling RoUninitialize.
-        // See <https://devblogs.microsoft.com/oldnewthing/20211105-00/?p=105878>.
-        winrt::clear_factory_cache();
-    }
-
-  private:
-    wil::unique_rouninitialize_call uninitialize_;
-};
 
 [[noreturn]] auto ConfigurationError(
     const std::string_view member,
@@ -518,7 +486,9 @@ auto ReadFields(
 
 [[nodiscard]] auto ReadBackupConfigurationImpl(
     const std::filesystem::path &path) {
-    const auto apartment = ConfigurationApartment{};
+    const auto apartment = WinrtApartment{
+        "could not initialize the Windows Runtime while reading "
+        "the backup configuration"};
     auto file = std::ifstream(path, std::ios::binary);
     if (!file.is_open()) {
         throw std::runtime_error(

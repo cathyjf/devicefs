@@ -12,7 +12,7 @@ argparse /parallel-images -- $argv || exit
 set pid_file $argv[1]
 set stop_file $argv[2]
 set backup_id $argv[3]
-# Keep these reads in the same order as RunWslBackup's NUL-delimited records,
+# Keep these reads in the same order as RunPbsFish's NUL-delimited records,
 # adding future records before the final key document.
 read --null --global DEVICEFS_PBS_CLIENT || exit
 read --null --global --export PBS_SERVER || exit

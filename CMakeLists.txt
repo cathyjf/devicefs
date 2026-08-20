@@ -150,6 +150,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/native_backup_devicefs_process.cpp
     src/modules/supervisor/native_backup_internal.cpp
     src/modules/supervisor/native_backup_manifest.cpp
+    src/modules/supervisor/native_backup_pbs.cpp
     src/modules/supervisor/process_diagnostics.ixx
     src/modules/supervisor/vshadow.ixx
     src/modules/supervisor/winrt_apartment.ixx

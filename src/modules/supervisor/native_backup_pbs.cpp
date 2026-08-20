@@ -33,6 +33,7 @@ import <wil/token_helpers.h>;
 import :internal;
 import devicefs.common;
 import devicefs.supervisor.configuration;
+import devicefs.supervisor.embedded_artifacts;
 import devicefs.supervisor.installation;
 
 #if defined(__INTELLISENSE__) && !defined(__cpp_lib_start_lifetime_as)
@@ -47,6 +48,24 @@ template <class T> auto start_lifetime_as_array(void *, size_t) noexcept -> T *;
 namespace internal {
 
 using namespace std::chrono_literals;
+
+enum class PbsStandardOutput {
+    Forward,
+    Capture,
+};
+
+struct PbsFishRequest {
+    std::span<const std::wstring_view> additional_arguments{};
+    std::optional<std::u8string_view> snapshot_manifest;
+    PbsStandardOutput standard_output = PbsStandardOutput::Forward;
+    std::chrono::milliseconds term_grace = 45s;
+    std::chrono::milliseconds kill_grace = 30s;
+};
+
+struct PbsFishResult {
+    int exit_code;
+    std::optional<std::u8string> standard_output;
+};
 
 constexpr auto kLocalDomain = wil::zwstring_view(L".");
 constexpr auto kWslCreationFlags = DWORD{
@@ -303,11 +322,68 @@ class PipeCopy {
     std::thread worker_;
 };
 
+[[nodiscard]] auto CapturePipeOutput(const HANDLE source) {
+    constexpr auto kBufferSize = DWORD{4096};
+    auto buffer = std::array<char8_t, kBufferSize>{};
+    auto output = std::u8string{};
+    while (true) {
+        auto read = DWORD{};
+        if (!ReadFile(source, buffer.data(), kBufferSize,
+                &read, nullptr)) {
+            const auto error = GetLastError();
+            if (error != ERROR_BROKEN_PIPE) {
+                WinError("could not copy WSL output",
+                    ExplicitWin32Error{error});
+            }
+            return output;
+        }
+        if (read == 0) {
+            return output;
+        }
+        output.append(buffer.data(), read);
+    }
+}
+
+class PipeCapture {
+  public:
+    explicit PipeCapture(wil::unique_handle source) {
+        auto task = std::packaged_task<std::u8string()>(
+            [source = std::move(source)] {
+                return CapturePipeOutput(source.get());
+            });
+        result_ = task.get_future();
+        worker_ = std::thread(std::move(task));
+    }
+
+    PipeCapture(const PipeCapture &) = delete;
+    auto operator=(const PipeCapture &) -> PipeCapture & = delete;
+    PipeCapture(PipeCapture &&) = default;
+    auto operator=(PipeCapture &&) -> PipeCapture & = delete;
+
+    [[gsl::suppress("26447",
+        justification: "A still-running pipe capture must be detached when its WSL operation is abandoned.")]]
+    ~PipeCapture() {
+        if (worker_.joinable()) {
+            worker_.detach();
+        }
+    }
+
+    auto Finish() {
+        worker_.join();
+        return result_.get();
+    }
+
+  private:
+    std::future<std::u8string> result_;
+    std::thread worker_;
+};
+
 struct WslProcess {
     wil::unique_handle token;
     LoadedProfile profile;
     wil::unique_process_information process;
     std::optional<PipeCopy> standard_output;
+    std::optional<PipeCapture> captured_standard_output;
     std::optional<PipeCopy> standard_error;
 
     WslProcess() noexcept = default;
@@ -327,7 +403,18 @@ struct WslProcess {
         }
     }
 
-    auto FinishOutput() {
+    auto FinishOutput() -> std::optional<std::u8string> {
+        if (captured_standard_output) {
+            const auto standard_error_result = standard_error
+                ? standard_error->Finish() : DWORD{ERROR_SUCCESS};
+            auto captured = captured_standard_output->Finish();
+            if (standard_error_result != ERROR_SUCCESS) {
+                WinError("could not copy WSL output",
+                    ExplicitWin32Error{standard_error_result});
+            }
+            return std::move(captured);
+        }
+
         auto first_error = DWORD{ERROR_SUCCESS};
         if (standard_output) {
             first_error = standard_output->Finish();
@@ -342,6 +429,7 @@ struct WslProcess {
             WinError("could not copy WSL output",
                 ExplicitWin32Error{first_error});
         }
+        return std::nullopt;
     }
 };
 
@@ -480,10 +568,17 @@ struct StartedWslFish {
     const BackupConfiguration &configuration,
     const std::span<const std::wstring_view> arguments,
     const std::span<const char> program,
-    const std::span<const char8_t> standard_input) {
+    const std::span<const char8_t> standard_input,
+    const PbsStandardOutput standard_output = PbsStandardOutput::Forward) {
     auto started = StartWslFishProcess(configuration, arguments);
-    started.process.standard_output.emplace(
-        std::move(started.standard_output), GetStdHandle(STD_OUTPUT_HANDLE));
+    if (standard_output == PbsStandardOutput::Forward) {
+        started.process.standard_output.emplace(
+            std::move(started.standard_output),
+            GetStdHandle(STD_OUTPUT_HANDLE));
+    } else {
+        started.process.captured_standard_output.emplace(
+            std::move(started.standard_output));
+    }
     started.process.standard_error.emplace(
         std::move(started.standard_error), GetStdHandle(STD_ERROR_HANDLE));
 
@@ -510,36 +605,40 @@ struct StartedWslFish {
     return std::move(started.process);
 }
 
-[[nodiscard]] auto FinishWsl(WslProcess &process) -> int {
-    process.FinishOutput();
-    return std::bit_cast<int>(ProcessExitCode(process.process.hProcess));
+[[nodiscard]] auto FinishWsl(WslProcess &process) -> PbsFishResult {
+    auto standard_output = process.FinishOutput();
+    return PbsFishResult{
+        .exit_code = std::bit_cast<int>(
+            ProcessExitCode(process.process.hProcess)),
+        .standard_output = std::move(standard_output),
+    };
 }
 
-enum class WslBackupSignal {
+enum class PbsFishSignal {
     Term,
     Kill,
 };
 
-struct WslBackupSignalText {
+struct PbsFishSignalText {
     std::wstring_view argument;
     std::string_view diagnostic;
 };
 
 [[nodiscard]] constexpr auto SignalText(
-    const WslBackupSignal signal) noexcept {
+    const PbsFishSignal signal) noexcept {
     switch (signal) {
-    case WslBackupSignal::Term:
-        return WslBackupSignalText{L"TERM", "TERM"};
-    case WslBackupSignal::Kill:
-        return WslBackupSignalText{L"KILL", "KILL"};
+    case PbsFishSignal::Term:
+        return PbsFishSignalText{L"TERM", "TERM"};
+    case PbsFishSignal::Kill:
+        return PbsFishSignalText{L"KILL", "KILL"};
     }
     std::unreachable();
 }
 
-auto SendWslBackupSignal(
+auto SendPbsFishSignal(
     const std::wstring_view pid_file,
     const std::wstring_view stop_file,
-    const WslBackupSignal signal) {
+    const PbsFishSignal signal) {
     constexpr auto kControlTimeout = 15s;
     constexpr auto program = std::string_view(
         "touch $argv[2]; "
@@ -563,23 +662,107 @@ auto SendWslBackupSignal(
             "the WSL {} request did not exit before its timeout",
             text.diagnostic));
     }
-    const auto exit_code = FinishWsl(request);
-    if (exit_code != 0) {
+    const auto result = FinishWsl(request);
+    if (result.exit_code != 0) {
         throw std::runtime_error(std::format(
             "the WSL {} request exited with code {}",
-            text.diagnostic, exit_code));
+            text.diagnostic, result.exit_code));
     }
 }
 
-auto TrySendWslBackupSignal(
+auto TrySendPbsFishSignal(
     const std::wstring_view pid_file,
     const std::wstring_view stop_file,
-    const WslBackupSignal signal) noexcept {
+    const PbsFishSignal signal) noexcept {
     try {
-        SendWslBackupSignal(pid_file, stop_file, signal);
+        SendPbsFishSignal(pid_file, stop_file, signal);
     } catch (const std::exception &error) {
-        TryWriteError("could not signal the WSL backup", error);
+        TryWriteError("could not signal the PBS operation", error);
     }
+}
+
+[[nodiscard]] auto RunPbsFish(
+    const HANDLE cancellation_event,
+    const std::optional<std::u8string> &namespace_override,
+    const PbsFishRequest &request) -> std::optional<PbsFishResult> {
+    constexpr auto kPollInterval = 100ms;
+    const auto control_path = std::format(
+        L"/tmp/devicefs-{}", UniqueName());
+    const auto pid_file = std::format(L"{}.pid", control_path);
+    const auto stop_file = std::format(L"{}.stop", control_path);
+    const auto computer_name =
+        wil::GetEnvironmentVariableW<std::wstring>(L"COMPUTERNAME");
+    auto operation = [&] {
+        const auto persistent = ResolvePersistentPaths();
+        const auto configuration =
+            ReadBackupConfiguration(persistent.configuration);
+        auto arguments = std::vector<std::wstring_view>{
+            pid_file, stop_file, computer_name};
+        if (configuration.pbs_parallelize_image_upload) {
+            arguments.push_back(L"--parallel-images");
+        }
+        arguments.append_range(request.additional_arguments);
+
+        auto input = SecureUtf8String{};
+        // start-pbs.fish consumes these NUL-delimited records in order. Add
+        // future records here and matching Fish reads before the remaining key
+        // document, which proxmox-backup-client reads through fd 0.
+        const auto append_record = [&](const std::u8string_view value) {
+            input.append(value);
+            input.push_back(u8'\0');
+        };
+        append_record(configuration.wsl_client_path);
+        append_record(configuration.pbs_server);
+        const auto port = std::to_string(configuration.pbs_port);
+        append_record(std::u8string{port.begin(), port.end()});
+        append_record(configuration.pbs_datastore);
+        append_record(configuration.pbs_auth_id);
+        append_record(namespace_override
+            ? *namespace_override : configuration.pbs_namespace);
+        append_record(configuration.pbs_fingerprint);
+        append_record(configuration.pbs_authentication_secret);
+        if (request.snapshot_manifest) {
+            append_record(*request.snapshot_manifest);
+        }
+        input.append(configuration.pbs_encryption_key);
+        return StartWslFish(
+            configuration,
+            arguments,
+            StartPbsProgram(),
+            std::span<const char8_t>{input.data(), input.size()},
+            request.standard_output);
+    }();
+
+    while (true) {
+        if (WaitForProcess(
+                operation.process.hProcess, kPollInterval)) {
+            return FinishWsl(operation);
+        }
+        const auto cancelled = WaitForSingleObject(cancellation_event, 0);
+        if (cancelled == WAIT_FAILED) {
+            WinError("could not inspect the backup cancellation event");
+        }
+        if (cancelled == WAIT_OBJECT_0) {
+            break;
+        }
+    }
+
+    TrySendPbsFishSignal(pid_file, stop_file, PbsFishSignal::Term);
+    if (!WaitForProcess(
+            operation.process.hProcess, request.term_grace)) {
+        TrySendPbsFishSignal(pid_file, stop_file, PbsFishSignal::Kill);
+        if (!WaitForProcess(
+                operation.process.hProcess, request.kill_grace)) {
+            throw std::runtime_error(
+                "the PBS operation did not exit after the KILL request");
+        }
+    }
+    const auto result = FinishWsl(operation);
+    if (result.exit_code != 0) {
+        std::wcout << L"The PBS operation exited with code "
+                   << result.exit_code << L" during cancellation.\n";
+    }
+    return std::nullopt;
 }
 
 } // namespace internal

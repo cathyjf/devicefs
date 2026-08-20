@@ -18,8 +18,6 @@ module;
 
 #include <windows.h>
 
-#include <wil/win32_helpers.h>
-
 #include <cstdio>
 
 export module devicefs.supervisor.native_backup;
@@ -32,96 +30,12 @@ import :manifest;
 import :pbs;
 import devicefs.common;
 import devicefs.supervisor.configuration;
-import devicefs.supervisor.embedded_artifacts;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.vshadow;
 
 export constexpr auto kCancelledExitCode = 130;
 
 namespace internal {
-
-using namespace std::chrono_literals;
-
-[[nodiscard]] auto RunWslBackup(
-    const HANDLE cancellation_event,
-    const std::u8string_view snapshot_manifest,
-    const std::optional<std::u8string> &namespace_override) {
-    constexpr auto kPollInterval = 100ms;
-    constexpr auto kTermTimeout = 45s;
-    constexpr auto kKillTimeout = 30s;
-    const auto control_path = std::format(
-        L"/tmp/devicefs-{}", UniqueName());
-    const auto pid_file = std::format(L"{}.pid", control_path);
-    const auto stop_file = std::format(L"{}.stop", control_path);
-    const auto computer_name =
-        wil::GetEnvironmentVariableW<std::wstring>(L"COMPUTERNAME");
-    auto backup = [&] {
-        const auto persistent = ResolvePersistentPaths();
-        const auto configuration =
-            ReadBackupConfiguration(persistent.configuration);
-        auto arguments = std::vector<std::wstring_view>{
-            pid_file, stop_file, computer_name};
-        if (configuration.pbs_parallelize_image_upload) {
-            arguments.push_back(L"--parallel-images");
-        }
-        auto input = SecureUtf8String{};
-        // start-pbs.fish consumes these NUL-delimited records in order. Add
-        // future records here and matching Fish reads before the remaining key
-        // document, which proxmox-backup-client reads through fd 0.
-        const auto append_record = [&](const std::u8string_view value) {
-            input.append(value);
-            input.push_back(u8'\0');
-        };
-        append_record(configuration.wsl_client_path);
-        append_record(configuration.pbs_server);
-        const auto port = std::to_string(configuration.pbs_port);
-        append_record(std::u8string{port.begin(), port.end()});
-        append_record(configuration.pbs_datastore);
-        append_record(configuration.pbs_auth_id);
-        append_record(namespace_override
-            ? *namespace_override : configuration.pbs_namespace);
-        append_record(configuration.pbs_fingerprint);
-        append_record(configuration.pbs_authentication_secret);
-        append_record(snapshot_manifest);
-        input.append(configuration.pbs_encryption_key);
-        return StartWslFish(
-            configuration,
-            arguments,
-            StartPbsProgram(),
-            std::span<const char8_t>{input.data(), input.size()});
-    }();
-
-    while (true) {
-        if (WaitForProcess(
-                backup.process.hProcess, kPollInterval)) {
-            return FinishWsl(backup);
-        }
-        const auto cancelled = WaitForSingleObject(cancellation_event, 0);
-        if (cancelled == WAIT_FAILED) {
-            WinError("could not inspect the backup cancellation event");
-        }
-        if (cancelled == WAIT_OBJECT_0) {
-            break;
-        }
-    }
-
-    TrySendWslBackupSignal(pid_file, stop_file, WslBackupSignal::Term);
-    if (!WaitForProcess(
-            backup.process.hProcess, kTermTimeout)) {
-        TrySendWslBackupSignal(pid_file, stop_file, WslBackupSignal::Kill);
-        if (!WaitForProcess(
-                backup.process.hProcess, kKillTimeout)) {
-            throw std::runtime_error(
-                "the WSL backup did not exit after the KILL request");
-        }
-    }
-    const auto exit_code = FinishWsl(backup);
-    if (exit_code != 0) {
-        std::wcout << L"The WSL backup exited with code " << exit_code
-                   << L" during cancellation.\n";
-    }
-    return kCancelledExitCode;
-}
 
 [[nodiscard]] auto RunSnapshotBackup(
     const HANDLE cancellation_event,
@@ -152,8 +66,12 @@ using namespace std::chrono_literals;
 
     auto result = kCancelledExitCode;
     if (WaitForDeviceFs(devicefs, cancellation_event)) {
-        result = RunWslBackup(
-            cancellation_event, snapshot_manifest, namespace_override);
+        const auto pbs_result = RunPbsFish(
+            cancellation_event,
+            namespace_override,
+            PbsFishRequest{.snapshot_manifest = snapshot_manifest});
+        result = pbs_result
+            ? pbs_result->exit_code : kCancelledExitCode;
     }
 
     cleanup.release();

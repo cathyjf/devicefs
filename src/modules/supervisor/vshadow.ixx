@@ -97,13 +97,15 @@ class Backup {
         auto snapshot_set = devicefs::vshadow::SnapshotSet{
             .identifier = snapshot_set_identifier,
         };
-        snapshot_set.snapshots.reserve(canonical_volumes.size());
-        for (auto index = std::size_t{};
-            index < canonical_volumes.size(); ++index) {
+        for (auto &&[identifier, original_volume, device] :
+            std::views::zip(
+                snapshot_identifiers,
+                canonical_volumes,
+                snapshot_devices)) {
             snapshot_set.snapshots.push_back({
-                .identifier = snapshot_identifiers[index],
-                .original_volume = canonical_volumes[index],
-                .device = snapshot_devices[index],
+                .identifier = identifier,
+                .original_volume = original_volume,
+                .device = device,
             });
         }
 
@@ -151,11 +153,12 @@ export namespace devicefs::vshadow {
     const std::span<const std::wstring_view> volumes,
     const std::function<int(const SnapshotSet &)> &operation) -> int {
     try {
-        auto canonical_volumes = std::vector<std::wstring>{};
-        for (const auto volume : volumes) {
-            canonical_volumes.push_back(
-                GetUniqueVolumeNameForPath(std::wstring{volume}, true));
-        }
+        auto canonical_volumes = volumes |
+            std::views::transform([](const std::wstring_view volume) {
+                return GetUniqueVolumeNameForPath(
+                    std::wstring{volume}, true);
+            }) |
+            std::ranges::to<std::vector<std::wstring>>();
 
         auto backup = Backup{cancellation_event, use_writers};
         return backup.Run(canonical_volumes, operation);

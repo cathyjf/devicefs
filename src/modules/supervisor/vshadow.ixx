@@ -133,8 +133,7 @@ class Backup {
                 L"backup-supervisor: could not delete the persistent VSS "
                 L"snapshot set (HRESULT 0x%08X); the snapshot set may "
                 L"remain.\n",
-                static_cast<unsigned int>(
-                    std::bit_cast<std::uint32_t>(error)));
+                std::bit_cast<unsigned int>(error));
         }
     }
 

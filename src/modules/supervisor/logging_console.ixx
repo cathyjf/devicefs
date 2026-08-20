@@ -23,6 +23,7 @@ module;
 #include <cstdint>
 
 #include <wil/resource.h>
+#include <wil/safecast.h>
 #include <wil/stl.h>
 
 #include <array>
@@ -192,7 +193,7 @@ public:
             WinError("could not obtain the backup supervisor log size");
         }
         if (size.QuadPart != 0) {
-            auto offset = LARGE_INTEGER{.QuadPart = -1};
+            const auto offset = LARGE_INTEGER{.QuadPart = -1};
             if (!SetFilePointerEx(
                     file_.get(), offset, nullptr, FILE_END)) {
                 WinError("could not seek in the backup supervisor log");
@@ -403,7 +404,7 @@ public:
         if (FAILED(error)) {
             WinError("could not create the backup pseudoconsole",
                 ExplicitWin32Error{
-                    static_cast<DWORD>(HRESULT_CODE(error))});
+                    wil::safe_cast<DWORD>(HRESULT_CODE(error))});
         }
         output_task_ = std::async(
             std::launch::async, CopyConsoleOutput,
@@ -414,9 +415,10 @@ public:
         const HANDLE job,
         const wil::zwstring_view application,
         std::wstring &command) {
-        const auto attribute_count = 2;
+        constexpr auto kAttributeCount = DWORD{2};
         auto attribute_bytes = SIZE_T{};
-        InitializeProcThreadAttributeList(nullptr, attribute_count, 0, &attribute_bytes);
+        InitializeProcThreadAttributeList(
+            nullptr, kAttributeCount, 0, &attribute_bytes);
         if ((attribute_bytes == 0) ||
             (GetLastError() != ERROR_INSUFFICIENT_BUFFER)) {
             WinError("could not size the process attribute list");
@@ -430,10 +432,11 @@ public:
                     ExplicitWin32Error{ERROR_NOT_ENOUGH_MEMORY});
             }
         }();
+        void *const raw_attributes = attribute_storage.get();
         auto *const attributes = static_cast<PPROC_THREAD_ATTRIBUTE_LIST>(
-            static_cast<void *>(attribute_storage.get()));
+            raw_attributes);
         if (!InitializeProcThreadAttributeList(
-                attributes, attribute_count, 0, &attribute_bytes)) {
+                attributes, kAttributeCount, 0, &attribute_bytes)) {
             WinError("could not initialize the process attribute list");
         }
         auto jobs = std::array{job};

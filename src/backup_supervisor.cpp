@@ -21,6 +21,7 @@
 #include <cstdint>
 
 #include <wil/resource.h>
+#include <wil/safecast.h>
 #include <wil/stl.h>
 #include <wil/win32_helpers.h>
 
@@ -28,6 +29,7 @@
 #include <bit>
 #include <chrono>
 #include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <future>
 #include <iostream>
@@ -220,7 +222,7 @@ auto SetServiceState(
 
 auto WINAPI ServiceControlHandler(
     const DWORD control, DWORD, void *, void *const raw_context) noexcept -> DWORD {
-    auto &context = *static_cast<ServiceContext *>(raw_context);
+    const auto &context = *static_cast<const ServiceContext *>(raw_context);
     if (control == SERVICE_CONTROL_INTERROGATE) {
         return ERROR_SUCCESS;
     }
@@ -261,7 +263,7 @@ struct ServiceOutcome {
         backup.process.hProcess, context.cancellation_event.get(),
     };
     const auto wait = WaitForMultipleObjects(
-        DWORD{waits.size()}, waits.data(), FALSE, INFINITE);
+        wil::safe_cast<DWORD>(waits.size()), waits.data(), FALSE, INFINITE);
     if (wait == WAIT_FAILED) {
         WinError("could not wait for the backup orchestrator");
     }
@@ -331,10 +333,12 @@ struct ServiceOutcome {
 }
 
 auto TryWriteFailure(
-    Log *const log, const std::string_view diagnostic) noexcept {
-    if (log != nullptr) {
-        log->TryWrite("backup-supervisor: {}", diagnostic);
-    }
+    Log *const log, const std::exception &error) noexcept {
+    try {
+        if (log != nullptr) {
+            log->Write("backup-supervisor: {}", error.what());
+        }
+    } catch (...) {}
 }
 
 [[nodiscard]] auto RunService(
@@ -355,13 +359,13 @@ auto TryWriteFailure(
         result = RunBackup(context, *log);
     } catch (const std::system_error &error) {
         result.win32_error = std::bit_cast<DWORD>(error.code().value());
-        TryWriteFailure(log ? &*log : nullptr, error.what());
+        TryWriteFailure(log ? &*log : nullptr, error);
     } catch (const std::runtime_error &error) {
         result = {
             .win32_error = ERROR_SERVICE_SPECIFIC_ERROR,
             .service_error = kInternalFailure,
         };
-        TryWriteFailure(log ? &*log : nullptr, error.what());
+        TryWriteFailure(log ? &*log : nullptr, error);
     } catch (...) {
         result = {
             .win32_error = ERROR_UNHANDLED_EXCEPTION,
@@ -567,7 +571,7 @@ auto RunServiceDispatcher() {
     return 0;
 }
 
-auto PrintHelp() {
+auto PrintHelp() noexcept {
     std::fputws(
         L"Usage:\n"
         L"  backup-supervisor.exe --devicefs [devicefs arguments]\n"

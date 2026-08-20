@@ -21,6 +21,8 @@ module;
 #include <winrt/Windows.Data.Json.h>
 #include <winrt/Windows.Foundation.Collections.h>
 
+#include <wil/safecast.h>
+
 #include <array>
 #include <format>
 #include <ranges>
@@ -70,7 +72,7 @@ namespace {
     auto label = std::array<wchar_t, MAX_PATH + 1>{};
     if (!GetVolumeInformationW(
             volume.c_str(), label.data(),
-            static_cast<DWORD>(label.size()),
+            wil::safe_cast<DWORD>(label.size()),
             nullptr, nullptr, nullptr, nullptr, 0)) {
         return std::wstring{};
     }

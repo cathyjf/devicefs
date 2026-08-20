@@ -74,7 +74,9 @@ constexpr auto kProcessCommandLineInformation =
         command_line->Length / sizeof(wchar_t));
 }
 
-export auto LogJobProcesses(Log &log, const HANDLE job) noexcept {
+export [[gsl::suppress("26447",
+    justification: "Potentially throwing work is caught locally; catch diagnostics use noexcept operations.")]]
+auto LogJobProcesses(Log &log, const HANDLE job) noexcept {
     try {
         auto snapshot = wil::unique_tool_help_snapshot(
             CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));

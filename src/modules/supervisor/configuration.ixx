@@ -113,9 +113,10 @@ template <typename String>
     auto result = String(
         wil::safe_cast<typename String::size_type>(size),
         typename String::value_type{});
+    void *const output = result.data();
     const auto converted = WideCharToMultiByte(
         CP_UTF8, WC_ERR_INVALID_CHARS, value.c_str(), -1,
-        static_cast<char *>(static_cast<void *>(result.data())),
+        static_cast<char *>(output),
         size, nullptr, nullptr);
     if (converted != size) {
         throw std::runtime_error(

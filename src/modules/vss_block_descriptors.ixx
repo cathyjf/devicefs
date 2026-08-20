@@ -354,7 +354,7 @@ class RawSource {
     }
 
     void Seek(const std::uint64_t offset) {
-        auto position = LARGE_INTEGER{
+        const auto position = LARGE_INTEGER{
             .QuadPart = wil::safe_cast<LONGLONG>(offset),
         };
         if (!SetFilePointerEx(handle_.get(), position, nullptr, FILE_BEGIN)) {
@@ -452,7 +452,8 @@ template <class Field>
 static_assert(sizeof(GUID) == 16);
 
 [[nodiscard]] auto HasIdentifier(
-    const std::span<const std::byte> data, const std::size_t length) {
+    const std::span<const std::byte> data,
+    const std::size_t length) noexcept {
     return (length <= data.size()) &&
         (length <= kVssIdentifier.size()) &&
         (std::memcmp(data.data(), kVssIdentifier.data(), length) == 0);

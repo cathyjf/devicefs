@@ -210,7 +210,7 @@ class ProfilePrivilegeEnabler {
 
         alignas(TOKEN_PRIVILEGES)
         auto state_storage = std::array<std::byte, kStateSize>{};
-        auto entries = std::span{
+        const auto entries = std::span{
             std::start_lifetime_as_array<LUID_AND_ATTRIBUTES>(
                 state_storage.data() +
                     offsetof(TOKEN_PRIVILEGES, Privileges),
@@ -220,14 +220,15 @@ class ProfilePrivilegeEnabler {
         for (auto index = 0uz; index < kPrivilegeNames.size(); ++index) {
             auto &entry = entries[index];
             if (!LookupPrivilegeValueW(
-                    nullptr, kPrivilegeNames[index].c_str(), &entry.Luid)) {
+                    nullptr, kPrivilegeNames.at(index).c_str(), &entry.Luid)) {
                 WinError("could not identify a user-profile privilege");
             }
             entry.Attributes = SE_PRIVILEGE_ENABLED;
         }
         auto *const state =
             std::start_lifetime_as<TOKEN_PRIVILEGES>(state_storage.data());
-        state->PrivilegeCount = DWORD{kPrivilegeNames.size()};
+        state->PrivilegeCount =
+            wil::safe_cast<DWORD>(kPrivilegeNames.size());
 
         static_cast<void>(std::start_lifetime_as_array<LUID_AND_ATTRIBUTES>(
             previous_state_storage_.data() +
@@ -300,7 +301,7 @@ class ProfilePrivilegeEnabler {
     if (FAILED(error)) {
         WinError("could not identify the backup-supervisor account",
             ExplicitWin32Error{
-                static_cast<DWORD>(HRESULT_CODE(error))});
+                wil::safe_cast<DWORD>(HRESULT_CODE(error))});
     }
     return result;
 }
@@ -422,7 +423,7 @@ struct WslProcess {
     std::optional<PipeCopy> standard_output;
     std::optional<PipeCopy> standard_error;
 
-    WslProcess() = default;
+    WslProcess() noexcept = default;
     WslProcess(const WslProcess &) = delete;
     auto operator=(const WslProcess &) -> WslProcess & = delete;
     WslProcess(WslProcess &&) = default;
@@ -684,6 +685,8 @@ auto SendWslBackupSignal(
     }
 }
 
+[[gsl::suppress("26447",
+    justification: "std::exception::what is noexcept, and fwprintf does not throw C++ exceptions.")]]
 auto TryWriteError(
     const char *const context,
     const std::exception &error) noexcept {

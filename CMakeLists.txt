@@ -2,8 +2,20 @@ cmake_minimum_required(VERSION 4.2)
 
 project(devicefs LANGUAGES CXX RC)
 
+if((NOT DEFINED CMAKE_VS_VERSION_BUILD_NUMBER)
+        OR (CMAKE_VS_VERSION_BUILD_NUMBER VERSION_LESS 18))
+    message(FATAL_ERROR "devicefs requires Visual Studio 2026 or newer")
+endif()
+
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     message(FATAL_ERROR "devicefs requires the Microsoft Visual C++ compiler")
+endif()
+
+if(MSVC_VERSION LESS 1951)
+    # MSVC Build Tools 14.51 is required for explicit lifecycle management.
+    # See <https://devblogs.microsoft.com/cppblog/c23-support-in-msvc-build-tools-14-51>.
+    # See also <https://learn.microsoft.com/en-us/cpp/overview/compiler-versions>.
+    message(FATAL_ERROR "devicefs requires MSVC Build Tools 14.51 or newer")
 endif()
 
 if(NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "x64")

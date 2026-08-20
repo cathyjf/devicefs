@@ -233,9 +233,10 @@ auto InstallExecutable(
 
 auto ConfigurePreshutdownTimeout(
     const SC_HANDLE service,
-    const DWORD preshutdown_timeout) {
+    const std::chrono::milliseconds preshutdown_timeout) {
     auto configuration = SERVICE_PRESHUTDOWN_INFO{
-        .dwPreshutdownTimeout = preshutdown_timeout,
+        .dwPreshutdownTimeout =
+            wil::safe_cast<DWORD>(preshutdown_timeout.count()),
     };
     if (!ChangeServiceConfig2W(service,
             SERVICE_CONFIG_PRESHUTDOWN_INFO, &configuration)) {
@@ -273,7 +274,7 @@ export [[nodiscard]] auto ResolvePersistentPaths() {
 
 export auto InstallService(
     const InstallMode mode,
-    const DWORD preshutdown_timeout) {
+    const std::chrono::milliseconds preshutdown_timeout) {
     auto manager = wil::unique_schandle(OpenSCManagerW(
         nullptr, nullptr,
         SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE));

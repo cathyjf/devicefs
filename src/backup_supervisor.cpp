@@ -34,6 +34,8 @@ import devicefs.supervisor.vshadow;
 
 namespace {
 
+using namespace std::chrono_literals;
+
 constexpr auto kCancellationEventName =
     wil::zwstring_view(L"Local\\devicefs-backup-stop");
 constexpr auto kOrchestrateOption = std::wstring_view(L"--orchestrate");
@@ -92,15 +94,17 @@ constexpr auto kOrchestrateOption = std::wstring_view(L"--orchestrate");
 }
 
 struct BackupProcess {
-    static constexpr auto kPollMilliseconds = DWORD{100};
-    static constexpr auto kForcedWaitMilliseconds = DWORD{30000};
+    static constexpr auto kJobPollInterval = 100ms;
+    static constexpr auto kForcedTerminationTimeout = 30s;
 
     LoggingConsole console;
     wil::unique_process_information process;
     wil::unique_handle job;
 
-    [[nodiscard]] auto Wait(const DWORD timeout) const {
-        const auto result = WaitForSingleObject(process.hProcess, timeout);
+    [[nodiscard]] auto Wait(
+        const std::chrono::milliseconds timeout) const {
+        const auto result = WaitForSingleObject(
+            process.hProcess, wil::safe_cast<DWORD>(timeout.count()));
         if (result == WAIT_FAILED) {
             WinError("could not wait for a backup process");
         }
@@ -115,8 +119,9 @@ struct BackupProcess {
         return result;
     }
 
-    [[nodiscard]] auto WaitForAll(const DWORD timeout) const {
-        const auto deadline = GetTickCount64() + timeout;
+    [[nodiscard]] auto WaitForAll(
+        const std::chrono::milliseconds timeout) const {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (true) {
             auto accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION{};
             if (!QueryInformationJobObject(job.get(),
@@ -127,10 +132,10 @@ struct BackupProcess {
             if (accounting.ActiveProcesses == 0) {
                 return true;
             }
-            if (GetTickCount64() >= deadline) {
+            if (std::chrono::steady_clock::now() >= deadline) {
                 return false;
             }
-            Sleep(kPollMilliseconds);
+            std::this_thread::sleep_for(kJobPollInterval);
         }
     }
 
@@ -138,7 +143,7 @@ struct BackupProcess {
         if (!TerminateJobObject(job.get(), exit_code)) {
             WinError("could not terminate the backup process job");
         }
-        if (!WaitForAll(kForcedWaitMilliseconds)) {
+        if (!WaitForAll(kForcedTerminationTimeout)) {
             throw std::runtime_error(
                 "backup processes survived job termination");
         }
@@ -165,15 +170,15 @@ struct ServiceContext {
     static constexpr auto kInitialPendingCheckpoint = DWORD{1};
     static constexpr auto kForcedCleanupCheckpoint =
         kInitialPendingCheckpoint + 1;
-    static constexpr auto kStartWaitHintMilliseconds = DWORD{30000};
-    static constexpr auto kGracefulStopMilliseconds = DWORD{300000};
-    static constexpr auto kStrayProcessWaitMilliseconds = DWORD{5000};
-    static constexpr auto kStopWaitHintMilliseconds =
-        kGracefulStopMilliseconds + kStrayProcessWaitMilliseconds +
-        BackupProcess::kForcedWaitMilliseconds;
-    static constexpr auto kPreshutdownMarginMilliseconds = DWORD{25000};
-    static constexpr auto kMinimumPreshutdownMilliseconds =
-        kStopWaitHintMilliseconds + kPreshutdownMarginMilliseconds;
+    static constexpr auto kStartWaitHint = 30s;
+    static constexpr auto kGracefulStopTimeout = 5min;
+    static constexpr auto kStrayProcessTimeout = 5s;
+    static constexpr auto kStopWaitHint =
+        kGracefulStopTimeout + kStrayProcessTimeout +
+        BackupProcess::kForcedTerminationTimeout;
+    static constexpr auto kPreshutdownMargin = 25s;
+    static constexpr auto kMinimumPreshutdownTimeout =
+        kStopWaitHint + kPreshutdownMargin;
     static constexpr auto kAcceptedControls =
         DWORD{SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN};
 
@@ -181,13 +186,15 @@ struct ServiceContext {
     wil::unique_event_nothrow cancellation_event;
 };
 
+using ServiceWaitHint = std::chrono::duration<DWORD, std::milli>;
+
 auto SetServiceState(
     const ServiceContext &context,
     const DWORD state,
     const DWORD win32_error = ERROR_SUCCESS,
     const DWORD service_error = 0,
     const DWORD checkpoint = 0,
-    const DWORD wait_hint = 0) noexcept {
+    const ServiceWaitHint wait_hint = {}) noexcept {
     auto status = SERVICE_STATUS{
         .dwServiceType = SERVICE_WIN32_OWN_PROCESS,
         .dwCurrentState = state,
@@ -197,7 +204,7 @@ auto SetServiceState(
         .dwWin32ExitCode = win32_error,
         .dwServiceSpecificExitCode = service_error,
         .dwCheckPoint = checkpoint,
-        .dwWaitHint = wait_hint,
+        .dwWaitHint = wait_hint.count(),
     };
     return SetServiceStatus(context.status_handle, &status) != FALSE;
 }
@@ -235,7 +242,7 @@ struct ServiceOutcome {
     auto report_stopping = wil::scope_exit([&] {
         SetServiceState(context, SERVICE_STOP_PENDING,
             ERROR_SUCCESS, 0, ServiceContext::kInitialPendingCheckpoint,
-            ServiceContext::kStopWaitHintMilliseconds);
+            ServiceContext::kStopWaitHint);
     });
     if (ResumeThread(backup.process.hThread) == MAXDWORD) {
         WinError("could not resume the backup orchestrator");
@@ -251,32 +258,32 @@ struct ServiceOutcome {
     }
     SetServiceState(context, SERVICE_STOP_PENDING,
         ERROR_SUCCESS, 0, ServiceContext::kInitialPendingCheckpoint,
-        ServiceContext::kStopWaitHintMilliseconds);
+        ServiceContext::kStopWaitHint);
     report_stopping.release();
     const auto cancellation_signaled =
         context.cancellation_event.is_signaled();
 
     auto forced = false;
     if (cancellation_signaled && !backup.Wait(
-            ServiceContext::kGracefulStopMilliseconds)) {
+            ServiceContext::kGracefulStopTimeout)) {
         log.Write(
             "backup-supervisor: graceful stop timed out; terminating the process job");
         LogJobProcesses(log, backup.job.get());
         SetServiceState(context, SERVICE_STOP_PENDING,
             ERROR_SUCCESS, 0, ServiceContext::kForcedCleanupCheckpoint,
-            BackupProcess::kForcedWaitMilliseconds);
+            BackupProcess::kForcedTerminationTimeout);
         backup.TerminateAndWait(ERROR_CANCELLED);
         forced = true;
     }
 
     const auto child_exit_code = backup.ExitCode();
-    if (!backup.WaitForAll(ServiceContext::kStrayProcessWaitMilliseconds)) {
+    if (!backup.WaitForAll(ServiceContext::kStrayProcessTimeout)) {
         log.Write(
             "backup-supervisor: terminating child processes left behind by the orchestrator");
         LogJobProcesses(log, backup.job.get());
         SetServiceState(context, SERVICE_STOP_PENDING,
             ERROR_SUCCESS, 0, ServiceContext::kForcedCleanupCheckpoint,
-            BackupProcess::kForcedWaitMilliseconds);
+            BackupProcess::kForcedTerminationTimeout);
         backup.TerminateAndWait(ERROR_PROCESS_ABORTED);
         forced = true;
     }
@@ -530,7 +537,7 @@ auto WINAPI ServiceMain(
     }
     SetServiceState(context, SERVICE_START_PENDING,
         ERROR_SUCCESS, 0, ServiceContext::kInitialPendingCheckpoint,
-        ServiceContext::kStartWaitHintMilliseconds);
+        ServiceContext::kStartWaitHint);
     const auto result = RunService(context, argc);
     SetServiceState(context, SERVICE_STOPPED,
         result.win32_error, result.service_error);
@@ -626,13 +633,13 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
         if (option == L"--install-service") {
             if (arguments.size() == 1) {
                 InstallService(InstallMode::CreateOnly,
-                    ServiceContext::kMinimumPreshutdownMilliseconds);
+                    ServiceContext::kMinimumPreshutdownTimeout);
                 return 0;
             }
             if ((arguments.size() == 2) &&
                 (std::wstring_view(arguments[1]) == L"--update")) {
                 InstallService(InstallMode::CreateOrUpdate,
-                    ServiceContext::kMinimumPreshutdownMilliseconds);
+                    ServiceContext::kMinimumPreshutdownTimeout);
                 return 0;
             }
             throw std::invalid_argument(

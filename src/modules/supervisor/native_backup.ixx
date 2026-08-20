@@ -1020,16 +1020,12 @@ export [[nodiscard]] auto RunNativeBackup(
     if (!volume_override.empty()) {
         selected_volumes.assign_range(volume_override);
     }
-    auto volumes = std::vector<std::wstring_view>{};
-    for (const auto &volume : selected_volumes) {
-        volumes.push_back(volume);
-    }
     constexpr auto kCallbackFailureExitCode = 2;
     try {
         return devicefs::vshadow::Run(
             cancellation_event,
             !no_writers,
-            volumes,
+            selected_volumes,
             [&](const devicefs::vshadow::SnapshotSet &snapshot_set) {
                 try {
                     return internal::RunSnapshotBackup(

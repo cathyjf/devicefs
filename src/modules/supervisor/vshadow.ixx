@@ -150,13 +150,12 @@ export namespace devicefs::vshadow {
 [[nodiscard]] auto Run(
     const HANDLE cancellation_event,
     const bool use_writers,
-    const std::span<const std::wstring_view> volumes,
+    const std::span<const std::wstring> volumes,
     const std::function<int(const SnapshotSet &)> &operation) -> int {
     try {
         auto canonical_volumes = volumes |
-            std::views::transform([](const std::wstring_view volume) {
-                return GetUniqueVolumeNameForPath(
-                    std::wstring{volume}, true);
+            std::views::transform([](const std::wstring &volume) {
+                return GetUniqueVolumeNameForPath(volume, true);
             }) |
             std::ranges::to<std::vector<std::wstring>>();
 

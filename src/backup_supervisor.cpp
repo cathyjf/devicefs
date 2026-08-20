@@ -25,23 +25,9 @@
 #include <wil/stl.h>
 #include <wil/win32_helpers.h>
 
-#include <array>
-#include <bit>
-#include <chrono>
 #include <cstdio>
-#include <exception>
-#include <filesystem>
-#include <future>
-#include <iostream>
-#include <optional>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <system_error>
-#include <utility>
-#include <vector>
 
+import std;
 import devicefs.common;
 import devicefs.filesystem;
 import devicefs.supervisor.installation;

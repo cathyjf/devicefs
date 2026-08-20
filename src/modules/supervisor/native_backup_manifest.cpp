@@ -23,13 +23,6 @@ module;
 
 #include <wil/safecast.h>
 
-#include <array>
-#include <format>
-#include <ranges>
-#include <stdexcept>
-#include <string>
-#include <vector>
-
 // The imported winrt_apartment module transitively references
 // `StringValidateDestW`, a function declared and defined in `strsafe.h`.
 // Because of an apparent MSVC++ compiler bug, the compiler is able to find the
@@ -40,6 +33,7 @@ module;
 
 module devicefs.supervisor.native_backup;
 
+import std;
 import devicefs.supervisor.vshadow;
 import devicefs.supervisor.winrt_apartment;
 

@@ -29,16 +29,11 @@ module;
 #include <wil/stl.h>
 #include <wil/win32_helpers.h>
 
-#include <array>
 #include <cstdio>
-#include <filesystem>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <utility>
 
 export module devicefs.supervisor.installation;
 
+import std;
 import devicefs.common;
 import devicefs.supervisor.configuration;
 

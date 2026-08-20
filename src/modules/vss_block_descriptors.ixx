@@ -67,26 +67,9 @@ module;
 #include <wil/resource.h>
 #include <wil/safecast.h>
 
-#include <array>
-#include <bit>
-#include <concepts>
-#include <cstddef>
-#include <cstring>
-#include <format>
-#include <limits>
-#include <memory>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <type_traits>
-#include <unordered_map>
-#include <unordered_set>
-#include <utility>
-#include <vector>
-
 export module devicefs.vss_block_descriptors;
 
+import std;
 import devicefs.common;
 
 export namespace devicefs::vss {

@@ -18,13 +18,9 @@ module;
 
 #include <windows.h>
 
-#include <format>
-#include <span>
-#include <stdexcept>
-#include <string_view>
-
 export module devicefs.supervisor.embedded_artifacts;
 
+import std;
 import devicefs.common;
 
 namespace {

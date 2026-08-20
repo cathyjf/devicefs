@@ -18,15 +18,9 @@ module;
 
 #include <windows.h>
 
-#include <bit>
-#include <cstddef>
-#include <format>
-#include <system_error>
-#include <tuple>
-#include <type_traits>
-#include <utility>
-
 export module devicefs.common;
+
+import std;
 
 export struct ExplicitWin32Error final {
     DWORD value;

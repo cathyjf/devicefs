@@ -26,24 +26,9 @@ module;
 #include <wil/safecast.h>
 #include <wil/stl.h>
 
-#include <array>
-#include <bit>
-#include <chrono>
-#include <cstddef>
-#include <filesystem>
-#include <format>
-#include <functional>
-#include <future>
-#include <memory>
-#include <new>
-#include <span>
-#include <string>
-#include <string_view>
-#include <system_error>
-#include <utility>
-
 export module devicefs.supervisor.logging_console;
 
+import std;
 import devicefs.common;
 
 using unique_pseudoconsole = wil::unique_any<

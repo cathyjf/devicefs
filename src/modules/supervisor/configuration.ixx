@@ -29,24 +29,9 @@ module;
 #include <wil/safecast.h>
 #include <wil/stl.h>
 
-#include <cmath>
-#include <cstddef>
-#include <filesystem>
-#include <fstream>
-#include <format>
-#include <functional>
-#include <iterator>
-#include <limits>
-#include <optional>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <variant>
-#include <vector>
-
 export module devicefs.supervisor.configuration;
 
+import std;
 import devicefs.supervisor.winrt_apartment;
 
 export using SecureUtf8String = std::basic_string<

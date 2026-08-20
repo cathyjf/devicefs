@@ -17,16 +17,9 @@
 #include <windows.h>
 #include <objbase.h>
 
-#include <algorithm>
 #include <cstdio>
-#include <cwchar>
-#include <format>
-#include <iterator>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
 
+import std;
 import devicefs.common;
 import devicefs.vss_block_descriptors;
 

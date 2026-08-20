@@ -29,30 +29,12 @@ module;
 #include <wil/token_helpers.h>
 #include <wil/win32_helpers.h>
 
-#include <array>
-#include <bit>
 #include <cstddef>
-#include <exception>
 #include <cstdio>
-#include <filesystem>
-#include <format>
-#include <future>
-#include <iostream>
-#include <memory>
-#include <new>
-#include <optional>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <system_error>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
 
 export module devicefs.supervisor.native_backup;
 
+import std;
 import devicefs.common;
 import devicefs.supervisor.configuration;
 import devicefs.supervisor.embedded_artifacts;

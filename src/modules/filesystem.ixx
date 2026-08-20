@@ -29,28 +29,13 @@ module;
 #include <wil/resource.h>
 #include <wil/stl.h>
 
-#include <array>
-#include <bit>
 #include <climits>
 #include <cstddef>
 #include <cstdio>
-#include <cstring>
-#include <format>
-#include <iostream>
-#include <map>
-#include <memory>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <system_error>
-#include <type_traits>
-#include <unordered_set>
-#include <utility>
-#include <vector>
 
 export module devicefs.filesystem;
 
+import std;
 import devicefs.common;
 
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA || DEVICEFS_MEASURE_READ_PATH

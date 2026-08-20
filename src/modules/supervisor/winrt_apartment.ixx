@@ -24,9 +24,9 @@ module;
 #include <wil/resource.h>
 #include <wil/result.h>
 
-#include <stdexcept>
-
 export module devicefs.supervisor.winrt_apartment;
+
+import std;
 
 export class WinrtApartment {
   public:

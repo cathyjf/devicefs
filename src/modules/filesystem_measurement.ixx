@@ -20,22 +20,12 @@ module;
 
 #include <wil/stl.h>
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <chrono>
 #include <climits>
-#include <cstdint>
 #include <cstdio>
-#include <cwchar>
-#include <memory>
-#include <mutex>
-#include <span>
-#include <utility>
-#include <vector>
 
 export module devicefs.filesystem_measurement;
+
+import std;
 
 export class FreeClusterMeasurement {
     static constexpr auto kClustersPerClaimWord =

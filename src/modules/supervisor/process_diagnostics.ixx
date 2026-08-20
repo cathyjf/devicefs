@@ -22,16 +22,9 @@ module;
 
 #include <wil/resource.h>
 
-#include <cstddef>
-#include <exception>
-#include <filesystem>
-#include <memory>
-#include <string>
-#include <string_view>
-#include <vector>
-
 export module devicefs.supervisor.process_diagnostics;
 
+import std;
 import devicefs.supervisor.logging_console;
 
 #if defined(__INTELLISENSE__) && !defined(__cpp_lib_start_lifetime_as)

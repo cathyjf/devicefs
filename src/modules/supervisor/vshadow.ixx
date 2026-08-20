@@ -19,21 +19,11 @@ module;
 #include <vshadow/shadow.h>
 #include <wil/resource.h>
 
-#include <bit>
-#include <cstddef>
-#include <cstdint>
 #include <cstdio>
-#include <exception>
-#include <format>
-#include <functional>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <system_error>
-#include <vector>
 
 export module devicefs.supervisor.vshadow;
+
+import std;
 
 export namespace devicefs::vshadow {
 

@@ -22,23 +22,9 @@ module;
 #include <wil/resource.h>
 #include <wil/safecast.h>
 
-#include <array>
-#include <bit>
-#include <chrono>
-#include <cstdint>
-#include <exception>
-#include <format>
-#include <future>
-#include <iostream>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <system_error>
-#include <thread>
-#include <utility>
-
 module devicefs.supervisor.native_backup;
 
+import std;
 import devicefs.common;
 import devicefs.supervisor.configuration;
 import devicefs.supervisor.embedded_artifacts;

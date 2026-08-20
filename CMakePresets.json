@@ -32,12 +32,13 @@
     {
       "name": "windows-x64-release",
       "configurePreset": "windows-x64",
-      "configuration": "Release"
+      "configuration": "Release",
+      "nativeToolOptions": ["/m"]
     },
     {
       "name": "windows-x64-instrumented-release",
       "configurePreset": "windows-x64-instrumented",
-      "configuration": "Release"
+      "inherits": "windows-x64-release"
     }
   ]
 }

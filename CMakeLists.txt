@@ -14,6 +14,16 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 
+# Increase build parallelism for native C++ projects.
+# See <https://devblogs.microsoft.com/cppblog/cpp-build-throughput-investigation-and-tune-up>.
+set(CMAKE_VS_GLOBALS
+    "BuildPassReferences=true"
+)
+
+# Build multiple source files concurrently.
+# See <https://learn.microsoft.com/en-us/cpp/build/reference/mp-build-with-multiple-processes>.
+add_compile_options(/MP)
+
 option(DEVICEFS_MEASURE_FREE_CLUSTER_DATA
     "Measure nonzero data in bitmap-free clusters (diagnostic builds only)"
     OFF

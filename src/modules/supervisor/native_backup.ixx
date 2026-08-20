@@ -564,8 +564,7 @@ struct StartedWslFish {
     }
     wsl_arguments.append_range(std::array<std::wstring_view, 6>{
         L"--exec", L"/usr/bin/fish", L"--no-config", L"-c",
-        L"read --null --global DEVICEFS_FISH_PROGRAM; "
-        L"and eval $DEVICEFS_FISH_PROGRAM",
+        L"read --null --global DEVICEFS_FISH_PROGRAM && eval $DEVICEFS_FISH_PROGRAM",
         L"--",
     });
     wsl_arguments.append_range(arguments);

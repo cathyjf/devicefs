@@ -48,6 +48,10 @@ cpp_space_around_ternary_operator = insert
 
 cpp_wrap_preserve_blocks = never
 
+[CMakeLists.txt]
+indent_style = space
+indent_size = 4
+
 [*.{cs,ps1}]
 indent_style = space
 indent_size = 4

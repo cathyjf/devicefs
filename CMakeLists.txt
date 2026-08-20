@@ -121,27 +121,13 @@ set(DEVICE_TO_FIFO
     "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/supervisor/artifacts/device-to-fifo.fish"
 )
 set(ARTIFACT_RESOURCE_SCRIPT
-    "${CMAKE_CURRENT_BINARY_DIR}/backup-supervisor-artifacts-$<CONFIG>.rc"
-)
-set(ARTIFACT_RESOURCE
-    "${CMAKE_CURRENT_BINARY_DIR}/backup-supervisor-artifacts-$<CONFIG>.res"
+    "${CMAKE_CURRENT_BINARY_DIR}/backup-supervisor-artifacts.rc"
 )
 file(GENERATE OUTPUT "${ARTIFACT_RESOURCE_SCRIPT}" CONTENT
     "START_PBS DEVICEFS_ARTIFACT \"${START_PBS}\"
     DEVICE_TO_FIFO DEVICEFS_ARTIFACT \"${DEVICE_TO_FIFO}\"\n"
 )
-add_custom_command(
-    OUTPUT "${ARTIFACT_RESOURCE}"
-    COMMAND "${CMAKE_RC_COMPILER}" /nologo /fo "${ARTIFACT_RESOURCE}"
-        "${ARTIFACT_RESOURCE_SCRIPT}"
-    DEPENDS "${ARTIFACT_RESOURCE_SCRIPT}" "${START_PBS}" "${DEVICE_TO_FIFO}"
-    VERBATIM
-)
-add_custom_target(backup-supervisor-artifacts
-    DEPENDS "${ARTIFACT_RESOURCE}"
-)
-add_dependencies(backup-supervisor backup-supervisor-artifacts)
-target_link_libraries(backup-supervisor PRIVATE "${ARTIFACT_RESOURCE}")
+target_sources(backup-supervisor PRIVATE "${ARTIFACT_RESOURCE_SCRIPT}")
 target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/configuration.ixx
     src/modules/supervisor/embedded_artifacts.ixx

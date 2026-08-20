@@ -16,14 +16,14 @@
 
 #include <windows.h>
 
-#include <wil/resource.h>
-#include <wil/safecast.h>
-#include <wil/stl.h>
 #include <wil/win32_helpers.h>
 
 #include <cstdio>
 
 import std;
+import <wil/resource.h>;
+import <wil/safecast.h>;
+import <wil/stl.h>;
 import devicefs.common;
 import devicefs.filesystem;
 import devicefs.supervisor.installation;

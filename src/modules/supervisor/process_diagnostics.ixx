@@ -20,11 +20,10 @@ module;
 #include <tlhelp32.h>
 #include <winternl.h>
 
-#include <wil/resource.h>
-
 export module devicefs.supervisor.process_diagnostics;
 
 import std;
+import <wil/resource.h>;
 import devicefs.supervisor.logging_console;
 
 #if defined(__INTELLISENSE__) && !defined(__cpp_lib_start_lifetime_as)

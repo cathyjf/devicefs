@@ -18,17 +18,26 @@ module;
 
 #include <windows.h>
 
-#include <winrt/Windows.Data.Json.h>
-#include <winrt/Windows.Foundation.Collections.h>
-
-#include <wil/resource.h>
-#include <wil/safecast.h>
-#include <wil/stl.h>
+// As a result of an apparent compiler defect, when the below WIL headers are
+// imported (instead of included), MSVC++ is able to find the declaration of
+// `StringValidateDestW` but not the definition of it, even though both the
+// declaration and definition are contained within `strsafe.h` and the compiler
+// should presumably either find both or neither. To work around this issue, we
+// explicitly include `strsafe.h`.
+#include <strsafe.h>
 
 export module devicefs.supervisor.configuration;
 
 import std;
+import <wil/resource.h>;
+import <wil/safecast.h>;
+import <wil/stl.h>;
+import <winrt/Windows.Data.Json.h>;
+import <winrt/Windows.Foundation.Collections.h>;
 import devicefs.supervisor.winrt_apartment;
+
+// The Windows GetObject macro conflicts with C++/WinRT IJsonValue::GetObject.
+#undef GetObject
 
 export using SecureUtf8String = std::basic_string<
     char8_t, std::char_traits<char8_t>, wil::secure_allocator<char8_t>>;

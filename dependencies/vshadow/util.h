@@ -355,7 +355,7 @@ inline wstring GetUniqueVolumeNameForMountPoint(wstring mountPoint)
 
 
 // Get the unique volume name for the given path
-inline wstring GetUniqueVolumeNameForPath(wstring path, bool bIsBackup=false)
+inline wstring GetUniqueVolumeNameForPath(wstring path, [[maybe_unused]] bool bIsBackup=false)
 {
     FunctionTracer ft(DBG_INFO);
 

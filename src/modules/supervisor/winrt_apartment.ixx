@@ -20,13 +20,12 @@ module;
 #include <roapi.h>
 
 #include <winrt/base.h>
-
 #include <wil/resource.h>
-#include <wil/result.h>
 
 export module devicefs.supervisor.winrt_apartment;
 
 import std;
+import <wil/result.h>;
 
 export class WinrtApartment {
   public:

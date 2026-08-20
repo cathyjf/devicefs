@@ -18,14 +18,13 @@ module;
 
 #include <windows.h>
 
-#include <wil/stl.h>
-
 #include <climits>
 #include <cstdio>
 
 export module devicefs.filesystem_measurement;
 
 import std;
+import <wil/stl.h>;
 
 export class FreeClusterMeasurement {
     static constexpr auto kClustersPerClaimWord =

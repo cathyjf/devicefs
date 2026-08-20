@@ -19,10 +19,6 @@ module;
 #include <windows.h>
 #include <userenv.h>
 
-#include <wil/resource.h>
-#include <wil/safecast.h>
-#include <wil/stl.h>
-#include <wil/token_helpers.h>
 #include <wil/win32_helpers.h>
 
 #include <cstddef>
@@ -31,6 +27,10 @@ module;
 export module devicefs.supervisor.native_backup;
 
 import std;
+import <wil/resource.h>;
+import <wil/safecast.h>;
+import <wil/stl.h>;
+import <wil/token_helpers.h>;
 import devicefs.common;
 import devicefs.supervisor.configuration;
 import devicefs.supervisor.embedded_artifacts;

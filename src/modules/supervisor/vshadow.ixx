@@ -16,14 +16,13 @@
 
 module;
 
-#include <vshadow/shadow.h>
-#include <wil/resource.h>
-
 #include <cstdio>
 
 export module devicefs.supervisor.vshadow;
 
 import std;
+import <vshadow/shadow.h>;
+import <wil/resource.h>;
 
 export namespace devicefs::vshadow {
 

@@ -20,9 +20,6 @@ module;
 #include <sddl.h>
 #include <shlobj.h>
 
-#include <wil/resource.h>
-#include <wil/safecast.h>
-#include <wil/stl.h>
 #include <wil/win32_helpers.h>
 
 #include <cstdio>
@@ -30,6 +27,9 @@ module;
 export module devicefs.supervisor.installation;
 
 import std;
+import <wil/resource.h>;
+import <wil/safecast.h>;
+import <wil/stl.h>;
 import devicefs.common;
 import devicefs.supervisor.configuration;
 

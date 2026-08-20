@@ -18,13 +18,20 @@ module;
 
 #include <windows.h>
 
-#include <wil/resource.h>
-#include <wil/safecast.h>
-#include <wil/stl.h>
+// As a result of an apparent compiler defect, when the below WIL headers are
+// imported (instead of included), MSVC++ is able to find the declaration of
+// `StringValidateDestW` but not the definition of it, even though both the
+// declaration and definition are contained within `strsafe.h` and the compiler
+// should presumably either find both or neither. To work around this issue, we
+// explicitly include `strsafe.h`.
+#include <strsafe.h>
 
 export module devicefs.supervisor.logging_console;
 
 import std;
+import <wil/resource.h>;
+import <wil/safecast.h>;
+import <wil/stl.h>;
 import devicefs.common;
 
 using unique_pseudoconsole = wil::unique_any<

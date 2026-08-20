@@ -65,9 +65,6 @@ function(target_module_interfaces target visibility)
         FILE_SET CXX_MODULES
         FILES ${ARGN}
     )
-    set_source_files_properties(${ARGN} PROPERTIES
-        VS_SETTINGS "CompileAs=CompileAsCppModule"
-    )
 endfunction()
 
 if(NOT EXISTS "${WINFSP_INCLUDE_DIR}/winfsp/winfsp.h" OR NOT EXISTS "${WINFSP_LIBRARY}")
@@ -156,6 +153,8 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/installation.ixx
     src/modules/supervisor/logging_console.ixx
     src/modules/supervisor/native_backup.ixx
+    src/modules/supervisor/native_backup_devicefs_process.cpp
+    src/modules/supervisor/native_backup_internal.cpp
     src/modules/supervisor/process_diagnostics.ixx
     src/modules/supervisor/vshadow.ixx
     src/modules/supervisor/winrt_apartment.ixx

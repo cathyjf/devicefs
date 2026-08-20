@@ -38,6 +38,16 @@ set(WINFSP_INCLUDE_DIR "${WINFSP_ROOT}/inc")
 set(WINFSP_LIBRARY "${WINFSP_ROOT}/lib/winfsp-x64.lib")
 set(WIL_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/wil/include")
 
+function(target_module_interfaces target visibility)
+    target_sources(${target} ${visibility}
+        FILE_SET CXX_MODULES
+        FILES ${ARGN}
+    )
+    set_source_files_properties(${ARGN} PROPERTIES
+        VS_SETTINGS "CompileAs=CompileAsCppModule"
+    )
+endfunction()
+
 if(NOT EXISTS "${WINFSP_INCLUDE_DIR}/winfsp/winfsp.h" OR NOT EXISTS "${WINFSP_LIBRARY}")
     message(FATAL_ERROR
         "WinFsp developer files were not found; reinstall WinFsp with the Developer feature"
@@ -45,22 +55,19 @@ if(NOT EXISTS "${WINFSP_INCLUDE_DIR}/winfsp/winfsp.h" OR NOT EXISTS "${WINFSP_LI
 endif()
 
 add_library(devicefs-common STATIC)
-target_sources(devicefs-common PUBLIC
-    FILE_SET CXX_MODULES
-    FILES src/modules/common.ixx
+target_module_interfaces(devicefs-common PUBLIC
+    src/modules/common.ixx
 )
 
 add_library(devicefs-filesystem STATIC)
-target_sources(devicefs-filesystem PUBLIC
-    FILE_SET CXX_MODULES
-    FILES src/modules/filesystem.ixx
+target_module_interfaces(devicefs-filesystem PUBLIC
+    src/modules/filesystem.ixx
 )
 target_link_libraries(devicefs-filesystem PRIVATE devicefs-common)
 
 add_library(devicefs-vss-block-descriptors STATIC)
-target_sources(devicefs-vss-block-descriptors PUBLIC
-    FILE_SET CXX_MODULES
-    FILES src/modules/vss_block_descriptors.ixx
+target_module_interfaces(devicefs-vss-block-descriptors PUBLIC
+    src/modules/vss_block_descriptors.ixx
 )
 target_link_libraries(devicefs-vss-block-descriptors PRIVATE devicefs-common)
 
@@ -135,24 +142,20 @@ add_custom_target(backup-supervisor-artifacts
 )
 add_dependencies(backup-supervisor backup-supervisor-artifacts)
 target_link_libraries(backup-supervisor PRIVATE "${ARTIFACT_RESOURCE}")
-target_sources(backup-supervisor PRIVATE
-    FILE_SET CXX_MODULES
-    FILES
-        src/modules/supervisor/configuration.ixx
-        src/modules/supervisor/embedded_artifacts.ixx
-        src/modules/supervisor/installation.ixx
-        src/modules/supervisor/logging_console.ixx
-        src/modules/supervisor/native_backup.ixx
-        src/modules/supervisor/process_diagnostics.ixx
-        src/modules/supervisor/vshadow.ixx
-        src/modules/supervisor/winrt_apartment.ixx
+target_module_interfaces(backup-supervisor PRIVATE
+    src/modules/supervisor/configuration.ixx
+    src/modules/supervisor/embedded_artifacts.ixx
+    src/modules/supervisor/installation.ixx
+    src/modules/supervisor/logging_console.ixx
+    src/modules/supervisor/native_backup.ixx
+    src/modules/supervisor/process_diagnostics.ixx
+    src/modules/supervisor/vshadow.ixx
+    src/modules/supervisor/winrt_apartment.ixx
 )
 
 if(DEVICEFS_MEASURE_FREE_CLUSTER_DATA OR DEVICEFS_MEASURE_READ_PATH)
-    target_sources(devicefs-filesystem PUBLIC
-        FILE_SET measurement_modules
-        TYPE CXX_MODULES
-        FILES src/modules/filesystem_measurement.ixx
+    target_module_interfaces(devicefs-filesystem PUBLIC
+        src/modules/filesystem_measurement.ixx
     )
 endif()
 

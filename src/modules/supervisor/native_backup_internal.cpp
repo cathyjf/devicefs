@@ -34,10 +34,10 @@ import devicefs.supervisor.vshadow;
 namespace internal {
 
 [[nodiscard]] auto SnapshotImageName(
-    const devicefs::vshadow::Snapshot &) -> std::wstring;
-
-[[nodiscard]] auto SerializeSnapshotManifest(
-    const devicefs::vshadow::SnapshotSet &) -> std::u8string;
+    const devicefs::vshadow::Snapshot &snapshot) -> std::wstring {
+    return std::format(
+        L"volume-{}.img", snapshot.original_volume.substr(11, 36));
+}
 
 [[nodiscard]] auto WaitForProcess(
     const HANDLE process,

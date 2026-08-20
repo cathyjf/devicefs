@@ -26,7 +26,7 @@ module;
 // explicitly include `strsafe.h`.
 #include <strsafe.h>
 
-module devicefs.supervisor.native_backup;
+module devicefs.supervisor.native_backup:manifest;
 
 import std;
 import <wil/safecast.h>;
@@ -75,12 +75,6 @@ namespace {
 } // namespace
 
 namespace internal {
-
-[[nodiscard]] auto SnapshotImageName(
-    const devicefs::vshadow::Snapshot &snapshot) -> std::wstring {
-    return std::format(
-        L"volume-{}.img", snapshot.original_volume.substr(11, 36));
-}
 
 [[nodiscard]] auto SerializeSnapshotManifest(
     const devicefs::vshadow::SnapshotSet &snapshot_set) -> std::u8string {

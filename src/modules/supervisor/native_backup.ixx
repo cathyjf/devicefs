@@ -33,6 +33,7 @@ import <wil/stl.h>;
 import <wil/token_helpers.h>;
 import :internal;
 import :devicefs_process;
+import :manifest;
 import devicefs.common;
 import devicefs.supervisor.configuration;
 import devicefs.supervisor.embedded_artifacts;

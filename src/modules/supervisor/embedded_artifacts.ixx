@@ -52,8 +52,3 @@ namespace {
 export [[nodiscard]] auto StartPbsProgram() {
     return LoadProgram(L"START_PBS", "an embedded backup program");
 }
-
-export [[nodiscard]] auto DeviceToFifoProgram() {
-    return LoadProgram(
-        L"DEVICE_TO_FIFO", "the embedded device-to-FIFO relay");
-}

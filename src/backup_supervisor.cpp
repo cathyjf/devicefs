@@ -568,7 +568,6 @@ auto PrintHelp() noexcept {
         L"[--namespace NAMESPACE] "
         L"[--volumes VOLUME[,VOLUME...]]\n"
         L"      --namespace and --volumes override configured values.\n"
-        L"  backup-supervisor.exe --device-to-fifo DEVICE FIFO_PATH\n"
         L"  backup-supervisor.exe --install-service [--update]\n"
         L"  backup-supervisor.exe --run-service\n",
         stdout);
@@ -608,27 +607,6 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
             const auto cancellation_event = OpenCancellationEvent();
             return RunNativeBackup(
                 cancellation_event.get(), false, {}, std::nullopt);
-        }
-        if (option == L"--device-to-fifo") {
-            if (arguments.size() != 3) {
-                throw std::invalid_argument(
-                    "--device-to-fifo requires DEVICE and FIFO_PATH");
-            }
-            const auto input = GetStdHandle(STD_INPUT_HANDLE);
-            auto console_mode = DWORD{};
-            if (!GetConsoleMode(input, &console_mode)) {
-                throw std::runtime_error(
-                    "--device-to-fifo requires an attached console");
-            }
-            const auto device = std::wstring_view{arguments[1]};
-            const auto fifo_path = std::wstring_view{arguments[2]};
-            return RunForegroundOperation(
-                input, console_mode,
-                [device, fifo_path](
-                    const HANDLE cancellation_event) {
-                    return RunDeviceToFifo(
-                        cancellation_event, device, fifo_path);
-                });
         }
         if (option == L"--install-service") {
             if (arguments.size() == 1) {

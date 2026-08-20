@@ -60,10 +60,6 @@ module;
 #include <windows.h>
 #include <winioctl.h>
 
-// wil/resource.h uses these facilities without including their standard headers.
-#include <algorithm>
-#include <cstdint>
-
 #include <wil/resource.h>
 #include <wil/safecast.h>
 

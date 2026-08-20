@@ -16,10 +16,6 @@
 
 #include <windows.h>
 
-// wil/stl.h uses these facilities without including their standard headers.
-#include <algorithm>
-#include <cstdint>
-
 #include <wil/resource.h>
 #include <wil/safecast.h>
 #include <wil/stl.h>

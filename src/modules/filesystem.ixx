@@ -21,9 +21,8 @@ module;
 #include <sddl.h>
 #include <winioctl.h>
 
-// wil/stl.h uses these facilities without including their standard headers.
+// wil/stl.h uses symbols defined in <algorithm> without including it.
 #include <algorithm>
-#include <cstdint>
 
 #include "winfsp_compat.h"
 #include <wil/resource.h>

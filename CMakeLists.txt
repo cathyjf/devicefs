@@ -178,7 +178,9 @@ foreach(target
     )
     target_compile_options(${target} PRIVATE
         /W4 /WX /permissive- /EHsc /utf-8 /guard:cf /guard:ehcont /sdl
-        /analyze:external- /analyze:autolog-
+        /analyze:external- "SHELL:/analyze:log $(IntDir)"
+        /analyze:log:format:sarif /analyze:sarif:configuration
+        /analyze:log:compilerwarnings
     )
 endforeach()
 

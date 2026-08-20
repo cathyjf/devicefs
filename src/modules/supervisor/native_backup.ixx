@@ -31,6 +31,8 @@ import <wil/resource.h>;
 import <wil/safecast.h>;
 import <wil/stl.h>;
 import <wil/token_helpers.h>;
+import :internal;
+import :devicefs_process;
 import devicefs.common;
 import devicefs.supervisor.configuration;
 import devicefs.supervisor.embedded_artifacts;
@@ -56,106 +58,6 @@ export [[nodiscard]] auto RunDeviceToFifo(
 namespace internal {
 
 using namespace std::chrono_literals;
-
-[[nodiscard]] auto SnapshotImageName(
-    const devicefs::vshadow::Snapshot &) -> std::wstring;
-
-[[nodiscard]] auto SerializeSnapshotManifest(
-    const devicefs::vshadow::SnapshotSet &) -> std::u8string;
-
-[[nodiscard]] auto WaitForProcess(
-    const HANDLE process,
-    const std::chrono::milliseconds timeout) -> bool {
-    const auto result = WaitForSingleObject(
-        process, wil::safe_cast<DWORD>(timeout.count()));
-    if (result == WAIT_FAILED) {
-        WinError("could not wait for a backup process");
-    }
-    return result == WAIT_OBJECT_0;
-}
-
-[[nodiscard]] auto ProcessExitCode(const HANDLE process) {
-    auto result = DWORD{};
-    if (!GetExitCodeProcess(process, &result)) {
-        WinError("could not obtain a backup process exit code");
-    }
-    return result;
-}
-
-[[nodiscard]] auto DuplicateInheritableHandle(const HANDLE source) {
-    if ((source == nullptr) || (source == INVALID_HANDLE_VALUE)) {
-        throw std::runtime_error("a child-process standard handle is unavailable");
-    }
-    auto duplicate = wil::unique_handle{};
-    if (!DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(),
-            duplicate.addressof(), 0, TRUE, DUPLICATE_SAME_ACCESS)) {
-        WinError("could not duplicate a child-process standard handle");
-    }
-    return duplicate;
-}
-
-template <typename Start>
-[[nodiscard]] auto StartProcessWithHandles(
-    const HANDLE standard_input,
-    const HANDLE standard_output,
-    const HANDLE standard_error,
-    const Start &start,
-    const wil::zstring_view operation) {
-    const auto child_handles = std::array{
-        DuplicateInheritableHandle(standard_input),
-        DuplicateInheritableHandle(standard_output),
-        DuplicateInheritableHandle(standard_error),
-    };
-    auto inherited_handles = std::array{
-        child_handles[0].get(), child_handles[1].get(), child_handles[2].get(),
-    };
-    constexpr auto kAttributeCount = DWORD{1};
-    auto attribute_bytes = SIZE_T{};
-    InitializeProcThreadAttributeList(
-        nullptr, kAttributeCount, 0, &attribute_bytes);
-    if ((attribute_bytes == 0) || (GetLastError() != ERROR_INSUFFICIENT_BUFFER)) {
-        WinError("could not size the process attribute list");
-    }
-    const auto attribute_storage = [&] {
-        try {
-            return std::make_unique_for_overwrite<std::byte[]>(attribute_bytes);
-        } catch (const std::bad_alloc &) {
-            WinError("could not allocate the process attribute list",
-                ExplicitWin32Error{ERROR_NOT_ENOUGH_MEMORY});
-        }
-    }();
-    auto *const attributes = static_cast<PPROC_THREAD_ATTRIBUTE_LIST>(
-        static_cast<void *>(attribute_storage.get()));
-    if (!InitializeProcThreadAttributeList(
-            attributes, kAttributeCount, 0, &attribute_bytes)) {
-        WinError("could not initialize the process attribute list");
-    }
-    const auto delete_attributes = wil::scope_exit(
-        [=] { DeleteProcThreadAttributeList(attributes); });
-    if (!UpdateProcThreadAttribute(attributes, 0,
-            PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            inherited_handles.data(),
-            sizeof(inherited_handles), nullptr, nullptr)) {
-        WinError("could not restrict inherited process handles");
-    }
-
-    auto startup = STARTUPINFOEXW{
-        .StartupInfo = {
-            .cb = sizeof(STARTUPINFOEXW),
-            .dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES,
-            .wShowWindow = SW_HIDE,
-            .hStdInput = inherited_handles[0],
-            .hStdOutput = inherited_handles[1],
-            .hStdError = inherited_handles[2],
-        },
-        .lpAttributeList = attributes,
-    };
-    auto process = wil::unique_process_information{};
-    if (!start(&startup.StartupInfo, &process)) {
-        WinError("{}", operation);
-    }
-    return process;
-}
 
 constexpr auto kLocalDomain = wil::zwstring_view(L".");
 constexpr auto kWslCreationFlags = DWORD{
@@ -680,15 +582,6 @@ auto SendWslBackupSignal(
     }
 }
 
-[[gsl::suppress("26447",
-    justification: "std::exception::what is noexcept, and fwprintf does not throw C++ exceptions.")]]
-auto TryWriteError(
-    const char *const context,
-    const std::exception &error) noexcept {
-    std::fwprintf(stderr, L"backup-supervisor: %hs: %hs\n",
-        context, error.what());
-}
-
 auto TrySendWslBackupSignal(
     const std::wstring_view pid_file,
     const std::wstring_view stop_file,
@@ -698,24 +591,6 @@ auto TrySendWslBackupSignal(
     } catch (const std::exception &error) {
         TryWriteError("could not signal the WSL backup", error);
     }
-}
-
-[[nodiscard]] auto UniqueName() {
-    auto id = GUID{};
-    const auto error = CoCreateGuid(&id);
-    if (FAILED(error)) {
-        [[gsl::suppress("type.1",
-            justification: "HRESULT_CODE returns the Win32-sized error code carried by the HRESULT.")]]
-        const auto win32_error =
-            static_cast<DWORD>(HRESULT_CODE(error));
-        WinError("could not create a unique backup identifier",
-            ExplicitWin32Error{win32_error});
-    }
-    return std::format(
-        L"{:08x}{:04x}{:04x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        id.Data1, id.Data2, id.Data3,
-        id.Data4[0], id.Data4[1], id.Data4[2], id.Data4[3],
-        id.Data4[4], id.Data4[5], id.Data4[6], id.Data4[7]);
 }
 
 [[nodiscard]] auto RunWslBackup(
@@ -797,155 +672,6 @@ auto TrySendWslBackupSignal(
                    << L" during cancellation.\n";
     }
     return kCancelledExitCode;
-}
-
-struct DeviceFsProcess {
-    static constexpr auto kPollInterval = 100ms;
-    static constexpr auto kStartTimeout = 30s;
-    static constexpr auto kShutdownTimeout = 60s;
-    static constexpr auto kMountTarget = std::wstring_view(L"X:");
-    static constexpr auto kMountDriveMask =
-        DWORD{1} << (kMountTarget.front() - L'A');
-
-    wil::unique_process_information process;
-    std::filesystem::path readiness_path;
-    std::wstring stop_event_name;
-};
-
-[[nodiscard]] auto StartDeviceFs(
-    const std::span<const devicefs::vshadow::Snapshot> snapshots,
-    const std::wstring_view read_user) {
-    const auto supervisor = CurrentExecutablePath();
-    auto stop_event_name = std::format(
-        L"Global\\devicefs-stop-{}", UniqueName());
-    auto arguments = std::vector<std::wstring>{
-        supervisor.native(),
-        L"--devicefs",
-        L"--synthetic-free-clusters", L"--cache",
-        L"--mount", std::wstring{DeviceFsProcess::kMountTarget},
-        L"--read-user", std::wstring{read_user},
-        L"--stop-event", stop_event_name,
-    };
-    auto readiness_path = std::filesystem::path{};
-    for (const auto &snapshot : snapshots) {
-        auto filename = SnapshotImageName(snapshot);
-        if (readiness_path.empty()) {
-            readiness_path = std::filesystem::path(
-                std::format(L"{}\\", DeviceFsProcess::kMountTarget)) /
-                filename;
-        }
-        arguments.emplace_back(L"--map");
-        arguments.emplace_back(std::move(filename));
-        arguments.emplace_back(snapshot.device);
-    }
-    auto command = wil::ArgvToCommandLine(arguments);
-    std::wcout << L"Setting up virtual filesystem: " << command << L'\n';
-    auto process = StartProcessWithHandles(
-        GetStdHandle(STD_INPUT_HANDLE),
-        GetStdHandle(STD_OUTPUT_HANDLE),
-        GetStdHandle(STD_ERROR_HANDLE),
-        [&](STARTUPINFOW *const startup, PROCESS_INFORMATION *const result) {
-            return CreateProcessW(
-                supervisor.c_str(), command.data(),
-                nullptr, nullptr, TRUE,
-                EXTENDED_STARTUPINFO_PRESENT,
-                nullptr, nullptr, startup, result);
-        },
-        "could not start devicefs");
-    return DeviceFsProcess{
-        .process = std::move(process),
-        .readiness_path = std::move(readiness_path),
-        .stop_event_name = std::move(stop_event_name),
-    };
-}
-
-[[nodiscard]] auto WaitForDeviceFs(
-    const DeviceFsProcess &devicefs,
-    const HANDLE cancellation_event) {
-    const auto deadline =
-        std::chrono::steady_clock::now() + DeviceFsProcess::kStartTimeout;
-    while (true) {
-        if (WaitForProcess(devicefs.process.hProcess,
-                DeviceFsProcess::kPollInterval)) {
-            throw std::runtime_error(std::format(
-                "devicefs exited during startup with code {}.",
-                ProcessExitCode(devicefs.process.hProcess)));
-        }
-        const auto cancelled = WaitForSingleObject(cancellation_event, 0);
-        if (cancelled == WAIT_FAILED) {
-            WinError("could not inspect the backup cancellation event");
-        }
-        if (cancelled == WAIT_OBJECT_0) {
-            return false;
-        }
-        auto exists_error = std::error_code{};
-        if (std::filesystem::is_regular_file(
-                devicefs.readiness_path, exists_error)) {
-            return true;
-        }
-        if (std::chrono::steady_clock::now() >= deadline) {
-            throw std::runtime_error(
-                "devicefs did not mount X: before the startup timeout elapsed");
-        }
-    }
-}
-
-auto StopDeviceFs(
-    const DeviceFsProcess &devicefs,
-    const bool backup_succeeded) {
-    const auto deadline =
-        std::chrono::steady_clock::now() +
-        DeviceFsProcess::kShutdownTimeout;
-    auto stop_requested = false;
-    while (!WaitForProcess(devicefs.process.hProcess, 0ms)) {
-        if (!stop_requested) {
-            auto stop_event = wil::unique_event_nothrow{};
-            if (stop_event.try_open(
-                    devicefs.stop_event_name.c_str(),
-                    EVENT_MODIFY_STATE)) {
-                if (!SetEvent(stop_event.get())) {
-                    WinError("could not request devicefs shutdown");
-                }
-                stop_requested = true;
-            } else {
-                const auto error = GetLastError();
-                if (error != ERROR_FILE_NOT_FOUND) {
-                    WinError("could not open the devicefs shutdown event",
-                        ExplicitWin32Error{error});
-                }
-            }
-        }
-        if (WaitForProcess(
-                devicefs.process.hProcess,
-                DeviceFsProcess::kPollInterval)) {
-            break;
-        }
-        if (std::chrono::steady_clock::now() >= deadline) {
-            throw std::runtime_error(
-                "devicefs did not exit before the shutdown timeout elapsed");
-        }
-    }
-    if (!backup_succeeded) {
-        return;
-    }
-    const auto exit_code = ProcessExitCode(devicefs.process.hProcess);
-    if (!stop_requested) {
-        throw std::runtime_error(std::format(
-            "devicefs exited before shutdown was requested with code {}.",
-            exit_code));
-    }
-    if (exit_code != 0) {
-        throw std::runtime_error(std::format(
-            "devicefs exited with code {}.", exit_code));
-    }
-}
-
-auto TryStopDeviceFs(const DeviceFsProcess &devicefs) noexcept {
-    try {
-        StopDeviceFs(devicefs, false);
-    } catch (const std::exception &error) {
-        TryWriteError("devicefs cleanup failed", error);
-    }
 }
 
 [[nodiscard]] auto RunSnapshotBackup(

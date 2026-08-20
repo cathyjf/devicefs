@@ -32,6 +32,7 @@ import std;
 import <wil/safecast.h>;
 import <winrt/Windows.Data.Json.h>;
 import <winrt/Windows.Foundation.Collections.h>;
+import :internal;
 import devicefs.supervisor.vshadow;
 import devicefs.supervisor.winrt_apartment;
 

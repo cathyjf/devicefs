@@ -51,11 +51,6 @@ template <class T> auto start_lifetime_as_array(void *, size_t) noexcept -> T *;
 
 export constexpr auto kCancelledExitCode = 130;
 
-export [[nodiscard]] auto RunDeviceToFifo(
-    HANDLE cancellation_event,
-    std::wstring_view device,
-    std::wstring_view fifo_path) -> int;
-
 namespace internal {
 
 using namespace std::chrono_literals;

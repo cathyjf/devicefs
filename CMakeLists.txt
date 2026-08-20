@@ -126,7 +126,6 @@ target_link_libraries(vss-descriptor-dump PRIVATE
 
 add_executable(backup-supervisor
     src/backup_supervisor.cpp
-    src/modules/supervisor/native_backup_fifo.cpp
 )
 target_link_libraries(backup-supervisor PRIVATE
     devicefs-common devicefs-filesystem vshadow
@@ -135,15 +134,11 @@ target_link_libraries(backup-supervisor PRIVATE
 set(START_PBS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/supervisor/artifacts/start-pbs.fish"
 )
-set(DEVICE_TO_FIFO
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/supervisor/artifacts/device-to-fifo.fish"
-)
 set(ARTIFACT_RESOURCE_SCRIPT
     "${CMAKE_CURRENT_BINARY_DIR}/backup-supervisor-artifacts.rc"
 )
 file(GENERATE OUTPUT "${ARTIFACT_RESOURCE_SCRIPT}" CONTENT
-    "START_PBS DEVICEFS_ARTIFACT \"${START_PBS}\"
-    DEVICE_TO_FIFO DEVICEFS_ARTIFACT \"${DEVICE_TO_FIFO}\"\n"
+    "START_PBS DEVICEFS_ARTIFACT \"${START_PBS}\"\n"
 )
 target_sources(backup-supervisor PRIVATE "${ARTIFACT_RESOURCE_SCRIPT}")
 target_module_interfaces(backup-supervisor PRIVATE

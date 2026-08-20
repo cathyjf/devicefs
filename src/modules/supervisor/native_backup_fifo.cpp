@@ -37,6 +37,8 @@ import devicefs.supervisor.configuration;
 import devicefs.supervisor.embedded_artifacts;
 import devicefs.supervisor.installation;
 
+using namespace std::chrono_literals;
+
 namespace internal {
 
 [[nodiscard]] auto CancellationRequested(
@@ -163,15 +165,15 @@ auto DeviceStream::WriteTo(
     const std::wstring_view pid_file,
     const std::wstring_view stop_file) noexcept {
     try {
-        constexpr auto kTermMilliseconds = DWORD{45000};
-        constexpr auto kKillMilliseconds = DWORD{30000};
-        if (WaitForProcess(relay.process.hProcess, 0)) {
+        constexpr auto kTermTimeout = 45s;
+        constexpr auto kKillTimeout = 30s;
+        if (WaitForProcess(relay.process.hProcess, 0ms)) {
             return true;
         }
         TrySendWslBackupSignal(pid_file, stop_file, WslBackupSignal::Term);
-        if (!WaitForProcess(relay.process.hProcess, kTermMilliseconds)) {
+        if (!WaitForProcess(relay.process.hProcess, kTermTimeout)) {
             TrySendWslBackupSignal(pid_file, stop_file, WslBackupSignal::Kill);
-            if (!WaitForProcess(relay.process.hProcess, kKillMilliseconds)) {
+            if (!WaitForProcess(relay.process.hProcess, kKillTimeout)) {
                 throw std::runtime_error(
                     "the device-to-FIFO relay did not exit after the KILL request");
             }
@@ -298,7 +300,7 @@ auto TryFinishWslFifoRelay(StartedWslFish &relay) noexcept {
     auto operation_result = operation.get_future();
     worker = std::thread{std::move(operation)};
 
-    constexpr auto kPollInterval = std::chrono::milliseconds{100};
+    constexpr auto kPollInterval = 100ms;
     while (operation_result.wait_for(kPollInterval) !=
         std::future_status::ready) {
         if (!internal::CancellationRequested(cancellation_event)) {
@@ -313,9 +315,9 @@ auto TryFinishWslFifoRelay(StartedWslFish &relay) noexcept {
     operation_result.get();
     worker.join();
 
-    constexpr auto kPollMilliseconds = DWORD{100};
+    constexpr auto kProcessPollInterval = 100ms;
     while (!internal::WaitForProcess(
-            relay.process.process.hProcess, kPollMilliseconds)) {
+            relay.process.process.hProcess, kProcessPollInterval)) {
         if (internal::CancellationRequested(cancellation_event)) {
             return kCancelledExitCode;
         }

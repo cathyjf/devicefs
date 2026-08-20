@@ -310,6 +310,20 @@ class ProfilePrivilegeEnabler {
         .hStdOutput = child_handles[1].get(),
         .hStdError = child_handles[2].get(),
     };
+    if (command.length() > 1024) {
+        // CreateProcessWithLogonW supports a maximum command line length of
+        // 1024 characters. A longer command line will cause
+        // CreateProcessWithLogonW to fail in a manner that is difficult to
+        // diagnose. This explicit error makes the failure more identifiable.
+        // See <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw>.
+        throw std::runtime_error{std::format(
+            "command line is {} characters, which is too long for CreateProcessWithLogonW: {}",
+            command.length(),
+            ([](const auto &str) {
+                return std::string(str.begin(), str.end());
+            })(std::filesystem::path(command).u8string())
+        )};
+    }
     auto process = wil::unique_process_information{};
     // This API copies STARTF_USESTDHANDLES itself and, unlike the service
     // launch path below, is available only when the caller is not LocalSystem.

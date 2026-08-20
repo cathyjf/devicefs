@@ -31,7 +31,7 @@ struct Options {
     bool help = false;
 };
 
-auto Usage(FILE *const output) noexcept {
+auto Usage(std::FILE *const output) noexcept {
     std::fputws(
         L"Usage: vss-descriptor-dump --source SOURCE --snapshot-id GUID\n\n"
         L"Read one VSS store's raw block descriptors from an NTFS volume or "

@@ -660,7 +660,7 @@ private:
         _Inout_opt_ SIZE_T *const size) noexcept {
         return NtCallback([&] {
             const auto &self = Self(fs);
-            const auto root = 0 == wcscmp(name, L"\\");
+            const auto root = 0 == std::wcscmp(name, L"\\");
             const auto *const file = root ? nullptr : self.File(name);
             if (!root && (file == nullptr)) {
                 return STATUS_OBJECT_NAME_NOT_FOUND;
@@ -680,7 +680,7 @@ private:
         _Out_ FSP_FSCTL_FILE_INFO *const info) noexcept {
         return NtCallback([&] {
             const auto &self = Self(fs);
-            const auto root = 0 == wcscmp(name, L"\\");
+            const auto root = 0 == std::wcscmp(name, L"\\");
             const auto *const file = root ? nullptr : self.File(name);
             if (!root && (file == nullptr)) {
                 return STATUS_OBJECT_NAME_NOT_FOUND;

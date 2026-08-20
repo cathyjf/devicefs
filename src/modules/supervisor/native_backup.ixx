@@ -1000,8 +1000,7 @@ export [[nodiscard]] auto RunNativeBackup(
         };
     }();
     if (!volume_override.empty()) {
-        selected_volumes.assign(
-            volume_override.begin(), volume_override.end());
+        selected_volumes.assign_range(volume_override);
     }
     auto volumes = std::vector<std::wstring_view>{};
     for (const auto &volume : selected_volumes) {

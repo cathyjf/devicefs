@@ -80,7 +80,7 @@ using winrt::Windows::Data::Json::JsonValueType;
         ConfigurationError(member, "must be a string");
     }
     const auto result = value.GetString();
-    if (std::ranges::find(result, L'\0') != result.end()) {
+    if (std::ranges::contains(result, L'\0')) {
         ConfigurationError(member, "must not contain a null character");
     }
     return result;
@@ -116,42 +116,45 @@ template <typename String>
     return result;
 }
 
-template <typename String>
-struct WideTextDestination {
-    explicit WideTextDestination(String &value) noexcept : value(value) {}
+template <typename Value>
+struct ReferenceDestination {
+    explicit ReferenceDestination(Value &value) noexcept : value(value) {}
 
-    std::reference_wrapper<String> value;
+    std::reference_wrapper<Value> value;
+};
+
+template <typename String>
+struct WideTextDestination : ReferenceDestination<String> {
+    using ReferenceDestination<String>::ReferenceDestination;
+
     static constexpr auto kTemplateValue = std::string_view{"\"\""};
 };
 
 template <typename String>
-struct Utf8TextDestination {
-    explicit Utf8TextDestination(String &value) noexcept : value(value) {}
+struct Utf8TextDestination : ReferenceDestination<String> {
+    using ReferenceDestination<String>::ReferenceDestination;
 
-    std::reference_wrapper<String> value;
     static constexpr auto kTemplateValue = std::string_view{"\"\""};
 };
 
-struct OptionalWideStringDestination {
-    explicit OptionalWideStringDestination(
-        std::optional<std::wstring> &value) noexcept : value(value) {}
+struct OptionalWideStringDestination :
+    ReferenceDestination<std::optional<std::wstring>> {
+    using ReferenceDestination<
+        std::optional<std::wstring>>::ReferenceDestination;
 
-    std::reference_wrapper<std::optional<std::wstring>> value;
     static constexpr auto kTemplateValue = std::string_view{"null"};
 };
 
-struct OptionalUtf8StringDestination {
-    explicit OptionalUtf8StringDestination(
-        std::u8string &value) noexcept : value(value) {}
+struct OptionalUtf8StringDestination :
+    ReferenceDestination<std::u8string> {
+    using ReferenceDestination<std::u8string>::ReferenceDestination;
 
-    std::reference_wrapper<std::u8string> value;
     static constexpr auto kTemplateValue = std::string_view{"\"\""};
 };
 
-struct OptionalBooleanDestination {
-    explicit OptionalBooleanDestination(bool &value) noexcept : value(value) {}
+struct OptionalBooleanDestination : ReferenceDestination<bool> {
+    using ReferenceDestination<bool>::ReferenceDestination;
 
-    std::reference_wrapper<bool> value;
     static constexpr auto kTemplateValue = std::string_view{"false"};
 };
 
@@ -165,19 +168,18 @@ struct PortDestination {
     std::uint16_t default_value;
 };
 
-struct SerializedJsonObjectDestination {
-    explicit SerializedJsonObjectDestination(
-        SecureUtf8String &value) noexcept : value(value) {}
+struct SerializedJsonObjectDestination :
+    ReferenceDestination<SecureUtf8String> {
+    using ReferenceDestination<SecureUtf8String>::ReferenceDestination;
 
-    std::reference_wrapper<SecureUtf8String> value;
     static constexpr auto kTemplateValue = std::string_view{"{}"};
 };
 
-struct NonemptyWideStringArrayDestination {
-    explicit NonemptyWideStringArrayDestination(
-        std::vector<std::wstring> &value) noexcept : value(value) {}
+struct NonemptyWideStringArrayDestination :
+    ReferenceDestination<std::vector<std::wstring>> {
+    using ReferenceDestination<
+        std::vector<std::wstring>>::ReferenceDestination;
 
-    std::reference_wrapper<std::vector<std::wstring>> value;
     static constexpr auto kTemplateValue = std::string_view{"[]"};
 };
 
@@ -283,29 +285,29 @@ struct TemplateValueWriter {
 
 struct DefaultFieldReader {
     template <typename Destination>
-    auto operator()(const Destination &) const noexcept {
+    static auto operator()(const Destination &) noexcept {
         return false;
     }
 
-    auto operator()(
-        const OptionalWideStringDestination &destination) const noexcept {
+    static auto operator()(
+        const OptionalWideStringDestination &destination) noexcept {
         destination.value.get().reset();
         return true;
     }
 
-    auto operator()(
-        const OptionalUtf8StringDestination &destination) const noexcept {
+    static auto operator()(
+        const OptionalUtf8StringDestination &destination) noexcept {
         destination.value.get().clear();
         return true;
     }
 
-    auto operator()(
-        const OptionalBooleanDestination &destination) const noexcept {
+    static auto operator()(
+        const OptionalBooleanDestination &destination) noexcept {
         destination.value.get() = false;
         return true;
     }
 
-    auto operator()(const PortDestination &destination) const noexcept {
+    static auto operator()(const PortDestination &destination) noexcept {
         destination.value.get() = destination.default_value;
         return true;
     }
@@ -450,9 +452,9 @@ auto ReadFields(
     };
     for (const auto &entry : object) {
         const auto name = winrt::to_string(entry.Key());
-        if (std::ranges::find(
+        if (!std::ranges::contains(
                 fields, std::string_view{name},
-                &ConfigurationField::name) == fields.end()) {
+                &ConfigurationField::name)) {
             const auto member = member_path(name);
             ConfigurationError(member, "is not recognized");
         }

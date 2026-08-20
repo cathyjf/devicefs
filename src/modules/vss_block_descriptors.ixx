@@ -442,7 +442,8 @@ static_assert(sizeof(GUID) == 16);
     const std::size_t length) noexcept {
     return (length <= data.size()) &&
         (length <= kVssIdentifier.size()) &&
-        (std::memcmp(data.data(), kVssIdentifier.data(), length) == 0);
+        std::ranges::equal(
+            data.first(length), std::span{kVssIdentifier}.first(length));
 }
 
 struct NtfsHeader {
@@ -463,8 +464,8 @@ struct NtfsHeader {
         std::byte{'N'}, std::byte{'T'}, std::byte{'F'}, std::byte{'S'},
         std::byte{' '}, std::byte{' '}, std::byte{' '}, std::byte{' '},
     };
-    if (std::memcmp(data.data() + 3,
-            signature.data(), signature.size()) != 0) {
+    if (!std::ranges::equal(
+            data.subspan(3, signature.size()), signature)) {
         throw std::runtime_error(
             "the VSS descriptor source is not an NTFS volume");
     }

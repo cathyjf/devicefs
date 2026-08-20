@@ -55,6 +55,8 @@ export [[nodiscard]] auto RunDeviceToFifo(
 
 namespace internal {
 
+using namespace std::chrono_literals;
+
 [[nodiscard]] auto SnapshotImageName(
     const devicefs::vshadow::Snapshot &) -> std::wstring;
 
@@ -62,8 +64,10 @@ namespace internal {
     const devicefs::vshadow::SnapshotSet &) -> std::u8string;
 
 [[nodiscard]] auto WaitForProcess(
-    const HANDLE process, const DWORD timeout) -> bool {
-    const auto result = WaitForSingleObject(process, timeout);
+    const HANDLE process,
+    const std::chrono::milliseconds timeout) -> bool {
+    const auto result = WaitForSingleObject(
+        process, wil::safe_cast<DWORD>(timeout.count()));
     if (result == WAIT_FAILED) {
         WinError("could not wait for a backup process");
     }
@@ -632,7 +636,7 @@ auto SendWslBackupSignal(
     const std::wstring_view pid_file,
     const std::wstring_view stop_file,
     const WslBackupSignal signal) {
-    constexpr auto kControlMilliseconds = DWORD{15000};
+    constexpr auto kControlTimeout = 15s;
     constexpr auto program = std::string_view(
         "touch $argv[2]; "
         "if test -s $argv[1]; kill -s $argv[3] (cat $argv[1]); end");
@@ -650,7 +654,7 @@ auto SendWslBackupSignal(
             std::span<const char8_t>{});
     }();
     if (!WaitForProcess(
-            request.process.hProcess, kControlMilliseconds)) {
+            request.process.hProcess, kControlTimeout)) {
         throw std::runtime_error(std::format(
             "the WSL {} request did not exit before its timeout",
             text.diagnostic));
@@ -705,9 +709,9 @@ auto TrySendWslBackupSignal(
     const HANDLE cancellation_event,
     const std::u8string_view snapshot_manifest,
     const std::optional<std::u8string> &namespace_override) {
-    constexpr auto kPollMilliseconds = DWORD{100};
-    constexpr auto kTermMilliseconds = DWORD{45000};
-    constexpr auto kKillMilliseconds = DWORD{30000};
+    constexpr auto kPollInterval = 100ms;
+    constexpr auto kTermTimeout = 45s;
+    constexpr auto kKillTimeout = 30s;
     const auto control_path = std::format(
         L"/tmp/devicefs-{}", UniqueName());
     const auto pid_file = std::format(L"{}.pid", control_path);
@@ -752,7 +756,7 @@ auto TrySendWslBackupSignal(
 
     while (true) {
         if (WaitForProcess(
-                backup.process.hProcess, kPollMilliseconds)) {
+                backup.process.hProcess, kPollInterval)) {
             return FinishWsl(backup);
         }
         const auto cancelled = WaitForSingleObject(cancellation_event, 0);
@@ -766,10 +770,10 @@ auto TrySendWslBackupSignal(
 
     TrySendWslBackupSignal(pid_file, stop_file, WslBackupSignal::Term);
     if (!WaitForProcess(
-            backup.process.hProcess, kTermMilliseconds)) {
+            backup.process.hProcess, kTermTimeout)) {
         TrySendWslBackupSignal(pid_file, stop_file, WslBackupSignal::Kill);
         if (!WaitForProcess(
-                backup.process.hProcess, kKillMilliseconds)) {
+                backup.process.hProcess, kKillTimeout)) {
             throw std::runtime_error(
                 "the WSL backup did not exit after the KILL request");
         }
@@ -783,9 +787,9 @@ auto TrySendWslBackupSignal(
 }
 
 struct DeviceFsProcess {
-    static constexpr auto kPollMilliseconds = DWORD{100};
-    static constexpr auto kStartMilliseconds = DWORD{30000};
-    static constexpr auto kShutdownMilliseconds = DWORD{60000};
+    static constexpr auto kPollInterval = 100ms;
+    static constexpr auto kStartTimeout = 30s;
+    static constexpr auto kShutdownTimeout = 60s;
     static constexpr auto kMountTarget = std::wstring_view(L"X:");
     static constexpr auto kMountDriveMask =
         DWORD{1} << (kMountTarget.front() - L'A');
@@ -846,10 +850,10 @@ struct DeviceFsProcess {
     const DeviceFsProcess &devicefs,
     const HANDLE cancellation_event) {
     const auto deadline =
-        GetTickCount64() + DeviceFsProcess::kStartMilliseconds;
+        std::chrono::steady_clock::now() + DeviceFsProcess::kStartTimeout;
     while (true) {
         if (WaitForProcess(devicefs.process.hProcess,
-                DeviceFsProcess::kPollMilliseconds)) {
+                DeviceFsProcess::kPollInterval)) {
             throw std::runtime_error(std::format(
                 "devicefs exited during startup with code {}.",
                 ProcessExitCode(devicefs.process.hProcess)));
@@ -866,7 +870,7 @@ struct DeviceFsProcess {
                 devicefs.readiness_path, exists_error)) {
             return true;
         }
-        if (GetTickCount64() >= deadline) {
+        if (std::chrono::steady_clock::now() >= deadline) {
             throw std::runtime_error(
                 "devicefs did not mount X: before the startup timeout elapsed");
         }
@@ -877,9 +881,10 @@ auto StopDeviceFs(
     const DeviceFsProcess &devicefs,
     const bool backup_succeeded) {
     const auto deadline =
-        GetTickCount64() + DeviceFsProcess::kShutdownMilliseconds;
+        std::chrono::steady_clock::now() +
+        DeviceFsProcess::kShutdownTimeout;
     auto stop_requested = false;
-    while (!WaitForProcess(devicefs.process.hProcess, 0)) {
+    while (!WaitForProcess(devicefs.process.hProcess, 0ms)) {
         if (!stop_requested) {
             auto stop_event = wil::unique_event_nothrow{};
             if (stop_event.try_open(
@@ -899,10 +904,10 @@ auto StopDeviceFs(
         }
         if (WaitForProcess(
                 devicefs.process.hProcess,
-                DeviceFsProcess::kPollMilliseconds)) {
+                DeviceFsProcess::kPollInterval)) {
             break;
         }
-        if (GetTickCount64() >= deadline) {
+        if (std::chrono::steady_clock::now() >= deadline) {
             throw std::runtime_error(
                 "devicefs did not exit before the shutdown timeout elapsed");
         }

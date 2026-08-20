@@ -454,6 +454,7 @@ template <typename Operation>
 
 struct ForegroundOptions {
     bool no_writers = false;
+    std::optional<std::u8string> namespace_override;
     std::vector<std::wstring> volume_override;
 };
 
@@ -480,11 +481,17 @@ struct ForegroundOptions {
 [[nodiscard]] auto ParseForegroundOptions(
     const std::span<const wchar_t *const> arguments) {
     auto result = ForegroundOptions{};
+    auto raw_namespace_override = std::optional<std::wstring_view>{};
     auto raw_volume_override = std::optional<std::wstring_view>{};
     for (auto index = 0uz; index < arguments.size(); ++index) {
         const auto argument = std::wstring_view{arguments[index]};
         if (argument == L"--no-writers") {
             result.no_writers = true;
+        } else if (argument == L"--namespace") {
+            if (++index == arguments.size()) {
+                throw std::invalid_argument("--namespace requires a value");
+            }
+            raw_namespace_override = arguments[index];
         } else if ((argument == L"--volume") ||
             (argument == L"--volumes")) {
             if (++index == arguments.size()) {
@@ -496,6 +503,10 @@ struct ForegroundOptions {
             throw std::invalid_argument(
                 "--foreground received an unknown argument");
         }
+    }
+    if (raw_namespace_override) {
+        result.namespace_override =
+            std::filesystem::path{*raw_namespace_override}.u8string();
     }
     if (raw_volume_override) {
         result.volume_override = ParseVolumeList(*raw_volume_override);
@@ -518,7 +529,8 @@ struct ForegroundOptions {
             return RunNativeBackup(
                 cancellation_event,
                 options.no_writers,
-                options.volume_override);
+                options.volume_override,
+                options.namespace_override);
         });
 }
 
@@ -560,8 +572,9 @@ auto PrintHelp() {
         L"Usage:\n"
         L"  backup-supervisor.exe --devicefs [devicefs arguments]\n"
         L"  backup-supervisor.exe --foreground [--no-writers] "
+        L"[--namespace NAMESPACE] "
         L"[--volumes VOLUME[,VOLUME...]]\n"
-        L"      --volumes overrides configured volumes.\n"
+        L"      --namespace and --volumes override configured values.\n"
         L"  backup-supervisor.exe --device-to-fifo DEVICE FIFO_PATH\n"
         L"  backup-supervisor.exe --install-service [--update]\n"
         L"  backup-supervisor.exe --run-service\n",
@@ -600,7 +613,8 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
             const auto backup_lock = AcquireBackupLock(
                 persistent.backup_lock);
             const auto cancellation_event = OpenCancellationEvent();
-            return RunNativeBackup(cancellation_event.get(), false, {});
+            return RunNativeBackup(
+                cancellation_event.get(), false, {}, std::nullopt);
         }
         if (option == L"--device-to-fifo") {
             if (arguments.size() != 3) {

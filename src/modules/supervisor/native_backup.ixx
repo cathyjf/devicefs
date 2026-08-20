@@ -722,7 +722,8 @@ auto TrySendWslBackupSignal(
 
 [[nodiscard]] auto RunWslBackup(
     const HANDLE cancellation_event,
-    const std::u8string_view snapshot_manifest) {
+    const std::u8string_view snapshot_manifest,
+    const std::optional<std::u8string> &namespace_override) {
     constexpr auto kPollMilliseconds = DWORD{100};
     constexpr auto kTermMilliseconds = DWORD{45000};
     constexpr auto kKillMilliseconds = DWORD{30000};
@@ -755,7 +756,8 @@ auto TrySendWslBackupSignal(
         append_record(std::u8string{port.begin(), port.end()});
         append_record(configuration.pbs_datastore);
         append_record(configuration.pbs_auth_id);
-        append_record(configuration.pbs_namespace);
+        append_record(namespace_override
+            ? *namespace_override : configuration.pbs_namespace);
         append_record(configuration.pbs_fingerprint);
         append_record(configuration.pbs_authentication_secret);
         append_record(snapshot_manifest);
@@ -950,7 +952,8 @@ auto TryStopDeviceFs(const DeviceFsProcess &devicefs) noexcept {
 [[nodiscard]] auto RunSnapshotBackup(
     const HANDLE cancellation_event,
     const devicefs::vshadow::SnapshotSet &snapshot_set,
-    const std::wstring_view read_user) {
+    const std::wstring_view read_user,
+    const std::optional<std::u8string> &namespace_override) {
     const auto cancelled = WaitForSingleObject(cancellation_event, 0);
     if (cancelled == WAIT_FAILED) {
         WinError("could not inspect the backup cancellation event");
@@ -975,7 +978,8 @@ auto TryStopDeviceFs(const DeviceFsProcess &devicefs) noexcept {
 
     auto result = kCancelledExitCode;
     if (WaitForDeviceFs(devicefs, cancellation_event)) {
-        result = RunWslBackup(cancellation_event, snapshot_manifest);
+        result = RunWslBackup(
+            cancellation_event, snapshot_manifest, namespace_override);
     }
 
     cleanup.release();
@@ -995,7 +999,8 @@ auto TryStopDeviceFs(const DeviceFsProcess &devicefs) noexcept {
 export [[nodiscard]] auto RunNativeBackup(
     const HANDLE cancellation_event,
     const bool no_writers,
-    const std::span<const std::wstring> volume_override) -> int {
+    const std::span<const std::wstring> volume_override,
+    const std::optional<std::u8string> &namespace_override) -> int {
     const auto cancelled = WaitForSingleObject(cancellation_event, 0);
     if (cancelled == WAIT_FAILED) {
         WinError("could not inspect the backup cancellation event");
@@ -1032,7 +1037,8 @@ export [[nodiscard]] auto RunNativeBackup(
                     return internal::RunSnapshotBackup(
                         cancellation_event,
                         snapshot_set,
-                        read_user);
+                        read_user,
+                        namespace_override);
                 } catch (const wil::ResultException &error) {
                     std::fwprintf(stderr, L"backup-supervisor: %hs\n",
                         error.what());

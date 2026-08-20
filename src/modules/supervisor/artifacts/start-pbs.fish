@@ -19,10 +19,7 @@ read --null --global --export PBS_SERVER || exit
 read --null --global --export PBS_PORT || exit
 read --null --global --export PBS_DATASTORE || exit
 read --null --global --export PBS_AUTH_ID || exit
-read --null --global DEVICEFS_PBS_NAMESPACE || exit
-if test -n "$DEVICEFS_PBS_NAMESPACE"
-    set --global --export PBS_NAMESPACE $DEVICEFS_PBS_NAMESPACE
-end
+read --null --global --export PBS_NAMESPACE || exit
 read --null --global --export PBS_FINGERPRINT || exit
 read --null --global --export PBS_PASSWORD || exit
 read --null --global DEVICEFS_MANIFEST || exit

@@ -801,11 +801,12 @@ class DescriptorState {
             const auto reverse = reverse_.find(Key(raw.original_offset,
                 "a VSS reverse descriptor offset"));
             if (reverse != reverse_.end()) {
-                const auto reverse_descriptor = reverse->second;
                 resolved_original =
-                    reverse_descriptor->value.original_offset;
+                    reverse->second->value.original_offset;
+                const auto reverse_target =
+                    reverse->second->value.relative_offset;
                 const auto erased = reverse_.erase(
-                    Key(reverse_descriptor->value.relative_offset,
+                    Key(reverse_target,
                         "a VSS reverse descriptor target"));
                 if (erased != 1) {
                     throw std::runtime_error(
@@ -834,7 +835,7 @@ class DescriptorState {
             forward_.emplace(forward_key, normalized);
         } else if ((normalized->value.flags &
                 devicefs::vss::kOverlayFlag) != 0) {
-            auto overlay = ((existing->second->value.flags &
+            const auto &overlay = ((existing->second->value.flags &
                     devicefs::vss::kOverlayFlag) != 0)
                 ? existing->second
                 : existing->second->overlay;
@@ -845,8 +846,8 @@ class DescriptorState {
             }
             return;
         } else {
-            const auto replaced = existing->second;
-            existing->second = normalized;
+            const auto replaced =
+                std::exchange(existing->second, normalized);
             if ((replaced->value.flags &
                     devicefs::vss::kOverlayFlag) != 0) {
                 if (replaced->overlay) {

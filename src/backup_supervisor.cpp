@@ -251,7 +251,8 @@ struct ServiceOutcome {
         backup.process.hProcess, context.cancellation_event.get(),
     };
     const auto wait = WaitForMultipleObjects(
-        wil::safe_cast<DWORD>(waits.size()), waits.data(), FALSE, INFINITE);
+        wil::safe_cast_failfast<DWORD>(waits.size()),
+        waits.data(), FALSE, INFINITE);
     if (wait == WAIT_FAILED) {
         WinError("could not wait for the backup orchestrator");
     }

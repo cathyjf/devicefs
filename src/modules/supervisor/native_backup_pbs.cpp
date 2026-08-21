@@ -121,7 +121,7 @@ class ProfilePrivilegeEnabler {
         auto *const state =
             std::start_lifetime_as<TOKEN_PRIVILEGES>(state_storage.data());
         state->PrivilegeCount =
-            wil::safe_cast<DWORD>(kPrivilegeNames.size());
+            wil::safe_cast_failfast<DWORD>(kPrivilegeNames.size());
 
         static_cast<void>(std::start_lifetime_as_array<LUID_AND_ATTRIBUTES>(
             previous_state_storage_.data() +
@@ -194,7 +194,7 @@ class ProfilePrivilegeEnabler {
     if (FAILED(error)) {
         WinError("could not identify the backup-supervisor account",
             ExplicitWin32Error{
-                wil::safe_cast<DWORD>(HRESULT_CODE(error))});
+                wil::safe_cast_failfast<DWORD>(HRESULT_CODE(error))});
     }
     return result;
 }

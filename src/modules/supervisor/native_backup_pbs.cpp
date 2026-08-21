@@ -306,6 +306,11 @@ template <typename Consumer>
 struct ForwardPipeOutput {
     HANDLE destination;
 
+    [[gsl::suppress("26447",
+        justification:
+            "The span cannot exceed the 4096-byte read buffer, so the conversion "
+            "cannot fail. safe_cast_failfast terminates rather than throws if that "
+            "invariant is violated.")]]
     [[nodiscard]] auto operator()(
         const std::span<const char8_t> data) const noexcept
         -> PipeOutputConsumption {

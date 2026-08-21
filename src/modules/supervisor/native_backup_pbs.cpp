@@ -711,9 +711,9 @@ auto TrySendPbsFishSignal(
         arguments.append_range(request.additional_arguments);
 
         auto input = SecureUtf8String{};
-        // start-pbs.fish consumes these NUL-delimited records in order. Add
-        // future records here and matching Fish reads before the remaining key
-        // document, which proxmox-backup-client reads through fd 0.
+        // start-pbs.fish consumes these nine NUL-delimited records in order,
+        // followed by the key document that proxmox-backup-client reads
+        // through fd 0.
         const auto append_record = [&](const std::u8string_view value) {
             input.append(value);
             input.push_back(u8'\0');
@@ -728,9 +728,8 @@ auto TrySendPbsFishSignal(
             ? *namespace_override : configuration.pbs_namespace);
         append_record(configuration.pbs_fingerprint);
         append_record(configuration.pbs_authentication_secret);
-        if (request.snapshot_manifest) {
-            append_record(*request.snapshot_manifest);
-        }
+        append_record(request.snapshot_manifest.value_or(
+            std::u8string_view{}));
         input.append(configuration.pbs_encryption_key);
         return StartWslFish(
             configuration,

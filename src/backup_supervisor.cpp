@@ -414,10 +414,10 @@ template <typename Operation>
                     continue;
                 }
                 if (!SetEvent(cancellation_event.get())) {
-                    WinError("could not request backup cancellation");
+                    WinError("could not request cancellation");
                 }
                 std::wcout <<
-                    L"Cancellation requested; waiting for backup cleanup.\n";
+                    L"Cancellation requested; waiting for cleanup.\n";
             }
             if (!GetNumberOfConsoleInputEvents(input, &available)) {
                 WinError("could not inspect foreground console input");
@@ -507,13 +507,33 @@ struct ForegroundOptions {
     return result;
 }
 
-[[nodiscard]] auto RunForeground(ForegroundOptions options) {
+[[nodiscard]] auto ParsePrintManifestOptions(
+    const std::span<const wchar_t *const> arguments)
+    -> std::optional<std::u8string> {
+    if (arguments.empty()) {
+        return std::nullopt;
+    }
+    if ((arguments.size() != 2) ||
+        (std::wstring_view{arguments[0]} != L"--namespace")) {
+        throw std::invalid_argument(
+            "--print-manifest accepts only --namespace NAMESPACE");
+    }
+    return std::filesystem::path{arguments[1]}.u8string();
+}
+
+[[nodiscard]] auto GetForegroundConsoleInput(
+    const char *const unavailable_message) {
     const auto input = GetStdHandle(STD_INPUT_HANDLE);
     auto console_mode = DWORD{};
     if (!GetConsoleMode(input, &console_mode)) {
-        throw std::runtime_error(
-            "--foreground requires an attached console");
+        throw std::runtime_error(unavailable_message);
     }
+    return std::pair{input, console_mode};
+}
+
+[[nodiscard]] auto RunForeground(ForegroundOptions options) {
+    const auto [input, console_mode] = GetForegroundConsoleInput(
+        "--foreground requires an attached console");
     const auto persistent = ResolvePersistentPaths();
     const auto backup_lock = AcquireBackupLock(persistent.backup_lock);
     return RunForegroundOperation(
@@ -524,6 +544,34 @@ struct ForegroundOptions {
                 options.no_writers,
                 options.volume_override,
                 options.namespace_override);
+        });
+}
+
+[[nodiscard]] auto RunPrintManifest(
+    std::optional<std::u8string> namespace_override) {
+    const auto [input, console_mode] = GetForegroundConsoleInput(
+        "--print-manifest requires an attached console");
+    return RunForegroundOperation(
+        input, console_mode,
+        [namespace_override = std::move(namespace_override)](
+            const HANDLE cancellation_event) {
+            const auto result = RetrievePreviousBackupManifest(
+                cancellation_event, namespace_override);
+            if (!result) {
+                return kCancelledExitCode;
+            }
+            if (result->exit_code != 0) {
+                return result->exit_code;
+            }
+            if (std::fwrite(
+                    result->manifest.data(),
+                    sizeof(decltype(result->manifest)::value_type),
+                    result->manifest.size(), stdout) !=
+                result->manifest.size()) {
+                throw std::runtime_error(
+                    "could not write the previous backup manifest");
+            }
+            return 0;
         });
 }
 
@@ -568,6 +616,8 @@ auto PrintHelp() noexcept {
         L"[--namespace NAMESPACE] "
         L"[--volumes VOLUME[,VOLUME...]]\n"
         L"      --namespace and --volumes override configured values.\n"
+        L"  backup-supervisor.exe --print-manifest "
+        L"[--namespace NAMESPACE]\n"
         L"  backup-supervisor.exe --install-service [--update]\n"
         L"  backup-supervisor.exe --run-service\n",
         stdout);
@@ -607,6 +657,10 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
             const auto cancellation_event = OpenCancellationEvent();
             return RunNativeBackup(
                 cancellation_event.get(), false, {}, std::nullopt);
+        }
+        if (option == L"--print-manifest") {
+            return RunPrintManifest(
+                ParsePrintManifestOptions(arguments.subspan(1)));
         }
         if (option == L"--install-service") {
             if (arguments.size() == 1) {

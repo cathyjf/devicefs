@@ -259,110 +259,111 @@ struct ProfileCloser {
 using LoadedProfile =
     std::unique_ptr<std::remove_pointer_t<HANDLE>, ProfileCloser>;
 
-[[nodiscard]] auto CopyPipeOutput(
-    const HANDLE source, const HANDLE destination) noexcept {
-    constexpr auto kBufferSize = DWORD{4096};
-    auto buffer = std::array<std::byte, kBufferSize>{};
-    while (true) {
-        auto read = DWORD{};
-        if (!ReadFile(source, buffer.data(), kBufferSize,
-                &read, nullptr)) {
-            const auto error = GetLastError();
-            return error == ERROR_BROKEN_PIPE ? ERROR_SUCCESS : error;
-        }
-        if (read == 0) {
-            return DWORD{ERROR_SUCCESS};
-        }
-        auto offset = DWORD{};
-        while (offset < read) {
-            auto written = DWORD{};
-            if (!WriteFile(destination, buffer.data() + offset,
-                    read - offset, &written, nullptr)) {
-                return GetLastError();
-            }
-            if (written == 0) {
-                return DWORD{ERROR_WRITE_FAULT};
-            }
-            offset += written;
-        }
-    }
-}
+using PipeOutputConsumption = std::expected<std::size_t, DWORD>;
 
-class PipeCopy {
-  public:
-    PipeCopy(wil::unique_handle source, const HANDLE destination) {
-        auto task = std::packaged_task<DWORD()>(
-            [source = std::move(source), destination]() noexcept {
-                return CopyPipeOutput(source.get(), destination);
-            });
-        result_ = task.get_future();
-        worker_ = std::thread(std::move(task));
-    }
-
-    PipeCopy(const PipeCopy &) = delete;
-    auto operator=(const PipeCopy &) -> PipeCopy & = delete;
-    PipeCopy(PipeCopy &&) = default;
-    auto operator=(PipeCopy &&) -> PipeCopy & = delete;
-
-    [[gsl::suppress("26447",
-        justification: "A still-running pipe copy must be detached when its WSL operation is abandoned.")]]
-    ~PipeCopy() {
-        if (worker_.joinable()) {
-            worker_.detach();
-        }
-    }
-
-    auto Finish() {
-        worker_.join();
-        return result_.get();
-    }
-
-  private:
-    std::future<DWORD> result_;
-    std::thread worker_;
-};
-
-[[nodiscard]] auto CapturePipeOutput(const HANDLE source) {
+template <typename Consumer>
+    requires std::is_invocable_v<
+        Consumer &, std::span<const char8_t>>
+[[nodiscard]] auto ReadPipeOutput(
+    const HANDLE source,
+    Consumer &consumer) noexcept(std::is_nothrow_invocable_v<
+        Consumer &, std::span<const char8_t>>) -> DWORD {
     constexpr auto kBufferSize = DWORD{4096};
     auto buffer = std::array<char8_t, kBufferSize>{};
-    auto output = std::u8string{};
-    while (true) {
+    const auto read_output = [&]() noexcept
+        -> std::expected<std::span<const char8_t>, DWORD> {
         auto read = DWORD{};
         if (!ReadFile(source, buffer.data(), kBufferSize,
                 &read, nullptr)) {
             const auto error = GetLastError();
             if (error != ERROR_BROKEN_PIPE) {
-                WinError("could not copy WSL output",
-                    ExplicitWin32Error{error});
+                return std::unexpected{error};
             }
-            return output;
+            return std::span<const char8_t>{};
         }
-        if (read == 0) {
-            return output;
+        return std::span{buffer}.first(read);
+    };
+
+    auto pending = read_output();
+    while (pending && (!pending->empty())) {
+        const auto consumed = consumer(*pending);
+        if (!consumed) {
+            return consumed.error();
         }
-        output.append(buffer.data(), read);
+        if (*consumed == 0) {
+            return DWORD{ERROR_WRITE_FAULT};
+        }
+
+        *pending = pending->subspan(*consumed);
+        if (pending->empty()) {
+            pending = read_output();
+        }
     }
+    return pending ? DWORD{ERROR_SUCCESS} : pending.error();
 }
 
-class PipeCapture {
+struct ForwardPipeOutput {
+    HANDLE destination;
+
+    [[nodiscard]] auto operator()(
+        const std::span<const char8_t> data) const noexcept
+        -> PipeOutputConsumption {
+        const auto size =
+            wil::safe_cast_failfast<DWORD>(data.size_bytes());
+        auto consumed = DWORD{};
+        if (!WriteFile(destination, data.data(), size, &consumed, nullptr)) {
+            return std::unexpected{GetLastError()};
+        }
+        return consumed;
+    }
+
+    [[nodiscard]] auto Finish(const DWORD error) const noexcept {
+        return error;
+    }
+};
+
+struct CapturePipeOutput {
+    [[nodiscard]] auto operator()(const std::span<const char8_t> data)
+        -> PipeOutputConsumption {
+        output.append(data.data(), data.size());
+        return data.size();
+    }
+
+    [[nodiscard]] auto Finish(const DWORD error) {
+        if (error != ERROR_SUCCESS) {
+            WinError("could not copy WSL output",
+                ExplicitWin32Error{error});
+        }
+        return std::move(output);
+    }
+
+    std::u8string output;
+};
+
+template <typename Operation>
+class PipeReader {
+    using Result = decltype(std::declval<Operation &>().Finish(DWORD{}));
+
   public:
-    explicit PipeCapture(wil::unique_handle source) {
-        auto task = std::packaged_task<std::u8string()>(
-            [source = std::move(source)] {
-                return CapturePipeOutput(source.get());
+    PipeReader(wil::unique_handle source, Operation operation) {
+        auto task = std::packaged_task<Result()>(
+            [source = std::move(source),
+                operation = std::move(operation)]() mutable {
+                const auto error = ReadPipeOutput(source.get(), operation);
+                return operation.Finish(error);
             });
         result_ = task.get_future();
         worker_ = std::thread(std::move(task));
     }
 
-    PipeCapture(const PipeCapture &) = delete;
-    auto operator=(const PipeCapture &) -> PipeCapture & = delete;
-    PipeCapture(PipeCapture &&) = default;
-    auto operator=(PipeCapture &&) -> PipeCapture & = delete;
+    PipeReader(const PipeReader &) = delete;
+    auto operator=(const PipeReader &) -> PipeReader & = delete;
+    PipeReader(PipeReader &&) = default;
+    auto operator=(PipeReader &&) -> PipeReader & = delete;
 
     [[gsl::suppress("26447",
-        justification: "A still-running pipe capture must be detached when its WSL operation is abandoned.")]]
-    ~PipeCapture() {
+        justification: "A still-running pipe reader must be detached when its WSL operation is abandoned.")]]
+    ~PipeReader() {
         if (worker_.joinable()) {
             worker_.detach();
         }
@@ -374,9 +375,12 @@ class PipeCapture {
     }
 
   private:
-    std::future<std::u8string> result_;
+    std::future<Result> result_;
     std::thread worker_;
 };
+
+using PipeCopy = PipeReader<ForwardPipeOutput>;
+using PipeCapture = PipeReader<CapturePipeOutput>;
 
 struct WslProcess {
     wil::unique_handle token;
@@ -574,13 +578,16 @@ struct StartedWslFish {
     if (standard_output == PbsStandardOutput::Forward) {
         started.process.standard_output.emplace(
             std::move(started.standard_output),
-            GetStdHandle(STD_OUTPUT_HANDLE));
+            ForwardPipeOutput{
+                .destination = GetStdHandle(STD_OUTPUT_HANDLE)});
     } else {
         started.process.captured_standard_output.emplace(
-            std::move(started.standard_output));
+            std::move(started.standard_output), CapturePipeOutput{});
     }
     started.process.standard_error.emplace(
-        std::move(started.standard_error), GetStdHandle(STD_ERROR_HANDLE));
+        std::move(started.standard_error),
+        ForwardPipeOutput{
+            .destination = GetStdHandle(STD_ERROR_HANDLE)});
 
     const auto write_input = [&](const auto input) {
         if (input.empty()) {

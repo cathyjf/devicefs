@@ -34,7 +34,7 @@ import std;
 import <wil/resource.h>;
 import :internal;
 import :devicefs_process;
-import :manifest;
+export import :manifest;
 import :pbs;
 import devicefs.common;
 import devicefs.supervisor.configuration;

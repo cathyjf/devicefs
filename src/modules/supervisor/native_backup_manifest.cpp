@@ -26,13 +26,14 @@ module;
 // explicitly include `strsafe.h`.
 #include <strsafe.h>
 
-module devicefs.supervisor.native_backup:manifest;
+export module devicefs.supervisor.native_backup:manifest;
 
 import std;
 import <wil/safecast.h>;
 import <winrt/Windows.Data.Json.h>;
 import <winrt/Windows.Foundation.Collections.h>;
 import :internal;
+import :pbs;
 import devicefs.supervisor.vshadow;
 import devicefs.supervisor.winrt_apartment;
 
@@ -73,6 +74,37 @@ namespace {
 }
 
 } // namespace
+
+export struct PreviousBackupManifestResult {
+    int exit_code;
+    std::u8string manifest;
+};
+
+export [[nodiscard]] auto RetrievePreviousBackupManifest(
+    const HANDLE cancellation_event,
+    const std::optional<std::u8string> &namespace_override)
+    -> std::optional<PreviousBackupManifestResult> {
+    try {
+        constexpr auto arguments =
+            std::array{std::wstring_view{L"--print-manifest"}};
+        auto result = internal::RunPbsFish(
+            cancellation_event,
+            namespace_override,
+            internal::PbsFishRequest{
+                .additional_arguments = arguments,
+                .standard_output = internal::PbsStandardOutput::Capture,
+            });
+        if (!result) {
+            return std::nullopt;
+        }
+        return PreviousBackupManifestResult{
+            .exit_code = result->exit_code,
+            .manifest = std::move(result->standard_output.value()),
+        };
+    } catch (const wil::ResultException &error) {
+        throw std::runtime_error(error.what());
+    }
+}
 
 namespace internal {
 

@@ -159,7 +159,7 @@ constexpr auto kStoreHeaderRecordType = std::uint32_t{4};
 // This byte sequence identifies the private VSS records parsed by this module;
 // it is not one of the provider or snapshot GUID constants in the Windows SDK.
 // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_io_handle.c#L41-L45
-constexpr auto kVssIdentifier = std::array<std::byte, 16>{
+constexpr auto kVssIdentifier = std::array{
     std::byte{0x6b}, std::byte{0x87}, std::byte{0x08}, std::byte{0x38},
     std::byte{0x76}, std::byte{0xc1}, std::byte{0x48}, std::byte{0x4e},
     std::byte{0xb7}, std::byte{0xae}, std::byte{0x04}, std::byte{0x04},

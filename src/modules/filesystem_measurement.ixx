@@ -171,7 +171,7 @@ export class ReadPathMeasurement {
         Clock::duration source{};
     };
 
-    static constexpr auto kRequestLengthBounds = std::array<std::uint32_t, 11>{
+    static constexpr auto kRequestLengthBounds = std::to_array<std::uint32_t>({
         4 * 1024,
         8 * 1024,
         16 * 1024,
@@ -183,7 +183,7 @@ export class ReadPathMeasurement {
         1024 * 1024,
         2 * 1024 * 1024,
         4 * 1024 * 1024,
-    };
+    });
     static constexpr auto kTimingSampleInterval = std::uint64_t{256};
 
     struct ThreadStatistics {

@@ -153,8 +153,8 @@ struct BackupProcess {
     auto console = LoggingConsole(log);
     auto job = CreateChildJob();
     const auto supervisor = CurrentExecutablePath();
-    const auto arguments = std::array<std::wstring_view, 2>{
-        supervisor.native(), kOrchestrateOption};
+    const auto arguments = std::array{
+        std::wstring_view{supervisor.native()}, kOrchestrateOption};
     auto command = wil::ArgvToCommandLine(arguments);
     auto process = console.StartProcess(
         job.get(), wil::zwstring_view(supervisor.native()), command);

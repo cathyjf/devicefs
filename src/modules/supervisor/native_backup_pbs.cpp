@@ -546,11 +546,11 @@ struct StartedWslFish {
         wsl_arguments.push_back(L"--user");
         wsl_arguments.push_back(*configuration.wsl_linux_user);
     }
-    wsl_arguments.append_range(std::array<std::wstring_view, 6>{
+    wsl_arguments.append_range(std::to_array<std::wstring_view>({
         L"--exec", L"/usr/bin/fish", L"--no-config", L"-c",
         L"read --null --global DEVICEFS_FISH_PROGRAM && eval $DEVICEFS_FISH_PROGRAM",
         L"--",
-    });
+    }));
     wsl_arguments.append_range(arguments);
     auto process = StartWslAsConfiguredUser(
         configuration,

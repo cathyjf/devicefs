@@ -66,6 +66,41 @@ auto WriteUtf8(
 
 export namespace devicefs {
 
+namespace stream_writer_detail {
+
+template <typename Character, typename... Arguments>
+class BasicFormatString {
+  public:
+    template <typename String>
+        requires std::convertible_to<
+            const String &, std::basic_string_view<Character>>
+    [[gsl::suppress("26447",
+        justification:
+            "std::basic_format_string is constructed during constant "
+            "evaluation, so no exception can escape at runtime.")]]
+    consteval BasicFormatString(const String &format) noexcept
+        : format_{format} {
+    }
+
+    [[nodiscard]] constexpr auto get() const noexcept
+        -> const std::basic_format_string<Character, Arguments...> & {
+        return format_;
+    }
+
+  private:
+    std::basic_format_string<Character, Arguments...> format_;
+};
+
+template <typename... Arguments>
+using FormatString = BasicFormatString<
+    char, std::type_identity_t<Arguments>...>;
+
+template <typename... Arguments>
+using WFormatString = BasicFormatString<
+    wchar_t, std::type_identity_t<Arguments>...>;
+
+} // namespace stream_writer_detail
+
 auto WriteToStream(
     std::ostream &output,
     const std::u8string_view text) noexcept -> std::ostream & {
@@ -79,14 +114,14 @@ auto WriteToStream(
 template <typename... Arguments>
 auto WriteToStream(
     std::ostream &output,
-    const std::format_string<Arguments...> format,
+    const stream_writer_detail::FormatString<Arguments...> format,
     Arguments &&...arguments) noexcept -> std::ostream & {
     return stream_writer_detail::Write(
         output,
         [&](const auto destination) {
             return std::format_to(
                 destination,
-                format,
+                format.get(),
                 std::forward<Arguments>(arguments)...);
         });
 }
@@ -94,13 +129,13 @@ auto WriteToStream(
 template <typename... Arguments>
 auto WriteToStream(
     std::ostream &output,
-    const std::wformat_string<Arguments...> format,
+    const stream_writer_detail::WFormatString<Arguments...> format,
     Arguments &&...arguments) noexcept -> std::ostream & {
     return stream_writer_detail::Write(
         output,
         [&](const auto destination) {
             const auto text = std::format(
-                format, std::forward<Arguments>(arguments)...);
+                format.get(), std::forward<Arguments>(arguments)...);
             return stream_writer_detail::WriteUtf8(
                 destination, std::filesystem::path{text}.u8string());
         });

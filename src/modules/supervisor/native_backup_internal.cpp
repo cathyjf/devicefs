@@ -135,6 +135,10 @@ template <typename Start>
 auto TryWriteError(
     const char *const context,
     const std::exception &error) noexcept {
+    [[gsl::suppress("26447",
+        justification:
+            "std::exception::what is noexcept. WriteToStream cannot "
+            "throw.")]]
     devicefs::WriteToStream(
         std::cerr, "backup-supervisor: {}: {}\n", context, error.what());
 }

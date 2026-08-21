@@ -163,13 +163,15 @@ if(DEVICEFS_MEASURE_FREE_CLUSTER_DATA OR DEVICEFS_MEASURE_READ_PATH)
     )
 endif()
 
-foreach(target
-        devicefs-common
-        devicefs-filesystem
-        devicefs-vss-block-descriptors
-        devicefs
-        vss-descriptor-dump
-        backup-supervisor)
+set(DEVICEFS_CODE_ANALYSIS_TARGETS
+    devicefs-common
+    devicefs-filesystem
+    devicefs-vss-block-descriptors
+    devicefs
+    vss-descriptor-dump
+    backup-supervisor
+)
+foreach(target IN LISTS DEVICEFS_CODE_ANALYSIS_TARGETS)
     set_target_properties(${target} PROPERTIES
         VS_GLOBAL_EnableCppCoreCheck true
         VS_GLOBAL_RunCodeAnalysis true
@@ -215,4 +217,18 @@ target_compile_definitions(devicefs-filesystem PRIVATE
 target_compile_definitions(backup-supervisor PRIVATE _WIN32_WINNT=0x0A00)
 target_link_libraries(backup-supervisor PRIVATE
     advapi32 ntdll ole32 shell32 userenv windowsapp
+)
+
+find_program(POWERSHELL_EXECUTABLE NAMES pwsh REQUIRED)
+add_custom_target(check-native-code-analysis ALL
+    COMMAND "${POWERSHELL_EXECUTABLE}"
+        -NoLogo -NoProfile -NonInteractive -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/misc/Check-NativeCodeAnalysis.ps1"
+        -BuildDirectory "${CMAKE_CURRENT_BINARY_DIR}"
+        -Configuration "$<CONFIG>"
+    USES_TERMINAL
+    VERBATIM
+)
+add_dependencies(check-native-code-analysis
+    ${DEVICEFS_CODE_ANALYSIS_TARGETS}
 )

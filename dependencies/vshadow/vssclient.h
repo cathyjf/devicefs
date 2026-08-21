@@ -173,7 +173,7 @@ public:
 
     // Gather writer metadata
     void GatherWriterMetadata();
-    void GatherWriterMetadataToScreen();
+    [[deprecated]] void GatherWriterMetadataToScreen();
 
     // Gather writer status
     void GatherWriterStatus(bool bCancellable = true);

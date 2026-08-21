@@ -18,8 +18,6 @@ module;
 
 #include <windows.h>
 
-#include <cstdio>
-
 // As a result of an apparent compiler defect, when the below WIL headers are
 // imported (instead of included), MSVC++ is able to find the declaration of
 // `StringValidateDestW` but not the definition of it, even though both the
@@ -37,6 +35,7 @@ import :devicefs_process;
 export import :manifest;
 import :pbs;
 import devicefs.common;
+import devicefs.stream_writer;
 import devicefs.supervisor.configuration;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.vshadow;
@@ -135,12 +134,12 @@ export [[nodiscard]] auto RunNativeBackup(
                         read_user,
                         namespace_override);
                 } catch (const wil::ResultException &error) {
-                    std::fwprintf(stderr, L"backup-supervisor: %hs\n",
-                        error.what());
+                    devicefs::WriteToStream(
+                        std::cerr, "backup-supervisor: {}\n", error.what());
                     return kCallbackFailureExitCode;
                 } catch (const std::runtime_error &error) {
-                    std::fwprintf(stderr, L"backup-supervisor: %hs\n",
-                        error.what());
+                    devicefs::WriteToStream(
+                        std::cerr, "backup-supervisor: {}\n", error.what());
                     return kCallbackFailureExitCode;
                 }
             });

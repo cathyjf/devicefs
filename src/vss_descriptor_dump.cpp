@@ -17,10 +17,9 @@
 #include <windows.h>
 #include <objbase.h>
 
-#include <cstdio>
-
 import std;
 import devicefs.common;
+import devicefs.stream_writer;
 import devicefs.vss_block_descriptors;
 
 namespace {
@@ -31,16 +30,16 @@ struct Options {
     bool help = false;
 };
 
-auto Usage(std::FILE *const output) noexcept {
-    std::fputws(
-        L"Usage: vss-descriptor-dump --source SOURCE --snapshot-id GUID\n\n"
-        L"Read one VSS store's raw block descriptors from an NTFS volume or "
-        L"flat volume image.\n\n"
-        L"Options:\n"
-        L"  --source SOURCE       Live volume path or flat raw-volume image\n"
-        L"  --snapshot-id GUID    Shadow-copy identifier to select\n"
-        L"  -h, --help            Show this help\n",
-        output);
+auto Usage(std::ostream &output) noexcept {
+    devicefs::WriteToStream(
+        output,
+        "Usage: vss-descriptor-dump --source SOURCE --snapshot-id GUID\n\n"
+        "Read one VSS store's raw block descriptors from an NTFS volume or "
+        "flat volume image.\n\n"
+        "Options:\n"
+        "  --source SOURCE       Live volume path or flat raw-volume image\n"
+        "  --snapshot-id GUID    Shadow-copy identifier to select\n"
+        "  -h, --help            Show this help\n");
 }
 
 [[nodiscard]] auto ParseOptions(
@@ -131,10 +130,12 @@ auto Usage(std::FILE *const output) noexcept {
 }
 
 auto WriteOutput(const std::string_view output) {
-    if (std::fwrite(output.data(), 1, output.size(), stdout) != output.size()) {
+    auto &stream = devicefs::WriteToStream(std::cout, "{}", output);
+    if (!stream) {
         throw std::runtime_error("could not write descriptor output");
     }
-    if (std::fflush(stdout) != 0) {
+    stream.flush();
+    if (!stream) {
         throw std::runtime_error("could not flush descriptor output");
     }
 }
@@ -142,7 +143,7 @@ auto WriteOutput(const std::string_view output) {
 auto Run(const std::span<const wchar_t *const> arguments) {
     const auto options = ParseOptions(arguments);
     if (options.help) {
-        Usage(stdout);
+        Usage(std::cout);
         return 0;
     }
     const auto snapshot_identifier = ParseGuid(options.snapshot_identifier);
@@ -160,12 +161,14 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
         try {
             return Run({argv + 1, argv + argc});
         } catch (const std::invalid_argument &error) {
-            std::fwprintf(stderr, L"vss-descriptor-dump: %hs\n\n", error.what());
-            Usage(stderr);
+            devicefs::WriteToStream(
+                std::cerr, "vss-descriptor-dump: {}\n\n", error.what());
+            Usage(std::cerr);
             return 2;
         }
     } catch (const std::runtime_error &error) {
-        std::fwprintf(stderr, L"vss-descriptor-dump: %hs\n", error.what());
+        devicefs::WriteToStream(
+            std::cerr, "vss-descriptor-dump: {}\n", error.what());
         return 1;
     }
 }

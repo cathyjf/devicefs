@@ -16,13 +16,12 @@
 
 module;
 
-#include <cstdio>
-
 export module devicefs.supervisor.vshadow;
 
 import std;
 import <vshadow/shadow.h>;
 import <wil/resource.h>;
+import devicefs.stream_writer;
 
 export namespace devicefs::vshadow {
 
@@ -120,10 +119,10 @@ class Backup {
     auto TryDeleteCreatedSnapshotSet() noexcept -> void {
         const auto error = client_.TryDeleteCreatedSnapshotSet();
         if (FAILED(error)) {
-            std::fwprintf(stderr,
-                L"backup-supervisor: could not delete the persistent VSS "
-                L"snapshot set (HRESULT 0x%08X); the snapshot set may "
-                L"remain.\n",
+            devicefs::WriteToStream(std::cerr,
+                "backup-supervisor: could not delete the persistent VSS "
+                "snapshot set (HRESULT 0x{:08X}); the snapshot set may "
+                "remain.\n",
                 std::bit_cast<unsigned int>(error));
         }
     }

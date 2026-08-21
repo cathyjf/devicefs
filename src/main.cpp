@@ -14,18 +14,18 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-#include <cstdio>
-
 import std;
 import devicefs.common;
 import devicefs.filesystem;
+import devicefs.stream_writer;
 
 auto wmain(const int argc, wchar_t **const argv) -> int {
     try {
         HardenProcess();
         return devicefs::Main({argv, argv + argc});
     } catch (const std::runtime_error &error) {
-        std::fwprintf(stderr, L"devicefs: %hs\n", error.what());
+        devicefs::WriteToStream(
+            std::cerr, "devicefs: {}\n", error.what());
         return 1;
     }
 }

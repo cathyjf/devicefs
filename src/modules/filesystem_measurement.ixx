@@ -19,12 +19,12 @@ module;
 #include <windows.h>
 
 #include <climits>
-#include <cstdio>
 
 export module devicefs.filesystem_measurement;
 
 import std;
 import <wil/stl.h>;
+import devicefs.stream_writer;
 
 export class FreeClusterMeasurement {
     static constexpr auto kClustersPerClaimWord =
@@ -125,10 +125,10 @@ public:
             nonzero_clusters_.load(std::memory_order_relaxed);
         const auto nonzero_bytes =
             nonzero_bytes_.load(std::memory_order_relaxed);
-        std::fwprintf(stderr,
-            L"devicefs: free-cluster measurement for '%ls': "
-            L"%llu of %llu bitmap-free clusters fully examined in one read; "
-            L"%llu of those clusters contained nonzero data (%llu bytes total)\n",
+        devicefs::WriteToStream(std::cerr,
+            L"devicefs: free-cluster measurement for '{}': "
+            L"{} of {} bitmap-free clusters fully examined in one read; "
+            L"{} of those clusters contained nonzero data ({} bytes total)\n",
             name.c_str(),
             fully_examined_clusters,
             total_free_clusters_,
@@ -425,28 +425,28 @@ public:
             AccumulateTiming(total.synthetic_timing, thread->synthetic_timing);
         }
 
-        std::fwprintf(stderr,
-            L"devicefs: WinFsp Read-callback measurement\n");
-        std::fwprintf(stderr,
-            L"  reads satisfied above this callback are not observed\n");
-        std::fwprintf(stderr,
-            L"  opens: total=%llu sequential=%llu random=%llu "
-                L"no-intermediate-buffering=%llu\n",
+        devicefs::WriteToStream(std::cerr,
+            "devicefs: WinFsp Read-callback measurement\n");
+        devicefs::WriteToStream(std::cerr,
+            "  reads satisfied above this callback are not observed\n");
+        devicefs::WriteToStream(std::cerr,
+            "  opens: total={} sequential={} random={} "
+                "no-intermediate-buffering={}\n",
             total.open_count,
             total.sequential_open_count,
             total.random_open_count,
             total.unbuffered_open_count);
-        std::fwprintf(stderr,
-            L"  measured reads: count=%llu requested-bytes=%llu wanted-bytes=%llu "
-                L"maximum-request=%llu\n",
+        devicefs::WriteToStream(std::cerr,
+            "  measured reads: count={} requested-bytes={} wanted-bytes={} "
+                "maximum-request={}\n",
             total.read_count,
             total.requested_bytes,
             total.wanted_bytes,
             total.maximum_request);
-        std::fwprintf(stderr,
-            L"  request lengths: <=4K=%llu <=8K=%llu <=16K=%llu <=32K=%llu "
-                L"<=64K=%llu <=128K=%llu <=256K=%llu <=512K=%llu "
-                L"<=1M=%llu <=2M=%llu <=4M=%llu >4M=%llu\n",
+        devicefs::WriteToStream(std::cerr,
+            "  request lengths: <=4K={} <=8K={} <=16K={} <=32K={} "
+                "<=64K={} <=128K={} <=256K={} <=512K={} "
+                "<=1M={} <=2M={} <=4M={} >4M={}\n",
             total.request_lengths[0],
             total.request_lengths[1],
             total.request_lengths[2],
@@ -459,11 +459,11 @@ public:
             total.request_lengths[9],
             total.request_lengths[10],
             total.request_lengths[11]);
-        std::fwprintf(stderr,
-            L"  paths: no-bounce-reads=%llu no-bounce-bytes=%llu "
-                L"bounce-reads=%llu bounce-wanted-bytes=%llu "
-                L"bounce-backing-bytes=%llu synthetic-all-free-reads=%llu "
-                L"synthetic-all-free-bytes=%llu unfinished-reads=%llu\n",
+        devicefs::WriteToStream(std::cerr,
+            "  paths: no-bounce-reads={} no-bounce-bytes={} "
+                "bounce-reads={} bounce-wanted-bytes={} "
+                "bounce-backing-bytes={} synthetic-all-free-reads={} "
+                "synthetic-all-free-bytes={} unfinished-reads={}\n",
             total.no_bounce_read_count,
             total.no_bounce_bytes,
             total.bounce_read_count,
@@ -472,27 +472,27 @@ public:
             total.synthetic_read_count,
             total.synthetic_bytes,
             total.unfinished_read_count);
-        std::fwprintf(stderr,
-            L"  backing reads: started=%llu completed=%llu bytes=%llu "
-                L"immediate=%llu pending=%llu\n",
+        devicefs::WriteToStream(std::cerr,
+            "  backing reads: started={} completed={} bytes={} "
+                "immediate={} pending={}\n",
             total.source_read_count,
             total.completed_source_read_count,
             total.source_bytes,
             total.immediate_source_read_count,
             total.pending_source_read_count);
-        std::fwprintf(stderr,
-            L"  concurrency: read-threads=%zu peak-active=%llu active-at-stop=%llu "
-                L"unrecorded-threads=%llu\n",
+        devicefs::WriteToStream(std::cerr,
+            "  concurrency: read-threads={} peak-active={} active-at-stop={} "
+                "unrecorded-threads={}\n",
             read_threads,
             total.maximum_active_reads,
             active_reads_.load(std::memory_order_relaxed),
             registration_failures_.load(std::memory_order_relaxed));
-        std::fwprintf(stderr,
-            L"  sampled timing (1/%llu per thread, averages in ns): "
-                L"no-bounce-samples=%lld no-bounce-callback=%lld "
-                L"no-bounce-backing=%lld "
-                L"bounce-samples=%lld bounce-callback=%lld bounce-backing=%lld "
-                L"synthetic-samples=%lld synthetic-callback=%lld\n",
+        devicefs::WriteToStream(std::cerr,
+            "  sampled timing (1/{} per thread, averages in ns): "
+                "no-bounce-samples={} no-bounce-callback={} "
+                "no-bounce-backing={} "
+                "bounce-samples={} bounce-callback={} bounce-backing={} "
+                "synthetic-samples={} synthetic-callback={}\n",
             kTimingSampleInterval,
             total.no_bounce_timing.samples,
             AverageCallbackNanoseconds(total.no_bounce_timing),

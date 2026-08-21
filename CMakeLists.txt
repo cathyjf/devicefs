@@ -76,6 +76,7 @@ endif()
 add_library(devicefs-common STATIC)
 target_module_interfaces(devicefs-common PUBLIC
     src/modules/common.ixx
+    src/modules/stream_writer.ixx
 )
 
 add_library(devicefs-filesystem STATIC)

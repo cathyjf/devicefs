@@ -18,14 +18,13 @@
 
 #include <wil/win32_helpers.h>
 
-#include <cstdio>
-
 import std;
 import <wil/resource.h>;
 import <wil/safecast.h>;
 import <wil/stl.h>;
 import devicefs.common;
 import devicefs.filesystem;
+import devicefs.stream_writer;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.logging_console;
 import devicefs.supervisor.native_backup;
@@ -416,8 +415,9 @@ template <typename Operation>
                 if (!SetEvent(cancellation_event.get())) {
                     WinError("could not request cancellation");
                 }
-                std::wcout <<
-                    L"Cancellation requested; waiting for cleanup.\n";
+                devicefs::WriteToStream(
+                    std::cout,
+                    "Cancellation requested; waiting for cleanup.\n");
             }
             if (!GetNumberOfConsoleInputEvents(input, &available)) {
                 WinError("could not inspect foreground console input");
@@ -563,11 +563,8 @@ struct ForegroundOptions {
             if (result->exit_code != 0) {
                 return result->exit_code;
             }
-            if (std::fwrite(
-                    result->manifest.data(),
-                    sizeof(decltype(result->manifest)::value_type),
-                    result->manifest.size(), stdout) !=
-                result->manifest.size()) {
+            if (!devicefs::WriteToStream(
+                    std::cout, result->manifest)) {
                 throw std::runtime_error(
                     "could not write the previous backup manifest");
             }
@@ -609,18 +606,18 @@ auto RunServiceDispatcher() {
 }
 
 auto PrintHelp() noexcept {
-    std::fputws(
-        L"Usage:\n"
-        L"  backup-supervisor.exe --devicefs [devicefs arguments]\n"
-        L"  backup-supervisor.exe --foreground [--no-writers] "
-        L"[--namespace NAMESPACE] "
-        L"[--volumes VOLUME[,VOLUME...]]\n"
-        L"      --namespace and --volumes override configured values.\n"
-        L"  backup-supervisor.exe --print-manifest "
-        L"[--namespace NAMESPACE]\n"
-        L"  backup-supervisor.exe --install-service [--update]\n"
-        L"  backup-supervisor.exe --run-service\n",
-        stdout);
+    devicefs::WriteToStream(
+        std::cout,
+        "Usage:\n"
+        "  backup-supervisor.exe --devicefs [devicefs arguments]\n"
+        "  backup-supervisor.exe --foreground [--no-writers] "
+        "[--namespace NAMESPACE] "
+        "[--volumes VOLUME[,VOLUME...]]\n"
+        "      --namespace and --volumes override configured values.\n"
+        "  backup-supervisor.exe --print-manifest "
+        "[--namespace NAMESPACE]\n"
+        "  backup-supervisor.exe --install-service [--update]\n"
+        "  backup-supervisor.exe --run-service\n");
 }
 
 } // namespace
@@ -683,13 +680,16 @@ auto wmain(const int argc, wchar_t **const argv) -> int {
         }
         throw std::invalid_argument("unknown backup-supervisor argument");
     } catch (const std::invalid_argument &error) {
-        std::fwprintf(stderr, L"backup-supervisor: %hs\n", error.what());
+        devicefs::WriteToStream(
+            std::cerr, "backup-supervisor: {}\n", error.what());
         return 2;
     } catch (const devicefs::vshadow::OperationError &error) {
-        std::fwprintf(stderr, L"backup-supervisor: %hs\n", error.what());
+        devicefs::WriteToStream(
+            std::cerr, "backup-supervisor: {}\n", error.what());
         return 2;
     } catch (const std::runtime_error &error) {
-        std::fwprintf(stderr, L"backup-supervisor: %hs\n", error.what());
+        devicefs::WriteToStream(
+            std::cerr, "backup-supervisor: {}\n", error.what());
         return 1;
     }
 }

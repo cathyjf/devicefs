@@ -32,6 +32,7 @@ import <wil/stl.h>;
 import <wil/token_helpers.h>;
 import :internal;
 import devicefs.common;
+import devicefs.stream_writer;
 import devicefs.supervisor.configuration;
 import devicefs.supervisor.embedded_artifacts;
 import devicefs.supervisor.installation;
@@ -765,8 +766,10 @@ auto TrySendPbsFishSignal(
     }
     const auto result = FinishWsl(operation);
     if (result.exit_code != 0) {
-        std::wcout << L"The PBS operation exited with code "
-                   << result.exit_code << L" during cancellation.\n";
+        devicefs::WriteToStream(
+            std::cout,
+            "The PBS operation exited with code {} during cancellation.\n",
+            result.exit_code);
     }
     return std::nullopt;
 }

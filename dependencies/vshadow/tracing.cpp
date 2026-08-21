@@ -38,6 +38,9 @@
 // Main header
 #include "shadow.h"
 
+#include <bit>
+#include <filesystem>
+#include <iterator>
 
 
 
@@ -56,7 +59,15 @@ void FunctionTracer::WriteLine(wstring format, ...)
     wstring buffer;
     VPRINTF_VAR_PARAMS(buffer, format);
 
-    wprintf(L"%s\n", buffer.c_str());
+    std::ranges::transform(
+        [](auto output) {
+            output.push_back(u8'\n');
+            return output;
+        }(std::filesystem::path{buffer.c_str()}.u8string()),
+        std::ostreambuf_iterator<char>{std::cout},
+        [](const char8_t value) noexcept {
+            return std::bit_cast<char>(value);
+        });
     Trace(m_fileName, m_lineNumber, m_functionName, L"OUTPUT: %s", buffer.c_str());
 }
 
@@ -65,7 +76,7 @@ void FunctionTracer::WriteLine(wstring format, ...)
 // Can throw HRESULT on invalid formats
 void FunctionTracer::Trace(wstring file, int line, wstring functionName, wstring format, ...)
 {
-    if (m_traceEnabled)
+    if (m_traceEnabled) [[unlikely]]
     {
         wstring buffer;
         VPRINTF_VAR_PARAMS(buffer, format);
@@ -83,7 +94,7 @@ void FunctionTracer::Trace(wstring file, int line, wstring functionName, wstring
 FunctionTracer::FunctionTracer(wstring fileName, INT lineNumber, wstring functionName):
     m_fileName(fileName), m_lineNumber(lineNumber), m_functionName(functionName)
 {
-    if (m_traceEnabled)
+    if (m_traceEnabled) [[unlikely]]
         Trace(m_fileName, m_lineNumber, m_functionName, L"ENTER %s", m_functionName.c_str());
 }
 
@@ -91,7 +102,7 @@ FunctionTracer::FunctionTracer(wstring fileName, INT lineNumber, wstring functio
 // Destructor
 FunctionTracer::~FunctionTracer()
 {
-    if (m_traceEnabled)
+    if (m_traceEnabled) [[unlikely]]
         Trace(m_fileName, m_lineNumber, m_functionName, L"EXIT %s", m_functionName.c_str());;
 }
 

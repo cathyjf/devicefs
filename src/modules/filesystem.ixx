@@ -30,12 +30,12 @@ module;
 
 #include <climits>
 #include <cstddef>
-#include <cstdio>
 
 export module devicefs.filesystem;
 
 import std;
 import devicefs.common;
+import devicefs.stream_writer;
 
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA || DEVICEFS_MEASURE_READ_PATH
 import devicefs.filesystem_measurement;
@@ -120,22 +120,23 @@ auto FurtherHardenProcess() {
     return result;
 }
 
-auto Usage(std::wostream &out) {
-    out << L"Usage: devicefs --mount TARGET --read-user USER"
-           L" --map NAME DEVICE [--map NAME DEVICE ...] [OPTIONS]\n\n"
-        << L"Options:\n"
-        << L"  --mount TARGET             Drive letter, directory, or network prefix\n"
-        << L"  --read-user USER           User granted read access\n"
-        << L"  --map NAME DEVICE          Virtual filename and block device (repeatable)\n"
-        << L"  --stop-event NAME          Named shutdown event (default: "
-        << kDefaultStopEvent << L")\n"
-        << L"  --cache                    Enable file-data caching (requires read-only volumes)\n"
-        << L"  --no-extended-dasd-io      Do not issue FSCTL_ALLOW_EXTENDED_DASD_IO\n"
-        << L"  --synthetic-free-clusters  Return zeros for free clusters on read-only NTFS volumes\n"
-        << L"  -h, --help                 Show this help\n\n"
-        << L"Example:\n"
-        << L"  devicefs --mount X: --read-user 'pbs-vss' `\n"
-        << L"    --map C.img '\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy12'\n";
+auto Usage(std::ostream &output) noexcept {
+    devicefs::WriteToStream(output,
+        L"Usage: devicefs --mount TARGET --read-user USER"
+        L" --map NAME DEVICE [--map NAME DEVICE ...] [OPTIONS]\n\n"
+        L"Options:\n"
+        L"  --mount TARGET             Drive letter, directory, or network prefix\n"
+        L"  --read-user USER           User granted read access\n"
+        L"  --map NAME DEVICE          Virtual filename and block device (repeatable)\n"
+        L"  --stop-event NAME          Named shutdown event (default: {})\n"
+        L"  --cache                    Enable file-data caching (requires read-only volumes)\n"
+        L"  --no-extended-dasd-io      Do not issue FSCTL_ALLOW_EXTENDED_DASD_IO\n"
+        L"  --synthetic-free-clusters  Return zeros for free clusters on read-only NTFS volumes\n"
+        L"  -h, --help                 Show this help\n\n"
+        L"Example:\n"
+        L"  devicefs --mount X: --read-user 'pbs-vss' `\n"
+        L"    --map C.img '\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy12'\n",
+        kDefaultStopEvent);
 }
 
 [[nodiscard]] auto ParseArgs(const std::span<const wchar_t *const> args) {
@@ -509,8 +510,11 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
     if (dasd_error != ERROR_SUCCESS) {
         const auto error = std::error_code(
             std::bit_cast<int>(dasd_error), std::system_category());
-        std::wcerr << L"devicefs: warning: FSCTL_ALLOW_EXTENDED_DASD_IO failed for '"
-                   << mapping.device << L"': " << error.message().c_str() << L"\n";
+        devicefs::WriteToStream(
+            std::cerr,
+            L"devicefs: warning: FSCTL_ALLOW_EXTENDED_DASD_IO failed for '{}': ",
+            mapping.device);
+        devicefs::WriteToStream(std::cerr, "{}\n", error.message());
     }
 
     if (cache || synthetic_free_clusters) {
@@ -737,8 +741,10 @@ private:
             }
         }
         const auto failure = [&](const DWORD error) {
-            std::fwprintf(stderr, L"devicefs: read failed for '%ls': Windows error %lu\n",
-                file->name.c_str(), error);
+            devicefs::WriteToStream(
+                std::cerr,
+                L"devicefs: read failed for '{}': Windows error {}\n",
+                file->name, error);
             return FspNtStatusFromWin32(error);
         };
         const auto read = [&](void *const output, const UINT64 position,
@@ -964,8 +970,10 @@ auto Run(const Options &options) {
     {
         if constexpr (kMeasureFreeClusterData) {
             if (options.synthetic_free_clusters) {
-                std::wcerr << L"devicefs: free-cluster measurement is enabled; "
-                              L"free-only reads will access the source device\n";
+                devicefs::WriteToStream(
+                    std::cerr,
+                    "devicefs: free-cluster measurement is enabled; "
+                    "free-only reads will access the source device\n");
             }
         }
         auto filesystem = DeviceFs(
@@ -978,9 +986,12 @@ auto Run(const Options &options) {
             WinError("could not install console handler");
         }
 
-        std::wcout << L"devicefs: mounted " << options.mappings.size() << L" device(s) at "
-                   << options.mount.value << L"; read access: " << options.read_user
-                   << L"; stop event: " << options.stop_event << L"\n";
+        devicefs::WriteToStream(
+            std::cout,
+            L"devicefs: mounted {} device(s) at {}; read access: {}; "
+            L"stop event: {}\n",
+            options.mappings.size(), options.mount.value,
+            options.read_user, options.stop_event);
         if (WaitForSingleObject(stop_event.get(), INFINITE) == WAIT_FAILED) {
             wait_error = GetLastError();
         }
@@ -1009,17 +1020,19 @@ auto Main(const std::span<const wchar_t *const> arguments) -> int {
         try {
             options = ParseArgs(arguments);
         } catch (const std::invalid_argument &error) {
-            std::wcerr << L"devicefs: " << error.what() << L"\n\n";
-            Usage(std::wcerr);
+            devicefs::WriteToStream(
+                std::cerr, "devicefs: {}\n\n", error.what());
+            Usage(std::cerr);
             return 2;
         }
         if (options.help) {
-            Usage(std::wcout);
+            Usage(std::cout);
             return 0;
         }
         return Run(options);
     } catch (const std::runtime_error &error) {
-        std::wcerr << L"devicefs: " << error.what() << L"\n";
+        devicefs::WriteToStream(
+            std::cerr, "devicefs: {}\n", error.what());
         return 1;
     }
 }

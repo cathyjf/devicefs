@@ -27,6 +27,7 @@ import <wil/resource.h>;
 import <wil/stl.h>;
 import :internal;
 import devicefs.common;
+import devicefs.stream_writer;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.vshadow;
 
@@ -74,7 +75,8 @@ struct DeviceFsProcess {
         arguments.emplace_back(snapshot.device);
     }
     auto command = wil::ArgvToCommandLine(arguments);
-    std::wcout << L"Setting up virtual filesystem: " << command << L'\n';
+    devicefs::WriteToStream(
+        std::cout, L"Setting up virtual filesystem: {}\n", command);
     auto process = StartProcessWithHandles(
         GetStdHandle(STD_INPUT_HANDLE),
         GetStdHandle(STD_OUTPUT_HANDLE),

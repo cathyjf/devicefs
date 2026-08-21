@@ -20,8 +20,6 @@ module;
 
 #include <wil/win32_helpers.h>
 
-#include <cstdio>
-
 module devicefs.supervisor.native_backup:internal;
 
 import std;
@@ -29,6 +27,7 @@ import <wil/resource.h>;
 import <wil/safecast.h>;
 import <wil/stl.h>;
 import devicefs.common;
+import devicefs.stream_writer;
 import devicefs.supervisor.vshadow;
 
 namespace internal {
@@ -133,13 +132,11 @@ template <typename Start>
     return process;
 }
 
-[[gsl::suppress("26447",
-    justification: "std::exception::what is noexcept, and fwprintf does not throw C++ exceptions.")]]
 auto TryWriteError(
     const char *const context,
     const std::exception &error) noexcept {
-    std::fwprintf(stderr, L"backup-supervisor: %hs: %hs\n",
-        context, error.what());
+    devicefs::WriteToStream(
+        std::cerr, "backup-supervisor: {}: {}\n", context, error.what());
 }
 
 [[nodiscard]] auto UniqueName() {

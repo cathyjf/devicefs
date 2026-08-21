@@ -59,7 +59,7 @@ public:
     static wstring  HResult2String(HRESULT hrError);
 
     // Enables tracing
-    static void EnableTracingMode();
+    [[deprecated]] static void EnableTracingMode();
 
 private:
 

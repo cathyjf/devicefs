@@ -22,8 +22,6 @@ module;
 
 #include <wil/win32_helpers.h>
 
-#include <cstdio>
-
 export module devicefs.supervisor.installation;
 
 import std;
@@ -31,6 +29,7 @@ import <wil/resource.h>;
 import <wil/safecast.h>;
 import <wil/stl.h>;
 import devicefs.common;
+import devicefs.stream_writer;
 import devicefs.supervisor.configuration;
 
 export enum class InstallMode {
@@ -350,8 +349,9 @@ export auto InstallService(
             WinError("could not update the backup service");
         }
         ConfigurePreshutdownTimeout(service.get(), preshutdown_timeout);
-        std::fwprintf(stdout, L"backup-supervisor: updated %ls at %ls\n",
-            kServiceName.data(), installed_executable.c_str());
+        devicefs::WriteToStream(
+            std::cout, L"backup-supervisor: updated {} at {}\n",
+            kServiceName, installed_executable.native());
         return;
     }
 
@@ -369,6 +369,7 @@ export auto InstallService(
     });
     ConfigurePreshutdownTimeout(service.get(), preshutdown_timeout);
     remove_incomplete_service.release();
-    std::fwprintf(stdout, L"backup-supervisor: installed %ls at %ls\n",
-        kServiceName.data(), installed_executable.c_str());
+    devicefs::WriteToStream(
+        std::cout, L"backup-supervisor: installed {} at {}\n",
+        kServiceName, installed_executable.native());
 }

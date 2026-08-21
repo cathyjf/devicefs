@@ -181,7 +181,7 @@ constexpr auto kVssIdentifier = std::array{
     if (value.size() < prefix.size()) {
         return false;
     }
-    const auto length = wil::safe_cast<int>(prefix.size());
+    const auto length = wil::safe_cast_failfast<int>(prefix.size());
     return CompareStringOrdinal(
         value.data(), length, prefix.data(), length, TRUE) == CSTR_EQUAL;
 }
@@ -250,7 +250,7 @@ class RawSource {
                 throw std::runtime_error(
                     "the VSS descriptor source reported a negative length");
             }
-            size_ = wil::safe_cast<std::uint64_t>(
+            size_ = wil::safe_cast_failfast<std::uint64_t>(
                 device_length.Length.QuadPart);
 
             // Windows treats volume handles as noncached. Query the sector size
@@ -306,7 +306,7 @@ class RawSource {
                 throw std::runtime_error(
                     "the VSS descriptor image reported a negative length");
             }
-            size_ = wil::safe_cast<std::uint64_t>(file_size.QuadPart);
+            size_ = wil::safe_cast_failfast<std::uint64_t>(file_size.QuadPart);
         }
 
         if (size_ == 0) {
@@ -325,7 +325,7 @@ class RawSource {
     void ReadExact(
         const std::uint64_t offset, std::span<std::byte> destination) {
         const auto requested =
-            wil::safe_cast<std::uint64_t>(destination.size());
+            wil::safe_cast_failfast<std::uint64_t>(destination.size());
         if ((offset > size_) || (requested > (size_ - offset))) {
             ThrowOffsetError("a VSS metadata read was out of bounds",
                 offset, requested, size_);
@@ -341,7 +341,7 @@ class RawSource {
 
     void Seek(const std::uint64_t offset) {
         const auto position = LARGE_INTEGER{
-            .QuadPart = wil::safe_cast<LONGLONG>(offset),
+            .QuadPart = wil::safe_cast_failfast<LONGLONG>(offset),
         };
         if (!SetFilePointerEx(handle_.get(), position, nullptr, FILE_BEGIN)) {
             WinError("could not seek to VSS metadata at offset 0x{:x}", offset);
@@ -350,7 +350,8 @@ class RawSource {
 
     void ReadCurrentExact(
         const std::uint64_t offset, std::span<std::byte> destination) {
-        const auto requested = wil::safe_cast<DWORD>(destination.size());
+        const auto requested =
+            wil::safe_cast_failfast<DWORD>(destination.size());
         auto completed = DWORD{};
         if (!ReadFile(handle_.get(), destination.data(), requested,
                 &completed, nullptr)) {
@@ -381,7 +382,7 @@ class RawSource {
 
         auto storage = wil::unique_virtualalloc_ptr<std::byte>{
             static_cast<std::byte *>(VirtualAlloc(nullptr,
-                wil::safe_cast<SIZE_T>(raw_size),
+                wil::safe_cast_failfast<SIZE_T>(raw_size),
                 MEM_COMMIT | MEM_RESERVE,
                 PAGE_READWRITE))};
         if (!storage) {
@@ -396,7 +397,8 @@ class RawSource {
         Seek(raw_offset);
         auto completed = DWORD{};
         if (!ReadFile(handle_.get(), storage.get(),
-                wil::safe_cast<DWORD>(raw_size), &completed, nullptr)) {
+                wil::safe_cast_failfast<DWORD>(raw_size),
+                &completed, nullptr)) {
             WinError("could not read aligned VSS metadata at offset 0x{:x}",
                 raw_offset);
         }
@@ -406,7 +408,7 @@ class RawSource {
         }
         std::memcpy(destination.data(),
             storage.get() +
-                wil::safe_cast<std::size_t>(offset - raw_offset),
+                wil::safe_cast_failfast<std::size_t>(offset - raw_offset),
             destination.size());
     }
 

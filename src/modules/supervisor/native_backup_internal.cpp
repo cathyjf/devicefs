@@ -143,10 +143,9 @@ auto TryWriteError(
     auto id = GUID{};
     const auto error = CoCreateGuid(&id);
     if (FAILED(error)) {
-        [[gsl::suppress("type.1",
-            justification: "HRESULT_CODE returns the Win32-sized error code carried by the HRESULT.")]]
+        // HRESULT_CODE returns the Win32-sized error code carried by the HRESULT.
         const auto win32_error =
-            static_cast<DWORD>(HRESULT_CODE(error));
+            wil::safe_cast_failfast<DWORD>(HRESULT_CODE(error));
         WinError("could not create a unique backup identifier",
             ExplicitWin32Error{win32_error});
     }

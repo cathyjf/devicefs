@@ -100,8 +100,10 @@ template <typename String>
         throw std::runtime_error(
             "could not convert a backup configuration value to UTF-8");
     }
+    static_assert(std::in_range<typename String::size_type>(
+        std::numeric_limits<int>::max()));
     auto result = String(
-        wil::safe_cast<typename String::size_type>(size),
+        wil::safe_cast_failfast<typename String::size_type>(size),
         typename String::value_type{});
     void *const output = result.data();
     const auto converted = WideCharToMultiByte(

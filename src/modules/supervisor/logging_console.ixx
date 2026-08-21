@@ -273,9 +273,9 @@ private:
         if (output.empty()) {
             return;
         }
-        [[gsl::suppress("type.1",
-            justification: "Supervisor diagnostics and ConPTY chunks are bounded far below MAXDWORD.")]]
-        const auto size = static_cast<DWORD>(output.size());
+        // Current diagnostics and ConPTY chunks are far below MAXDWORD, but WriteRaw
+        // accepts an arbitrary string view, so reject a length WriteFile cannot represent.
+        const auto size = wil::safe_cast<DWORD>(output.size());
         auto written = DWORD{};
         if (!WriteFile(file_.get(), output.data(),
                 size, &written, nullptr)) {
@@ -392,7 +392,7 @@ public:
         if (FAILED(error)) {
             WinError("could not create the backup pseudoconsole",
                 ExplicitWin32Error{
-                    wil::safe_cast<DWORD>(HRESULT_CODE(error))});
+                    wil::safe_cast_failfast<DWORD>(HRESULT_CODE(error))});
         }
         output_task_ = std::async(
             std::launch::async, CopyConsoleOutput,

@@ -26,6 +26,7 @@ module;
 
 #include "winfsp_compat.h"
 #include <wil/resource.h>
+#include <wil/safecast.h>
 #include <wil/stl.h>
 
 #include <climits>
@@ -382,9 +383,10 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
             map_number));
     }
 
-    [[gsl::suppress("type.1",
-        justification: "The nonpositive case is rejected above, so this conversion preserves the cluster count.")]]
-    const auto cluster_count = static_cast<UINT64>(volume.TotalClusters.QuadPart);
+    // The nonpositive case is rejected above, so this conversion preserves
+    // the cluster count.
+    const auto cluster_count =
+        wil::safe_cast_failfast<UINT64>(volume.TotalClusters.QuadPart);
     if (cluster_count > (device_size / volume.BytesPerCluster)) {
         throw std::runtime_error(std::format(
             "NTFS cluster span exceeds the exposed device length for --map #{}",
@@ -414,9 +416,9 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
         throw std::runtime_error(std::format(
             "NTFS allocation bitmap is too large for --map #{}", map_number));
     }
-    [[gsl::suppress("type.1",
-        justification: "std::in_range above proves output_size is representable by DWORD.")]]
-    const auto output_size_for_api = static_cast<DWORD>(output_size);
+    // std::in_range above proves output_size is representable by DWORD.
+    const auto output_size_for_api =
+        wil::safe_cast_failfast<DWORD>(output_size);
 
     auto storage = wil::unique_virtualalloc_ptr<BYTE>(static_cast<BYTE *>(
         VirtualAlloc(nullptr, output_size_for_api, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)));
@@ -489,9 +491,10 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
             ExplicitWin32Error{geometry_error});
     }
 
-    [[gsl::suppress("type.1",
-        justification: "The negative case is rejected above, so this conversion preserves the device length.")]]
-    const auto size = static_cast<UINT64>(length.Length.QuadPart);
+    // The negative case is rejected above, so this conversion preserves the
+    // device length.
+    const auto size =
+        wil::safe_cast_failfast<UINT64>(length.Length.QuadPart);
     if ((geometry.BytesPerSector == 0) || ((size % geometry.BytesPerSector) != 0)) {
         throw std::runtime_error(std::format(
             "block device length is not a multiple of its sector size for --map #{}",
@@ -859,9 +862,9 @@ private:
             for (; current != self.files_.end(); ++current) {
                 const auto &file = current->second;
                 const auto name_bytes = file.name.size() * sizeof(wchar_t);
-                [[gsl::suppress("type.1",
-                    justification: "Filename validation bounds the record by kMaxDirectoryInfoSize, which is asserted to fit FSP_FSCTL_DIR_INFO::Size.")]]
-                info->Size = static_cast<decltype(info->Size)>(
+                // Filename validation bounds the record by
+                // kMaxDirectoryInfoSize, which is asserted to fit this field.
+                info->Size = wil::safe_cast_failfast<decltype(info->Size)>(
                     sizeof(FSP_FSCTL_DIR_INFO) + name_bytes);
                 info->FileInfo = file.info;
                 std::memcpy(info->FileNameBuf, file.name.data(), name_bytes);

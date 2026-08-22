@@ -65,21 +65,32 @@ class Backup {
     Backup(Backup &&) = delete;
     auto operator=(Backup &&) -> Backup & = delete;
 
-    [[gsl::suppress("26439",
-        justification: "Normal destruction reports VSS completion failure; failure cleanup cannot replace an exception already unwinding.")]]
-    ~Backup() noexcept(false) {
-        const auto delete_snapshot_set = wil::scope_exit(
+    ~Backup() {
+        auto delete_snapshot_set = wil::scope_exit(
             [this]() noexcept { TryDeleteCreatedSnapshotSet(); });
+        if (completion_ == Completion::Success) {
+            delete_snapshot_set.release();
+        }
         try {
             if (completion_ == Completion::Failure) {
                 client_.CompleteFailedBackup();
             } else if ((completion_ == Completion::Success) && use_writers_) {
                 client_.BackupComplete(true);
             }
+        } catch (const HRESULT error) {
+            if (completion_ == Completion::Success) {
+                devicefs::WriteToStream(std::cerr,
+                    "backup-supervisor: VSS writer completion failed "
+                    "(HRESULT 0x{:08X}); the backup succeeded and the "
+                    "snapshot set was retained.\n",
+                    std::bit_cast<unsigned int>(error));
+            }
         } catch (...) {
-            if ((std::uncaught_exceptions() == 0) &&
-                (completion_ == Completion::Success)) {
-                throw;
+            if (completion_ == Completion::Success) {
+                devicefs::WriteToStream(std::cerr,
+                    "backup-supervisor: VSS writer completion failed with "
+                    "an unexpected error; the backup succeeded and the "
+                    "snapshot set was retained.\n");
             }
         }
     }

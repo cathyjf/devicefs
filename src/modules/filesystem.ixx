@@ -627,6 +627,10 @@ private:
         return found == files_.end() ? nullptr : &found->second;
     }
 
+    [[gsl::suppress("26461",
+        justification:
+            "The function signature must match the requirement of the "
+            "corresponding WinFsp callback.")]]
     static auto GetVolumeInfo(
         FSP_FILE_SYSTEM *const fs, FSP_FSCTL_VOLUME_INFO *const info) noexcept {
         info->TotalSize = std::ranges::fold_left(Self(fs).files_, UINT64{},
@@ -641,6 +645,11 @@ private:
         return STATUS_SUCCESS;
     }
 
+    [[gsl::suppress("26461", "26429",
+        justification:
+            "The function signature must match the requirement of the "
+            "corresponding WinFsp callback. The `_Inout_` annotation reflects "
+            "that `size` cannot be null.")]]
     _Success_(return == STATUS_SUCCESS)
     static auto GetSecurity(FSP_FILE_SYSTEM *const fs, void *,
         _Out_writes_bytes_to_opt_(*size, *size) void *const output,
@@ -708,6 +717,11 @@ private:
         });
     }
 
+    [[gsl::suppress("26429",
+        justification:
+            "The function signature must match the requirement of the "
+            "corresponding WinFsp callback. The `_Out_` annotation reflects "
+            "that `transferred` cannot be null.")]]
     _Success_(return == STATUS_SUCCESS)
     static auto Read([[maybe_unused]] FSP_FILE_SYSTEM *const fs,
         _In_opt_ void *const context,

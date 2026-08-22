@@ -3,12 +3,8 @@
   <Include Path="NativeRecommendedRules.ruleset" Action="Error" />
   <Include Path="CppCoreCheckRules.ruleset" Action="Error" />
   <Rules AnalyzerId="Microsoft.Analyzers.NativeCodeAnalysis" RuleNamespace="Microsoft.Rules.Native">
-    <!-- "Symbol 'symbol' is never tested for nullness, it can be marked as not_null." -->
-    <Rule Id="C26429" Action="None" />
     <!-- "Prefer to use gsl::at() instead of unchecked subscript operator." -->
     <Rule Id="C26446" Action="None" />
-    <!-- "The pointer argument 'argument' for function 'function' can be marked as a pointer to const." -->
-    <Rule Id="C26461" Action="None" />
     <!-- "Don't use pointer arithmetic. Use span instead." -->
     <Rule Id="C26481" Action="None" />
     <!-- "Expression 'expr': No array to pointer decay." -->

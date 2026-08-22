@@ -23,7 +23,7 @@ module;
 export module devicefs.supervisor.process_diagnostics;
 
 import std;
-import <wil/resource.h>;
+import <devicefs/windows_imports.h>;
 import devicefs.supervisor.logging_console;
 
 #if defined(__INTELLISENSE__) && !defined(__cpp_lib_start_lifetime_as)

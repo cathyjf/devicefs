@@ -16,21 +16,12 @@
 
 module;
 
-// As a result of an apparent compiler defect, when the below WIL headers are
-// imported (instead of included), MSVC++ is able to find the declaration of
-// `StringValidateDestW` but not the definition of it, even though both the
-// declaration and definition are contained within `strsafe.h` and the compiler
-// should presumably either find both or neither. To work around this issue, we
-// explicitly include `strsafe.h`.
-#include <strsafe.h>
+#include <devicefs/strsafe_compat.h>
 
 export module devicefs.supervisor.configuration;
 
 import std;
-import <wil/resource.h>;
-import <wil/safecast.h>;
-import <wil/stl.h>;
-import <windows.h>;
+import <devicefs/windows_imports.h>;
 import <winrt/Windows.Data.Json.h>;
 import <winrt/Windows.Foundation.Collections.h>;
 import devicefs.supervisor.winrt_apartment;

@@ -16,20 +16,14 @@
 
 module;
 
-#include <windows.h>
-#include <userenv.h>
-
-#include <wil/win32_helpers.h>
+#include <devicefs/strsafe_compat.h>
 
 #include <cstddef>
 
 module devicefs.supervisor.native_backup:pbs;
 
 import std;
-import <wil/resource.h>;
-import <wil/safecast.h>;
-import <wil/stl.h>;
-import <wil/token_helpers.h>;
+import <devicefs/windows_imports.h>;
 import :internal;
 import devicefs.common;
 import devicefs.stream_writer;

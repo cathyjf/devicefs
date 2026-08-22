@@ -29,6 +29,8 @@ set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 # Increase build parallelism for native C++ projects.
 # See <https://devblogs.microsoft.com/cppblog/cpp-build-throughput-investigation-and-tune-up>.
 set(CMAKE_VS_GLOBALS
+    "UseMultiToolTask=true"
+    "EnableClServerMode=true"
     "BuildPassReferences=true"
 )
 
@@ -179,6 +181,9 @@ foreach(target IN LISTS DEVICEFS_CODE_ANALYSIS_TARGETS)
         VS_GLOBAL_CAExcludePath "${WIL_INCLUDE_DIR};$(CAExcludePath)"
     )
     target_include_directories(${target} SYSTEM PRIVATE "${WIL_INCLUDE_DIR}")
+    target_include_directories(${target} PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/include"
+    )
     target_compile_definitions(${target} PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _MSVC_STL_HARDENING=1
     )

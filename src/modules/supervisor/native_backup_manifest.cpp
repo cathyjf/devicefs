@@ -29,6 +29,26 @@ import :pbs;
 import devicefs.supervisor.vshadow;
 import devicefs.supervisor.winrt_apartment;
 
+// The Windows GetObject macro conflicts with C++/WinRT IJsonValue::GetObject.
+#undef GetObject
+
+export struct PreviousBackupManifestResult {
+    int exit_code;
+    std::u8string manifest;
+
+    struct SnapshotManifest {
+        using GuidLess = decltype([](
+            const GUID &left, const GUID &right) noexcept {
+                return std::memcmp(&left, &right, sizeof(GUID)) < 0;
+            });
+
+        GUID snapshot_set_identifier{};
+        std::map<GUID, GUID, GuidLess> volumes;
+    };
+
+    [[nodiscard]] auto ParseManifest() const -> SnapshotManifest;
+};
+
 namespace {
 
 [[nodiscard]] auto VolumeMountPoints(const std::wstring &volume)
@@ -65,12 +85,95 @@ namespace {
     return std::wstring{label.data()};
 }
 
+[[nodiscard]] auto ParseSnapshotManifest(
+    const std::u8string_view manifest) {
+    const auto apartment = WinrtApartment{
+        "could not initialize the Windows Runtime while parsing "
+        "the backup manifest"};
+    using winrt::Windows::Data::Json::JsonObject;
+    using winrt::Windows::Data::Json::JsonValueType;
+
+    const auto required_value = [](
+        const JsonObject &object, const wil::zwstring_view name,
+        const JsonValueType type, const wil::zstring_view error) {
+        if (!object.HasKey(name.c_str())) {
+            throw std::runtime_error(error.c_str());
+        }
+        const auto value = object.GetNamedValue(name.c_str());
+        if (value.ValueType() != type) {
+            throw std::runtime_error(error.c_str());
+        }
+        return value;
+    };
+    const auto parse_identifier = [](
+        const wil::zwstring_view value,
+        const wil::zstring_view error) -> GUID {
+        auto result = GUID{};
+        if (IIDFromString(value.c_str(), &result) != S_OK) {
+            throw std::runtime_error(error.c_str());
+        }
+        return result;
+    };
+
+    auto root = JsonObject{nullptr};
+    if (!JsonObject::TryParse(
+            std::filesystem::path{manifest}.wstring(), root)) {
+        throw std::runtime_error(
+            "the backup manifest is not a JSON object");
+    }
+
+    const auto snapshot_set = required_value(
+        root, L"snapshot-set", JsonValueType::String,
+        "the backup manifest does not contain a snapshot-set string");
+    const auto volumes = required_value(
+        root, L"volumes", JsonValueType::Object,
+        "the backup manifest does not contain a volumes object");
+    auto result = PreviousBackupManifestResult::SnapshotManifest{
+        .snapshot_set_identifier = parse_identifier(
+            snapshot_set.GetString().c_str(),
+            "the backup manifest contains an invalid snapshot-set identifier"),
+    };
+    constexpr auto volume_prefix = std::wstring_view{L"volume-"};
+    constexpr auto invalid_volume_identifier = wil::zstring_view{
+        "the backup manifest contains an invalid volume identifier"};
+    for (const auto &entry : volumes.GetObject()) {
+        if (entry.Value().ValueType() != JsonValueType::Object) {
+            throw std::runtime_error(
+                "a backup-manifest volume is not an object");
+        }
+        const auto snapshot = required_value(
+            entry.Value().GetObject(), L"snapshot-id", JsonValueType::String,
+            "a backup-manifest volume does not contain a snapshot-id string");
+        const auto image_name = std::filesystem::path{
+            entry.Key().c_str()}.stem().wstring();
+        if (image_name.size() < volume_prefix.size()) {
+            throw std::runtime_error(invalid_volume_identifier.c_str());
+        }
+        const auto volume_identifier = std::format(
+            L"{{{}}}", std::wstring_view{image_name}.substr(
+                volume_prefix.size()));
+        result.volumes.emplace(
+            parse_identifier(
+                volume_identifier.c_str(),
+                invalid_volume_identifier),
+            parse_identifier(
+                snapshot.GetString().c_str(),
+                "a backup-manifest volume contains an invalid snapshot identifier"));
+    }
+    return result;
+}
+
 } // namespace
 
-export struct PreviousBackupManifestResult {
-    int exit_code;
-    std::u8string manifest;
-};
+auto PreviousBackupManifestResult::ParseManifest() const
+    -> SnapshotManifest {
+    try {
+        return ParseSnapshotManifest(manifest);
+    } catch (const winrt::hresult_error &) {
+        throw std::runtime_error(
+            "the Windows Runtime failed while parsing the backup manifest");
+    }
+}
 
 export [[nodiscard]] auto RetrievePreviousBackupManifest(
     const HANDLE cancellation_event,

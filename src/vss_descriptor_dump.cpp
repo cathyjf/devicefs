@@ -18,6 +18,7 @@
 #include <objbase.h>
 
 import std;
+import <sal.h>;
 import devicefs.common;
 import devicefs.stream_writer;
 import devicefs.vss_block_descriptors;
@@ -155,7 +156,9 @@ auto Run(const std::span<const wchar_t *const> arguments) {
 
 } // namespace
 
-auto wmain(const int argc, wchar_t **const argv) -> int {
+auto wmain(
+    _Pre_satisfies_(argc > 0) const int argc,
+    _In_reads_(argc) wchar_t **const argv) -> int {
     try {
         HardenProcess();
         try {

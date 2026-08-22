@@ -19,13 +19,14 @@ module;
 export module devicefs.supervisor.embedded_artifacts;
 
 import std;
+import <sal.h>;
 import <windows.h>;
 import devicefs.common;
 
 namespace {
 
 [[nodiscard]] auto LoadProgram(
-    const wchar_t *const name,
+    _In_z_ const wchar_t *const name,
     const std::string_view description) {
     const auto resource = FindResourceW(
         nullptr, name, L"DEVICEFS_ARTIFACT");

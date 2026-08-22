@@ -19,6 +19,7 @@
 #include <wil/win32_helpers.h>
 
 import std;
+import <sal.h>;
 import <wil/resource.h>;
 import <wil/safecast.h>;
 import <wil/stl.h>;
@@ -39,7 +40,8 @@ constexpr auto kCancellationEventName =
     wil::zwstring_view(L"Local\\devicefs-backup-stop");
 constexpr auto kOrchestrateOption = std::wstring_view(L"--orchestrate");
 
-[[nodiscard]] auto CreateCancellationEvent(const wchar_t *const name) {
+[[nodiscard]] auto CreateCancellationEvent(
+    _In_opt_z_ const wchar_t *const name) {
     auto event = wil::unique_event_nothrow{};
     auto already_exists = false;
     if (!event.try_create(wil::EventOptions::ManualReset,
@@ -209,7 +211,8 @@ auto SetServiceState(
 }
 
 auto WINAPI ServiceControlHandler(
-    const DWORD control, DWORD, void *, void *const raw_context) noexcept -> DWORD {
+    const DWORD control, DWORD, void *,
+    _In_ void *const raw_context) noexcept -> DWORD {
     const auto &context = *static_cast<const ServiceContext *>(raw_context);
     if (control == SERVICE_CONTROL_INTERROGATE) {
         return ERROR_SUCCESS;
@@ -523,7 +526,7 @@ struct ForegroundOptions {
 }
 
 [[nodiscard]] auto GetForegroundConsoleInput(
-    const char *const unavailable_message) {
+    _In_z_ const char *const unavailable_message) {
     const auto input = GetStdHandle(STD_INPUT_HANDLE);
     auto console_mode = DWORD{};
     if (!GetConsoleMode(input, &console_mode)) {
@@ -623,7 +626,9 @@ auto PrintHelp() noexcept {
 
 } // namespace
 
-auto wmain(const int argc, wchar_t **const argv) -> int {
+auto wmain(
+    _Pre_satisfies_(argc > 0) const int argc,
+    _In_reads_(argc) wchar_t **const argv) -> int {
     try {
         HardenProcess();
         const auto arguments =

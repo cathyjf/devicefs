@@ -25,11 +25,13 @@ module;
 export module devicefs.supervisor.winrt_apartment;
 
 import std;
+import <sal.h>;
 import <wil/result.h>;
 
 export class WinrtApartment {
   public:
-    explicit WinrtApartment(const char *const initialization_error)
+    explicit WinrtApartment(
+        _In_z_ const char *const initialization_error)
         : uninitialize_([initialization_error] {
             try {
                 return wil::RoInitialize(RO_INIT_SINGLETHREADED);

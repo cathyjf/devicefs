@@ -23,6 +23,7 @@ module;
 module devicefs.supervisor.native_backup:internal;
 
 import std;
+import <sal.h>;
 import <wil/resource.h>;
 import <wil/safecast.h>;
 import <wil/stl.h>;
@@ -133,7 +134,7 @@ template <typename Start>
 }
 
 auto TryWriteError(
-    const char *const context,
+    _In_z_ const char *const context,
     const std::exception &error) noexcept {
     [[gsl::suppress("26447",
         justification:

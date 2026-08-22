@@ -15,11 +15,14 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import std;
+import <sal.h>;
 import devicefs.common;
 import devicefs.filesystem;
 import devicefs.stream_writer;
 
-auto wmain(const int argc, wchar_t **const argv) -> int {
+auto wmain(
+    _Pre_satisfies_(argc > 0) const int argc,
+    _In_reads_(argc) wchar_t **const argv) -> int {
     try {
         HardenProcess();
         return devicefs::Main({argv, argv + argc});

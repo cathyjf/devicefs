@@ -16,11 +16,10 @@
 
 module;
 
-#include <windows.h>
-
 export module devicefs.supervisor.embedded_artifacts;
 
 import std;
+import <windows.h>;
 import devicefs.common;
 
 namespace {

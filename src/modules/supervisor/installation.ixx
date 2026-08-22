@@ -16,18 +16,16 @@
 
 module;
 
+#include <devicefs/strsafe_compat.h>
+
 #include <windows.h>
 #include <sddl.h>
 #include <shlobj.h>
 
-#include <wil/win32_helpers.h>
-
 export module devicefs.supervisor.installation;
 
 import std;
-import <wil/resource.h>;
-import <wil/safecast.h>;
-import <wil/stl.h>;
+import <devicefs/windows_imports.h>;
 import devicefs.common;
 import devicefs.stream_writer;
 import devicefs.supervisor.configuration;

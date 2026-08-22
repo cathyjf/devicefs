@@ -16,17 +16,13 @@
 
 module;
 
-#include <windows.h>
-
-#include <wil/win32_helpers.h>
+#include <devicefs/strsafe_compat.h>
 
 module devicefs.supervisor.native_backup:internal;
 
 import std;
+import <devicefs/windows_imports.h>;
 import <sal.h>;
-import <wil/resource.h>;
-import <wil/safecast.h>;
-import <wil/stl.h>;
 import devicefs.common;
 import devicefs.stream_writer;
 import devicefs.supervisor.vshadow;

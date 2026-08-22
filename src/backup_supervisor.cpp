@@ -14,15 +14,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-#include <windows.h>
-
-#include <wil/win32_helpers.h>
+#include <devicefs/strsafe_compat.h>
 
 import std;
+import <devicefs/windows_imports.h>;
 import <sal.h>;
-import <wil/resource.h>;
-import <wil/safecast.h>;
-import <wil/stl.h>;
 import devicefs.common;
 import devicefs.filesystem;
 import devicefs.stream_writer;

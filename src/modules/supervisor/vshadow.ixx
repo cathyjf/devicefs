@@ -20,7 +20,7 @@ export module devicefs.supervisor.vshadow;
 
 import std;
 import <vshadow/shadow.h>;
-import <wil/resource.h>;
+import <devicefs/windows_imports.h>;
 import devicefs.stream_writer;
 
 export namespace devicefs::vshadow {

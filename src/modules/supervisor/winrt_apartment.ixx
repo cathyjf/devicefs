@@ -16,17 +16,13 @@
 
 module;
 
-#include <windows.h>
-#include <roapi.h>
-
-#include <winrt/base.h>
-#include <wil/resource.h>
+#include <devicefs/strsafe_compat.h>
 
 export module devicefs.supervisor.winrt_apartment;
 
 import std;
+import <devicefs/windows_imports.h>;
 import <sal.h>;
-import <wil/result.h>;
 
 export class WinrtApartment {
   public:

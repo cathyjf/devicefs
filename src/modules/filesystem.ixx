@@ -24,7 +24,7 @@ module;
 // wil/stl.h uses symbols defined in <algorithm> without including it.
 #include <algorithm>
 
-#include "winfsp_compat.h"
+#include <devicefs/winfsp_compat.h>
 #include <wil/resource.h>
 #include <wil/safecast.h>
 #include <wil/stl.h>

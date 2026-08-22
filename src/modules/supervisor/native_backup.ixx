@@ -16,8 +16,6 @@
 
 module;
 
-#include <windows.h>
-
 // As a result of an apparent compiler defect, when the below WIL headers are
 // imported (instead of included), MSVC++ is able to find the declaration of
 // `StringValidateDestW` but not the definition of it, even though both the
@@ -30,6 +28,7 @@ export module devicefs.supervisor.native_backup;
 
 import std;
 import <wil/resource.h>;
+import <windows.h>;
 import :internal;
 import :devicefs_process;
 export import :manifest;

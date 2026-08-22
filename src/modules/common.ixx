@@ -16,11 +16,10 @@
 
 module;
 
-#include <windows.h>
-
 export module devicefs.common;
 
 import std;
+import <windows.h>;
 
 export struct ExplicitWin32Error final {
     DWORD value;

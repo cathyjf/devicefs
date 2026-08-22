@@ -16,8 +16,6 @@
 
 module;
 
-#include <windows.h>
-
 // As a result of an apparent compiler defect, when the below WIL headers are
 // imported (instead of included), MSVC++ is able to find the declaration of
 // `StringValidateDestW` but not the definition of it, even though both the
@@ -32,6 +30,7 @@ import std;
 import <wil/resource.h>;
 import <wil/safecast.h>;
 import <wil/stl.h>;
+import <windows.h>;
 import devicefs.common;
 
 using unique_pseudoconsole = wil::unique_any<

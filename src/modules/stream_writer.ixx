@@ -16,12 +16,11 @@
 
 module;
 
-#include <windows.h>
-#include <intrin.h>
-
 export module devicefs.stream_writer;
 
 import std;
+import <windows.h>;
+import <intrin.h>;
 
 namespace devicefs::stream_writer_detail {
 

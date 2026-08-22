@@ -118,70 +118,97 @@ template <typename String>
 }
 
 template <typename Value>
-struct ReferenceDestination {
-    explicit ReferenceDestination(Value &value) noexcept : value(value) {}
+struct MemberDestination {
+    constexpr explicit MemberDestination(
+        Value BackupConfiguration::*member) noexcept : member(member) {}
 
-    std::reference_wrapper<Value> value;
+    [[nodiscard]] auto Get(
+        BackupConfiguration &configuration) const noexcept -> Value & {
+        return configuration.*member;
+    }
+
+    Value BackupConfiguration::*member;
 };
 
 template <typename String>
-struct WideTextDestination : ReferenceDestination<String> {
-    using ReferenceDestination<String>::ReferenceDestination;
+struct WideTextDestination : MemberDestination<String> {
+    using MemberDestination<String>::MemberDestination;
 
-    static constexpr auto kTemplateValue = std::string_view{"\"\""};
+    [[nodiscard]] static constexpr auto TemplateValue() noexcept {
+        return std::string_view{"\"\""};
+    }
 };
 
 template <typename String>
-struct Utf8TextDestination : ReferenceDestination<String> {
-    using ReferenceDestination<String>::ReferenceDestination;
+WideTextDestination(String BackupConfiguration::*)
+    -> WideTextDestination<String>;
 
-    static constexpr auto kTemplateValue = std::string_view{"\"\""};
+template <typename String>
+struct Utf8TextDestination : MemberDestination<String> {
+    using MemberDestination<String>::MemberDestination;
+
+    [[nodiscard]] static constexpr auto TemplateValue() noexcept {
+        return std::string_view{"\"\""};
+    }
 };
+
+template <typename String>
+Utf8TextDestination(String BackupConfiguration::*)
+    -> Utf8TextDestination<String>;
 
 struct OptionalWideStringDestination :
-    ReferenceDestination<std::optional<std::wstring>> {
-    using ReferenceDestination<
-        std::optional<std::wstring>>::ReferenceDestination;
+    MemberDestination<std::optional<std::wstring>> {
+    using MemberDestination<
+        std::optional<std::wstring>>::MemberDestination;
 
-    static constexpr auto kTemplateValue = std::string_view{"null"};
+    [[nodiscard]] static constexpr auto TemplateValue() noexcept {
+        return std::string_view{"null"};
+    }
 };
 
 struct OptionalUtf8StringDestination :
-    ReferenceDestination<std::u8string> {
-    using ReferenceDestination<std::u8string>::ReferenceDestination;
+    MemberDestination<std::u8string> {
+    using MemberDestination<std::u8string>::MemberDestination;
 
-    static constexpr auto kTemplateValue = std::string_view{"\"\""};
+    [[nodiscard]] static constexpr auto TemplateValue() noexcept {
+        return std::string_view{"\"\""};
+    }
 };
 
-struct OptionalBooleanDestination : ReferenceDestination<bool> {
-    using ReferenceDestination<bool>::ReferenceDestination;
+struct OptionalBooleanDestination : MemberDestination<bool> {
+    using MemberDestination<bool>::MemberDestination;
 
-    static constexpr auto kTemplateValue = std::string_view{"false"};
+    [[nodiscard]] static constexpr auto TemplateValue() noexcept {
+        return std::string_view{"false"};
+    }
 };
 
-struct PortDestination {
-    PortDestination(
-        std::uint16_t &value,
+struct PortDestination : MemberDestination<std::uint16_t> {
+    constexpr PortDestination(
+        std::uint16_t BackupConfiguration::*member,
         const std::uint16_t default_value) noexcept
-        : value(value), default_value(default_value) {}
+        : MemberDestination(member), default_value(default_value) {}
 
-    std::reference_wrapper<std::uint16_t> value;
     std::uint16_t default_value;
 };
 
 struct SerializedJsonObjectDestination :
-    ReferenceDestination<SecureUtf8String> {
-    using ReferenceDestination<SecureUtf8String>::ReferenceDestination;
+    MemberDestination<SecureUtf8String> {
+    using MemberDestination<SecureUtf8String>::MemberDestination;
 
-    static constexpr auto kTemplateValue = std::string_view{"{}"};
+    [[nodiscard]] static constexpr auto TemplateValue() noexcept {
+        return std::string_view{"{}"};
+    }
 };
 
 struct NonemptyWideStringArrayDestination :
-    ReferenceDestination<std::vector<std::wstring>> {
-    using ReferenceDestination<
-        std::vector<std::wstring>>::ReferenceDestination;
+    MemberDestination<std::vector<std::wstring>> {
+    using MemberDestination<
+        std::vector<std::wstring>>::MemberDestination;
 
-    static constexpr auto kTemplateValue = std::string_view{"[]"};
+    [[nodiscard]] static constexpr auto TemplateValue() noexcept {
+        return std::string_view{"[]"};
+    }
 };
 
 struct ConfigurationField;
@@ -201,82 +228,115 @@ using FieldDestination = std::variant<
     ConfigurationFields>;
 
 struct ConfigurationField {
-    ConfigurationField(
+    constexpr ConfigurationField(
         const std::string_view name,
         FieldDestination destination) noexcept
         : name(name), destination(std::move(destination)) {}
+    constexpr ConfigurationField(
+        const ConfigurationField &) = default;
+    constexpr ConfigurationField(
+        ConfigurationField &&) = default;
+    constexpr auto operator=(const ConfigurationField &)
+        -> ConfigurationField & = default;
+    constexpr auto operator=(ConfigurationField &&)
+        -> ConfigurationField & = default;
+    constexpr ~ConfigurationField();
 
     std::string_view name;
     FieldDestination destination;
 };
 
-[[nodiscard]] auto ConfigurationDescription(
-    BackupConfiguration &configuration) {
+// Delay the destructor definition until the recursive ConfigurationFields
+// alternative has a complete element type.
+constexpr ConfigurationField::~ConfigurationField() = default;
+
+[[nodiscard]] constexpr auto ConfigurationDescription() {
     return ConfigurationFields{
         {"windows_account", ConfigurationFields{
             {"username",
-                WideTextDestination{configuration.windows_username}},
+                WideTextDestination{
+                    &BackupConfiguration::windows_username}},
             {"password",
-                WideTextDestination{configuration.windows_password}},
+                WideTextDestination{
+                    &BackupConfiguration::windows_password}},
         }},
         {"wsl", ConfigurationFields{
             {"distribution",
-                WideTextDestination{configuration.wsl_distribution}},
+                WideTextDestination{
+                    &BackupConfiguration::wsl_distribution}},
             {"linux_user",
-                OptionalWideStringDestination{configuration.wsl_linux_user}},
+                OptionalWideStringDestination{
+                    &BackupConfiguration::wsl_linux_user}},
             {"client_path",
-                Utf8TextDestination{configuration.wsl_client_path}},
+                Utf8TextDestination{
+                    &BackupConfiguration::wsl_client_path}},
         }},
         {"pbs", ConfigurationFields{
-            {"server", Utf8TextDestination{configuration.pbs_server}},
-            {"port", PortDestination{configuration.pbs_port, 8007}},
+            {"server", Utf8TextDestination{
+                &BackupConfiguration::pbs_server}},
+            {"port", PortDestination{
+                &BackupConfiguration::pbs_port, 8007}},
             {"datastore",
-                Utf8TextDestination{configuration.pbs_datastore}},
-            {"auth_id", Utf8TextDestination{configuration.pbs_auth_id}},
+                Utf8TextDestination{
+                    &BackupConfiguration::pbs_datastore}},
+            {"auth_id", Utf8TextDestination{
+                &BackupConfiguration::pbs_auth_id}},
             {"namespace",
-                OptionalUtf8StringDestination{configuration.pbs_namespace}},
+                OptionalUtf8StringDestination{
+                    &BackupConfiguration::pbs_namespace}},
             {"parallelize_image_upload", OptionalBooleanDestination{
-                configuration.pbs_parallelize_image_upload}},
+                &BackupConfiguration::pbs_parallelize_image_upload}},
             {"fingerprint",
-                Utf8TextDestination{configuration.pbs_fingerprint}},
+                Utf8TextDestination{
+                    &BackupConfiguration::pbs_fingerprint}},
             {"authentication_secret", Utf8TextDestination{
-                configuration.pbs_authentication_secret}},
+                &BackupConfiguration::pbs_authentication_secret}},
             {"encryption_key", SerializedJsonObjectDestination{
-                configuration.pbs_encryption_key}},
+                &BackupConfiguration::pbs_encryption_key}},
         }},
         {"volumes",
-            NonemptyWideStringArrayDestination{configuration.volumes}},
+            NonemptyWideStringArrayDestination{
+                &BackupConfiguration::volumes}},
     };
 }
 
-auto WriteTemplateFields(
+constexpr auto WriteTemplateFields(
     std::string &output,
     const ConfigurationFields &fields,
     std::size_t indentation) -> void;
 
 template <typename Destination>
 concept FixedTemplateValueDestination = requires {
-    Destination::kTemplateValue;
+    Destination::TemplateValue();
 };
 
 struct TemplateValueWriter {
-    TemplateValueWriter(
+    constexpr TemplateValueWriter(
         std::string &output,
         const std::size_t indentation) noexcept
         : output(output), indentation(indentation) {}
 
     template <FixedTemplateValueDestination Destination>
-    auto operator()(const Destination &) const -> void {
-        output.get().append(Destination::kTemplateValue);
+    constexpr auto operator()(const Destination &) const -> void {
+        output.get().append(Destination::TemplateValue());
     }
 
-    auto operator()(const PortDestination &destination) const -> void {
-        std::format_to(
-            std::back_inserter(output.get()),
-            "{}", destination.default_value);
+    constexpr auto operator()(
+        const PortDestination &destination) const -> void {
+        constexpr auto kMaximumPortTextLength =
+            std::numeric_limits<std::uint16_t>::digits10 + 1;
+        auto buffer = std::array<char, kMaximumPortTextLength>{};
+        const auto converted = std::to_chars(
+            buffer.data(), buffer.data() + buffer.size(),
+            destination.default_value);
+        if (converted.ec != std::errc{}) {
+            std::unreachable();
+        }
+        output.get().append(buffer.data(), converted.ptr);
     }
 
-    auto operator()(const ConfigurationFields &fields) const -> void {
+    constexpr auto operator()(const ConfigurationFields &fields) const
+        -> void {
         WriteTemplateFields(output.get(), fields, indentation);
     }
 
@@ -285,36 +345,42 @@ struct TemplateValueWriter {
 };
 
 struct DefaultFieldReader {
+    explicit DefaultFieldReader(
+        BackupConfiguration &configuration) noexcept
+        : configuration(configuration) {}
+
     template <typename Destination>
-    static auto operator()(const Destination &) noexcept {
+    auto operator()(const Destination &) const noexcept {
         return false;
     }
 
-    static auto operator()(
-        const OptionalWideStringDestination &destination) noexcept {
-        destination.value.get().reset();
+    auto operator()(
+        const OptionalWideStringDestination &destination) const noexcept {
+        destination.Get(configuration.get()).reset();
         return true;
     }
 
-    static auto operator()(
-        const OptionalUtf8StringDestination &destination) noexcept {
-        destination.value.get().clear();
+    auto operator()(
+        const OptionalUtf8StringDestination &destination) const noexcept {
+        destination.Get(configuration.get()).clear();
         return true;
     }
 
-    static auto operator()(
-        const OptionalBooleanDestination &destination) noexcept {
-        destination.value.get() = false;
+    auto operator()(
+        const OptionalBooleanDestination &destination) const noexcept {
+        destination.Get(configuration.get()) = false;
         return true;
     }
 
-    static auto operator()(const PortDestination &destination) noexcept {
-        destination.value.get() = destination.default_value;
+    auto operator()(const PortDestination &destination) const noexcept {
+        destination.Get(configuration.get()) = destination.default_value;
         return true;
     }
+
+    std::reference_wrapper<BackupConfiguration> configuration;
 };
 
-auto WriteTemplateFields(
+constexpr auto WriteTemplateFields(
     std::string &output,
     const ConfigurationFields &fields,
     const std::size_t indentation) -> void {
@@ -322,8 +388,9 @@ auto WriteTemplateFields(
     for (auto index = std::size_t{}; index < fields.size(); ++index) {
         const auto &field = fields[index];
         output.append(indentation + 2, ' ');
-        std::format_to(
-            std::back_inserter(output), "\"{}\": ", field.name);
+        output.push_back('"');
+        output.append(field.name);
+        output.append("\": ");
         std::visit(
             TemplateValueWriter{output, indentation + 2}, field.destination);
         output.append(index + 1 == fields.size() ? "\n" : ",\n");
@@ -333,39 +400,41 @@ auto WriteTemplateFields(
 }
 
 auto ReadFields(
+    BackupConfiguration &configuration,
     const JsonObject &object,
     const ConfigurationFields &fields,
     std::string_view parent) -> void;
 
 struct FieldReader {
     FieldReader(
+        BackupConfiguration &configuration,
         const IJsonValue &value,
         const std::string_view member) noexcept
-        : value(value), member(member) {}
+        : configuration(configuration), value(value), member(member) {}
 
     template <typename String>
     auto operator()(const WideTextDestination<String> &destination) const
         -> void {
-        destination.value.get() =
+        destination.Get(configuration.get()) =
             CopyWide<String>(ReadString(value.get(), member));
     }
 
     template <typename String>
     auto operator()(const Utf8TextDestination<String> &destination) const
         -> void {
-        destination.value.get() =
+        destination.Get(configuration.get()) =
             ToUtf8<String>(ReadString(value.get(), member));
     }
 
     auto operator()(
         const OptionalWideStringDestination &destination) const -> void {
-        destination.value.get() = CopyWide<std::wstring>(
+        destination.Get(configuration.get()) = CopyWide<std::wstring>(
             ReadString(value.get(), member));
     }
 
     auto operator()(
         const OptionalUtf8StringDestination &destination) const -> void {
-        destination.value.get() = ToUtf8<std::u8string>(
+        destination.Get(configuration.get()) = ToUtf8<std::u8string>(
             ReadString(value.get(), member));
     }
 
@@ -375,7 +444,7 @@ struct FieldReader {
         if (json_value.ValueType() != JsonValueType::Boolean) {
             ConfigurationError(member, "must be a boolean");
         }
-        destination.value.get() = json_value.GetBoolean();
+        destination.Get(configuration.get()) = json_value.GetBoolean();
     }
 
     auto operator()(const PortDestination &destination) const -> void {
@@ -396,7 +465,7 @@ struct FieldReader {
         [[gsl::suppress("type.1",
             justification: "The preceding range and integrality checks prove that the JSON number fits the port field.")]]
         const auto port = static_cast<std::uint16_t>(number);
-        destination.value.get() = port;
+        destination.Get(configuration.get()) = port;
     }
 
     auto operator()(
@@ -405,7 +474,7 @@ struct FieldReader {
         if (json_value.ValueType() != JsonValueType::Object) {
             ConfigurationError(member, "must be an object");
         }
-        destination.value.get() = ToUtf8<SecureUtf8String>(
+        destination.Get(configuration.get()) = ToUtf8<SecureUtf8String>(
             json_value.GetObject().Stringify());
     }
 
@@ -425,7 +494,7 @@ struct FieldReader {
                 ConfigurationError(member,
                     "must not contain an empty string");
             }
-            destination.value.get().emplace_back(
+            destination.Get(configuration.get()).emplace_back(
                 text.begin(), text.end());
         }
     }
@@ -435,14 +504,17 @@ struct FieldReader {
         if (json_value.ValueType() != JsonValueType::Object) {
             ConfigurationError(member, "must be an object");
         }
-        ReadFields(json_value.GetObject(), fields, member);
+        ReadFields(
+            configuration.get(), json_value.GetObject(), fields, member);
     }
 
+    std::reference_wrapper<BackupConfiguration> configuration;
     std::reference_wrapper<const IJsonValue> value;
     std::string_view member;
 };
 
 auto ReadFields(
+    BackupConfiguration &configuration,
     const JsonObject &object,
     const ConfigurationFields &fields,
     const std::string_view parent) -> void {
@@ -464,17 +536,20 @@ auto ReadFields(
         const auto member = member_path(field.name);
         const auto name = winrt::to_hstring(field.name);
         if (!object.HasKey(name)) {
-            if (std::visit(DefaultFieldReader{}, field.destination)) {
+            if (std::visit(
+                    DefaultFieldReader{configuration}, field.destination)) {
                 continue;
             }
             ConfigurationError(member, "is required");
         }
         const auto value = object.GetNamedValue(name);
         if ((value.ValueType() == JsonValueType::Null) &&
-            std::visit(DefaultFieldReader{}, field.destination)) {
+            std::visit(
+                DefaultFieldReader{configuration}, field.destination)) {
             continue;
         }
-        std::visit(FieldReader{value, member}, field.destination);
+        std::visit(
+            FieldReader{configuration, value, member}, field.destination);
     }
 }
 
@@ -498,8 +573,8 @@ auto ReadFields(
         std::string_view{source.data(), source.size()});
     const auto root = JsonObject::Parse(document);
     auto result = BackupConfiguration{};
-    const auto fields = ConfigurationDescription(result);
-    ReadFields(root, fields, {});
+    const auto fields = ConfigurationDescription();
+    ReadFields(result, root, fields, {});
     if (!result.wsl_client_path.starts_with(u8'/')) {
         ConfigurationError(
             "wsl.client_path", "must be an absolute Linux path");
@@ -507,14 +582,21 @@ auto ReadFields(
     return result;
 }
 
-} // namespace
-
-export [[nodiscard]] auto GenerateConfigurationTemplate() {
-    auto configuration = BackupConfiguration{};
-    const auto fields = ConfigurationDescription(configuration);
+[[nodiscard]] consteval auto GenerateConfigurationTemplateText() {
+    const auto fields = ConfigurationDescription();
     auto result = std::string{};
     WriteTemplateFields(result, fields, 0);
     result.push_back('\n');
+    return result;
+}
+
+} // namespace
+
+export [[nodiscard]] consteval auto GenerateConfigurationTemplate() {
+    constexpr auto size = GenerateConfigurationTemplateText().size();
+    const auto text = GenerateConfigurationTemplateText();
+    auto result = std::array<char, size>{};
+    std::ranges::copy(text, result.begin());
     return result;
 }
 

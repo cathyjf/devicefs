@@ -29,7 +29,6 @@ module;
 #include <wil/safecast.h>
 #include <wil/stl.h>
 
-#include <climits>
 #include <cstddef>
 
 export module devicefs.filesystem;
@@ -286,6 +285,7 @@ _Success_(return == ERROR_SUCCESS)
 }
 
 constexpr auto kVolumeBitmapHeaderSize = offsetof(VOLUME_BITMAP_BUFFER, Buffer);
+constexpr auto kBitsPerByte = std::numeric_limits<BYTE>::digits;
 
 struct AllocationBitmap {
     UINT32 cluster_size = 0;
@@ -300,8 +300,8 @@ struct AllocationBitmap {
         if (cluster >= cluster_count) {
             return true;
         }
-        return (storage.get()[kVolumeBitmapHeaderSize + cluster / CHAR_BIT] &
-            (1u << (cluster % CHAR_BIT))) != 0;
+        return (storage.get()[kVolumeBitmapHeaderSize + cluster / kBitsPerByte] &
+            (1u << (cluster % kBitsPerByte))) != 0;
     }
 
     [[nodiscard]] auto HasAllocatedClusters(
@@ -409,7 +409,8 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
     }
 
     const auto bitmap_bytes =
-        cluster_count / CHAR_BIT + ((cluster_count % CHAR_BIT) != 0);
+        cluster_count / kBitsPerByte +
+        ((cluster_count % kBitsPerByte) != 0);
     const auto bitmap_data_size = kVolumeBitmapHeaderSize + bitmap_bytes;
     const auto output_size = std::max(sizeof(VOLUME_BITMAP_BUFFER), bitmap_data_size);
     if (!std::in_range<DWORD>(output_size)) {

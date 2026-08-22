@@ -18,8 +18,6 @@ module;
 
 #include <windows.h>
 
-#include <climits>
-
 export module devicefs.filesystem_measurement;
 
 import std;
@@ -27,18 +25,20 @@ import <wil/stl.h>;
 import devicefs.stream_writer;
 
 export class FreeClusterMeasurement {
+    static constexpr auto kBitsPerByte =
+        std::numeric_limits<unsigned char>::digits;
     static constexpr auto kClustersPerClaimWord =
-        sizeof(std::uint64_t) * CHAR_BIT;
+        sizeof(std::uint64_t) * kBitsPerByte;
 
     [[nodiscard]] static auto CountFreeClusters(
         const std::span<const unsigned char> bitmap,
         const std::uint64_t cluster_count) noexcept {
         auto allocated_clusters = std::uint64_t{};
-        const auto full_bytes = cluster_count / CHAR_BIT;
+        const auto full_bytes = cluster_count / kBitsPerByte;
         for (auto i = 0uz; i < full_bytes; ++i) {
             allocated_clusters += std::popcount(bitmap[i]);
         }
-        const auto remaining_bits = cluster_count % CHAR_BIT;
+        const auto remaining_bits = cluster_count % kBitsPerByte;
         if (remaining_bits != 0) {
             const auto mask = (1u << remaining_bits) - 1;
             allocated_clusters += std::popcount(bitmap[full_bytes] & mask);
@@ -50,8 +50,8 @@ export class FreeClusterMeasurement {
         if (cluster >= cluster_count_) {
             return true;
         }
-        return (bitmap_[cluster / CHAR_BIT] &
-            (1u << (cluster % CHAR_BIT))) != 0;
+        return (bitmap_[cluster / kBitsPerByte] &
+            (1u << (cluster % kBitsPerByte))) != 0;
     }
 
     [[nodiscard]] auto Claim(const std::uint64_t cluster) noexcept {

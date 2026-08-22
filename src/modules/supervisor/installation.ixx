@@ -192,9 +192,10 @@ auto CreateConfigurationTemplate(
         file.reset();
         static_cast<void>(DeleteFileW(path.c_str()));
     });
-    const auto configuration_template = GenerateConfigurationTemplate();
-    const auto size =
-        wil::safe_cast_failfast<DWORD>(configuration_template.size());
+    constexpr auto configuration_template = GenerateConfigurationTemplate();
+    [[gsl::suppress("type.4",
+        justification: "Braced initialization proves this construction safe at compile time.")]]
+    constexpr auto size = DWORD{configuration_template.size()};
     auto written = DWORD{};
     if (!WriteFile(file.get(), configuration_template.data(), size,
             &written, nullptr)) {

@@ -507,7 +507,7 @@ struct ForegroundOptions {
     return result;
 }
 
-[[nodiscard]] auto ParsePrintManifestOptions(
+[[nodiscard]] auto ParseQueryManifestOptions(
     const std::span<const wchar_t *const> arguments)
     -> std::optional<std::u8string> {
     if (arguments.empty()) {
@@ -516,7 +516,7 @@ struct ForegroundOptions {
     if ((arguments.size() != 2) ||
         (std::wstring_view{arguments[0]} != L"--namespace")) {
         throw std::invalid_argument(
-            "--print-manifest accepts only --namespace NAMESPACE");
+            "--query-manifest accepts only --namespace NAMESPACE");
     }
     return std::filesystem::path{arguments[1]}.u8string();
 }
@@ -547,10 +547,10 @@ struct ForegroundOptions {
         });
 }
 
-[[nodiscard]] auto RunPrintManifest(
+[[nodiscard]] auto RunQueryManifest(
     std::optional<std::u8string> namespace_override) {
     const auto [input, console_mode] = GetForegroundConsoleInput(
-        "--print-manifest requires an attached console");
+        "--query-manifest requires an attached console");
     return RunForegroundOperation(
         input, console_mode,
         [namespace_override = std::move(namespace_override)](
@@ -567,6 +567,33 @@ struct ForegroundOptions {
                     std::cout, result->manifest)) {
                 throw std::runtime_error(
                     "could not write the previous backup manifest");
+            }
+
+            const auto snapshot_volumes =
+                result->ParseManifest().QuerySnapshotVolumes();
+            auto &output = devicefs::WriteToStream(
+                std::cout, "\n\nValidated snapshots still available:\n");
+            if (snapshot_volumes.empty()) {
+                devicefs::WriteToStream(output, "  (none)\n");
+            }
+            for (const auto &[volume_identifier, snapshot] :
+                snapshot_volumes) {
+                const auto volume_identifier_text =
+                    winrt::to_hstring(volume_identifier);
+                const auto snapshot_identifier_text =
+                    winrt::to_hstring(snapshot.snapshot_identifier);
+                devicefs::WriteToStream(
+                    output,
+                    L"  Volume ID: {}\n"
+                    L"    Snapshot ID: {}\n"
+                    L"    Device: {}\n",
+                    std::wstring_view{volume_identifier_text},
+                    std::wstring_view{snapshot_identifier_text},
+                    snapshot.device);
+            }
+            if (!output) {
+                throw std::runtime_error(
+                    "could not write the available VSS snapshots");
             }
             return 0;
         });
@@ -614,7 +641,7 @@ auto PrintHelp() noexcept {
         "[--namespace NAMESPACE] "
         "[--volumes VOLUME[,VOLUME...]]\n"
         "      --namespace and --volumes override configured values.\n"
-        "  backup-supervisor.exe --print-manifest "
+        "  backup-supervisor.exe --query-manifest "
         "[--namespace NAMESPACE]\n"
         "  backup-supervisor.exe --install-service [--update]\n"
         "  backup-supervisor.exe --run-service\n");
@@ -657,9 +684,9 @@ auto wmain(
             return RunNativeBackup(
                 cancellation_event.get(), false, {}, std::nullopt);
         }
-        if (option == L"--print-manifest") {
-            return RunPrintManifest(
-                ParsePrintManifestOptions(arguments.subspan(1)));
+        if (option == L"--query-manifest") {
+            return RunQueryManifest(
+                ParseQueryManifestOptions(arguments.subspan(1)));
         }
         if (option == L"--install-service") {
             if (arguments.size() == 1) {

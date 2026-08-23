@@ -144,11 +144,8 @@ auto TryWriteError(
     auto id = GUID{};
     const auto error = CoCreateGuid(&id);
     if (FAILED(error)) {
-        // HRESULT_CODE returns the Win32-sized error code carried by the HRESULT.
-        const auto win32_error =
-            wil::safe_cast_failfast<DWORD>(HRESULT_CODE(error));
         WinError("could not create a unique backup identifier",
-            ExplicitWin32Error{win32_error});
+            ExplicitWin32Error::FromHresult(error));
     }
     return std::format(
         L"{:08x}{:04x}{:04x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",

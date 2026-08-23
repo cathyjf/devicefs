@@ -100,17 +100,14 @@ constexpr auto kPrivateFileSecurity = wil::zwstring_view(
         wil::unique_couninitialize_call(SUCCEEDED(com_error));
     if ((FAILED(com_error)) && (com_error != RPC_E_CHANGED_MODE)) {
         WinError("could not initialize COM before resolving the {} path",
-            description,
-            ExplicitWin32Error{
-                wil::safe_cast_failfast<DWORD>(HRESULT_CODE(com_error))});
+            description, ExplicitWin32Error::FromHresult(com_error));
     }
     auto result = wil::unique_cotaskmem_string{};
     const auto error = SHGetKnownFolderPath(
         identifier, KF_FLAG_DEFAULT, nullptr, result.addressof());
     if (FAILED(error)) {
         WinError("could not obtain the {} path", description,
-            ExplicitWin32Error{
-                wil::safe_cast_failfast<DWORD>(HRESULT_CODE(error))});
+            ExplicitWin32Error::FromHresult(error));
     }
     return std::filesystem::path(result.get());
 }
@@ -250,8 +247,7 @@ export [[nodiscard]] auto CurrentExecutablePath() {
     const auto error = wil::GetModuleFileNameW(nullptr, result);
     if (FAILED(error)) {
         WinError("could not obtain the backup supervisor path",
-            ExplicitWin32Error{
-                wil::safe_cast_failfast<DWORD>(HRESULT_CODE(error))});
+            ExplicitWin32Error::FromHresult(error));
     }
     return std::filesystem::path(std::move(result));
 }

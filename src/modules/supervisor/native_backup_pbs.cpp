@@ -187,8 +187,7 @@ class ProfilePrivilegeEnabler {
         &result, nullptr, SECURITY_NT_AUTHORITY, SECURITY_LOCAL_SYSTEM_RID);
     if (FAILED(error)) {
         WinError("could not identify the backup-supervisor account",
-            ExplicitWin32Error{
-                wil::safe_cast_failfast<DWORD>(HRESULT_CODE(error))});
+            ExplicitWin32Error::FromHresult(error));
     }
     return result;
 }

@@ -65,9 +65,7 @@ auto ThrowIfFileInfoFailed(
     if (SUCCEEDED(error)) {
         return;
     }
-    WinError("{}", operation,
-        ExplicitWin32Error{
-            wil::safe_cast_failfast<DWORD>(HRESULT_CODE(error))});
+    WinError("{}", operation, ExplicitWin32Error::FromHresult(error));
 }
 
 class SviExtentReader {

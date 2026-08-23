@@ -23,6 +23,16 @@ import <windows.h>;
 
 export struct ExplicitWin32Error final {
     DWORD value;
+
+    [[nodiscard]] static constexpr auto FromHresult(const HRESULT hr) {
+        [[gsl::suppress("26472",
+            justification:
+                "The definition of HRESULT_CODE ensures that the result will "
+                "always fit in a DWORD. `static_cast` is used here instead "
+                "of `wil::safe_cast_failfast` because this translation unit "
+                "does not otherwise depend on WIL.")]]
+        return ExplicitWin32Error{static_cast<DWORD>(HRESULT_CODE(hr))};
+    }
 };
 
 namespace detail {

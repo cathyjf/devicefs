@@ -31,6 +31,12 @@ struct Snapshot {
     std::wstring device;
 };
 
+struct SnapshotProperties {
+    GUID snapshot_set_identifier{};
+    std::wstring original_volume;
+    std::wstring device;
+};
+
 struct SnapshotSet {
     GUID identifier{};
     std::vector<Snapshot> snapshots;
@@ -45,6 +51,27 @@ class OperationError : public std::runtime_error {
 
 namespace {
 
+class VssClientOwner final : private VssClient {
+  public:
+    template <typename... Arguments>
+        requires(sizeof...(Arguments) > 0)
+    [[gsl::suppress("26455",
+        justification:
+            "VssClientOwner does not have a default constructor. This variadic "
+            "constructor requires at least one argument, but the analyzer "
+            "incorrectly classifies it as a default constructor.")]]
+    explicit VssClientOwner(Arguments &&...arguments) {
+        Initialize(std::forward<Arguments>(arguments)...);
+    }
+
+    using VssClient::BackupComplete;
+    using VssClient::CompleteFailedBackup;
+    using VssClient::CreateSnapshotSet;
+    using VssClient::GetLatestSnapshotDevices;
+    using VssClient::GetSnapshotProperties;
+    using VssClient::TryDeleteCreatedSnapshotSet;
+};
+
 class Backup {
     enum class Completion {
         None,
@@ -54,11 +81,10 @@ class Backup {
 
   public:
     Backup(const HANDLE cancellation_event, const bool use_writers)
-        : use_writers_{use_writers} {
-        client_.Initialize(
-            use_writers ? VSS_CTX_APP_ROLLBACK : VSS_CTX_NAS_ROLLBACK,
-            L"", false, cancellation_event);
-    }
+        : client_{
+              use_writers ? VSS_CTX_APP_ROLLBACK : VSS_CTX_NAS_ROLLBACK,
+              L"", false, cancellation_event},
+          use_writers_{use_writers} {}
 
     Backup(const Backup &) = delete;
     auto operator=(const Backup &) -> Backup & = delete;
@@ -138,7 +164,7 @@ class Backup {
         }
     }
 
-    VssClient client_;
+    VssClientOwner client_;
     const bool use_writers_;
     Completion completion_ = Completion::None;
 };
@@ -156,6 +182,36 @@ class Backup {
 } // namespace
 
 export namespace devicefs::vshadow {
+
+[[nodiscard]] auto QuerySnapshotProperties(
+    const std::span<const GUID> snapshot_identifiers)
+    -> std::vector<std::optional<SnapshotProperties>> {
+    auto result = std::vector<std::optional<SnapshotProperties>>(
+        snapshot_identifiers.size());
+    try {
+        auto client = VssClientOwner{VSS_CTX_ALL};
+        for (auto &&[identifier, properties] :
+            std::views::zip(snapshot_identifiers, result)) {
+            try {
+                auto snapshot_set_identifier = GUID{};
+                auto original_volume = std::wstring{};
+                auto device = std::wstring{};
+                client.GetSnapshotProperties(identifier,
+                    snapshot_set_identifier, original_volume, device);
+                properties = SnapshotProperties{
+                    .snapshot_set_identifier = snapshot_set_identifier,
+                    .original_volume = std::move(original_volume),
+                    .device = std::move(device),
+                };
+            } catch (const HRESULT) {
+                // One unavailable old snapshot does not affect the others.
+            }
+        }
+    } catch (const HRESULT) {
+        // Initialization failure leaves no old snapshot properties.
+    }
+    return result;
+}
 
 [[nodiscard]] auto Run(
     const HANDLE cancellation_event,

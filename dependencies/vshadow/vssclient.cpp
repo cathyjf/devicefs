@@ -36,6 +36,7 @@
 
 // Main header
 #include "shadow.h"
+#include <mutex>
 
 
 
@@ -76,18 +77,21 @@ void VssClient::Initialize(DWORD dwContext, wstring xmlDoc, bool bDuringRestore,
     m_bCoInitializeCalled = true;
 
     // Initialize COM security
-    CHECK_COM( 
-        CoInitializeSecurity(
-            NULL,                           //  Allow *all* VSS writers to communicate back!
-            -1,                             //  Default COM authentication service
-            NULL,                           //  Default COM authorization service
-            NULL,                           //  reserved parameter
-            RPC_C_AUTHN_LEVEL_PKT_PRIVACY,  //  Strongest COM authentication level
-            RPC_C_IMP_LEVEL_IMPERSONATE,    //  Minimal impersonation abilities 
-            NULL,                           //  Default COM authentication settings
-            EOAC_DYNAMIC_CLOAKING,          //  Cloaking
-            NULL                            //  Reserved parameter
-            ) );
+    static auto security_once = std::once_flag{};
+    std::call_once(security_once, [&ft] {
+        CHECK_COM(
+            CoInitializeSecurity(
+                NULL,                           //  Allow *all* VSS writers to communicate back!
+                -1,                             //  Default COM authentication service
+                NULL,                           //  Default COM authorization service
+                NULL,                           //  reserved parameter
+                RPC_C_AUTHN_LEVEL_PKT_PRIVACY,  //  Strongest COM authentication level
+                RPC_C_IMP_LEVEL_IMPERSONATE,    //  Minimal impersonation abilities
+                NULL,                           //  Default COM authentication settings
+                EOAC_DYNAMIC_CLOAKING,          //  Cloaking
+                NULL                            //  Reserved parameter
+                ) );
+    });
 
     // Create the internal backup components object
     CHECK_COM( CreateVssBackupComponents(&m_pVssObject) );

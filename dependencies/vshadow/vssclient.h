@@ -110,7 +110,11 @@ public:
     void QuerySnapshotSet(VSS_ID snapshotSetID);
 
     // Query the properties of the given shadow copy
-    void GetSnapshotProperties(VSS_ID snapshotID);
+    void GetSnapshotProperties(
+        VSS_ID snapshotID,
+        VSS_ID &snapshotSetID,
+        wstring &originalVolumeName,
+        wstring &snapshotDeviceObject);
 
     // Print the properties for the given snasphot
     void PrintSnapshotProperties(VSS_SNAPSHOT_PROP & prop);

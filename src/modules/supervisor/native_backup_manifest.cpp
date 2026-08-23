@@ -42,8 +42,17 @@ export struct PreviousBackupManifestResult {
                 return std::memcmp(&left, &right, sizeof(GUID)) < 0;
             });
 
+        struct SnapshotVolume {
+            GUID snapshot_identifier{};
+            std::wstring device;
+        };
+
+        using SnapshotVolumes = std::map<GUID, SnapshotVolume, GuidLess>;
+
         GUID snapshot_set_identifier{};
         std::map<GUID, GUID, GuidLess> volumes;
+
+        [[nodiscard]] auto QuerySnapshotVolumes() const -> SnapshotVolumes;
     };
 
     [[nodiscard]] auto ParseManifest() const -> SnapshotManifest;
@@ -173,6 +182,56 @@ auto PreviousBackupManifestResult::ParseManifest() const
         throw std::runtime_error(
             "the Windows Runtime failed while parsing the backup manifest");
     }
+}
+
+auto PreviousBackupManifestResult::SnapshotManifest::QuerySnapshotVolumes() const
+    -> SnapshotVolumes {
+    const auto snapshot_identifiers = volumes |
+        std::views::values |
+        std::ranges::to<std::vector<GUID>>();
+    auto snapshot_properties =
+        devicefs::vshadow::QuerySnapshotProperties(snapshot_identifiers);
+    const auto parse_volume_identifier = [](
+        const std::wstring &volume) -> std::optional<GUID> {
+        constexpr auto prefix = std::wstring_view{LR"(\\?\Volume)"};
+        if (!volume.starts_with(prefix) || !volume.ends_with(L'\\')) {
+            return std::nullopt;
+        }
+        const auto identifier = volume.substr(
+            prefix.size(), volume.size() - prefix.size() - 1);
+        auto result = GUID{};
+        if (IIDFromString(
+                wil::zwstring_view{identifier}.c_str(), &result) != S_OK) {
+            return std::nullopt;
+        }
+        return result;
+    };
+
+    auto result = SnapshotVolumes{};
+    for (auto &&[volume, properties] :
+        std::views::zip(volumes, snapshot_properties)) {
+        const auto &[volume_identifier, snapshot_identifier] = volume;
+        if (!properties ||
+            (InlineIsEqualGUID(
+                properties->snapshot_set_identifier,
+                snapshot_set_identifier) == FALSE)) {
+            continue;
+        }
+        const auto original_volume_identifier =
+            parse_volume_identifier(properties->original_volume);
+        if (!original_volume_identifier ||
+            (InlineIsEqualGUID(
+                *original_volume_identifier, volume_identifier) == FALSE)) {
+            continue;
+        }
+        result.emplace(
+            volume_identifier,
+            SnapshotVolume{
+                .snapshot_identifier = snapshot_identifier,
+                .device = std::move(properties->device),
+            });
+    }
+    return result;
 }
 
 export [[nodiscard]] auto RetrievePreviousBackupManifest(

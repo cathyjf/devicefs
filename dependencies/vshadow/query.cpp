@@ -91,19 +91,24 @@ void VssClient::QuerySnapshotSet(VSS_ID snapshotSetID)
 
 
 // Query the properties of the given shadow copy
-void VssClient::GetSnapshotProperties(VSS_ID snapshotID)
+void VssClient::GetSnapshotProperties(
+    VSS_ID snapshotID,
+    VSS_ID &snapshotSetID,
+    wstring &originalVolumeName,
+    wstring &snapshotDeviceObject)
 {
     FunctionTracer ft(DBG_INFO);
 
     // Get the shadow copy properties
-    VSS_SNAPSHOT_PROP Snap;
+    auto Snap = VSS_SNAPSHOT_PROP{};
     CHECK_COM(m_pVssObject->GetSnapshotProperties(snapshotID, &Snap));
 
     // Automatically call VssFreeSnapshotProperties on this structure at the end of scope
     CAutoSnapPointer snapAutoCleanup(&Snap);
 
-    // Print the properties of this shadow copy 
-    PrintSnapshotProperties(Snap);
+    snapshotSetID = Snap.m_SnapshotSetId;
+    originalVolumeName = Snap.m_pwszOriginalVolumeName;
+    snapshotDeviceObject = Snap.m_pwszSnapshotDeviceObject;
 }
 
 

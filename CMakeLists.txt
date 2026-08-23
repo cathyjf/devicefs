@@ -89,6 +89,7 @@ target_link_libraries(devicefs-filesystem PRIVATE devicefs-common)
 
 add_library(devicefs-vss-block-descriptors STATIC)
 target_module_interfaces(devicefs-vss-block-descriptors PUBLIC
+    src/modules/svi_extents.ixx
     src/modules/vss_block_descriptors.ixx
 )
 target_link_libraries(devicefs-vss-block-descriptors PRIVATE devicefs-common)

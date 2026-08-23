@@ -20,6 +20,7 @@
 import std;
 import <sal.h>;
 import devicefs.common;
+import devicefs.svi_extents;
 import devicefs.stream_writer;
 import devicefs.vss_block_descriptors;
 
@@ -28,18 +29,21 @@ namespace {
 struct Options {
     std::wstring_view source;
     std::wstring_view snapshot_identifier;
+    bool svi_extents = false;
     bool help = false;
 };
 
 auto Usage(std::ostream &output) noexcept {
     devicefs::WriteToStream(
         output,
-        "Usage: vss-descriptor-dump --source SOURCE --snapshot-id GUID\n\n"
-        "Read one VSS store's raw block descriptors from an NTFS volume or "
-        "flat volume image.\n\n"
+        "Usage: vss-descriptor-dump --source SOURCE --snapshot-id GUID\n"
+        "       vss-descriptor-dump --source SNAPSHOT --svi-extents\n\n"
+        "Read one VSS store's raw block descriptors or the allocated "
+        "System Volume Information extents of a snapshot.\n\n"
         "Options:\n"
-        "  --source SOURCE       Live volume path or flat raw-volume image\n"
+        "  --source SOURCE       Volume, snapshot device, or flat volume image\n"
         "  --snapshot-id GUID    Shadow-copy identifier to select\n"
+        "  --svi-extents         Print allocated SVI block offsets\n"
         "  -h, --help            Show this help\n");
 }
 
@@ -62,15 +66,26 @@ auto Usage(std::ostream &output) noexcept {
             result.source = next(index);
         } else if (argument == L"--snapshot-id") {
             result.snapshot_identifier = next(index);
+        } else if (argument == L"--svi-extents") {
+            result.svi_extents = true;
         } else {
             throw std::invalid_argument(std::format(
                 "unknown option at argument {}", index + 1));
         }
     }
-    if (!result.help &&
-        (result.source.empty() || result.snapshot_identifier.empty())) {
+    if (result.help) {
+        return result;
+    }
+    if (result.source.empty()) {
+        throw std::invalid_argument("--source is required");
+    }
+    if (result.snapshot_identifier.empty() && !result.svi_extents) {
         throw std::invalid_argument(
-            "--source and --snapshot-id are required");
+            "--snapshot-id or --svi-extents is required");
+    }
+    if (!result.snapshot_identifier.empty() && result.svi_extents) {
+        throw std::invalid_argument(
+            "--snapshot-id and --svi-extents cannot be combined");
     }
     return result;
 }
@@ -130,14 +145,28 @@ auto Usage(std::ostream &output) noexcept {
     return output;
 }
 
+[[nodiscard]] auto FormatSviExtents(
+    const std::set<std::uint64_t> &offsets) {
+    auto output = std::format(
+        "schema-version\t1\n"
+        "block-size\t{}\n"
+        "block-count\t{}\n",
+        devicefs::vss::kBlockSize, offsets.size());
+    for (const auto offset : offsets) {
+        std::format_to(
+            std::back_inserter(output), "block\t{:016x}\n", offset);
+    }
+    return output;
+}
+
 auto WriteOutput(const std::string_view output) {
     auto &stream = devicefs::WriteToStream(std::cout, "{}", output);
     if (!stream) {
-        throw std::runtime_error("could not write descriptor output");
+        throw std::runtime_error("could not write output");
     }
     stream.flush();
     if (!stream) {
-        throw std::runtime_error("could not flush descriptor output");
+        throw std::runtime_error("could not flush output");
     }
 }
 
@@ -145,6 +174,12 @@ auto Run(const std::span<const wchar_t *const> arguments) {
     const auto options = ParseOptions(arguments);
     if (options.help) {
         Usage(std::cout);
+        return 0;
+    }
+    if (options.svi_extents) {
+        const auto offsets =
+            devicefs::svi::ReadBlockOffsets(options.source);
+        WriteOutput(FormatSviExtents(offsets));
         return 0;
     }
     const auto snapshot_identifier = ParseGuid(options.snapshot_identifier);

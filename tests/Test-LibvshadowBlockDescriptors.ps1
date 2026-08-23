@@ -30,8 +30,8 @@ C makes it no longer latest, as well as from C while C is latest.
 The test must run elevated under an account whose token contains
 SeBackupPrivilege. It temporarily enables that privilege while natively
 enumerating System Volume Information and querying those extents, then restores
-the token's prior privilege state. Named streams of reparse points are not
-queried, and reparse targets are not followed.
+the token's prior privilege state. Reparse-point objects and their named data
+streams are included, but reparse targets are not followed.
 
 For each snapshot store, the descriptor set includes the 16 KiB block
 containing every in-range original and store-data offset, plus each forwarder's
@@ -253,14 +253,53 @@ function Get-TreeBlockOffsets {
     $blocks = [Collections.Generic.HashSet[long]]::new()
     $objects = @([DeviceFsTestNative]::EnumerateTreeObjects($Root))
     foreach ($object in $objects) {
-        $is_reparse_point = (($object.Attributes -band
-                [IO.FileAttributes]::ReparsePoint) -ne 0)
         $object_blocks = Get-ObjectBlockOffsets $object.FullName $Bitmap `
-            $BlockSize (-not $is_reparse_point)
+            $BlockSize $true
         foreach ($offset in $object_blocks) {
             $null = $blocks.Add($offset)
         }
     }
+    return ,$blocks
+}
+
+function ConvertFrom-SviExtentDumpOutput {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string] $Output,
+
+        [Parameter(Mandatory)]
+        [int] $ExpectedBlockSize
+    )
+
+    $header_pattern = (
+        '\Aschema-version\t1\r?\n' +
+        'block-size\t(?<size>[0-9]+)\r?\n' +
+        'block-count\t(?<count>[0-9]+)\r?\n')
+    Assert-Condition ($Output -match $header_pattern) `
+        'the SVI extent reader printed an invalid header.'
+    $header = $Matches
+    Assert-Condition (
+        [Convert]::ToUInt64($header['size']) -eq $ExpectedBlockSize) `
+        'the SVI extent reader reported an unexpected block size.'
+
+    $blocks = [Collections.Generic.HashSet[long]]::new()
+    $block_output = $Output.Substring($header[0].Length)
+    foreach ($line in $block_output -split '\r?\n') {
+        if ($line.Length -eq 0) {
+            continue
+        }
+        Assert-Condition ($line -match '^block\t([0-9a-f]{16})$') `
+            "the SVI extent reader printed an unexpected line: $line"
+        $offset = [Convert]::ToUInt64($Matches[1], 16)
+        Assert-Condition ($offset -le [long]::MaxValue) `
+            'the SVI extent reader printed an out-of-range block offset.'
+        Assert-Condition ($blocks.Add([long]$offset)) `
+            'the SVI extent reader printed a duplicate block offset.'
+    }
+    Assert-Condition (
+        [uint64]$blocks.Count -eq [Convert]::ToUInt64($header['count'])) `
+        'the SVI extent reader block count did not match its output.'
     return ,$blocks
 }
 
@@ -900,6 +939,57 @@ try {
     $svi_blocks_c = Get-TreeBlockOffsets `
         "$($snapshot_c.DeviceObject)\$svi_relative_path" `
         $bitmap_c $vss_block_size
+    if ($use_descriptor_dump) {
+        $svi_failures = [Collections.Generic.List[string]]::new()
+        foreach ($endpoint in @(
+                [pscustomobject]@{
+                    Name = 'A'
+                    Device = $snapshot_a.DeviceObject
+                    Expected = $svi_blocks_a
+                },
+                [pscustomobject]@{
+                    Name = 'B'
+                    Device = $snapshot_b.DeviceObject
+                    Expected = $svi_blocks_b
+                },
+                [pscustomobject]@{
+                    Name = 'C'
+                    Device = $snapshot_c.DeviceObject
+                    Expected = $svi_blocks_c
+                })) {
+            $name = $endpoint.Name.ToLowerInvariant()
+            $stdout = [IO.Path]::Combine(
+                $test_root, "svi-extents-$name.stdout.txt")
+            $stderr = [IO.Path]::Combine(
+                $test_root, "svi-extents-$name.stderr.txt")
+            & $VssDescriptorDumpPath --source $endpoint.Device `
+                --svi-extents >$stdout 2>$stderr
+            $exit_code = $LASTEXITCODE
+            if ($exit_code -ne 0) {
+                $error_text = ([IO.File]::ReadAllText($stderr) -replace
+                    '\r?\n', ' ').Trim()
+                $svi_failures.Add(
+                    "snapshot $($endpoint.Name) exited $exit_code`: " +
+                    $error_text)
+                continue
+            }
+            try {
+                $actual = ConvertFrom-SviExtentDumpOutput `
+                    ([IO.File]::ReadAllText($stdout)) $vss_block_size
+                if (-not $actual.SetEquals($endpoint.Expected)) {
+                    $svi_failures.Add(
+                        "snapshot $($endpoint.Name) returned different " +
+                        'block offsets')
+                }
+            } catch {
+                $svi_failures.Add(
+                    "snapshot $($endpoint.Name): $($_.Exception.Message)")
+            }
+        }
+        Assert-Condition ($svi_failures.Count -eq 0) (
+            'C++ SVI extent reader parity failed: ' +
+            ($svi_failures -join '; '))
+    }
     $backup_privilege.Dispose()
     $backup_privilege = $null
     Assert-Condition (

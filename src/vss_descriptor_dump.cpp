@@ -18,6 +18,7 @@
 #include <objbase.h>
 
 import std;
+import <boost/program_options.hpp>;
 import <sal.h>;
 import devicefs.common;
 import devicefs.stream_writer;
@@ -25,54 +26,56 @@ import devicefs.vss_block_descriptors;
 
 namespace {
 
+namespace program_options = boost::program_options;
+
 struct Options {
-    std::wstring_view source;
-    std::wstring_view snapshot_identifier;
+    std::wstring source;
+    std::wstring snapshot_identifier;
     bool help = false;
 };
 
-auto Usage(std::ostream &output) noexcept {
-    devicefs::WriteToStream(
-        output,
-        "Usage: vss-descriptor-dump --source SOURCE --snapshot-id GUID\n\n"
+[[nodiscard]] auto CommandLineDescription() {
+    auto result = program_options::options_description{
         "Read one VSS store's raw block descriptors from an NTFS volume or "
-        "flat volume image.\n\n"
-        "Options:\n"
-        "  --source SOURCE       Live volume path or flat raw-volume image\n"
-        "  --snapshot-id GUID    Shadow-copy identifier to select\n"
-        "  -h, --help            Show this help\n");
+        "flat volume image.\n\nOptions"};
+    result.add_options()
+        ("help,h", "Show this help")
+        ("source",
+            program_options::wvalue<std::wstring>()
+                ->required()
+                ->value_name("SOURCE"),
+            "Live volume path or flat raw-volume image")
+        ("snapshot-id",
+            program_options::wvalue<std::wstring>()
+                ->required()
+                ->value_name("GUID"),
+            "Shadow-copy identifier to select");
+    return result;
 }
 
 [[nodiscard]] auto ParseOptions(
-    const std::span<const wchar_t *const> arguments) {
-    auto result = Options{};
-    const auto next = [&](auto &index) {
-        if (++index == arguments.size()) {
-            throw std::invalid_argument(std::format(
-                "missing value after argument {}", index));
+    const std::span<const wchar_t *const> arguments,
+    const program_options::options_description &description) {
+    const auto command_line = std::vector<std::wstring>{
+        arguments.begin(), arguments.end()};
+    auto variables = program_options::variables_map{};
+    try {
+        program_options::store(
+            program_options::wcommand_line_parser{command_line}
+                .options(description)
+                .run(),
+            variables);
+        if (variables.contains("help")) {
+            return Options{.help = true};
         }
-        return std::wstring_view{arguments[index]};
-    };
-
-    for (auto index = 0uz; index < arguments.size(); ++index) {
-        const auto argument = std::wstring_view{arguments[index]};
-        if ((argument == L"-h") || (argument == L"--help")) {
-            result.help = true;
-        } else if (argument == L"--source") {
-            result.source = next(index);
-        } else if (argument == L"--snapshot-id") {
-            result.snapshot_identifier = next(index);
-        } else {
-            throw std::invalid_argument(std::format(
-                "unknown option at argument {}", index + 1));
-        }
+        program_options::notify(variables);
+    } catch (const program_options::error &error) {
+        throw std::invalid_argument{error.what()};
     }
-    if (!result.help &&
-        (result.source.empty() || result.snapshot_identifier.empty())) {
-        throw std::invalid_argument(
-            "--source and --snapshot-id are required");
-    }
-    return result;
+    return Options{
+        .source = std::move(variables.at("source").as<std::wstring>()),
+        .snapshot_identifier = std::move(
+            variables.at("snapshot-id").as<std::wstring>())};
 }
 
 [[nodiscard]] auto ParseGuid(const std::wstring_view value) {
@@ -142,9 +145,10 @@ auto WriteOutput(const std::string_view output) {
 }
 
 auto Run(const std::span<const wchar_t *const> arguments) {
-    const auto options = ParseOptions(arguments);
+    const auto description = CommandLineDescription();
+    const auto options = ParseOptions(arguments, description);
     if (options.help) {
-        Usage(std::cout);
+        description.print(std::cout);
         return 0;
     }
     const auto snapshot_identifier = ParseGuid(options.snapshot_identifier);
@@ -166,7 +170,7 @@ auto wmain(
         } catch (const std::invalid_argument &error) {
             devicefs::WriteToStream(
                 std::cerr, "vss-descriptor-dump: {}\n\n", error.what());
-            Usage(std::cerr);
+            CommandLineDescription().print(std::cerr);
             return 2;
         }
     } catch (const std::runtime_error &error) {

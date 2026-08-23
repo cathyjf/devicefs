@@ -1,5 +1,6 @@
 {
-  "version": 5,
+  "$schema": "https://raw.githubusercontent.com/Kitware/CMake/refs/tags/v4.4.2/Help/manual/presets/schema.json",
+  "version": 9,
   "cmakeMinimumRequired": {
     "major": 4,
     "minor": 2,
@@ -11,6 +12,7 @@
       "displayName": "Windows x64 (Visual Studio 2026)",
       "generator": "Visual Studio 18 2026",
       "architecture": "x64",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
       "binaryDir": "${sourceDir}/build/windows-x64",
       "cacheVariables": {
         "DEVICEFS_MEASURE_FREE_CLUSTER_DATA": false,
@@ -23,7 +25,6 @@
       "inherits": "windows-x64",
       "binaryDir": "${sourceDir}/build/windows-x64-instrumented",
       "cacheVariables": {
-        "DEVICEFS_MEASURE_FREE_CLUSTER_DATA": false,
         "DEVICEFS_MEASURE_READ_PATH": true
       }
     }

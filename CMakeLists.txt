@@ -1,5 +1,42 @@
 cmake_minimum_required(VERSION 4.2)
 
+set(DEVICEFS_TARGET_ARCHITECTURE x64)
+
+# These MSVC hardening options are applied to all targets.
+set(DEVICEFS_HARDENING_OPTIONS /guard:cf /guard:ehcont /sdl)
+
+# Standard library hardening is applied to all targets.
+# See <https://devblogs.microsoft.com/cppblog/whats-new-for-cpp-developers-in-visual-studio-2022-17-14/>.
+set(DEVICEFS_HARDENING_DEFINITIONS _MSVC_STL_HARDENING=1)
+
+# External dependencies specified in the vcpkg manifest are built with the same
+# hardening configuration as all other project code. Here, we construct the set
+# of flags that will be inserted into the generated vcpkg triplet based on the
+# configuration specified above.
+set(DEVICEFS_VCPKG_DEFINITION_FLAGS ${DEVICEFS_HARDENING_DEFINITIONS})
+list(TRANSFORM DEVICEFS_VCPKG_DEFINITION_FLAGS PREPEND "/D")
+string(JOIN " " DEVICEFS_VCPKG_FLAGS
+    ${DEVICEFS_HARDENING_OPTIONS}
+    ${DEVICEFS_VCPKG_DEFINITION_FLAGS}
+)
+
+set(VCPKG_TARGET_TRIPLET "${DEVICEFS_TARGET_ARCHITECTURE}-windows-devicefs")
+set(VCPKG_OVERLAY_TRIPLETS "${CMAKE_BINARY_DIR}/vcpkg-triplets")
+file(MAKE_DIRECTORY "${VCPKG_OVERLAY_TRIPLETS}")
+file(CONFIGURE
+    OUTPUT "${VCPKG_OVERLAY_TRIPLETS}/${VCPKG_TARGET_TRIPLET}.cmake"
+    CONTENT [=[
+set(VCPKG_TARGET_ARCHITECTURE "@DEVICEFS_TARGET_ARCHITECTURE@")
+set(VCPKG_CRT_LINKAGE dynamic)
+set(VCPKG_LIBRARY_LINKAGE static)
+set(VCPKG_BUILD_TYPE release)
+
+set(VCPKG_C_FLAGS "@DEVICEFS_VCPKG_FLAGS@")
+set(VCPKG_CXX_FLAGS "@DEVICEFS_VCPKG_FLAGS@")
+]=]
+    @ONLY
+)
+
 project(devicefs LANGUAGES CXX RC)
 
 if((NOT DEFINED CMAKE_VS_VERSION_BUILD_NUMBER)
@@ -18,8 +55,10 @@ if(MSVC_VERSION LESS 1951)
     message(FATAL_ERROR "devicefs requires MSVC Build Tools 14.51 or newer")
 endif()
 
-if(NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
-    message(FATAL_ERROR "devicefs requires an x64 target")
+if(NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL
+        "${DEVICEFS_TARGET_ARCHITECTURE}")
+    message(FATAL_ERROR
+        "devicefs requires an ${DEVICEFS_TARGET_ARCHITECTURE} target")
 endif()
 
 set(CMAKE_CXX_STANDARD 23)
@@ -61,6 +100,10 @@ endif()
 set(WINFSP_INCLUDE_DIR "${WINFSP_ROOT}/inc")
 set(WINFSP_LIBRARY "${WINFSP_ROOT}/lib/winfsp-x64.lib")
 set(WIL_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/wil/include")
+
+find_package(Boost 1.91.0 EXACT CONFIG REQUIRED
+    COMPONENTS program_options
+)
 
 function(target_module_interfaces target visibility)
     target_sources(${target} ${visibility}
@@ -105,10 +148,11 @@ target_include_directories(vshadow SYSTEM PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/dependencies"
 )
 target_compile_definitions(vshadow PRIVATE
-    UNICODE _UNICODE _WIN32_WINNT=0x0A00 _MSVC_STL_HARDENING=1
+    UNICODE _UNICODE _WIN32_WINNT=0x0A00
+    ${DEVICEFS_HARDENING_DEFINITIONS}
 )
 target_compile_options(vshadow PRIVATE
-    /W3 /WX- /permissive /EHsc /utf-8 /guard:cf /guard:ehcont /sdl
+    /W3 /WX- /permissive /EHsc /utf-8 ${DEVICEFS_HARDENING_OPTIONS}
     /analyze-
 )
 set_target_properties(vshadow PROPERTIES
@@ -124,7 +168,7 @@ target_link_libraries(devicefs PRIVATE devicefs-common devicefs-filesystem)
 
 add_executable(vss-descriptor-dump src/vss_descriptor_dump.cpp)
 target_link_libraries(vss-descriptor-dump PRIVATE
-    devicefs-common devicefs-vss-block-descriptors ole32
+    devicefs-common devicefs-vss-block-descriptors Boost::program_options ole32
 )
 
 add_executable(backup-supervisor
@@ -185,10 +229,11 @@ foreach(target IN LISTS DEVICEFS_CODE_ANALYSIS_TARGETS)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/include"
     )
     target_compile_definitions(${target} PRIVATE
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _MSVC_STL_HARDENING=1
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        ${DEVICEFS_HARDENING_DEFINITIONS}
     )
     target_compile_options(${target} PRIVATE
-        /W4 /WX /permissive- /EHsc /utf-8 /guard:cf /guard:ehcont /sdl
+        /W4 /WX /permissive- /EHsc /utf-8 ${DEVICEFS_HARDENING_OPTIONS}
         /analyze:external- "SHELL:/analyze:log $(IntDir)"
         /analyze:log:format:sarif /analyze:sarif:configuration
         /analyze:log:compilerwarnings

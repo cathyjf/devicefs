@@ -157,6 +157,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/native_backup.ixx
     src/modules/supervisor/native_backup_devicefs_process.cpp
     src/modules/supervisor/native_backup_incremental.cpp
+    src/modules/supervisor/native_backup_incremental_diagnostics.cpp
     src/modules/supervisor/native_backup_internal.cpp
     src/modules/supervisor/native_backup_manifest.cpp
     src/modules/supervisor/native_backup_pbs.cpp

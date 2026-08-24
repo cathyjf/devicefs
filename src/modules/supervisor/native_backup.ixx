@@ -24,7 +24,7 @@ import std;
 import <devicefs/windows_imports.h>;
 import :internal;
 import :devicefs_process;
-export import :incremental;
+export import :incremental_diagnostics;
 export import :manifest;
 import :pbs;
 import devicefs.common;

@@ -43,6 +43,35 @@ import devicefs.filesystem_measurement;
 
 export namespace devicefs {
 
+class SnapshotAllocationBitmap {
+  public:
+    SnapshotAllocationBitmap(SnapshotAllocationBitmap &&) noexcept;
+    auto operator=(SnapshotAllocationBitmap &&) noexcept
+        -> SnapshotAllocationBitmap &;
+    ~SnapshotAllocationBitmap();
+
+    [[nodiscard]] auto VolumeSize() const noexcept -> std::uint64_t;
+    auto SynthesizeFreeClusters(
+        std::span<unsigned char> output,
+        std::uint64_t offset) const noexcept -> void;
+
+  private:
+    struct State;
+
+    explicit SnapshotAllocationBitmap(
+        std::unique_ptr<State> state) noexcept;
+
+    std::unique_ptr<State> state_;
+
+    friend auto LoadSnapshotAllocationBitmap(
+        std::wstring_view,
+        std::string_view) -> SnapshotAllocationBitmap;
+};
+
+[[nodiscard]] auto LoadSnapshotAllocationBitmap(
+    std::wstring_view snapshot,
+    std::string_view description) -> SnapshotAllocationBitmap;
+
 struct AllocationChangeBlocks {
     std::uint64_t volume_size = 0;
     // Sorted, unique block starts intersecting an allocation-bit change.

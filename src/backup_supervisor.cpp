@@ -507,6 +507,45 @@ struct ForegroundOptions {
     return result;
 }
 
+[[nodiscard]] auto ParseIncrementalDiagnosticOptions(
+    const std::span<const wchar_t *const> arguments) {
+    auto result = IncrementalDiagnosticOptions{};
+    auto raw_namespace_override = std::optional<std::wstring_view>{};
+    auto raw_volume_override = std::optional<std::wstring_view>{};
+    for (auto index = 0uz; index < arguments.size(); ++index) {
+        const auto argument = std::wstring_view{arguments[index]};
+        if (argument == L"--incremental-stats") {
+            result.print_statistics = true;
+        } else if (argument == L"--incremental-verify") {
+            result.verify = true;
+        } else if (argument == L"--namespace") {
+            if (++index == arguments.size()) {
+                throw std::invalid_argument(
+                    "--namespace requires a value");
+            }
+            raw_namespace_override = arguments[index];
+        } else if ((argument == L"--volume") ||
+            (argument == L"--volumes")) {
+            if (++index == arguments.size()) {
+                throw std::invalid_argument(
+                    "--volume/--volumes requires a value");
+            }
+            raw_volume_override = arguments[index];
+        } else {
+            throw std::invalid_argument(
+                "incremental diagnostics received an unknown argument");
+        }
+    }
+    if (raw_namespace_override) {
+        result.namespace_override =
+            std::filesystem::path{*raw_namespace_override}.u8string();
+    }
+    if (raw_volume_override) {
+        result.volume_override = ParseVolumeList(*raw_volume_override);
+    }
+    return result;
+}
+
 [[nodiscard]] auto ParseNamespaceOverride(
     const std::span<const wchar_t *const> arguments,
     const std::string_view mode)
@@ -600,18 +639,18 @@ struct ForegroundOptions {
         });
 }
 
-[[nodiscard]] auto RunIncrementalStatsMode(
-    std::optional<std::u8string> namespace_override) {
+[[nodiscard]] auto RunIncrementalDiagnosticMode(
+    IncrementalDiagnosticOptions options) {
     const auto [input, console_mode] = GetForegroundConsoleInput(
-        "--incremental-stats requires an attached console");
+        "incremental diagnostics require an attached console");
     const auto persistent = ResolvePersistentPaths();
     const auto backup_lock = AcquireBackupLock(persistent.backup_lock);
     return RunForegroundOperation(
         input, console_mode,
-        [namespace_override = std::move(namespace_override)](
+        [options = std::move(options)](
             const HANDLE cancellation_event) {
-            return RunIncrementalStats(
-                cancellation_event, namespace_override);
+            return RunIncrementalDiagnostics(
+                cancellation_event, options);
         });
 }
 
@@ -660,7 +699,11 @@ auto PrintHelp() noexcept {
         "  backup-supervisor.exe --query-manifest "
         "[--namespace NAMESPACE]\n"
         "  backup-supervisor.exe --incremental-stats "
-        "[--namespace NAMESPACE]\n"
+        "[--incremental-verify] [--namespace NAMESPACE] "
+        "[--volumes VOLUME[,VOLUME...]]\n"
+        "  backup-supervisor.exe --incremental-verify "
+        "[--incremental-stats] [--namespace NAMESPACE] "
+        "[--volumes VOLUME[,VOLUME...]]\n"
         "  backup-supervisor.exe --install-service [--update]\n"
         "  backup-supervisor.exe --run-service\n");
 }
@@ -707,10 +750,10 @@ auto wmain(
                 ParseNamespaceOverride(
                     arguments.subspan(1), "--query-manifest"));
         }
-        if (option == L"--incremental-stats") {
-            return RunIncrementalStatsMode(
-                ParseNamespaceOverride(
-                    arguments.subspan(1), "--incremental-stats"));
+        if ((option == L"--incremental-stats") ||
+            (option == L"--incremental-verify")) {
+            return RunIncrementalDiagnosticMode(
+                ParseIncrementalDiagnosticOptions(arguments));
         }
         if (option == L"--install-service") {
             if (arguments.size() == 1) {

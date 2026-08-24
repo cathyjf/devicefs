@@ -64,6 +64,49 @@ namespace {
 
 namespace devicefs {
 
+struct SnapshotAllocationBitmap::State {
+    std::uint64_t volume_size;
+    filesystem_internal::AllocationBitmap bitmap;
+};
+
+SnapshotAllocationBitmap::SnapshotAllocationBitmap(
+    std::unique_ptr<State> state) noexcept
+    : state_{std::move(state)} {}
+
+SnapshotAllocationBitmap::SnapshotAllocationBitmap(
+    SnapshotAllocationBitmap &&) noexcept = default;
+
+auto SnapshotAllocationBitmap::operator=(
+    SnapshotAllocationBitmap &&) noexcept
+    -> SnapshotAllocationBitmap & = default;
+
+SnapshotAllocationBitmap::~SnapshotAllocationBitmap() = default;
+
+auto SnapshotAllocationBitmap::VolumeSize() const noexcept
+    -> std::uint64_t {
+    return state_->volume_size;
+}
+
+auto SnapshotAllocationBitmap::SynthesizeFreeClusters(
+    const std::span<unsigned char> output,
+    const std::uint64_t offset) const noexcept -> void {
+    state_->bitmap.SynthesizeFreeClusters(output, offset);
+}
+
+auto LoadSnapshotAllocationBitmap(
+    const std::wstring_view snapshot,
+    const std::string_view description) -> SnapshotAllocationBitmap {
+    auto handle = OpenSnapshot(snapshot, description);
+    const auto size = QueryVolumeSize(handle.get(), description);
+    return SnapshotAllocationBitmap{std::make_unique<
+        SnapshotAllocationBitmap::State>(
+        SnapshotAllocationBitmap::State{
+            .volume_size = size,
+            .bitmap = filesystem_internal::LoadAllocationBitmap(
+                handle.get(), size, description),
+        })};
+}
+
 auto ReadAllocationChangeBlocks(
     const std::wstring_view previous_snapshot,
     const std::wstring_view current_snapshot,

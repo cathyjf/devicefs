@@ -87,6 +87,11 @@ auto SnapshotAllocationBitmap::VolumeSize() const noexcept
     return state_->volume_size;
 }
 
+auto SnapshotAllocationBitmap::ClusterSize() const noexcept
+    -> std::uint32_t {
+    return state_->bitmap.cluster_size;
+}
+
 auto SnapshotAllocationBitmap::SynthesizeFreeClusters(
     const std::span<unsigned char> output,
     const std::uint64_t offset) const noexcept -> void {

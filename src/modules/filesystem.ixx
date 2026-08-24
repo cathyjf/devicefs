@@ -51,6 +51,7 @@ class SnapshotAllocationBitmap {
     ~SnapshotAllocationBitmap();
 
     [[nodiscard]] auto VolumeSize() const noexcept -> std::uint64_t;
+    [[nodiscard]] auto ClusterSize() const noexcept -> std::uint32_t;
     auto SynthesizeFreeClusters(
         std::span<unsigned char> output,
         std::uint64_t offset) const noexcept -> void;

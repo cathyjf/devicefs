@@ -21,6 +21,8 @@ module;
 
 #include <devicefs/strsafe_compat.h>
 
+#include <cstddef>
+
 export module devicefs.supervisor.native_backup:incremental_diagnostics;
 
 import std;
@@ -313,6 +315,7 @@ struct ComparisonObservation {
     std::uint64_t uncovered_bytes = 0;
     std::uint64_t uncovered_blocks = 0;
     std::optional<UnexpectedDifference> first_uncovered;
+    std::vector<std::uint64_t> uncovered_clusters;
     std::string failure;
 };
 
@@ -331,6 +334,8 @@ class VerificationState {
         observation_.differing_blocks += observation.differing_blocks;
         observation_.uncovered_bytes += observation.uncovered_bytes;
         observation_.uncovered_blocks += observation.uncovered_blocks;
+        observation_.uncovered_clusters.append_range(
+            observation.uncovered_clusters);
         if (observation.first_uncovered &&
             (!observation_.first_uncovered ||
                 (observation.first_uncovered->byte_offset <
@@ -363,11 +368,47 @@ struct VerificationAllocation {
     devicefs::SnapshotAllocationBitmap payload;
 };
 
+enum class SnapshotEndpoint {
+    Baseline,
+    Payload,
+};
+
+struct SnapshotStreamMatch {
+    std::uint64_t cluster;
+    DWORD flags;
+    std::wstring name;
+};
+
+struct EndpointStreamOwnership {
+    DWORD flags = 0;
+    std::set<std::uint64_t> clusters;
+};
+
+struct StreamOwnership {
+    EndpointStreamOwnership baseline;
+    EndpointStreamOwnership payload;
+    bool printed_during_progress = false;
+};
+
+struct SnapshotOwnershipResult {
+    std::set<std::uint64_t> no_stream_clusters;
+    std::set<std::uint64_t> failed_clusters;
+    std::string failure;
+};
+
+struct ClusterOwnershipCache {
+    std::map<std::wstring, StreamOwnership> streams;
+    SnapshotOwnershipResult baseline;
+    SnapshotOwnershipResult payload;
+    std::set<std::uint64_t> queried_clusters;
+};
+
 struct VerificationJob {
     std::reference_wrapper<const VolumeReport> volume;
     std::uint64_t volume_size;
     std::unique_ptr<VerificationState> state;
     std::optional<VerificationAllocation> allocation;
+    ClusterOwnershipCache ownership;
     // Futures are destroyed first so an exceptional unwind cannot release
     // state or allocation data while a worker still refers to them.
     std::vector<std::future<void>> workers;
@@ -461,10 +502,38 @@ auto ReadVerificationChunk(
 using DirtyBlockIterator =
     std::span<const std::uint64_t>::iterator;
 
+auto AppendDifferingClusters(
+    const std::span<const unsigned char> baseline,
+    const std::span<const unsigned char> payload,
+    const std::uint64_t block_offset,
+    const std::uint32_t cluster_size,
+    std::vector<std::uint64_t> &clusters) -> void {
+    const auto block_end = block_offset + baseline.size();
+    const auto first_cluster = block_offset / cluster_size;
+    const auto past_last_cluster =
+        ((block_end - 1) / cluster_size) + 1;
+    for (const auto cluster :
+        std::views::iota(first_cluster, past_last_cluster)) {
+        const auto cluster_start = cluster * cluster_size;
+        const auto cluster_end = cluster_start + cluster_size;
+        const auto start = std::max(block_offset, cluster_start);
+        const auto end = std::min(block_end, cluster_end);
+        const auto relative = wil::safe_cast_failfast<std::size_t>(
+            start - block_offset);
+        const auto size = wil::safe_cast_failfast<std::size_t>(end - start);
+        if (!std::ranges::equal(
+                baseline.subspan(relative, size),
+                payload.subspan(relative, size))) {
+            clusters.push_back(cluster);
+        }
+    }
+}
+
 [[nodiscard]] auto CompareVerificationChunk(
     const std::span<const unsigned char> baseline,
     const std::span<const unsigned char> payload,
     const std::uint64_t chunk_offset,
+    const std::uint32_t cluster_size,
     const bool verify_coverage,
     DirtyBlockIterator &next_dirty,
     const DirtyBlockIterator dirty_end) {
@@ -507,6 +576,9 @@ using DirtyBlockIterator =
         }
         result.uncovered_bytes += differing_bytes;
         ++result.uncovered_blocks;
+        AppendDifferingClusters(
+            baseline_block, payload_block, block_offset,
+            cluster_size, result.uncovered_clusters);
         if (!result.first_uncovered) {
             const auto relative_byte =
                 wil::safe_cast_failfast<std::uint64_t>(
@@ -550,6 +622,7 @@ auto VerifySnapshotRange(
             ? std::span<const std::uint64_t>{
                 volume.map->block_offsets}
             : std::span<const std::uint64_t>{};
+        const auto cluster_size = allocation.baseline.ClusterSize();
         auto next_dirty = std::ranges::lower_bound(
             dirty_blocks, range_start);
         for (auto offset = range_start; offset < range_end;
@@ -581,6 +654,7 @@ auto VerifySnapshotRange(
                 payload_chunk, offset);
             state.Record(size, CompareVerificationChunk(
                 baseline_chunk, payload_chunk, offset,
+                cluster_size,
                 volume.map.has_value(),
                 next_dirty, dirty_blocks.end()));
         }
@@ -655,6 +729,162 @@ auto StartVerificationWorkers(
     }
 }
 
+[[nodiscard]] auto LookupSnapshotStreams(
+    const std::wstring_view snapshot,
+    const std::string_view description,
+    const std::span<const std::uint64_t> clusters) {
+    const auto api_clusters = clusters |
+        std::views::transform([](const auto cluster) {
+            return LARGE_INTEGER{
+                .QuadPart = wil::safe_cast_failfast<LONGLONG>(cluster),
+            };
+        }) |
+        std::ranges::to<std::vector<LARGE_INTEGER>>();
+    const auto api_cluster_bytes =
+        std::as_bytes(std::span{api_clusters});
+    constexpr auto input_header_size =
+        offsetof(LOOKUP_STREAM_FROM_CLUSTER_INPUT, Cluster);
+    const auto input_size =
+        input_header_size + api_cluster_bytes.size();
+    if (!std::in_range<DWORD>(input_size)) {
+        throw std::runtime_error(
+            "the uncovered-cluster lookup input is too large");
+    }
+    const auto api_input_size =
+        wil::safe_cast_failfast<DWORD>(input_size);
+    const auto input_header = LOOKUP_STREAM_FROM_CLUSTER_INPUT{
+        .Flags = 0,
+        .NumberOfClusters =
+            wil::safe_cast_failfast<DWORD>(clusters.size()),
+    };
+    auto input_storage = std::vector<std::byte>(input_size);
+    std::memcpy(
+        input_storage.data(), &input_header, input_header_size);
+    std::memcpy(
+        input_storage.data() + input_header_size,
+        api_cluster_bytes.data(), api_cluster_bytes.size());
+
+    auto device = OpenVerificationSnapshot(snapshot, description);
+    const auto lookup = [&](
+        void *const output, const DWORD output_size, DWORD &returned) {
+        return DeviceIoControl(device.get(),
+            FSCTL_LOOKUP_STREAM_FROM_CLUSTER,
+            input_storage.data(),
+            api_input_size,
+            output, output_size, &returned, nullptr);
+    };
+
+    auto probe = LOOKUP_STREAM_FROM_CLUSTER_OUTPUT{};
+    auto returned = DWORD{};
+    if (!lookup(&probe, sizeof(probe), returned)) {
+        const auto error = GetLastError();
+        if (error != ERROR_MORE_DATA) {
+            WinError("FSCTL_LOOKUP_STREAM_FROM_CLUSTER failed for {}",
+                description, ExplicitWin32Error{error});
+        }
+    }
+    if (probe.NumberOfMatches == 0) {
+        return std::vector<SnapshotStreamMatch>{};
+    }
+
+    auto output_storage =
+        std::vector<std::byte>(probe.BufferSizeRequired);
+    if (!lookup(
+            output_storage.data(), probe.BufferSizeRequired, returned)) {
+        WinError("FSCTL_LOOKUP_STREAM_FROM_CLUSTER failed for {}",
+            description);
+    }
+
+    auto output = LOOKUP_STREAM_FROM_CLUSTER_OUTPUT{};
+    std::memcpy(&output, output_storage.data(), sizeof(output));
+    auto result = std::vector<SnapshotStreamMatch>{};
+    result.reserve(output.NumberOfMatches);
+    if (output.Offset == 0) {
+        return result;
+    }
+    auto entries = std::span{output_storage}.first(returned)
+        .subspan(output.Offset);
+    constexpr auto entry_header_size =
+        offsetof(LOOKUP_STREAM_FROM_CLUSTER_ENTRY, FileName);
+    while (true) {
+        auto entry = LOOKUP_STREAM_FROM_CLUSTER_ENTRY{};
+        std::memcpy(&entry, entries.data(), entry_header_size);
+        const auto entry_size = entry.OffsetToNext == 0
+            ? entries.size() : entry.OffsetToNext;
+        const auto name_characters =
+            (entry_size - entry_header_size) /
+            sizeof(std::wstring::value_type);
+        auto name = std::wstring(name_characters, L'\0');
+        std::memcpy(name.data(), entries.data() + entry_header_size,
+            name.size() * sizeof(std::wstring::value_type));
+        // FileName is a null-terminated trailing array whose SDK declaration
+        // exposes only its first element.
+        name.resize(name.find(L'\0'));
+        result.push_back({
+            .cluster = wil::safe_cast_failfast<std::uint64_t>(
+                entry.Cluster.QuadPart),
+            .flags = entry.Flags,
+            .name = std::move(name),
+        });
+        if (entry.OffsetToNext == 0) {
+            break;
+        }
+        entries = entries.subspan(entry.OffsetToNext);
+    }
+    return result;
+}
+
+auto ResolveSnapshotOwnership(
+    ClusterOwnershipCache &ownership_cache,
+    const SnapshotEndpoint endpoint,
+    const std::wstring_view snapshot,
+    const std::span<const std::uint64_t> clusters) -> void {
+    const auto description = endpoint == SnapshotEndpoint::Baseline
+        ? kBaselineDescription : kPayloadDescription;
+    auto &snapshot_result = endpoint == SnapshotEndpoint::Baseline
+        ? ownership_cache.baseline : ownership_cache.payload;
+    try {
+        auto unmatched = std::set<std::uint64_t>{
+            clusters.begin(), clusters.end()};
+        for (auto &stream :
+            LookupSnapshotStreams(snapshot, description, clusters)) {
+            auto &ownership = ownership_cache.streams[stream.name];
+            auto &endpoint_ownership =
+                endpoint == SnapshotEndpoint::Baseline
+                    ? ownership.baseline : ownership.payload;
+            endpoint_ownership.flags |= stream.flags;
+            endpoint_ownership.clusters.insert(stream.cluster);
+            unmatched.erase(stream.cluster);
+        }
+        snapshot_result.no_stream_clusters.insert_range(unmatched);
+    } catch (const std::runtime_error &error) {
+        snapshot_result.failed_clusters.insert_range(clusters);
+        if (snapshot_result.failure.empty()) {
+            snapshot_result.failure = error.what();
+        }
+    }
+}
+
+auto UpdateClusterOwnership(
+    VerificationJob &job,
+    const std::span<const std::uint64_t> observed_clusters) -> void {
+    auto new_clusters = std::vector<std::uint64_t>{};
+    for (const auto cluster : observed_clusters) {
+        if (job.ownership.queried_clusters.insert(cluster).second) {
+            new_clusters.push_back(cluster);
+        }
+    }
+    if (new_clusters.empty()) {
+        return;
+    }
+    ResolveSnapshotOwnership(
+        job.ownership, SnapshotEndpoint::Baseline,
+        job.volume.get().baseline_device, new_clusters);
+    ResolveSnapshotOwnership(
+        job.ownership, SnapshotEndpoint::Payload,
+        job.volume.get().payload_device, new_clusters);
+}
+
 [[nodiscard]] constexpr auto VerificationPercentage(
     const std::uint64_t part,
     const std::uint64_t whole) {
@@ -664,8 +894,122 @@ auto StartVerificationWorkers(
             static_cast<double>(whole);
 }
 
+auto PrintEndpointClusters(
+    std::ostream &output,
+    const std::string_view endpoint,
+    const std::set<std::uint64_t> &clusters,
+    const std::optional<DWORD> flags = std::nullopt) noexcept -> void {
+    if (clusters.empty()) {
+        return;
+    }
+    devicefs::WriteToStream(output,
+        "        {}: {} cluster(s)",
+        endpoint, clusters.size());
+    if (flags) {
+        devicefs::WriteToStream(
+            output, ", flags 0x{:08x}", *flags);
+    }
+    devicefs::WriteToStream(output, ", LCNs:");
+    for (const auto cluster : clusters) {
+        devicefs::WriteToStream(output, " 0x{:x}", cluster);
+    }
+    devicefs::WriteToStream(output, "\n");
+}
+
+auto PrintStreamOwnership(
+    std::ostream &output,
+    const std::wstring_view name,
+    const StreamOwnership &ownership) noexcept -> void {
+    devicefs::WriteToStream(output, L"      {}\n", name);
+    PrintEndpointClusters(
+        output, "A", ownership.baseline.clusters,
+        ownership.baseline.flags);
+    PrintEndpointClusters(
+        output, "B", ownership.payload.clusters,
+        ownership.payload.flags);
+}
+
+[[nodiscard]] auto PrintOwnershipUpdate(
+    std::ostream &output,
+    const GUID &volume_identifier,
+    ClusterOwnershipCache &ownership) {
+    auto wrote_heading = false;
+    for (auto &[name, stream] : ownership.streams) {
+        if (stream.printed_during_progress) {
+            continue;
+        }
+        if (!wrote_heading) {
+            const auto identifier =
+                winrt::to_hstring(volume_identifier);
+            devicefs::WriteToStream(output,
+                L"  Volume ID: {}\n",
+                std::wstring_view{identifier});
+            devicefs::WriteToStream(
+                output, "    NTFS ownership update:\n");
+            wrote_heading = true;
+        }
+        PrintStreamOwnership(output, name, stream);
+        stream.printed_during_progress = true;
+    }
+    return wrote_heading;
+}
+
+auto PrintClusterOwnership(
+    std::ostream &output,
+    const ClusterOwnershipCache &ownership,
+    const std::uint32_t cluster_size) noexcept -> void {
+    devicefs::WriteToStream(output,
+        "    NTFS ownership of uncovered differences:\n"
+        "      {} distinct {}-byte NTFS cluster(s) queried\n",
+        ownership.queried_clusters.size(), cluster_size);
+    for (const auto &[name, stream] : ownership.streams) {
+        PrintStreamOwnership(output, name, stream);
+    }
+
+    if (!ownership.baseline.failure.empty()) {
+        devicefs::WriteToStream(output,
+            "      A ownership lookup failed: {}\n",
+            ownership.baseline.failure);
+        PrintEndpointClusters(
+            output, "A unresolved", ownership.baseline.failed_clusters);
+    }
+    if (!ownership.payload.failure.empty()) {
+        devicefs::WriteToStream(output,
+            "      B ownership lookup failed: {}\n",
+            ownership.payload.failure);
+        PrintEndpointClusters(
+            output, "B unresolved", ownership.payload.failed_clusters);
+    }
+    if (!ownership.baseline.no_stream_clusters.empty() ||
+        !ownership.payload.no_stream_clusters.empty()) {
+        devicefs::WriteToStream(
+            output, "      No stream reported by NTFS:\n");
+        PrintEndpointClusters(
+            output, "A", ownership.baseline.no_stream_clusters);
+        PrintEndpointClusters(
+            output, "B", ownership.payload.no_stream_clusters);
+    }
+}
+
+auto FlushVerificationProgress(std::ostream &output) -> void {
+    if (!output) {
+        throw std::runtime_error(
+            "could not write incremental verification progress");
+    }
+    output.flush();
+    if (!output) {
+        throw std::runtime_error(
+            "could not flush incremental verification progress");
+    }
+}
+
 auto PrintVerificationProgress(
-    const std::span<const VerificationJob> jobs) {
+    const std::span<VerificationJob> jobs) {
+    const auto observations = jobs |
+        std::views::transform([](const VerificationJob &job) {
+            return job.state->Snapshot();
+        }) |
+        std::ranges::to<std::vector<ComparisonObservation>>();
     auto &output = devicefs::WriteToStream(
         std::cout, "\nIncremental verification progress:\n");
     auto compared_total = std::uint64_t{};
@@ -673,8 +1017,8 @@ auto PrintVerificationProgress(
     auto differing_total = std::uint64_t{};
     auto uncovered_total = std::uint64_t{};
     auto coverage_unavailable = std::size_t{};
-    for (const auto &job : jobs) {
-        const auto observation = job.state->Snapshot();
+    for (auto &&[job, observation] :
+        std::views::zip(jobs, observations)) {
         const auto identifier =
             winrt::to_hstring(job.volume.get().volume_identifier);
         const auto volume_size = job.volume_size;
@@ -717,14 +1061,19 @@ auto PrintVerificationProgress(
         compared_total, volume_total,
         VerificationPercentage(compared_total, volume_total),
         differing_total, uncovered_total, coverage_unavailable);
-    if (!output) {
-        throw std::runtime_error(
-            "could not write incremental verification progress");
-    }
-    output.flush();
-    if (!output) {
-        throw std::runtime_error(
-            "could not flush incremental verification progress");
+    FlushVerificationProgress(output);
+
+    for (auto &&[job, observation] :
+        std::views::zip(jobs, observations)) {
+        if (observation.uncovered_clusters.empty()) {
+            continue;
+        }
+        UpdateClusterOwnership(job, observation.uncovered_clusters);
+        if (PrintOwnershipUpdate(
+                output, job.volume.get().volume_identifier,
+                job.ownership)) {
+            FlushVerificationProgress(output);
+        }
     }
 }
 
@@ -836,6 +1185,10 @@ auto PrintVerificationResult(
             observation.first_uncovered->baseline,
             observation.first_uncovered->payload);
     }
+    if (!job.ownership.queried_clusters.empty()) {
+        PrintClusterOwnership(output, job.ownership,
+            job.allocation->baseline.ClusterSize());
+    }
 }
 
 [[nodiscard]] auto PrintVerificationSummary(
@@ -934,7 +1287,7 @@ auto PrintVerificationResult(
         const auto now = std::chrono::steady_clock::now();
         if (now >= next_progress) {
             PrintVerificationProgress(jobs);
-            next_progress = now +
+            next_progress = std::chrono::steady_clock::now() +
                 kProgressReportInterval;
         }
     }
@@ -942,6 +1295,8 @@ auto PrintVerificationResult(
         for (auto &worker : job.workers) {
             worker.get();
         }
+        const auto observation = job.state->Snapshot();
+        UpdateClusterOwnership(job, observation.uncovered_clusters);
     }
 
     return PrintVerificationSummary(

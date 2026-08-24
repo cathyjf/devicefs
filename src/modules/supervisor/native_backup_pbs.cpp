@@ -18,27 +18,17 @@ module;
 
 #include <devicefs/strsafe_compat.h>
 
-#include <cstddef>
-
 module devicefs.supervisor.native_backup:pbs;
 
 import std;
 import <devicefs/windows_imports.h>;
 import :internal;
+import :privileges;
 import devicefs.common;
 import devicefs.stream_writer;
 import devicefs.supervisor.configuration;
 import devicefs.supervisor.embedded_artifacts;
 import devicefs.supervisor.installation;
-
-#if defined(__INTELLISENSE__) && !defined(__cpp_lib_start_lifetime_as)
-// IntelliSense uses EDG, which does not yet expose these C++23 functions.
-// Tracked by <https://github.com/microsoft/STL/issues/6169>.
-namespace std {
-template <class T> auto start_lifetime_as(void *) noexcept -> T *;
-template <class T> auto start_lifetime_as_array(void *, size_t) noexcept -> T *;
-} // namespace std
-#endif
 
 namespace internal {
 
@@ -77,109 +67,6 @@ constexpr auto kWslCreationFlags = DWORD{
     }
     return token;
 }
-
-class ProfilePrivilegeEnabler {
-    static constexpr auto kPrivilegeNames = std::array{
-        wil::zwstring_view(SE_BACKUP_NAME),
-        wil::zwstring_view(SE_RESTORE_NAME),
-    };
-    static constexpr auto kStateSize =
-        offsetof(TOKEN_PRIVILEGES, Privileges) +
-        (kPrivilegeNames.size() * sizeof(LUID_AND_ATTRIBUTES));
-
-  public:
-    explicit ProfilePrivilegeEnabler(const HANDLE process) {
-        if (!OpenProcessToken(process,
-                TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
-                token_.addressof())) {
-            WinError("could not open the backup-supervisor process token");
-        }
-
-        alignas(TOKEN_PRIVILEGES)
-        auto state_storage = std::array<std::byte, kStateSize>{};
-        const auto entries = std::span{
-            std::start_lifetime_as_array<LUID_AND_ATTRIBUTES>(
-                state_storage.data() +
-                    offsetof(TOKEN_PRIVILEGES, Privileges),
-                kPrivilegeNames.size()),
-            kPrivilegeNames.size(),
-        };
-        for (auto index = 0uz; index < kPrivilegeNames.size(); ++index) {
-            auto &entry = entries[index];
-            if (!LookupPrivilegeValueW(
-                    nullptr, kPrivilegeNames.at(index).c_str(), &entry.Luid)) {
-                WinError("could not identify a user-profile privilege");
-            }
-            entry.Attributes = SE_PRIVILEGE_ENABLED;
-        }
-        auto *const state =
-            std::start_lifetime_as<TOKEN_PRIVILEGES>(state_storage.data());
-        state->PrivilegeCount =
-            wil::safe_cast_failfast<DWORD>(kPrivilegeNames.size());
-
-        static_cast<void>(std::start_lifetime_as_array<LUID_AND_ATTRIBUTES>(
-            previous_state_storage_.data() +
-                offsetof(TOKEN_PRIVILEGES, Privileges),
-            kPrivilegeNames.size()));
-        auto *const previous_state = std::start_lifetime_as<TOKEN_PRIVILEGES>(
-            previous_state_storage_.data());
-        auto previous_state_size = DWORD{};
-        if (!AdjustTokenPrivileges(
-                token_.get(), FALSE, state,
-                DWORD{kStateSize}, previous_state,
-                &previous_state_size)) {
-            WinError("could not enable the user-profile privileges");
-        }
-        previous_state_ = previous_state;
-        const auto error = GetLastError();
-        if (error != ERROR_SUCCESS) {
-            static_cast<void>(RestoreNoThrow());
-            WinError("could not enable the user-profile privileges",
-                ExplicitWin32Error{error});
-        }
-    }
-
-    ProfilePrivilegeEnabler(const ProfilePrivilegeEnabler &) = delete;
-    auto operator=(const ProfilePrivilegeEnabler &)
-        -> ProfilePrivilegeEnabler & = delete;
-    ProfilePrivilegeEnabler(ProfilePrivilegeEnabler &&) = delete;
-    auto operator=(ProfilePrivilegeEnabler &&)
-        -> ProfilePrivilegeEnabler & = delete;
-
-    ~ProfilePrivilegeEnabler() {
-        static_cast<void>(RestoreNoThrow());
-    }
-
-    auto Restore() {
-        const auto error = RestoreNoThrow();
-        if (error != ERROR_SUCCESS) {
-            WinError("could not restore the user-profile privileges",
-                ExplicitWin32Error{error});
-        }
-    }
-
-  private:
-    [[nodiscard]] auto RestoreNoThrow() noexcept -> DWORD {
-        if (previous_state_ == nullptr) {
-            return DWORD{ERROR_SUCCESS};
-        }
-        if (!AdjustTokenPrivileges(
-                token_.get(), FALSE, previous_state_,
-                0, nullptr, nullptr)) {
-            return GetLastError();
-        }
-        const auto error = GetLastError();
-        if (error == ERROR_SUCCESS) {
-            previous_state_ = nullptr;
-        }
-        return error;
-    }
-
-    wil::unique_handle token_;
-    alignas(TOKEN_PRIVILEGES)
-    std::array<std::byte, kStateSize> previous_state_storage_{};
-    TOKEN_PRIVILEGES *previous_state_ = nullptr;
-};
 
 [[nodiscard]] auto RunningAsLocalSystem() {
     auto result = false;
@@ -474,7 +361,13 @@ struct WslProcess {
     {
         // LoadUserProfileW requires these privileges on its LocalSystem
         // caller. They are not added to the user token used to start WSL.
-        auto privileges = ProfilePrivilegeEnabler{GetCurrentProcess()};
+        constexpr auto privilege_names = std::array{
+            wil::zwstring_view(SE_BACKUP_NAME),
+            wil::zwstring_view(SE_RESTORE_NAME),
+        };
+        auto privileges = ProcessPrivilegeEnabler{
+            GetCurrentProcess(), privilege_names,
+            std::string_view{"the user-profile privileges"}};
         if (!LoadUserProfileW(result.token.get(), &profile)) {
             WinError("could not load the configured WSL account profile");
         }

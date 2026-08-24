@@ -85,6 +85,9 @@ add_library(devicefs-filesystem STATIC)
 target_module_interfaces(devicefs-filesystem PUBLIC
     src/modules/filesystem.ixx
 )
+target_sources(devicefs-filesystem PRIVATE
+    src/modules/filesystem_allocation_changes.cpp
+)
 target_link_libraries(devicefs-filesystem PRIVATE devicefs-common)
 
 add_library(devicefs-vss-block-descriptors STATIC)
@@ -132,7 +135,8 @@ add_executable(backup-supervisor
     src/backup_supervisor.cpp
 )
 target_link_libraries(backup-supervisor PRIVATE
-    devicefs-common devicefs-filesystem vshadow
+    devicefs-common devicefs-filesystem
+    devicefs-vss-block-descriptors vshadow
 )
 
 set(START_PBS
@@ -152,9 +156,11 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/logging_console.ixx
     src/modules/supervisor/native_backup.ixx
     src/modules/supervisor/native_backup_devicefs_process.cpp
+    src/modules/supervisor/native_backup_incremental.cpp
     src/modules/supervisor/native_backup_internal.cpp
     src/modules/supervisor/native_backup_manifest.cpp
     src/modules/supervisor/native_backup_pbs.cpp
+    src/modules/supervisor/native_backup_privileges.cpp
     src/modules/supervisor/process_diagnostics.ixx
     src/modules/supervisor/vshadow.ixx
     src/modules/supervisor/winrt_apartment.ixx

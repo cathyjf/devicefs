@@ -24,6 +24,7 @@ import std;
 import <devicefs/windows_imports.h>;
 import :internal;
 import :devicefs_process;
+export import :incremental;
 export import :manifest;
 import :pbs;
 import devicefs.common;
@@ -32,7 +33,7 @@ import devicefs.supervisor.configuration;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.vshadow;
 
-export constexpr auto kCancelledExitCode = 130;
+export constexpr auto kCancelledExitCode = internal::kCancelledExitCode;
 
 namespace internal {
 
@@ -113,7 +114,7 @@ export [[nodiscard]] auto RunNativeBackup(
         selected_volumes.assign_range(volume_override);
     }
     constexpr auto kCallbackFailureExitCode = 2;
-    try {
+    return internal::RunVssOperation(cancellation_event, [&] {
         return devicefs::vshadow::Run(
             cancellation_event,
             !no_writers,
@@ -135,21 +136,5 @@ export [[nodiscard]] auto RunNativeBackup(
                     return kCallbackFailureExitCode;
                 }
             });
-    } catch (const std::system_error &error) {
-        const auto cancellation_signaled =
-            WaitForSingleObject(cancellation_event, 0);
-        if (cancellation_signaled == WAIT_FAILED) {
-            WinError("could not inspect the backup cancellation event");
-        }
-        if ((cancellation_signaled == WAIT_OBJECT_0) &&
-            (error.code() == std::error_code(
-                ERROR_CANCELLED, std::system_category()))) {
-            return kCancelledExitCode;
-        }
-        if (error.code() == std::error_code(
-                ERROR_CANCELLED, std::system_category())) {
-            throw devicefs::vshadow::OperationError(error.what());
-        }
-        throw;
-    }
+    });
 }

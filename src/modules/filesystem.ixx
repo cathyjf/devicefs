@@ -41,6 +41,21 @@ import devicefs.stream_writer;
 import devicefs.filesystem_measurement;
 #endif
 
+export namespace devicefs {
+
+struct AllocationChangeBlocks {
+    std::uint64_t volume_size = 0;
+    // Sorted, unique block starts intersecting an allocation-bit change.
+    std::vector<std::uint64_t> block_offsets;
+};
+
+[[nodiscard]] auto ReadAllocationChangeBlocks(
+    std::wstring_view previous_snapshot,
+    std::wstring_view current_snapshot,
+    std::uint64_t block_size) -> AllocationChangeBlocks;
+
+} // namespace devicefs
+
 #if defined(__INTELLISENSE__) && !defined(__cpp_lib_start_lifetime_as)
 // IntelliSense uses EDG, which does not yet expose `std::start_lifetime_as`.
 // Tracked by <https://github.com/microsoft/STL/issues/6169>.
@@ -255,13 +270,17 @@ auto CheckNt(const NTSTATUS status, const wil::zstring_view operation) {
     return descriptor;
 }
 
+} // namespace
+
+namespace devicefs::filesystem_internal {
+
 _Success_(return == ERROR_SUCCESS)
 [[nodiscard]] auto Ioctl(const HANDLE device, const DWORD code,
     _Out_writes_bytes_opt_(output_size) void *const output,
     const DWORD output_size,
-    _In_reads_bytes_opt_(input_size) void *const input = nullptr,
-    const DWORD input_size = 0,
-    _Out_opt_ DWORD *const bytes_returned = nullptr) {
+    _In_reads_bytes_opt_(input_size) void *const input,
+    const DWORD input_size,
+    _Out_opt_ DWORD *const bytes_returned) -> DWORD {
     auto event = wil::unique_event_nothrow{};
     if (!event.try_create(wil::EventOptions::ManualReset, nullptr)) {
         return GetLastError();
@@ -284,8 +303,27 @@ _Success_(return == ERROR_SUCCESS)
     return DWORD{ERROR_SUCCESS};
 }
 
-constexpr auto kVolumeBitmapHeaderSize = offsetof(VOLUME_BITMAP_BUFFER, Buffer);
-constexpr auto kBitsPerByte = std::numeric_limits<BYTE>::digits;
+// This overloaded declaration of `Ioctl` exists to work around an apparent
+// defect in MSVC Code Analysis. In a previous version of the code, there
+// was only a single declaration of `Ioctl`, and it had two optional pointer
+// arguments with default values of `nullptr`. When the former declaration
+// was consumed by a module implementation unit, Code Analysis emitted
+// C26477 ("Use `nullptr` rather than 0 or NULL"), even though the default
+// values were already spelled `nullptr`. Adding a suppression to the
+// declaration of `Ioctl` was ineffective to prevent C26477 from being
+// raised. Instead, this overloaded version with fewer arguments avoids the
+// need for default arguments.
+_Success_(return == ERROR_SUCCESS)
+[[nodiscard]] auto Ioctl(const HANDLE device, const DWORD code,
+    _Out_writes_bytes_opt_(output_size) void *const output,
+    const DWORD output_size) -> DWORD {
+    return Ioctl(
+        device, code, output, output_size, nullptr, 0, nullptr);
+}
+
+inline constexpr auto kVolumeBitmapHeaderSize =
+    offsetof(VOLUME_BITMAP_BUFFER, Buffer);
+inline constexpr auto kBitsPerByte = std::numeric_limits<BYTE>::digits;
 
 struct AllocationBitmap {
     UINT32 cluster_size = 0;
@@ -357,6 +395,13 @@ struct AllocationBitmap {
     }
 };
 
+} // namespace devicefs::filesystem_internal
+
+namespace {
+
+using devicefs::filesystem_internal::AllocationBitmap;
+using devicefs::filesystem_internal::Ioctl;
+
 struct DeviceFile {
     std::wstring name;
     wil::unique_hfile handle;
@@ -368,19 +413,24 @@ struct DeviceFile {
 // WinFsp directory markers require a stable order and an upper-bound lookup.
 using DeviceFiles = std::map<std::wstring, DeviceFile>;
 
+} // namespace
+
+namespace devicefs::filesystem_internal {
+
 [[nodiscard]] auto LoadAllocationBitmap(
-    const HANDLE device, const UINT64 device_size, const UINT64 map_number) {
+    const HANDLE device, const UINT64 device_size,
+    const std::string_view description) -> AllocationBitmap {
     auto volume = NTFS_VOLUME_DATA_BUFFER{};
     const auto volume_error =
         Ioctl(device, FSCTL_GET_NTFS_VOLUME_DATA, &volume, sizeof(volume));
     if (volume_error != ERROR_SUCCESS) {
-        WinError("FSCTL_GET_NTFS_VOLUME_DATA failed for --map #{}", map_number,
+        WinError("FSCTL_GET_NTFS_VOLUME_DATA failed for {}", description,
             ExplicitWin32Error{volume_error});
     }
     if ((volume.TotalClusters.QuadPart <= 0) || (volume.BytesPerCluster == 0)) {
         throw std::runtime_error(std::format(
-            "FSCTL_GET_NTFS_VOLUME_DATA returned invalid data for --map #{}",
-            map_number));
+            "FSCTL_GET_NTFS_VOLUME_DATA returned invalid data for {}",
+            description));
     }
 
     // The nonpositive case is rejected above, so this conversion preserves
@@ -389,8 +439,8 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
         wil::safe_cast_failfast<UINT64>(volume.TotalClusters.QuadPart);
     if (cluster_count > (device_size / volume.BytesPerCluster)) {
         throw std::runtime_error(std::format(
-            "NTFS cluster span exceeds the exposed device length for --map #{}",
-            map_number));
+            "NTFS cluster span exceeds the exposed device length for {}",
+            description));
     }
 
     // The bitmap is applied directly to device offsets, so LCN 0 must begin at byte 0.
@@ -398,14 +448,14 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
     const auto retrieval_base_error = Ioctl(device,
         FSCTL_GET_RETRIEVAL_POINTER_BASE, &retrieval_base, sizeof(retrieval_base));
     if (retrieval_base_error != ERROR_SUCCESS) {
-        WinError("FSCTL_GET_RETRIEVAL_POINTER_BASE failed for --map #{}",
-            map_number, ExplicitWin32Error{retrieval_base_error});
+        WinError("FSCTL_GET_RETRIEVAL_POINTER_BASE failed for {}",
+            description, ExplicitWin32Error{retrieval_base_error});
     }
     if (retrieval_base.FileAreaOffset.QuadPart != 0) {
         throw std::runtime_error(std::format(
             "NTFS LCN 0 is offset {} sectors from the start of the exposed device "
-            "for --map #{}",
-            retrieval_base.FileAreaOffset.QuadPart, map_number));
+            "for {}",
+            retrieval_base.FileAreaOffset.QuadPart, description));
     }
 
     const auto bitmap_bytes =
@@ -415,7 +465,7 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
     const auto output_size = std::max(sizeof(VOLUME_BITMAP_BUFFER), bitmap_data_size);
     if (!std::in_range<DWORD>(output_size)) {
         throw std::runtime_error(std::format(
-            "NTFS allocation bitmap is too large for --map #{}", map_number));
+            "NTFS allocation bitmap is too large for {}", description));
     }
     // std::in_range above proves output_size is representable by DWORD.
     const auto output_size_for_api =
@@ -425,7 +475,7 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
         VirtualAlloc(nullptr, output_size_for_api, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)));
     if (!storage) {
         WinError(
-            "could not allocate NTFS allocation bitmap for --map #{}", map_number);
+            "could not allocate NTFS allocation bitmap for {}", description);
     }
     auto *const output = std::start_lifetime_as<VOLUME_BITMAP_BUFFER>(storage.get());
     auto input = STARTING_LCN_INPUT_BUFFER{.StartingLcn = {.QuadPart = 0}};
@@ -433,15 +483,15 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
     const auto bitmap_error = Ioctl(device, FSCTL_GET_VOLUME_BITMAP,
         output, output_size_for_api, &input, sizeof(input), &returned);
     if (bitmap_error != ERROR_SUCCESS) {
-        WinError("FSCTL_GET_VOLUME_BITMAP failed for --map #{}", map_number,
+        WinError("FSCTL_GET_VOLUME_BITMAP failed for {}", description,
             ExplicitWin32Error{bitmap_error});
     }
     if ((output->StartingLcn.QuadPart != 0) ||
         (output->BitmapSize.QuadPart != volume.TotalClusters.QuadPart) ||
         (returned < bitmap_data_size)) {
         throw std::runtime_error(std::format(
-            "FSCTL_GET_VOLUME_BITMAP returned incomplete data for --map #{}",
-            map_number));
+            "FSCTL_GET_VOLUME_BITMAP returned incomplete data for {}",
+            description));
     }
 
     auto result = AllocationBitmap{
@@ -459,6 +509,12 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
 #endif
     return result;
 }
+
+} // namespace devicefs::filesystem_internal
+
+namespace {
+
+using devicefs::filesystem_internal::LoadAllocationBitmap;
 
 [[nodiscard]] auto OpenDevice(
     const Mapping &mapping, const bool extended_dasd,
@@ -535,7 +591,8 @@ using DeviceFiles = std::map<std::wstring, DeviceFile>;
         }
     }
     auto allocation_bitmap = synthetic_free_clusters
-        ? LoadAllocationBitmap(handle.get(), size, map_number)
+        ? LoadAllocationBitmap(
+            handle.get(), size, std::format("--map #{}", map_number))
         : AllocationBitmap{};
     return DeviceFile{
         .name = mapping.name,

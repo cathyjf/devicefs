@@ -507,16 +507,17 @@ struct ForegroundOptions {
     return result;
 }
 
-[[nodiscard]] auto ParseQueryManifestOptions(
-    const std::span<const wchar_t *const> arguments)
+[[nodiscard]] auto ParseNamespaceOverride(
+    const std::span<const wchar_t *const> arguments,
+    const std::string_view mode)
     -> std::optional<std::u8string> {
     if (arguments.empty()) {
         return std::nullopt;
     }
     if ((arguments.size() != 2) ||
         (std::wstring_view{arguments[0]} != L"--namespace")) {
-        throw std::invalid_argument(
-            "--query-manifest accepts only --namespace NAMESPACE");
+        throw std::invalid_argument(std::format(
+            "{} accepts only --namespace NAMESPACE", mode));
     }
     return std::filesystem::path{arguments[1]}.u8string();
 }
@@ -599,6 +600,21 @@ struct ForegroundOptions {
         });
 }
 
+[[nodiscard]] auto RunIncrementalStatsMode(
+    std::optional<std::u8string> namespace_override) {
+    const auto [input, console_mode] = GetForegroundConsoleInput(
+        "--incremental-stats requires an attached console");
+    const auto persistent = ResolvePersistentPaths();
+    const auto backup_lock = AcquireBackupLock(persistent.backup_lock);
+    return RunForegroundOperation(
+        input, console_mode,
+        [namespace_override = std::move(namespace_override)](
+            const HANDLE cancellation_event) {
+            return RunIncrementalStats(
+                cancellation_event, namespace_override);
+        });
+}
+
 auto WINAPI ServiceMain(
     const DWORD argc, wchar_t **) noexcept -> void {
     static auto context = ServiceContext{};
@@ -643,6 +659,8 @@ auto PrintHelp() noexcept {
         "      --namespace and --volumes override configured values.\n"
         "  backup-supervisor.exe --query-manifest "
         "[--namespace NAMESPACE]\n"
+        "  backup-supervisor.exe --incremental-stats "
+        "[--namespace NAMESPACE]\n"
         "  backup-supervisor.exe --install-service [--update]\n"
         "  backup-supervisor.exe --run-service\n");
 }
@@ -686,7 +704,13 @@ auto wmain(
         }
         if (option == L"--query-manifest") {
             return RunQueryManifest(
-                ParseQueryManifestOptions(arguments.subspan(1)));
+                ParseNamespaceOverride(
+                    arguments.subspan(1), "--query-manifest"));
+        }
+        if (option == L"--incremental-stats") {
+            return RunIncrementalStatsMode(
+                ParseNamespaceOverride(
+                    arguments.subspan(1), "--incremental-stats"));
         }
         if (option == L"--install-service") {
             if (arguments.size() == 1) {

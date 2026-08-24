@@ -37,6 +37,7 @@
 // Main header
 #include "shadow.h"
 #include <mutex>
+#include <objidl.h>
 
 
 
@@ -76,9 +77,19 @@ void VssClient::Initialize(DWORD dwContext, wstring xmlDoc, bool bDuringRestore,
     CHECK_COM( CoInitialize(NULL) );
     m_bCoInitializeCalled = true;
 
-    // Initialize COM security
-    static auto security_once = std::once_flag{};
-    std::call_once(security_once, [&ft] {
+    // As instructed by Microsoft's guidelines, configure process-wide COM
+    // behavior before exposing VSS callback interfaces. Masking an exception
+    // there could leave the requester in a corrupted state.
+    // See <https://learn.microsoft.com/en-us/windows/win32/vss/security-considerations-for-requestors>.
+    static auto process_com_once = std::once_flag{};
+    std::call_once(process_com_once, [&ft] {
+        auto global_options = CComPtr<IGlobalOptions>{};
+        CHECK_COM(global_options.CoCreateInstance(
+            CLSID_GlobalOptions, nullptr, CLSCTX_INPROC_SERVER));
+        CHECK_COM(global_options->Set(
+            COMGLB_EXCEPTION_HANDLING,
+            COMGLB_EXCEPTION_DONOT_HANDLE_ANY));
+
         CHECK_COM(
             CoInitializeSecurity(
                 NULL,                           //  Allow *all* VSS writers to communicate back!

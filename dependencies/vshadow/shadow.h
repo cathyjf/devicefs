@@ -53,6 +53,7 @@
 #include <vector>
 #include <map>
 #include <algorithm>
+#include <ranges>
 #include <string>
 #include <fstream>
 using namespace std;

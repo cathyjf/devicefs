@@ -537,65 +537,54 @@ inline wstring GetDeviceForVolumeName(wstring volumeName)
 
 
 
+inline auto GetSmallestMountPoint(
+    const std::vector<wchar_t> &volume_mount_points) -> std::wstring {
+    auto mount_point = std::wstring{};
+    for (const auto path : volume_mount_points | std::views::split(L'\0')) {
+        if (path.empty()) {
+            break;
+        }
+        if (mount_point.empty() || (path.size() < mount_point.size())) {
+            mount_point.assign(path.begin(), path.end());
+        }
+    }
+    return mount_point;
+}
+
 // Get the displayable root path for the given volume name
 inline wstring GetDisplayNameForVolume(wstring volumeName)
 {
     FunctionTracer ft(DBG_INFO);
 
-    DWORD dwRequired = 0;
-    wstring volumeMountPoints(MAX_PATH, L'\0');
-    if (!GetVolumePathNamesForVolumeName((LPCWSTR)volumeName.c_str(), 
-            WString2Buffer(volumeMountPoints), 
-            (DWORD)volumeMountPoints.length(), 
-            &dwRequired))
-    {
-            // If not enough, retry with a larger size
-            volumeMountPoints.resize(dwRequired, L'\0');
-            CHECK_WIN32(!GetVolumePathNamesForVolumeName((LPCWSTR)volumeName.c_str(), 
-                WString2Buffer(volumeMountPoints), 
-                (DWORD)volumeMountPoints.length(), 
-                &dwRequired));
-    }
+    auto required = DWORD{};
+    GetVolumePathNamesForVolumeNameW(
+        volumeName.c_str(), nullptr, 0, &required);
+    auto volume_mount_points = std::vector<wchar_t>(required);
+    CHECK_WIN32(GetVolumePathNamesForVolumeNameW(
+        volumeName.c_str(), volume_mount_points.data(),
+        required, &required));
+    volume_mount_points.resize(required);
 
-    // compute the smallest mount point by enumerating the returned MULTI_SZ
-    wstring mountPoint = volumeMountPoints;
-    for(LPWSTR pwszString = (LPWSTR)volumeMountPoints.c_str(); pwszString[0]; pwszString += wcslen(pwszString) + 1)
-        if (mountPoint.length() > wcslen(pwszString))
-            mountPoint = pwszString;
-
-    return mountPoint;
+    return GetSmallestMountPoint(volume_mount_points);
 }
 
 inline bool GetDisplayNameForVolumeNoThrow(wstring volumeName, wstring &volumeNameCanon)
 {
     FunctionTracer ft(DBG_INFO);
 
-    DWORD dwRequired = 0;
-    wstring volumeMountPoints(MAX_PATH, L'\0');
-    if (!GetVolumePathNamesForVolumeName((LPCWSTR)volumeName.c_str(), 
-            WString2Buffer(volumeMountPoints), 
-            (DWORD)volumeMountPoints.length(), 
-            &dwRequired))
-    {
-            // If not enough, retry with a larger size
-            volumeMountPoints.resize(dwRequired, L'\0');
-            if(!dwRequired || !GetVolumePathNamesForVolumeName((LPCWSTR)volumeName.c_str(), 
-                                                                WString2Buffer(volumeMountPoints), 
-                                                                (DWORD)volumeMountPoints.length(), 
-                                                                &dwRequired))
-            {
-                ft.Trace(DBG_INFO, L"GetVolumePathNamesForVolumeName(%s) fails winerror %d", volumeName.c_str(), GetLastError());
-                return false;
-            }
+    auto required = DWORD{};
+    GetVolumePathNamesForVolumeNameW(
+        volumeName.c_str(), nullptr, 0, &required);
+    auto volume_mount_points = std::vector<wchar_t>(required);
+    if (!GetVolumePathNamesForVolumeNameW(
+            volumeName.c_str(), volume_mount_points.data(),
+            required, &required)) {
+        ft.Trace(DBG_INFO, L"GetVolumePathNamesForVolumeName(%s) failed with error %d", volumeName.c_str(), GetLastError());
+        return false;
     }
+    volume_mount_points.resize(required);
 
-    // compute the smallest mount point by enumerating the returned MULTI_SZ
-    wstring mountPoint = volumeMountPoints;
-    for(LPWSTR pwszString = (LPWSTR)volumeMountPoints.c_str(); pwszString[0]; pwszString += wcslen(pwszString) + 1)
-        if (mountPoint.length() > wcslen(pwszString))
-            mountPoint = pwszString;
-
-    volumeNameCanon = mountPoint;
+    volumeNameCanon = GetSmallestMountPoint(volume_mount_points);
 
     return true;
 }
@@ -748,20 +737,24 @@ inline wstring VssTimeToString(VSS_TIMESTAMP& vssTime)
     WCHAR pwszDate[64];
     WCHAR pwszTime[64];
     //  Convert timestamp to a date string
-    ::GetDateFormatW( GetThreadLocale( ),
-                      DATE_SHORTDATE,
-                      &stLocal,
-                      NULL,
-                      pwszDate,
-                      sizeof( pwszDate ) / sizeof( pwszDate[0] ));
+    if (!::GetDateFormatW(GetThreadLocale(),
+            DATE_SHORTDATE,
+            &stLocal,
+            nullptr,
+            pwszDate,
+            sizeof(pwszDate) / sizeof(pwszDate[0]))) {
+        return {};
+    }
 
     //  Convert timestamp to a time string
-    ::GetTimeFormatW( GetThreadLocale( ),
-                      0,
-                      &stLocal,
-                      NULL,
-                      pwszTime,
-                      sizeof( pwszTime ) / sizeof( pwszTime[0] ));
+    if (!::GetTimeFormatW(GetThreadLocale(),
+            0,
+            &stLocal,
+            nullptr,
+            pwszTime,
+            sizeof(pwszTime) / sizeof(pwszTime[0]))) {
+        return {};
+    }
 
     stringDateTime = pwszDate;
     stringDateTime += L" ";

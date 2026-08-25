@@ -433,9 +433,15 @@ using devicefs::filesystem_internal::AllocationBitmap;
 using devicefs::filesystem_internal::Ioctl;
 
 struct WindowsBlockDevice {
+    const std::uint64_t length;
     wil::unique_hfile handle;
     UINT32 sector_size = 0;
     AllocationBitmap allocation_bitmap;
+
+    [[nodiscard]] static auto FromFilename(
+        wil::zwstring_view filename, bool extended_dasd,
+        bool cache, bool synthetic_free_clusters,
+        std::string_view description) -> WindowsBlockDevice;
 
     template <typename... Observers>
     [[gsl::suppress("26429",
@@ -652,35 +658,35 @@ namespace {
 
 using devicefs::filesystem_internal::LoadAllocationBitmap;
 
-[[nodiscard]] auto OpenDevice(
-    const Mapping &mapping, const bool extended_dasd,
+auto WindowsBlockDevice::FromFilename(
+    const wil::zwstring_view filename, const bool extended_dasd,
     const bool cache, const bool synthetic_free_clusters,
-    const UINT64 map_number) {
-    auto handle = wil::unique_hfile(CreateFileW(mapping.device.c_str(), GENERIC_READ,
+    const std::string_view description) -> WindowsBlockDevice {
+    auto handle = wil::unique_hfile(CreateFileW(filename.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
     if (!handle) {
-        WinError("could not open block device for --map #{}", map_number);
+        WinError("could not open block device for {}", description);
     }
 
     auto length = GET_LENGTH_INFORMATION{};
     const auto length_error =
         Ioctl(handle.get(), IOCTL_DISK_GET_LENGTH_INFO, &length, sizeof(length));
     if (length_error != ERROR_SUCCESS) {
-        WinError("IOCTL_DISK_GET_LENGTH_INFO failed for --map #{}", map_number,
+        WinError("IOCTL_DISK_GET_LENGTH_INFO failed for {}", description,
             ExplicitWin32Error{length_error});
     }
     if (length.Length.QuadPart < 0) {
         throw std::runtime_error(std::format(
-            "IOCTL_DISK_GET_LENGTH_INFO returned an invalid length for --map #{}",
-            map_number));
+            "IOCTL_DISK_GET_LENGTH_INFO returned an invalid length for {}",
+            description));
     }
 
     auto geometry = DISK_GEOMETRY{};
     const auto geometry_error =
         Ioctl(handle.get(), IOCTL_DISK_GET_DRIVE_GEOMETRY, &geometry, sizeof(geometry));
     if (geometry_error != ERROR_SUCCESS) {
-        WinError("IOCTL_DISK_GET_DRIVE_GEOMETRY failed for --map #{}", map_number,
+        WinError("IOCTL_DISK_GET_DRIVE_GEOMETRY failed for {}", description,
             ExplicitWin32Error{geometry_error});
     }
 
@@ -690,14 +696,14 @@ using devicefs::filesystem_internal::LoadAllocationBitmap;
         wil::safe_cast_failfast<UINT64>(length.Length.QuadPart);
     if ((geometry.BytesPerSector == 0) || ((size % geometry.BytesPerSector) != 0)) {
         throw std::runtime_error(std::format(
-            "block device length is not a multiple of its sector size for --map #{}",
-            map_number));
+            "block device length is not a multiple of its sector size for {}",
+            description));
     }
     if ((size % kAdvertisedSectorSize) != 0) {
         throw std::runtime_error(std::format(
             "block device length is not a multiple of the advertised "
-            "allocation unit for --map #{}",
-            map_number));
+            "allocation unit for {}",
+            description));
     }
 
     const auto dasd_error = extended_dasd
@@ -709,7 +715,7 @@ using devicefs::filesystem_internal::LoadAllocationBitmap;
         devicefs::WriteToStream(
             std::cerr,
             L"devicefs: warning: FSCTL_ALLOW_EXTENDED_DASD_IO failed for '{}': ",
-            mapping.device);
+            std::wstring_view{filename});
         devicefs::WriteToStream(std::cerr, "{}\n", error.message());
     }
 
@@ -717,32 +723,41 @@ using devicefs::filesystem_internal::LoadAllocationBitmap;
         auto file_system_flags = DWORD{};
         if (!GetVolumeInformationByHandleW(handle.get(), nullptr, 0, nullptr,
                 nullptr, &file_system_flags, nullptr, 0)) {
-            WinError(
-                "could not query filesystem flags for --map #{}", map_number);
+            WinError("could not query filesystem flags for {}", description);
         }
         if ((file_system_flags & FILE_READ_ONLY_VOLUME) == 0) {
             const auto option = cache ? "--cache" : "--synthetic-free-clusters";
             throw std::runtime_error(std::format(
-                "{} requires a read-only volume for --map #{}", option, map_number));
+                "{} requires a read-only volume for {}", option, description));
         }
     }
     auto allocation_bitmap = synthetic_free_clusters
-        ? LoadAllocationBitmap(
-            handle.get(), size, std::format("--map #{}", map_number))
+        ? LoadAllocationBitmap(handle.get(), size, description)
         : AllocationBitmap{};
+    return WindowsBlockDevice{
+        .length = size,
+        .handle = std::move(handle),
+        .sector_size = geometry.BytesPerSector,
+        .allocation_bitmap = std::move(allocation_bitmap),
+    };
+}
+
+[[nodiscard]] auto OpenDevice(
+    const Mapping &mapping, const bool extended_dasd,
+    const bool cache, const bool synthetic_free_clusters,
+    const UINT64 map_number) {
+    auto device = WindowsBlockDevice::FromFilename(
+        mapping.device, extended_dasd, cache, synthetic_free_clusters,
+        std::format("--map #{}", map_number));
     return DeviceFile<WindowsBlockDevice>{
         .name = mapping.name,
         .info = {
             .FileAttributes = FILE_ATTRIBUTE_READONLY,
-            .AllocationSize = size,
-            .FileSize = size,
+            .AllocationSize = device.length,
+            .FileSize = device.length,
             .IndexNumber = map_number + 1,
         },
-        .device = {
-            .handle = std::move(handle),
-            .sector_size = geometry.BytesPerSector,
-            .allocation_bitmap = std::move(allocation_bitmap),
-        },
+        .device = std::move(device),
     };
 }
 

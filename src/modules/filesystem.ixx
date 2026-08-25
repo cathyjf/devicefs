@@ -434,6 +434,7 @@ using devicefs::filesystem_internal::Ioctl;
 
 struct WindowsBlockDevice {
     const std::uint64_t length;
+    std::wstring filename;
     wil::unique_hfile handle;
     UINT32 sector_size = 0;
     AllocationBitmap allocation_bitmap;
@@ -450,11 +451,10 @@ struct WindowsBlockDevice {
             "null.")]]
     _Success_(return == STATUS_SUCCESS)
     auto Read(
-        const std::wstring &name,
         _Out_writes_bytes_to_(wanted, *transferred) void *const buffer,
         const std::uint64_t offset, const ULONG wanted,
         _Inout_ ULONG *const transferred,
-        Observers &...observers) const noexcept {
+        Observers &...observers) const noexcept -> NTSTATUS {
         const auto output = std::span<BYTE>{static_cast<BYTE *>(buffer), wanted};
         if constexpr (!kMeasureFreeClusterData) {
             if (!allocation_bitmap.HasAllocatedClusters(offset, wanted)) {
@@ -468,7 +468,7 @@ struct WindowsBlockDevice {
             devicefs::WriteToStream(
                 std::cerr,
                 L"devicefs: read failed for '{}': Windows error {}\n",
-                name, error);
+                filename, error);
             return FspNtStatusFromWin32(error);
         };
         const auto read = [&](void *const output, const UINT64 position,
@@ -546,6 +546,18 @@ struct WindowsBlockDevice {
 };
 
 template <typename DeviceType>
+concept BlockDevice = requires(
+    DeviceType &device,
+    _Out_writes_bytes_to_(wanted, *transferred) void *const buffer,
+    const std::remove_const_t<decltype(device.length)> offset,
+    const ULONG wanted,
+    _Inout_ ULONG *const transferred) {
+    { device.length } -> std::same_as<const std::uint64_t &>;
+    { device.Read(buffer, offset, wanted, transferred) }
+        noexcept -> std::same_as<NTSTATUS>;
+};
+
+template <typename DeviceType>
 struct DeviceFile {
     std::wstring name;
     FSP_FSCTL_FILE_INFO info{};
@@ -553,7 +565,8 @@ struct DeviceFile {
 };
 
 // WinFsp directory markers require a stable order and an upper-bound lookup.
-using DeviceFiles = std::map<std::wstring, DeviceFile<WindowsBlockDevice>>;
+template <typename DeviceType>
+using DeviceFiles = std::map<std::wstring, DeviceFile<DeviceType>>;
 
 } // namespace
 
@@ -736,6 +749,7 @@ auto WindowsBlockDevice::FromFilename(
         : AllocationBitmap{};
     return WindowsBlockDevice{
         .length = size,
+        .filename = std::wstring{filename},
         .handle = std::move(handle),
         .sector_size = geometry.BytesPerSector,
         .allocation_bitmap = std::move(allocation_bitmap),
@@ -782,10 +796,12 @@ auto g_stop_event = HANDLE{};
 auto g_stopped_event = HANDLE{};
 auto g_dispatcher_stopped_unexpectedly = false;
 
+template <BlockDevice DeviceType>
 class DeviceFs {
 public:
     [[nodiscard]] DeviceFs(
-        DeviceFiles files, wil::unique_hlocal_security_descriptor security,
+        DeviceFiles<DeviceType> files,
+        wil::unique_hlocal_security_descriptor security,
         Mount mount, const bool cache)
         : files_(std::move(files)), security_(std::move(security)), mount_(std::move(mount)) {
         auto params = FSP_FSCTL_VOLUME_PARAMS{
@@ -921,7 +937,7 @@ private:
 #endif
             [[gsl::suppress("type.3",
                 justification: "WinFsp stores an opaque context as void *, but DeviceFile is immutable.")]]
-            *context = const_cast<DeviceFile<WindowsBlockDevice> *>(file);
+            *context = const_cast<DeviceFile<DeviceType> *>(file);
             *info = root ? kRootInfo : file->info;
             return STATUS_SUCCESS;
         });
@@ -939,7 +955,7 @@ private:
         const UINT64 offset, const ULONG length,
         _Out_ ULONG *const transferred) noexcept {
         *transferred = 0;
-        const auto *const file = static_cast<const DeviceFile<WindowsBlockDevice> *>(context);
+        const auto *const file = static_cast<const DeviceFile<DeviceType> *>(context);
         if (file == nullptr) {
             return STATUS_FILE_IS_A_DIRECTORY;
         }
@@ -958,7 +974,7 @@ private:
         auto observation = Self(fs).read_measurement_.BeginRead(length, wanted);
 #endif
         return file->device.Read(
-            file->name, buffer, offset, wanted, transferred
+            buffer, offset, wanted, transferred
 #if DEVICEFS_MEASURE_READ_PATH
             , observation
 #endif
@@ -970,7 +986,7 @@ private:
         _Out_ FSP_FSCTL_FILE_INFO *const info) noexcept {
         *info = context == nullptr
             ? kRootInfo
-            : static_cast<const DeviceFile<WindowsBlockDevice> *>(context)->info;
+            : static_cast<const DeviceFile<DeviceType> *>(context)->info;
         return STATUS_SUCCESS;
     }
 
@@ -1032,7 +1048,7 @@ private:
     }
 
     static const FSP_FILE_SYSTEM_INTERFACE interface_;
-    const DeviceFiles files_;
+    const DeviceFiles<DeviceType> files_;
     const wil::unique_hlocal_security_descriptor security_;
     const Mount mount_;
 #if DEVICEFS_MEASURE_READ_PATH
@@ -1042,7 +1058,8 @@ private:
     UniqueFileSystem fs_;
 };
 
-const FSP_FILE_SYSTEM_INTERFACE DeviceFs::interface_ = {
+template <BlockDevice DeviceType>
+const FSP_FILE_SYSTEM_INTERFACE DeviceFs<DeviceType>::interface_ = {
     .GetVolumeInfo = GetVolumeInfo,
     .GetSecurityByName = GetSecurityByName,
     // WinFsp requires Create, Open, and Overwrite callbacks as a group.
@@ -1080,7 +1097,7 @@ auto Run(const Options &options) {
     }
 
     auto security = MakeSecurityDescriptor(options.read_user);
-    auto files = DeviceFiles{};
+    auto files = DeviceFiles<WindowsBlockDevice>{};
     for (auto i = 0uz; i < options.mappings.size(); ++i) {
         const auto &mapping = options.mappings[i];
         files.emplace(Lowercase(mapping.name),
@@ -1112,7 +1129,7 @@ auto Run(const Options &options) {
                     "free-only reads will access the source device\n");
             }
         }
-        auto filesystem = DeviceFs(
+        auto filesystem = DeviceFs<WindowsBlockDevice>(
             std::move(files), std::move(security), options.mount, options.cache);
         g_stop_event = stop_event.get();
         g_stopped_event = stopped_event.get();

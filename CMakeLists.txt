@@ -84,12 +84,13 @@ target_module_interfaces(devicefs-common PUBLIC
 add_library(devicefs-filesystem STATIC)
 target_module_interfaces(devicefs-filesystem PUBLIC
     src/modules/filesystem.ixx
+    src/modules/vhdx_viewer.ixx
     src/modules/windows_block_device.ixx
 )
 target_sources(devicefs-filesystem PRIVATE
     src/modules/filesystem_allocation_changes.cpp
 )
-target_link_libraries(devicefs-filesystem PRIVATE devicefs-common)
+target_link_libraries(devicefs-filesystem PRIVATE devicefs-common ole32)
 
 add_library(devicefs-vss-block-descriptors STATIC)
 target_module_interfaces(devicefs-vss-block-descriptors PUBLIC

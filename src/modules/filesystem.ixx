@@ -34,6 +34,7 @@ import std;
 export import devicefs.windows_block_device;
 import devicefs.common;
 import devicefs.stream_writer;
+import devicefs.vhdx_viewer;
 
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA || DEVICEFS_MEASURE_READ_PATH
 import devicefs.filesystem_measurement;
@@ -88,6 +89,7 @@ struct Options {
     bool cache = false;
     bool extended_dasd = true;
     bool synthetic_free_clusters = false;
+    bool vhdx = false;
     bool help = false;
 };
 
@@ -128,6 +130,7 @@ auto Usage(std::ostream &output) noexcept {
         L"  --cache                    Enable file-data caching (requires read-only volumes)\n"
         L"  --no-extended-dasd-io      Do not issue FSCTL_ALLOW_EXTENDED_DASD_IO\n"
         L"  --synthetic-free-clusters  Return zeros for free clusters on read-only NTFS volumes\n"
+        L"  --vhdx                     Expose each mapped volume as a VHDX disk\n"
         L"  -h, --help                 Show this help\n\n"
         L"Example:\n"
         L"  devicefs --mount X: --read-user 'pbs-vss' `\n"
@@ -165,6 +168,8 @@ auto Usage(std::ostream &output) noexcept {
             result.extended_dasd = false;
         } else if (arg == L"--synthetic-free-clusters") {
             result.synthetic_free_clusters = true;
+        } else if (arg == L"--vhdx") {
+            result.vhdx = true;
         } else {
             throw std::invalid_argument(std::format("unknown option at argument {}", i));
         }
@@ -256,6 +261,7 @@ auto CheckNt(const NTSTATUS status, const wil::zstring_view operation) {
 namespace {
 
 using devicefs::WindowsBlockDevice;
+using devicefs::VhdxViewer;
 
 template <typename DeviceType>
 concept BlockDevice = requires(
@@ -285,15 +291,23 @@ using DeviceFiles = std::map<std::wstring, DeviceFile<DeviceType>>;
 
 namespace {
 
+template <BlockDevice DeviceType>
 [[nodiscard]] auto OpenDevice(
     const Mapping &mapping, const bool extended_dasd,
     const bool cache, const bool synthetic_free_clusters,
     const UINT64 map_number) {
-    auto device = WindowsBlockDevice::FromFilename(
+    auto source = WindowsBlockDevice::FromFilename(
         std::filesystem::path{mapping.device}, extended_dasd,
         cache, synthetic_free_clusters,
         std::format("--map #{}", map_number));
-    return DeviceFile<WindowsBlockDevice>{
+    auto device = [&]() -> DeviceType {
+        if constexpr (std::same_as<DeviceType, WindowsBlockDevice>) {
+            return std::move(source);
+        } else {
+            return DeviceType::FromBlockDevice(std::move(source));
+        }
+    }();
+    return DeviceFile<DeviceType>{
         .name = mapping.name,
         .info = {
             .FileAttributes = FILE_ATTRIBUTE_READONLY,
@@ -565,10 +579,12 @@ private:
         [[maybe_unused]] FSP_FILE_SYSTEM *const fs,
         const BOOLEAN normally) noexcept {
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
-        for (const auto &entry : Self(fs).files_) {
-            const auto &file = entry.second;
-            if (file.device.allocation_bitmap.measurement) {
-                file.device.allocation_bitmap.measurement->Report(file.name);
+        if constexpr (std::same_as<DeviceType, WindowsBlockDevice>) {
+            for (const auto &entry : Self(fs).files_) {
+                const auto &file = entry.second;
+                if (file.device.allocation_bitmap.measurement) {
+                    file.device.allocation_bitmap.measurement->Report(file.name);
+                }
             }
         }
 #endif
@@ -626,17 +642,14 @@ auto WINAPI ControlHandler(const DWORD event) noexcept -> BOOL {
     }
 }
 
-auto Run(const Options &options) {
-    if (!NT_SUCCESS(FspLoad(nullptr))) {
-        throw std::runtime_error("could not load WinFsp DLL");
-    }
-
+template <BlockDevice DeviceType>
+auto RunWithDevice(const Options &options) {
     auto security = MakeSecurityDescriptor(options.read_user);
-    auto files = DeviceFiles<WindowsBlockDevice>{};
+    auto files = DeviceFiles<DeviceType>{};
     for (auto i = 0uz; i < options.mappings.size(); ++i) {
         const auto &mapping = options.mappings[i];
         files.emplace(Lowercase(mapping.name),
-            OpenDevice(mapping, options.extended_dasd,
+            OpenDevice<DeviceType>(mapping, options.extended_dasd,
                 options.cache, options.synthetic_free_clusters, i + 1));
     }
 
@@ -664,7 +677,7 @@ auto Run(const Options &options) {
                     "free-only reads will access the source device\n");
             }
         }
-        auto filesystem = DeviceFs<WindowsBlockDevice>(
+        auto filesystem = DeviceFs<DeviceType>(
             std::move(files), std::move(security), options.mount, options.cache);
         g_stop_event = stop_event.get();
         g_stopped_event = stopped_event.get();
@@ -695,6 +708,16 @@ auto Run(const Options &options) {
         throw std::runtime_error("WinFsp dispatcher stopped unexpectedly");
     }
     return 0;
+}
+
+auto Run(const Options &options) {
+    if (!NT_SUCCESS(FspLoad(nullptr))) {
+        throw std::runtime_error("could not load WinFsp DLL");
+    }
+    if (options.vhdx) {
+        return RunWithDevice<VhdxViewer<WindowsBlockDevice>>(options);
+    }
+    return RunWithDevice<WindowsBlockDevice>(options);
 }
 
 } // namespace

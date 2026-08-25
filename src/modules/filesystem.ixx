@@ -425,22 +425,15 @@ struct AllocationBitmap {
     }
 };
 
-} // namespace devicefs::filesystem_internal
-
-namespace {
-
-using devicefs::filesystem_internal::AllocationBitmap;
-using devicefs::filesystem_internal::Ioctl;
-
 struct WindowsBlockDevice {
     const std::uint64_t length;
-    std::wstring filename;
+    std::filesystem::path filename;
     wil::unique_hfile handle;
     UINT32 sector_size = 0;
     AllocationBitmap allocation_bitmap;
 
     [[nodiscard]] static auto FromFilename(
-        wil::zwstring_view filename, bool extended_dasd,
+        std::filesystem::path filename, bool extended_dasd,
         bool cache, bool synthetic_free_clusters,
         std::string_view description) -> WindowsBlockDevice;
 
@@ -468,7 +461,7 @@ struct WindowsBlockDevice {
             devicefs::WriteToStream(
                 std::cerr,
                 L"devicefs: read failed for '{}': Windows error {}\n",
-                filename, error);
+                filename.native(), error);
             return FspNtStatusFromWin32(error);
         };
         const auto read = [&](void *const output, const UINT64 position,
@@ -544,6 +537,12 @@ struct WindowsBlockDevice {
         return STATUS_SUCCESS;
     }
 };
+
+} // namespace devicefs::filesystem_internal
+
+namespace {
+
+using devicefs::filesystem_internal::WindowsBlockDevice;
 
 template <typename DeviceType>
 concept BlockDevice = requires(
@@ -665,14 +664,8 @@ namespace devicefs::filesystem_internal {
     return result;
 }
 
-} // namespace devicefs::filesystem_internal
-
-namespace {
-
-using devicefs::filesystem_internal::LoadAllocationBitmap;
-
 auto WindowsBlockDevice::FromFilename(
-    const wil::zwstring_view filename, const bool extended_dasd,
+    std::filesystem::path filename, const bool extended_dasd,
     const bool cache, const bool synthetic_free_clusters,
     const std::string_view description) -> WindowsBlockDevice {
     auto handle = wil::unique_hfile(CreateFileW(filename.c_str(), GENERIC_READ,
@@ -728,7 +721,7 @@ auto WindowsBlockDevice::FromFilename(
         devicefs::WriteToStream(
             std::cerr,
             L"devicefs: warning: FSCTL_ALLOW_EXTENDED_DASD_IO failed for '{}': ",
-            std::wstring_view{filename});
+            filename.native());
         devicefs::WriteToStream(std::cerr, "{}\n", error.message());
     }
 
@@ -749,19 +742,24 @@ auto WindowsBlockDevice::FromFilename(
         : AllocationBitmap{};
     return WindowsBlockDevice{
         .length = size,
-        .filename = std::wstring{filename},
+        .filename = std::move(filename),
         .handle = std::move(handle),
         .sector_size = geometry.BytesPerSector,
         .allocation_bitmap = std::move(allocation_bitmap),
     };
 }
 
+} // namespace devicefs::filesystem_internal
+
+namespace {
+
 [[nodiscard]] auto OpenDevice(
     const Mapping &mapping, const bool extended_dasd,
     const bool cache, const bool synthetic_free_clusters,
     const UINT64 map_number) {
     auto device = WindowsBlockDevice::FromFilename(
-        mapping.device, extended_dasd, cache, synthetic_free_clusters,
+        std::filesystem::path{mapping.device}, extended_dasd,
+        cache, synthetic_free_clusters,
         std::format("--map #{}", map_number));
     return DeviceFile<WindowsBlockDevice>{
         .name = mapping.name,

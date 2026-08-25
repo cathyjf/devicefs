@@ -16,51 +16,12 @@
 
 module;
 
-#include <windows.h>
-#include <winioctl.h>
-
-#include <wil/resource.h>
-#include <wil/safecast.h>
+#include <devicefs/strsafe_compat.h>
 
 module devicefs.filesystem;
 
 import std;
-import devicefs.common;
-
-namespace {
-
-[[nodiscard]] auto OpenSnapshot(
-    const std::wstring_view source,
-    const std::string_view description) {
-    const auto path = std::filesystem::path{source};
-    auto result = wil::unique_hfile{CreateFileW(
-        path.c_str(), GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING,
-        FILE_FLAG_OVERLAPPED |
-            SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
-        nullptr)};
-    if (!result) {
-        WinError("could not open {}", description);
-    }
-    return result;
-}
-
-[[nodiscard]] auto QueryVolumeSize(
-    const HANDLE volume,
-    const std::string_view description) {
-    auto length = GET_LENGTH_INFORMATION{};
-    const auto error = devicefs::filesystem_internal::Ioctl(
-        volume, IOCTL_DISK_GET_LENGTH_INFO, &length, sizeof(length));
-    if (error != ERROR_SUCCESS) {
-        WinError("IOCTL_DISK_GET_LENGTH_INFO failed for {}", description,
-            ExplicitWin32Error{error});
-    }
-    return wil::safe_cast_failfast<std::uint64_t>(
-        length.Length.QuadPart);
-}
-
-} // namespace
+import <devicefs/windows_imports.h>;
 
 namespace devicefs {
 
@@ -101,14 +62,13 @@ auto SnapshotAllocationBitmap::SynthesizeFreeClusters(
 auto LoadSnapshotAllocationBitmap(
     const std::wstring_view snapshot,
     const std::string_view description) -> SnapshotAllocationBitmap {
-    auto handle = OpenSnapshot(snapshot, description);
-    const auto size = QueryVolumeSize(handle.get(), description);
+    auto device = filesystem_internal::WindowsBlockDevice::FromFilename(
+        std::filesystem::path{snapshot}, false, false, true, description);
     return SnapshotAllocationBitmap{std::make_unique<
         SnapshotAllocationBitmap::State>(
         SnapshotAllocationBitmap::State{
-            .volume_size = size,
-            .bitmap = filesystem_internal::LoadAllocationBitmap(
-                handle.get(), size, description),
+            .volume_size = device.length,
+            .bitmap = std::move(device.allocation_bitmap),
         })};
 }
 
@@ -120,22 +80,20 @@ auto ReadAllocationChangeBlocks(
         std::string_view{"the previous snapshot"};
     constexpr auto current_description =
         std::string_view{"the current snapshot"};
-    auto previous = OpenSnapshot(
-        previous_snapshot, previous_description);
-    auto current = OpenSnapshot(
-        current_snapshot, current_description);
-    const auto previous_size =
-        QueryVolumeSize(previous.get(), previous_description);
-    const auto current_size =
-        QueryVolumeSize(current.get(), current_description);
+    const auto previous = filesystem_internal::WindowsBlockDevice::FromFilename(
+        std::filesystem::path{previous_snapshot},
+        false, false, true, previous_description);
+    const auto current = filesystem_internal::WindowsBlockDevice::FromFilename(
+        std::filesystem::path{current_snapshot},
+        false, false, true, current_description);
+    const auto previous_size = previous.length;
+    const auto current_size = current.length;
     if (previous_size != current_size) {
         throw std::runtime_error(
             "the previous and current snapshot volume sizes do not match");
     }
-    auto previous_bitmap = filesystem_internal::LoadAllocationBitmap(
-        previous.get(), previous_size, previous_description);
-    auto current_bitmap = filesystem_internal::LoadAllocationBitmap(
-        current.get(), current_size, current_description);
+    const auto &previous_bitmap = previous.allocation_bitmap;
+    const auto &current_bitmap = current.allocation_bitmap;
     if ((previous_bitmap.cluster_size != current_bitmap.cluster_size) ||
         (previous_bitmap.cluster_count != current_bitmap.cluster_count)) {
         throw std::runtime_error(

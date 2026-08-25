@@ -18,7 +18,7 @@ module;
 
 #include <devicefs/strsafe_compat.h>
 
-module devicefs.filesystem;
+module devicefs.windows_block_device;
 
 import std;
 import <devicefs/windows_imports.h>;
@@ -62,7 +62,7 @@ auto SnapshotAllocationBitmap::SynthesizeFreeClusters(
 auto LoadSnapshotAllocationBitmap(
     const std::wstring_view snapshot,
     const std::string_view description) -> SnapshotAllocationBitmap {
-    auto device = filesystem_internal::WindowsBlockDevice::FromFilename(
+    auto device = WindowsBlockDevice::FromFilename(
         std::filesystem::path{snapshot}, false, false, true, description);
     return SnapshotAllocationBitmap{std::make_unique<
         SnapshotAllocationBitmap::State>(
@@ -80,10 +80,10 @@ auto ReadAllocationChangeBlocks(
         std::string_view{"the previous snapshot"};
     constexpr auto current_description =
         std::string_view{"the current snapshot"};
-    const auto previous = filesystem_internal::WindowsBlockDevice::FromFilename(
+    const auto previous = WindowsBlockDevice::FromFilename(
         std::filesystem::path{previous_snapshot},
         false, false, true, previous_description);
-    const auto current = filesystem_internal::WindowsBlockDevice::FromFilename(
+    const auto current = WindowsBlockDevice::FromFilename(
         std::filesystem::path{current_snapshot},
         false, false, true, current_description);
     const auto previous_size = previous.length;

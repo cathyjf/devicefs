@@ -84,6 +84,7 @@ target_module_interfaces(devicefs-common PUBLIC
 add_library(devicefs-filesystem STATIC)
 target_module_interfaces(devicefs-filesystem PUBLIC
     src/modules/filesystem.ixx
+    src/modules/windows_block_device.ixx
 )
 target_sources(devicefs-filesystem PRIVATE
     src/modules/filesystem_allocation_changes.cpp

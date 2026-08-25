@@ -155,13 +155,13 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/installation.ixx
     src/modules/supervisor/logging_console.ixx
     src/modules/supervisor/native_backup.ixx
-    src/modules/supervisor/native_backup_devicefs_process.cpp
-    src/modules/supervisor/native_backup_incremental.cpp
-    src/modules/supervisor/native_backup_incremental_diagnostics.cpp
-    src/modules/supervisor/native_backup_internal.cpp
-    src/modules/supervisor/native_backup_manifest.cpp
-    src/modules/supervisor/native_backup_pbs.cpp
-    src/modules/supervisor/native_backup_privileges.cpp
+    src/modules/supervisor/native_backup/devicefs_process.cpp
+    src/modules/supervisor/native_backup/incremental.cpp
+    src/modules/supervisor/native_backup/incremental_diagnostics.cpp
+    src/modules/supervisor/native_backup/internal.cpp
+    src/modules/supervisor/native_backup/manifest.cpp
+    src/modules/supervisor/native_backup/pbs.cpp
+    src/modules/supervisor/native_backup/privileges.cpp
     src/modules/supervisor/process_diagnostics.ixx
     src/modules/supervisor/vshadow.ixx
     src/modules/supervisor/winrt_apartment.ixx

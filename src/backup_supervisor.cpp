@@ -531,6 +531,13 @@ struct ForegroundOptions {
                     "--volume/--volumes requires a value");
             }
             raw_volume_override = arguments[index];
+        } else if (argument == L"--baseline") {
+            if (++index == arguments.size()) {
+                throw std::invalid_argument(
+                    "--baseline requires a value");
+            }
+            result.baseline_snapshot_identifier =
+                winrt::guid{std::wstring_view{arguments[index]}};
         } else {
             throw std::invalid_argument(
                 "incremental diagnostics received an unknown argument");
@@ -698,12 +705,10 @@ auto PrintHelp() noexcept {
         "      --namespace and --volumes override configured values.\n"
         "  backup-supervisor.exe --query-manifest "
         "[--namespace NAMESPACE]\n"
-        "  backup-supervisor.exe --incremental-stats "
-        "[--incremental-verify] [--namespace NAMESPACE] "
-        "[--volumes VOLUME[,VOLUME...]]\n"
-        "  backup-supervisor.exe --incremental-verify "
-        "[--incremental-stats] [--namespace NAMESPACE] "
-        "[--volumes VOLUME[,VOLUME...]]\n"
+        "  backup-supervisor.exe [--incremental-verify] "
+        "[--incremental-stats]\n"
+        "      [--namespace NAMESPACE] [--baseline SNAPSHOT-ID]\n"
+        "      [--volumes VOLUME[,VOLUME...]]\n"
         "  backup-supervisor.exe --install-service [--update]\n"
         "  backup-supervisor.exe --run-service\n");
 }

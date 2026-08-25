@@ -39,6 +39,7 @@ import devicefs.vss_block_descriptors;
 export struct IncrementalDiagnosticOptions {
     bool print_statistics = false;
     bool verify = false;
+    std::optional<GUID> baseline_snapshot_identifier;
     std::optional<std::u8string> namespace_override;
     std::vector<std::wstring> volume_override;
 };
@@ -130,6 +131,23 @@ struct SnapshotDiagnosticResult {
             };
         }) |
         std::ranges::to<std::vector<AvailableBaseline>>();
+}
+
+[[nodiscard]] auto QueryBaselineSnapshot(
+    const GUID &snapshot_identifier) -> std::vector<AvailableBaseline> {
+    auto snapshot = std::move(
+        devicefs::vshadow::QuerySnapshotProperties(
+            std::array{snapshot_identifier}).front());
+    if (!snapshot) {
+        return {};
+    }
+    return {{
+        .volume_identifier = winrt::guid{
+            snapshot->original_volume.substr(11, 36)},
+        .snapshot_identifier = snapshot_identifier,
+        .volume = std::move(snapshot->original_volume),
+        .device = std::move(snapshot->device),
+    }};
 }
 
 [[nodiscard]] auto SelectPayloadVolumes(
@@ -1363,26 +1381,36 @@ auto PrintVerificationResult(
 export [[nodiscard]] auto RunIncrementalDiagnostics(
     const HANDLE cancellation_event,
     const IncrementalDiagnosticOptions &options) -> int {
-    const auto previous = RetrievePreviousBackupManifest(
-        cancellation_event, options.namespace_override);
-    if (!previous) {
-        return internal::kCancelledExitCode;
+    const auto baseline_result = [&]()
+        -> std::expected<std::vector<AvailableBaseline>, int> {
+        if (options.baseline_snapshot_identifier) {
+            return QueryBaselineSnapshot(
+                *options.baseline_snapshot_identifier);
+        }
+        const auto previous = RetrievePreviousBackupManifest(
+            cancellation_event, options.namespace_override);
+        if (!previous) {
+            return std::unexpected{internal::kCancelledExitCode};
+        }
+        if (previous->exit_code != 0) {
+            return std::unexpected{previous->exit_code};
+        }
+        const auto snapshot_volumes =
+            previous->ParseManifest().QuerySnapshotVolumes();
+        if (snapshot_volumes.empty()) {
+            throw std::runtime_error(
+                "the previous backup has no snapshots still available");
+        }
+        return CollectAvailableBaselines(snapshot_volumes);
+    }();
+    if (!baseline_result) {
+        return baseline_result.error();
     }
-    if (previous->exit_code != 0) {
-        return previous->exit_code;
-    }
-
-    const auto snapshot_volumes =
-        previous->ParseManifest().QuerySnapshotVolumes();
-    if (snapshot_volumes.empty()) {
-        throw std::runtime_error(
-            "the previous backup has no snapshots still available");
-    }
+    const auto &baselines = *baseline_result;
     if (internal::CancellationRequested(cancellation_event)) {
         return internal::kCancelledExitCode;
     }
 
-    const auto baselines = CollectAvailableBaselines(snapshot_volumes);
     const auto volumes = SelectPayloadVolumes(
         baselines, options.volume_override);
     const auto result = RunSnapshotDiagnostics(

@@ -386,6 +386,18 @@ public:
             "could not start WinFsp dispatcher");
     }
 
+    auto WaitForOpenFilesToClose() const noexcept {
+        auto open_files = open_file_count_.load();
+        if (open_files != 0) {
+            devicefs::WriteToStream(std::cerr,
+                "devicefs: waiting for open files to close before shutdown\n");
+        }
+        while (open_files != 0) {
+            open_file_count_.wait(open_files);
+            open_files = open_file_count_.load();
+        }
+    }
+
 private:
     [[nodiscard]] static auto Self(const FSP_FILE_SYSTEM *const fs) noexcept -> decltype(auto) {
         return *static_cast<const DeviceFs *>(fs->UserContext);
@@ -395,6 +407,12 @@ private:
         path.remove_prefix(1);
         const auto found = files_.find(Lowercase(path));
         return found == files_.end() ? nullptr : &found->second;
+    }
+
+    auto EndFileOpen() const noexcept {
+        if (open_file_count_.fetch_sub(1) == 1) {
+            open_file_count_.notify_all();
+        }
     }
 
     [[gsl::suppress("26461",
@@ -474,6 +492,9 @@ private:
             if (access & kWriteAccess) {
                 return STATUS_MEDIA_WRITE_PROTECTED;
             }
+            if (!root) {
+                self.open_file_count_.fetch_add(1);
+            }
 #if DEVICEFS_MEASURE_READ_PATH
             if (!root) {
                 self.read_measurement_.RecordOpen(create_options);
@@ -485,6 +506,17 @@ private:
             *info = root ? kRootInfo : file->info;
             return STATUS_SUCCESS;
         });
+    }
+
+    [[gsl::suppress("26461",
+        justification:
+            "The function signature must match the requirement of the "
+            "corresponding WinFsp callback.")]]
+    static auto Cleanup(FSP_FILE_SYSTEM *const fs,
+        _In_opt_ void *const context, wchar_t *, ULONG) noexcept {
+        if (context != nullptr) {
+            Self(fs).EndFileOpen();
+        }
     }
 
     [[gsl::suppress("26429",
@@ -575,6 +607,10 @@ private:
         });
     }
 
+    [[gsl::suppress("26461",
+        justification:
+            "The function signature must match the requirement of the "
+            "corresponding WinFsp callback.")]]
     static auto DispatcherStopped(
         [[maybe_unused]] FSP_FILE_SYSTEM *const fs,
         const BOOLEAN normally) noexcept {
@@ -594,6 +630,10 @@ private:
         if (normally) {
             return;
         }
+        // If the WinFsp dispatcher fails, Windows can no longer tell us when
+        // open handles are closed. Stop waiting so the process can exit.
+        Self(fs).open_file_count_.store(0);
+        Self(fs).open_file_count_.notify_all();
         g_dispatcher_stopped_unexpectedly = true;
         SetEvent(g_stop_event);
     }
@@ -602,6 +642,7 @@ private:
     const DeviceFiles<DeviceType> files_;
     const wil::unique_hlocal_security_descriptor security_;
     const Mount mount_;
+    mutable std::atomic_size_t open_file_count_{};
 #if DEVICEFS_MEASURE_READ_PATH
     mutable ReadPathMeasurement read_measurement_;
 #endif
@@ -617,6 +658,7 @@ const FSP_FILE_SYSTEM_INTERFACE DeviceFs<DeviceType>::interface_ = {
     .Create = [](auto...) noexcept { return STATUS_MEDIA_WRITE_PROTECTED; },
     .Open = Open,
     .Overwrite = [](auto...) noexcept { return STATUS_MEDIA_WRITE_PROTECTED; },
+    .Cleanup = Cleanup,
     .Read = Read,
     .GetFileInfo = GetFileInfo,
     .GetSecurity = GetSecurity,
@@ -696,6 +738,7 @@ auto RunWithDevice(const Options &options) {
         if (WaitForSingleObject(stop_event.get(), INFINITE) == WAIT_FAILED) {
             wait_error = GetLastError();
         }
+        filesystem.WaitForOpenFilesToClose();
     }
     SetEvent(stopped_event.get());
     // The registered handler lives until process exit, so its handles must as well.

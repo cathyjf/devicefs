@@ -162,12 +162,14 @@ struct AllocationBitmap {
             (1u << (cluster % kBitsPerByte))) != 0;
     }
 
+    _Pre_satisfies_((cluster_count == 0) || (cluster_size != 0))
     [[nodiscard]] auto HasAllocatedClusters(
         const UINT64 offset,
         _In_range_(1, MAXUINT64 - offset) const UINT64 length) const noexcept {
         if (!storage) {
             return true;
         }
+        _Analysis_assume_(cluster_count != 0);
 
         const auto first_cluster = offset / cluster_size;
         const auto last_cluster = (offset + (length - 1)) / cluster_size;
@@ -182,12 +184,14 @@ struct AllocationBitmap {
         return false;
     }
 
+    _Pre_satisfies_((cluster_count == 0) || (cluster_size != 0))
     auto SynthesizeFreeClusters(
         const std::span<BYTE> output,
         const UINT64 offset) const noexcept {
         if (!storage || output.empty()) {
             return;
         }
+        _Analysis_assume_(cluster_count != 0);
 
         const auto end = offset + output.size();
         const auto first_cluster = offset / cluster_size;
@@ -240,23 +244,19 @@ struct WindowsBlockDevice {
         std::string_view description) -> WindowsBlockDevice;
 
     template <typename... Observers>
-    [[gsl::suppress("26429",
-        justification:
-            "The `_Inout_` annotation reflects that `transferred` cannot be "
-            "null.")]]
     _Success_(return == STATUS_SUCCESS)
     auto Read(
-        _Out_writes_bytes_to_(wanted, *transferred) void *const buffer,
+        _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
         _In_range_(0, length - 1) const std::uint64_t offset,
         _In_range_(1, length - offset) const ULONG wanted,
-        _Inout_ ULONG *const transferred,
+        _Pre_equal_to_(0) ULONG &transferred,
         Observers &...observers) const noexcept -> NTSTATUS {
         const auto output = std::span<BYTE>{static_cast<BYTE *>(buffer), wanted};
         if constexpr (!kMeasureFreeClusterData) {
             if (!allocation_bitmap.HasAllocatedClusters(offset, wanted)) {
                 (observers.RecordSynthetic(), ...);
                 std::ranges::fill(output, 0);
-                *transferred = wanted;
+                transferred = wanted;
                 return STATUS_SUCCESS;
             }
         }
@@ -310,7 +310,7 @@ struct WindowsBlockDevice {
             justification: "std::in_range above proves aligned_length is representable by LengthType.")]]
         const auto read_length = static_cast<LengthType>(aligned_length);
         if ((read_offset == offset) && (read_length == wanted)) {
-            const auto status = read(output.data(), offset, wanted, transferred);
+            const auto status = read(output.data(), offset, wanted, &transferred);
             if (!NT_SUCCESS(status)) {
                 return status;
             }
@@ -333,7 +333,7 @@ struct WindowsBlockDevice {
             return status;
         }
 
-        *transferred = wanted;
+        transferred = wanted;
         std::ranges::copy(bounce.subspan(prefix, wanted), output.begin());
         allocation_bitmap.SynthesizeFreeClusters(output, offset);
         (observers.RecordBounce(), ...);

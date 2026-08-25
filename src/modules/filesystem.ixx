@@ -260,11 +260,11 @@ using devicefs::WindowsBlockDevice;
 template <typename DeviceType>
 concept BlockDevice = requires(
     DeviceType &device,
-    _Out_writes_bytes_to_(wanted, *transferred) void *const buffer,
+    _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
     _In_range_(0, device.length - 1)
         const std::remove_const_t<decltype(device.length)> offset,
     _In_range_(1, device.length - offset) const ULONG wanted,
-    _Inout_ ULONG *const transferred) {
+    _Pre_equal_to_(0) ULONG &transferred) {
     { device.length } -> std::same_as<const std::uint64_t &>;
     { device.Read(buffer, offset, wanted, transferred) }
         noexcept -> std::same_as<NTSTATUS>;
@@ -509,7 +509,7 @@ private:
         // attribute expresses that policy.
         [[msvc::forceinline_calls]]
         return file->device.Read(
-            buffer, offset, wanted, transferred
+            buffer, offset, wanted, *transferred
 #if DEVICEFS_MEASURE_READ_PATH
             , observation
 #endif

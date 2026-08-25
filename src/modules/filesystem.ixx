@@ -432,16 +432,122 @@ namespace {
 using devicefs::filesystem_internal::AllocationBitmap;
 using devicefs::filesystem_internal::Ioctl;
 
-struct DeviceFile {
-    std::wstring name;
+struct WindowsBlockDevice {
     wil::unique_hfile handle;
     UINT32 sector_size = 0;
     AllocationBitmap allocation_bitmap;
+
+    template <typename... Observers>
+    [[gsl::suppress("26429",
+        justification:
+            "The `_Inout_` annotation reflects that `transferred` cannot be "
+            "null.")]]
+    _Success_(return == STATUS_SUCCESS)
+    auto Read(
+        const std::wstring &name,
+        _Out_writes_bytes_to_(wanted, *transferred) void *const buffer,
+        const std::uint64_t offset, const ULONG wanted,
+        _Inout_ ULONG *const transferred,
+        Observers &...observers) const noexcept {
+        const auto output = std::span<BYTE>{static_cast<BYTE *>(buffer), wanted};
+        if constexpr (!kMeasureFreeClusterData) {
+            if (!allocation_bitmap.HasAllocatedClusters(offset, wanted)) {
+                (observers.RecordSynthetic(), ...);
+                std::ranges::fill(output, 0);
+                *transferred = wanted;
+                return STATUS_SUCCESS;
+            }
+        }
+        const auto failure = [&](const DWORD error) {
+            devicefs::WriteToStream(
+                std::cerr,
+                L"devicefs: read failed for '{}': Windows error {}\n",
+                name, error);
+            return FspNtStatusFromWin32(error);
+        };
+        const auto read = [&](void *const output, const UINT64 position,
+                              const auto count, auto *const done) {
+            // ReadFile resets the event; each dispatcher thread uses it serially.
+            thread_local auto event = wil::unique_event_nothrow{};
+            if (!event && !event.try_create(wil::EventOptions::ManualReset, nullptr)) {
+                return failure(GetLastError());
+            }
+            auto operation = OVERLAPPED{};
+            const auto parts = ULARGE_INTEGER{.QuadPart = position};
+            operation.Offset = parts.LowPart;
+            operation.OffsetHigh = parts.HighPart;
+            operation.hEvent = event.get();
+            (observers.BeginSourceRead(), ...);
+            // GetOverlappedResult supplies the byte count for either completion path.
+            if (!ReadFile(handle.get(), output, count, nullptr, &operation)) {
+                const auto error = GetLastError();
+                if (error != ERROR_IO_PENDING) {
+                    return failure(error);
+                }
+                (observers.RecordSourcePending(), ...);
+            }
+            if (!GetOverlappedResult(handle.get(), &operation, done, TRUE)) {
+                return failure(GetLastError());
+            }
+            if (*done != count) {
+                return failure(ERROR_READ_FAULT);
+            }
+            (observers.FinishSourceRead(*done), ...);
+            return STATUS_SUCCESS;
+        };
+
+        const auto read_offset = offset - (offset % sector_size);
+        const auto end = offset + wanted;
+        const auto read_end = ((end + sector_size - 1) / sector_size) * sector_size;
+        using LengthType = std::remove_cv_t<decltype(wanted)>;
+        const auto aligned_length = read_end - read_offset;
+        if (!std::in_range<LengthType>(aligned_length)) {
+            return STATUS_INVALID_PARAMETER;
+        }
+        [[gsl::suppress("type.1",
+            justification: "std::in_range above proves aligned_length is representable by LengthType.")]]
+        const auto read_length = static_cast<LengthType>(aligned_length);
+        if ((read_offset == offset) && (read_length == wanted)) {
+            const auto status = read(output.data(), offset, wanted, transferred);
+            if (!NT_SUCCESS(status)) {
+                return status;
+            }
+            allocation_bitmap.SynthesizeFreeClusters(output, offset);
+            return STATUS_SUCCESS;
+        }
+
+        const auto prefix = offset - read_offset;
+
+        auto storage = wil::unique_virtualalloc_ptr<BYTE>(static_cast<BYTE *>(
+            VirtualAlloc(nullptr, read_length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)));
+        if (!storage) {
+            return failure(GetLastError());
+        }
+        const auto bounce = std::span<BYTE>{storage.get(), read_length};
+        auto device_transferred = LengthType{};
+        const auto status = read(
+            bounce.data(), read_offset, read_length, &device_transferred);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+
+        *transferred = wanted;
+        std::ranges::copy(bounce.subspan(prefix, wanted), output.begin());
+        allocation_bitmap.SynthesizeFreeClusters(output, offset);
+        (observers.RecordBounce(), ...);
+        return STATUS_SUCCESS;
+    }
+};
+
+template <typename DeviceType>
+struct DeviceFile {
+    std::wstring name;
     FSP_FSCTL_FILE_INFO info{};
+    DeviceType device;
 };
 
 // WinFsp directory markers require a stable order and an upper-bound lookup.
-using DeviceFiles = std::map<std::wstring, DeviceFile>;
+using DeviceFiles = std::map<std::wstring, DeviceFile<WindowsBlockDevice>>;
 
 } // namespace
 
@@ -624,16 +730,18 @@ using devicefs::filesystem_internal::LoadAllocationBitmap;
         ? LoadAllocationBitmap(
             handle.get(), size, std::format("--map #{}", map_number))
         : AllocationBitmap{};
-    return DeviceFile{
+    return DeviceFile<WindowsBlockDevice>{
         .name = mapping.name,
-        .handle = std::move(handle),
-        .sector_size = geometry.BytesPerSector,
-        .allocation_bitmap = std::move(allocation_bitmap),
         .info = {
             .FileAttributes = FILE_ATTRIBUTE_READONLY,
             .AllocationSize = size,
             .FileSize = size,
             .IndexNumber = map_number + 1,
+        },
+        .device = {
+            .handle = std::move(handle),
+            .sector_size = geometry.BytesPerSector,
+            .allocation_bitmap = std::move(allocation_bitmap),
         },
     };
 }
@@ -798,7 +906,7 @@ private:
 #endif
             [[gsl::suppress("type.3",
                 justification: "WinFsp stores an opaque context as void *, but DeviceFile is immutable.")]]
-            *context = const_cast<DeviceFile *>(file);
+            *context = const_cast<DeviceFile<WindowsBlockDevice> *>(file);
             *info = root ? kRootInfo : file->info;
             return STATUS_SUCCESS;
         });
@@ -816,7 +924,7 @@ private:
         const UINT64 offset, const ULONG length,
         _Out_ ULONG *const transferred) noexcept {
         *transferred = 0;
-        const auto *const file = static_cast<const DeviceFile *>(context);
+        const auto *const file = static_cast<const DeviceFile<WindowsBlockDevice> *>(context);
         if (file == nullptr) {
             return STATUS_FILE_IS_A_DIRECTORY;
         }
@@ -831,107 +939,15 @@ private:
             justification: "The minimum cannot exceed the ULONG length argument.")]]
         const auto wanted = static_cast<std::remove_cv_t<decltype(length)>>(
             std::min(UINT64{length}, file->info.FileSize - offset));
-        const auto output = std::span<BYTE>{static_cast<BYTE *>(buffer), wanted};
 #if DEVICEFS_MEASURE_READ_PATH
         auto observation = Self(fs).read_measurement_.BeginRead(length, wanted);
 #endif
-        if constexpr (!kMeasureFreeClusterData) {
-            if (!file->allocation_bitmap.HasAllocatedClusters(offset, wanted)) {
+        return file->device.Read(
+            file->name, buffer, offset, wanted, transferred
 #if DEVICEFS_MEASURE_READ_PATH
-                observation.RecordSynthetic();
+            , observation
 #endif
-                std::ranges::fill(output, 0);
-                *transferred = wanted;
-                return STATUS_SUCCESS;
-            }
-        }
-        const auto failure = [&](const DWORD error) {
-            devicefs::WriteToStream(
-                std::cerr,
-                L"devicefs: read failed for '{}': Windows error {}\n",
-                file->name, error);
-            return FspNtStatusFromWin32(error);
-        };
-        const auto read = [&](void *const output, const UINT64 position,
-                              const auto count, auto *const done) {
-            // ReadFile resets the event; each dispatcher thread uses it serially.
-            thread_local auto event = wil::unique_event_nothrow{};
-            if (!event && !event.try_create(wil::EventOptions::ManualReset, nullptr)) {
-                return failure(GetLastError());
-            }
-            auto operation = OVERLAPPED{};
-            const auto parts = ULARGE_INTEGER{.QuadPart = position};
-            operation.Offset = parts.LowPart;
-            operation.OffsetHigh = parts.HighPart;
-            operation.hEvent = event.get();
-#if DEVICEFS_MEASURE_READ_PATH
-            observation.BeginSourceRead();
-#endif
-            // GetOverlappedResult supplies the byte count for either completion path.
-            if (!ReadFile(file->handle.get(), output, count, nullptr, &operation)) {
-                const auto error = GetLastError();
-                if (error != ERROR_IO_PENDING) {
-                    return failure(error);
-                }
-#if DEVICEFS_MEASURE_READ_PATH
-                observation.RecordSourcePending();
-#endif
-            }
-            if (!GetOverlappedResult(file->handle.get(), &operation, done, TRUE)) {
-                return failure(GetLastError());
-            }
-            if (*done != count) {
-                return failure(ERROR_READ_FAULT);
-            }
-#if DEVICEFS_MEASURE_READ_PATH
-            observation.FinishSourceRead(*done);
-#endif
-            return STATUS_SUCCESS;
-        };
-
-        const auto sector_size = file->sector_size;
-        const auto read_offset = offset - (offset % sector_size);
-        const auto end = offset + wanted;
-        const auto read_end = ((end + sector_size - 1) / sector_size) * sector_size;
-        using LengthType = std::remove_cv_t<decltype(length)>;
-        const auto aligned_length = read_end - read_offset;
-        if (!std::in_range<LengthType>(aligned_length)) {
-            return STATUS_INVALID_PARAMETER;
-        }
-        [[gsl::suppress("type.1",
-            justification: "std::in_range above proves aligned_length is representable by LengthType.")]]
-        const auto read_length = static_cast<LengthType>(aligned_length);
-        if ((read_offset == offset) && (read_length == wanted)) {
-            const auto status = read(output.data(), offset, wanted, transferred);
-            if (!NT_SUCCESS(status)) {
-                return status;
-            }
-            file->allocation_bitmap.SynthesizeFreeClusters(output, offset);
-            return STATUS_SUCCESS;
-        }
-
-        const auto prefix = offset - read_offset;
-
-        auto storage = wil::unique_virtualalloc_ptr<BYTE>(static_cast<BYTE *>(
-            VirtualAlloc(nullptr, read_length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)));
-        if (!storage) {
-            return failure(GetLastError());
-        }
-        const auto bounce = std::span<BYTE>{storage.get(), read_length};
-        auto device_transferred = LengthType{};
-        const auto status = read(
-            bounce.data(), read_offset, read_length, &device_transferred);
-        if (!NT_SUCCESS(status)) {
-            return status;
-        }
-
-        *transferred = wanted;
-        std::ranges::copy(bounce.subspan(prefix, wanted), output.begin());
-        file->allocation_bitmap.SynthesizeFreeClusters(output, offset);
-#if DEVICEFS_MEASURE_READ_PATH
-        observation.RecordBounce();
-#endif
-        return STATUS_SUCCESS;
+        );
     }
 
     static auto GetFileInfo(FSP_FILE_SYSTEM *,
@@ -939,7 +955,7 @@ private:
         _Out_ FSP_FSCTL_FILE_INFO *const info) noexcept {
         *info = context == nullptr
             ? kRootInfo
-            : static_cast<const DeviceFile *>(context)->info;
+            : static_cast<const DeviceFile<WindowsBlockDevice> *>(context)->info;
         return STATUS_SUCCESS;
     }
 
@@ -985,8 +1001,8 @@ private:
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
         for (const auto &entry : Self(fs).files_) {
             const auto &file = entry.second;
-            if (file.allocation_bitmap.measurement) {
-                file.allocation_bitmap.measurement->Report(file.name);
+            if (file.device.allocation_bitmap.measurement) {
+                file.device.allocation_bitmap.measurement->Report(file.name);
             }
         }
 #endif

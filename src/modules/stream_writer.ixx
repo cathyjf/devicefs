@@ -24,6 +24,14 @@ import <intrin.h>;
 
 namespace devicefs::stream_writer_detail {
 
+auto DisableStdioSynchronization() {
+    static auto once = std::once_flag{};
+    std::call_once(once, [] {
+        std::ios_base::sync_with_stdio(false);
+    });
+
+} // namespace
+
 template <typename Operation>
 [[gsl::suppress("26447",
     justification: "Output streams with exceptions enabled will fail fast.")]]
@@ -35,12 +43,16 @@ auto Write(
     }
     auto failed = false;
     try {
+        DisableStdioSynchronization();
         const auto ready = std::ostream::sentry{output};
         if (!ready) {
             return output;
         }
+        auto synchronized_output = std::osyncstream{output};
         failed = operation(
-            std::ostreambuf_iterator<char>{output}).failed();
+            std::ostreambuf_iterator<char>{synchronized_output}).failed();
+        std::flush_emit(synchronized_output);
+        failed = failed || !synchronized_output;
     } catch (...) {
         failed = true;
     }

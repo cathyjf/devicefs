@@ -20,6 +20,7 @@ module;
 
 #include <sal.h>
 #include <windows.h>
+#include <lmcons.h>
 #include <sddl.h>
 
 // wil/stl.h uses symbols defined in <algorithm> without including it.
@@ -129,13 +130,23 @@ auto FurtherHardenProcess() {
     return result;
 }
 
+[[nodiscard]] auto CurrentUserName() {
+    auto length = DWORD{UNLEN + 1};
+    auto result = std::wstring(length, L'\0');
+    if (!GetUserNameW(result.data(), &length)) {
+        WinError("could not obtain the current user name");
+    }
+    result.resize(length - 1);
+    return result;
+}
+
 auto Usage(std::ostream &output) noexcept {
     devicefs::WriteToStream(output,
-        L"Usage: devicefs --mount TARGET --read-user USER"
-        L" --map NAME DEVICE [--map NAME DEVICE ...] [OPTIONS]\n\n"
+        L"Usage: devicefs --mount TARGET --map NAME DEVICE"
+        L" [--map NAME DEVICE ...] [OPTIONS]\n\n"
         L"Options:\n"
         L"  --mount TARGET             Drive letter, directory, or network prefix\n"
-        L"  --read-user USER           User granted read access\n"
+        L"  --read-user USER           User granted read access (default: current user)\n"
         L"  --map NAME DEVICE          Virtual filename and block device (repeatable)\n"
         L"  --stop-event NAME          Named shutdown event (default: {})\n"
         L"  --cache                    Enable file-data caching (requires read-only volumes)\n"
@@ -144,7 +155,7 @@ auto Usage(std::ostream &output) noexcept {
         L"  --vhdx                     Expose each mapped volume as a VHDX disk\n"
         L"  -h, --help                 Show this help\n\n"
         L"Example:\n"
-        L"  devicefs --mount X: --read-user 'pbs-vss' `\n"
+        L"  devicefs --mount X: `\n"
         L"    --map C.img '\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy12'\n",
         kDefaultStopEvent);
 }
@@ -190,10 +201,9 @@ auto Usage(std::ostream &output) noexcept {
         throw std::invalid_argument("--stop-event must not be empty");
     }
     if (!result.help &&
-        ((result.mount.value.empty()) || (result.read_user.empty()) ||
-            (result.mappings.empty()))) {
+        ((result.mount.value.empty()) || (result.mappings.empty()))) {
         throw std::invalid_argument(
-            "--mount, --read-user, and at least one --map are required");
+            "--mount and at least one --map are required");
     }
 
     auto names = std::unordered_set<std::wstring>{};
@@ -925,6 +935,9 @@ auto Main(const std::span<const wchar_t *const> arguments) -> int {
         if (options.help) {
             Usage(std::cout);
             return 0;
+        }
+        if (options.read_user.empty()) {
+            options.read_user = CurrentUserName();
         }
         return Run(options);
     } catch (const std::runtime_error &error) {

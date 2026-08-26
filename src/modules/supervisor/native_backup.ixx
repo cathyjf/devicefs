@@ -35,6 +35,10 @@ import devicefs.supervisor.vshadow;
 
 export constexpr auto kCancelledExitCode = internal::kCancelledExitCode;
 
+export [[nodiscard]] auto MountVhdx(
+    HANDLE cancellation_event,
+    std::wstring_view device) -> int;
+
 namespace internal {
 
 [[nodiscard]] auto RunSnapshotBackup(

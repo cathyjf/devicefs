@@ -714,6 +714,17 @@ struct ForegroundOptions {
         });
 }
 
+[[nodiscard]] auto RunMountVhdx(std::wstring device) {
+    const auto [input, console_mode] = GetForegroundConsoleInput(
+        "--mount-vhdx requires an attached console");
+    return RunForegroundOperation(
+        input, console_mode,
+        [device = std::move(device)](
+            const HANDLE cancellation_event) {
+            return MountVhdx(cancellation_event, device);
+        });
+}
+
 auto WINAPI ServiceMain(
     const DWORD argc, wchar_t **) noexcept -> void {
     static auto context = ServiceContext{};
@@ -758,6 +769,7 @@ auto PrintHelp() noexcept {
         "      --namespace and --volumes override configured values.\n"
         "  backup-supervisor.exe --query-manifest "
         "[--namespace NAMESPACE]\n"
+        "  backup-supervisor.exe --mount-vhdx DEVICE\n"
         "  backup-supervisor.exe [--incremental-verify] "
         "[--incremental-stats]\n"
         "      [--expose-synthetic-backup UNC-PREFIX |\n"
@@ -810,6 +822,13 @@ auto wmain(
             return RunQueryManifest(
                 ParseNamespaceOverride(
                     arguments.subspan(1), "--query-manifest"));
+        }
+        if (option == L"--mount-vhdx") {
+            if (arguments.size() != 2) {
+                throw std::invalid_argument(
+                    "--mount-vhdx requires exactly one DEVICE");
+            }
+            return RunMountVhdx(std::wstring{arguments[1]});
         }
         if ((option == L"--incremental-stats") ||
             (option == L"--incremental-verify") ||

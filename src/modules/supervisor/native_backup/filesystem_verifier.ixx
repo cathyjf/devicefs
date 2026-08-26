@@ -28,6 +28,7 @@ export module devicefs.supervisor.native_backup:filesystem_verifier;
 import std;
 import <cstddef>;
 import <devicefs/windows_imports.h>;
+import :devicefs_process;
 import :internal;
 import :privileges;
 import devicefs.common;
@@ -639,6 +640,20 @@ class AttachedVhdx {
     [[nodiscard]] auto Root() const noexcept
         -> std::wstring_view {
         return root_;
+    }
+
+    [[nodiscard]] auto IsLoaded() const {
+        auto information = GET_VIRTUAL_DISK_INFO{
+            .Version = GET_VIRTUAL_DISK_INFO_IS_LOADED,
+        };
+        auto bytes = ULONG{sizeof(information)};
+        const auto status = GetVirtualDiskInformation(
+            disk_.get(), &bytes, &information, nullptr);
+        if (status != ERROR_SUCCESS) {
+            WinError("could not determine whether the VHDX is mounted",
+                ExplicitWin32Error{status});
+        }
+        return information.IsLoaded != FALSE;
     }
 
     [[nodiscard]] auto Detach() noexcept {
@@ -2006,6 +2021,157 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
 }
 
 } // namespace
+
+[[nodiscard]] auto MountVhdx(
+    const HANDLE cancellation_event,
+    const std::wstring_view device) -> int {
+    const auto mount_target = std::format(
+        LR"(\\devicefs\mount-vhdx-{})", internal::UniqueName());
+    const auto sources = std::array{
+        internal::DeviceFsSource{
+            .name = L"device.vhdx",
+            .source = std::wstring{device},
+        },
+    };
+    auto child = internal::DeviceFsChild{
+        internal::StartDeviceFs(
+            internal::DeviceFsStartRequest{
+                .sources = sources,
+                .mount_target = mount_target,
+                .vhdx = true,
+            })};
+    if (!internal::WaitForDeviceFs(
+            child.Process(), cancellation_event)) {
+        return 0;
+    }
+
+    const auto wait = [&] {
+        const auto processes = std::array{&child.Process()};
+        const auto result = internal::WaitForDeviceFsExitOrCancellation(
+            processes, cancellation_event);
+        if (result) {
+            auto &output = devicefs::WriteToStream(std::cout,
+                "devicefs exited with code {}.\n",
+                result->exit_code);
+            output.flush();
+        }
+        return result;
+    };
+    const auto preserve_for_manual_mount =
+        [&](const std::string_view error) {
+            auto &output = devicefs::WriteToStream(
+                std::cout,
+                "\nAutomatic VHDX mounting failed: {}\n",
+                error);
+            devicefs::WriteToStream(output,
+                L"The VHDX remains available for manual mounting:\n"
+                L"  VHDX file: {}\n"
+                L"After unmounting any manual attachment, press Ctrl+C "
+                L"to stop devicefs.\n",
+                child.Process().readiness_path.native());
+            output.flush();
+            static_cast<void>(wait());
+            child.Stop();
+            return 1;
+        };
+
+    auto setup_complete = false;
+    try {
+        constexpr auto privilege_names =
+            std::array{wil::zwstring_view{SE_MANAGE_VOLUME_NAME}};
+        auto privileges = internal::ProcessPrivilegeEnabler{
+            GetCurrentProcess(), privilege_names,
+            std::string_view{"the volume-management privilege"}};
+        const auto exit = [&] {
+            auto mount_identifier = GUID{};
+            const auto identifier_status = CoCreateGuid(&mount_identifier);
+            if (FAILED(identifier_status)) {
+                WinError("could not create a VHDX mount-point identifier",
+                    ExplicitWin32Error::FromHresult(identifier_status));
+            }
+            const auto mount_identifier_text =
+                winrt::to_hstring(mount_identifier);
+            const auto windows_directory = [] {
+                auto result = std::wstring{};
+                const auto status = wil::GetWindowsDirectoryW(result);
+                if (FAILED(status)) {
+                    WinError("could not obtain the Windows directory",
+                        ExplicitWin32Error::FromHresult(status));
+                }
+                return result;
+            }();
+            const auto mount_directory =
+                std::filesystem::path{windows_directory} /
+                L"SystemTemp" /
+                std::format(L"devicefs-vhdx-{}",
+                    std::wstring_view{mount_identifier_text});
+            std::filesystem::create_directory(mount_directory);
+            auto remove_mount_directory = wil::scope_exit([&] {
+                auto ignored = std::error_code{};
+                static_cast<void>(
+                    std::filesystem::remove(mount_directory, ignored));
+            });
+            const auto volume_mount_point =
+                std::format(L"{}\\", mount_directory.native());
+            const auto volume_mount_point_name =
+                wil::zwstring_view{volume_mount_point};
+            auto view = AttachedVhdx::Attach(
+                child.Process().readiness_path, "requested device");
+            const auto volume_name = wil::zwstring_view{
+                view.Root().data(), view.Root().size()};
+            if (!SetVolumeMountPointW(
+                    volume_mount_point_name.c_str(), volume_name.c_str())) {
+                WinError("could not assign the VHDX volume mount point {}",
+                    mount_directory.string());
+            }
+            setup_complete = true;
+            auto &output = devicefs::WriteToStream(
+                std::cout,
+                L"\nMounted VHDX view:\n"
+                L"  Source device: {}\n"
+                L"  VHDX file: {}\n"
+                L"  Volume: {}\n"
+                L"  Mount point: {}\n"
+                L"Press Ctrl+C to unmount.\n",
+                device, child.Process().readiness_path.native(),
+                view.Root(), mount_directory.native());
+            output.flush();
+
+            const auto result = wait();
+            devicefs::WriteToStream(output, "Unmounting the VHDX.\n");
+            output.flush();
+
+            if (!view.IsLoaded()) {
+                devicefs::WriteToStream(
+                    output, "The VHDX was already unmounted.\n");
+            } else {
+                const auto detach_status = view.Detach();
+                if (detach_status != ERROR_SUCCESS) {
+                    WinError("could not unmount VHDX {}",
+                        child.Process().readiness_path.string(),
+                        ExplicitWin32Error{detach_status});
+                }
+                devicefs::WriteToStream(
+                    output, "The VHDX was unmounted.\n");
+            }
+            output.flush();
+            return result;
+        }();
+        privileges.Restore();
+        child.Stop();
+        return exit && (exit->exit_code != 0) ? 1 : 0;
+    } catch (const VerificationFailure &error) {
+        if (setup_complete) {
+            throw;
+        }
+        return preserve_for_manual_mount(error.what());
+    } catch (const std::system_error &error) {
+        if (setup_complete) {
+            throw;
+        }
+        return preserve_for_manual_mount(error.what());
+    }
+}
 
 export [[nodiscard]] auto VerifyFilesystemViews(
     const HANDLE cancellation_event,

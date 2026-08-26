@@ -255,7 +255,7 @@ struct WindowsBlockDevice {
         if constexpr (!kMeasureFreeClusterData) {
             if (!allocation_bitmap.HasAllocatedClusters(offset, wanted)) {
                 (observers.RecordSynthetic(), ...);
-                std::ranges::fill(output, 0);
+                std::ranges::fill(output, BYTE{});
                 transferred = wanted;
                 return STATUS_SUCCESS;
             }

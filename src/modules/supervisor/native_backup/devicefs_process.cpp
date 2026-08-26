@@ -16,6 +16,9 @@
 
 module;
 
+#define RPC_USE_NATIVE_WCHAR
+
+#include <devicefs/rpc_block_device.h>
 #include <devicefs/strsafe_compat.h>
 
 module devicefs.supervisor.native_backup:devicefs_process;
@@ -45,35 +48,67 @@ struct DeviceFsProcess {
     std::wstring stop_event_name;
 };
 
+struct DeviceFsSource {
+    std::wstring name;
+    std::wstring source;
+};
+
+struct DeviceFsStartRequest {
+    std::span<const DeviceFsSource> sources;
+    std::wstring_view mount_target;
+    std::optional<std::wstring_view> read_user;
+    std::optional<wil::zwstring_view> rpc_endpoint;
+    bool vhdx = false;
+};
+
 [[nodiscard]] auto StartDeviceFs(
-    const std::span<const devicefs::vshadow::Snapshot> snapshots,
-    const std::wstring_view read_user) {
+    const DeviceFsStartRequest &request) {
     const auto supervisor = CurrentExecutablePath();
+    auto mount_target = std::wstring{request.mount_target};
     auto stop_event_name = std::format(
         L"Global\\devicefs-stop-{}", UniqueName());
     auto arguments = std::vector<std::wstring>{
         supervisor.native(),
         L"--devicefs",
-        L"--synthetic-free-clusters", L"--cache",
-        L"--mount", std::wstring{DeviceFsProcess::kMountTarget},
-        L"--read-user", std::wstring{read_user},
-        L"--stop-event", stop_event_name,
+        L"--synthetic-free-clusters",
+        L"--cache",
     };
+    if (request.vhdx) {
+        arguments.emplace_back(L"--vhdx");
+    }
+    arguments.emplace_back(L"--mount");
+    arguments.emplace_back(mount_target);
+    if (request.read_user) {
+        arguments.emplace_back(L"--read-user");
+        arguments.emplace_back(*request.read_user);
+    }
+    arguments.emplace_back(L"--stop-event");
+    arguments.emplace_back(stop_event_name);
+
     auto readiness_path = std::filesystem::path{};
-    for (const auto &snapshot : snapshots) {
-        auto filename = SnapshotImageName(snapshot);
+    for (const auto &source : request.sources) {
         if (readiness_path.empty()) {
             readiness_path = std::filesystem::path(
-                std::format(L"{}\\", DeviceFsProcess::kMountTarget)) /
-                filename;
+                std::format(L"{}\\", mount_target)) /
+                source.name;
         }
         arguments.emplace_back(L"--map");
-        arguments.emplace_back(std::move(filename));
-        arguments.emplace_back(snapshot.device);
+        arguments.emplace_back(source.name);
+        arguments.emplace_back(request.rpc_endpoint
+            ? std::format(LR"(\\\{})", source.source)
+            : source.source);
     }
     auto command = wil::ArgvToCommandLine(arguments);
+    if (request.rpc_endpoint &&
+        !SetEnvironmentVariableW(
+            DEVICEFS_RPC_ENDPOINT_ENVIRONMENT_VARIABLE,
+            request.rpc_endpoint->c_str())) {
+        WinError("could not set the RPC block-device endpoint");
+    }
     devicefs::WriteToStream(
         std::cout, L"Setting up virtual filesystem: {}\n", command);
+    const auto creation_flags = EXTENDED_STARTUPINFO_PRESENT |
+        (request.rpc_endpoint ? CREATE_SUSPENDED : DWORD{});
     auto process = StartProcessWithHandles(
         GetStdHandle(STD_INPUT_HANDLE),
         GetStdHandle(STD_OUTPUT_HANDLE),
@@ -82,8 +117,9 @@ struct DeviceFsProcess {
             return CreateProcessW(
                 supervisor.c_str(), command.data(),
                 nullptr, nullptr, TRUE,
-                EXTENDED_STARTUPINFO_PRESENT,
-                nullptr, nullptr, startup, result);
+                creation_flags,
+                nullptr,
+                nullptr, startup, result);
         },
         "could not start devicefs");
     return DeviceFsProcess{
@@ -91,6 +127,30 @@ struct DeviceFsProcess {
         .readiness_path = std::move(readiness_path),
         .stop_event_name = std::move(stop_event_name),
     };
+}
+
+auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
+    if (ResumeThread(devicefs.process.hThread) == MAXDWORD) {
+        WinError("could not resume devicefs");
+    }
+}
+
+[[nodiscard]] auto StartDeviceFs(
+    const std::span<const devicefs::vshadow::Snapshot> snapshots,
+    const std::wstring_view read_user) {
+    const auto sources = snapshots |
+        std::views::transform([](const auto &snapshot) {
+            return DeviceFsSource{
+                .name = SnapshotImageName(snapshot),
+                .source = snapshot.device,
+            };
+        }) |
+        std::ranges::to<std::vector<DeviceFsSource>>();
+    return StartDeviceFs(DeviceFsStartRequest{
+        .sources = sources,
+        .mount_target = DeviceFsProcess::kMountTarget,
+        .read_user = read_user,
+    });
 }
 
 [[nodiscard]] auto WaitForDeviceFs(
@@ -119,9 +179,26 @@ struct DeviceFsProcess {
         }
         if (std::chrono::steady_clock::now() >= deadline) {
             throw std::runtime_error(
-                "devicefs did not mount X: before the startup timeout elapsed");
+                "devicefs did not mount before the startup timeout elapsed");
         }
     }
+}
+
+[[nodiscard]] auto WaitForDeviceFsExitOrCancellation(
+    const DeviceFsProcess &devicefs,
+    const HANDLE cancellation_event) -> std::optional<DWORD> {
+    const auto handles = std::array{
+        devicefs.process.hProcess, cancellation_event};
+    const auto result = WaitForMultipleObjects(
+        wil::safe_cast_failfast<DWORD>(handles.size()),
+        handles.data(), FALSE, INFINITE);
+    if (result == WAIT_FAILED) {
+        WinError("could not wait for devicefs or cancellation");
+    }
+    if (result == WAIT_OBJECT_0) {
+        return ProcessExitCode(devicefs.process.hProcess);
+    }
+    return std::nullopt;
 }
 
 auto StopDeviceFs(

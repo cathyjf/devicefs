@@ -81,30 +81,65 @@ target_module_interfaces(devicefs-common PUBLIC
     src/modules/stream_writer.ixx
 )
 
+set(DEVICEFS_RPC_DEFINITION
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/filesystem/rpc_block_device.idl"
+)
+set(DEVICEFS_RPC_OUTPUT_DIRECTORY
+    "${CMAKE_CURRENT_BINARY_DIR}/devicefs"
+)
+set(DEVICEFS_RPC_HEADER
+    "${DEVICEFS_RPC_OUTPUT_DIRECTORY}/rpc_block_device.h"
+)
 set(DEVICEFS_RPC_CLIENT_STUB
-    "${CMAKE_CURRENT_BINARY_DIR}/rpc_block_device_c.c"
+    "${DEVICEFS_RPC_OUTPUT_DIRECTORY}/rpc_block_device_c.c"
+)
+set(DEVICEFS_RPC_SERVER_STUB
+    "${DEVICEFS_RPC_OUTPUT_DIRECTORY}/rpc_block_device_s.c"
+)
+add_custom_command(
+    OUTPUT
+        "${DEVICEFS_RPC_HEADER}"
+        "${DEVICEFS_RPC_CLIENT_STUB}"
+        "${DEVICEFS_RPC_SERVER_STUB}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+        "${DEVICEFS_RPC_OUTPUT_DIRECTORY}"
+    COMMAND midl.exe
+        /env "${CMAKE_CXX_COMPILER_ARCHITECTURE_ID}"
+        /error none
+        /Os
+        /sal
+        /prefix client DeviceFsRpcClient_
+        /no_default_epv
+        /client stub
+        /server stub
+        /out "${DEVICEFS_RPC_OUTPUT_DIRECTORY}"
+        /h rpc_block_device.h
+        /cstub rpc_block_device_c.c
+        /sstub rpc_block_device_s.c
+        "${DEVICEFS_RPC_DEFINITION}"
+    MAIN_DEPENDENCY "${DEVICEFS_RPC_DEFINITION}"
+    VERBATIM
 )
 add_library(devicefs-rpc-block-device STATIC
-    src/modules/filesystem/rpc_block_device.idl
+    "${DEVICEFS_RPC_HEADER}"
     "${DEVICEFS_RPC_CLIENT_STUB}"
+    "${DEVICEFS_RPC_SERVER_STUB}"
 )
-set_source_files_properties("${DEVICEFS_RPC_CLIENT_STUB}" PROPERTIES GENERATED TRUE)
-set_property(SOURCE src/modules/filesystem/rpc_block_device.idl PROPERTY VS_SETTINGS
-    "AdditionalOptions=/sal /prefix client \"DeviceFsRpcClient_\" %(AdditionalOptions)"
-    "ClientStubFile=${DEVICEFS_RPC_CLIENT_STUB}"
-    "GenerateClientFiles=Stub"
-    "GenerateServerFiles=None"
-    "OutputDirectory=$<TARGET_INTERMEDIATE_DIR:devicefs-rpc-block-device>/devicefs"
+set_source_files_properties(
+    "${DEVICEFS_RPC_CLIENT_STUB}"
+    "${DEVICEFS_RPC_SERVER_STUB}"
+    PROPERTIES COMPILE_OPTIONS "/wd4213;/wd6011"
 )
 target_include_directories(devicefs-rpc-block-device PUBLIC
-    "$<TARGET_INTERMEDIATE_DIR:devicefs-rpc-block-device>"
-    PRIVATE "$<TARGET_INTERMEDIATE_DIR:devicefs-rpc-block-device>/devicefs"
+    "${CMAKE_CURRENT_BINARY_DIR}"
 )
 target_link_libraries(devicefs-rpc-block-device PUBLIC rpcrt4)
 
 add_library(devicefs-filesystem STATIC)
 target_module_interfaces(devicefs-filesystem PUBLIC
     src/modules/filesystem.ixx
+    src/modules/rpc_block_device_server.ixx
+    src/modules/synthetic_backup_block_device.ixx
     src/modules/vhdx_viewer.ixx
     src/modules/windows_block_device.ixx
 )
@@ -160,7 +195,7 @@ add_executable(backup-supervisor
     src/backup_supervisor.cpp
 )
 target_link_libraries(backup-supervisor PRIVATE
-    devicefs-common devicefs-filesystem
+    devicefs-common devicefs-filesystem devicefs-rpc-block-device
     devicefs-vss-block-descriptors vshadow
 )
 

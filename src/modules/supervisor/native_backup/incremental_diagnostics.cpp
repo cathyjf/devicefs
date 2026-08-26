@@ -27,18 +27,22 @@ export module devicefs.supervisor.native_backup:incremental_diagnostics;
 
 import std;
 import <devicefs/windows_imports.h>;
+import :devicefs_process;
 import :incremental;
 import :internal;
 import :manifest;
 import devicefs.common;
 import devicefs.filesystem;
+import devicefs.rpc_block_device_server;
 import devicefs.stream_writer;
+import devicefs.synthetic_backup_block_device;
 import devicefs.supervisor.vshadow;
 import devicefs.vss_block_descriptors;
 
 export struct IncrementalDiagnosticOptions {
     bool print_statistics = false;
     bool verify = false;
+    std::optional<std::wstring> synthetic_backup_mount;
     std::optional<GUID> baseline_snapshot_identifier;
     std::optional<std::u8string> namespace_override;
     std::vector<std::wstring> volume_override;
@@ -83,6 +87,7 @@ struct AvailableBaseline {
 struct SnapshotInterval {
     GUID volume_identifier;
     GUID baseline_snapshot_identifier;
+    GUID payload_snapshot_identifier;
     std::wstring volume;
     std::wstring baseline_device;
     std::wstring payload_device;
@@ -90,6 +95,9 @@ struct SnapshotInterval {
 
 struct VolumeReport {
     GUID volume_identifier;
+    GUID baseline_snapshot_identifier;
+    GUID payload_snapshot_identifier;
+    std::wstring volume;
     std::wstring baseline_device;
     std::wstring payload_device;
     std::expected<DirtyBlockMap, std::string> map;
@@ -188,6 +196,7 @@ struct SnapshotDiagnosticResult {
         result.push_back({
             .volume_identifier = baseline->volume_identifier,
             .baseline_snapshot_identifier = baseline->snapshot_identifier,
+            .payload_snapshot_identifier = current.identifier,
             .volume = current.original_volume,
             .baseline_device = baseline->device,
             .payload_device = current.device,
@@ -287,6 +296,11 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
     }();
     return VolumeReport{
         .volume_identifier = interval.volume_identifier,
+        .baseline_snapshot_identifier =
+            interval.baseline_snapshot_identifier,
+        .payload_snapshot_identifier =
+            interval.payload_snapshot_identifier,
+        .volume = interval.volume,
         .baseline_device = interval.baseline_device,
         .payload_device = interval.payload_device,
         .map = std::move(map),
@@ -317,6 +331,148 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
         .exit_code = exit_code,
         .reports = std::move(reports),
     };
+}
+
+using SyntheticBackupDevice =
+    devicefs::SyntheticBackupBlockDevice<
+        devicefs::WindowsBlockDevice>;
+using SyntheticBackupServer =
+    devicefs::RpcBlockDeviceServer<SyntheticBackupDevice>;
+
+auto AddSyntheticBackup(
+    const VolumeReport &report,
+    SyntheticBackupServer::Devices &devices,
+    std::vector<internal::DeviceFsSource> &sources,
+    std::ostream &output) -> void {
+    const auto volume_identifier =
+        winrt::to_hstring(report.volume_identifier);
+    if (!report.map) {
+        devicefs::WriteToStream(output,
+            L"\n  Volume ID: {}\n",
+            std::wstring_view{volume_identifier});
+        devicefs::WriteToStream(output,
+            "    Not exposed: dirty map unavailable: {}\n",
+            report.map.error());
+        return;
+    }
+
+    auto synthetic = [&]() -> std::optional<SyntheticBackupDevice> {
+        try {
+            auto baseline = devicefs::WindowsBlockDevice::FromFilename(
+                std::filesystem::path{report.baseline_device},
+                true, true, true, kBaselineDescription);
+            auto payload = devicefs::WindowsBlockDevice::FromFilename(
+                std::filesystem::path{report.payload_device},
+                true, true, true, kPayloadDescription);
+            return SyntheticBackupDevice::FromBlockDevices(
+                std::move(baseline), std::move(payload),
+                devicefs::vss::kBlockSize,
+                report.map->block_offsets);
+        } catch (const std::runtime_error &error) {
+            devicefs::WriteToStream(output,
+                L"\n  Volume ID: {}\n",
+                std::wstring_view{volume_identifier});
+            devicefs::WriteToStream(output,
+                "    Not exposed: {}\n", error.what());
+            return std::nullopt;
+        }
+    }();
+    if (!synthetic) {
+        return;
+    }
+
+    auto filename = internal::VolumeImageName(
+        report.volume, L".vhdx");
+    const auto baseline_identifier =
+        winrt::to_hstring(report.baseline_snapshot_identifier);
+    const auto payload_identifier =
+        winrt::to_hstring(report.payload_snapshot_identifier);
+    devicefs::WriteToStream(output,
+        L"\n  File: {}\n"
+        L"    Volume ID: {}\n"
+        L"    Snapshot A: {}\n"
+        L"      Device: {}\n"
+        L"    Snapshot B: {}\n"
+        L"      Device: {}\n"
+        L"    RPC symbol: {}\n",
+        filename,
+        std::wstring_view{volume_identifier},
+        std::wstring_view{baseline_identifier},
+        report.baseline_device,
+        std::wstring_view{payload_identifier},
+        report.payload_device,
+        filename);
+    devicefs::WriteToStream(output,
+        "    Dirty map: {} 16-KiB block(s)\n",
+        report.map->block_offsets.size());
+
+    sources.push_back({
+        .name = filename,
+        .source = filename,
+    });
+    devices.emplace_back(
+        std::move(filename), std::move(*synthetic));
+}
+
+auto ExposeSyntheticBackups(
+    const HANDLE cancellation_event,
+    const std::span<const VolumeReport> reports,
+    const std::wstring_view mount_target) -> void {
+    auto &output = devicefs::WriteToStream(
+        std::cout, "Synthetic backup VHDX exposure:\n");
+    auto devices = SyntheticBackupServer::Devices{};
+    auto sources = std::vector<internal::DeviceFsSource>{};
+    for (const auto &report : reports) {
+        AddSyntheticBackup(report, devices, sources, output);
+    }
+    if (devices.empty()) {
+        throw std::runtime_error(
+            "no synthetic backup VHDX could be exposed");
+    }
+
+    auto endpoint = std::format(
+        L"devicefs-block-device-{}", internal::UniqueName());
+    const auto devicefs = internal::StartDeviceFs(
+        internal::DeviceFsStartRequest{
+            .sources = sources,
+            .mount_target = mount_target,
+            .rpc_endpoint = endpoint,
+            .vhdx = true,
+        });
+    auto terminate_suspended = wil::scope_exit([&] {
+        static_cast<void>(TerminateProcess(
+            devicefs.process.hProcess, ERROR_PROCESS_ABORTED));
+    });
+    auto server = SyntheticBackupServer::Start(
+        endpoint, devicefs.process.dwProcessId,
+        std::move(devices));
+    internal::ResumeDeviceFs(devicefs);
+    terminate_suspended.release();
+    auto cleanup = wil::scope_exit([&] {
+        internal::TryStopDeviceFs(devicefs);
+    });
+    if (!internal::WaitForDeviceFs(
+            devicefs, cancellation_event)) {
+        internal::StopDeviceFs(devicefs, false);
+        cleanup.release();
+        return;
+    }
+
+    devicefs::WriteToStream(
+        std::cout,
+        L"\nMounted {} synthetic backup VHDX file(s) at {}.\n"
+        L"Press Ctrl+C to stop.\n",
+        sources.size(), mount_target);
+    const auto exit_code =
+        internal::WaitForDeviceFsExitOrCancellation(
+            devicefs, cancellation_event);
+    if (exit_code) {
+        throw std::runtime_error(std::format(
+            "devicefs exited while exposing the synthetic backup "
+            "with code {}.", *exit_code));
+    }
+    internal::StopDeviceFs(devicefs, false);
+    cleanup.release();
 }
 
 struct UnexpectedDifference {
@@ -1352,6 +1508,13 @@ auto PrintVerificationResult(
             cancellation_event, result.reports,
             intervals.size() - result.reports.size(),
             unavailable_snapshots);
+    }
+    if (options.synthetic_backup_mount &&
+        (result.map_exit_code == 0) &&
+        !internal::CancellationRequested(cancellation_event)) {
+        ExposeSyntheticBackups(
+            cancellation_event, result.reports,
+            *options.synthetic_backup_mount);
     }
     return result;
 }

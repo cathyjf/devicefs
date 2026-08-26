@@ -55,6 +55,23 @@ template <class T> auto start_lifetime_as(void *) noexcept -> T *;
 } // namespace std
 #endif
 
+export namespace devicefs {
+
+template <typename DeviceType>
+concept BlockDevice = requires(
+    const DeviceType &device,
+    _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
+    _In_range_(0, device.length - 1)
+        const std::remove_const_t<decltype(device.length)> offset,
+    _In_range_(1, device.length - offset) const ULONG wanted,
+    _Pre_equal_to_(0) ULONG &transferred) {
+    { device.length } -> std::same_as<const std::uint64_t &>;
+    { device.Read(buffer, offset, wanted, transferred) }
+        noexcept -> std::same_as<NTSTATUS>;
+};
+
+} // namespace devicefs
+
 namespace {
 
 constexpr auto kDefaultStopEvent = std::wstring_view(L"Local\\devicefs-stop");
@@ -293,6 +310,7 @@ namespace {
 
 using devicefs::WindowsBlockDevice;
 using devicefs::VhdxViewer;
+using devicefs::BlockDevice;
 
 [[nodiscard]] auto MakeRpcBinding(const wil::zwstring_view endpoint) {
     auto endpoint_text = std::wstring{endpoint};
@@ -381,19 +399,6 @@ struct RPCBlockDevice {
 
     std::wstring symbol_;
     wil::shared_rpc_binding binding_;
-};
-
-template <typename DeviceType>
-concept BlockDevice = requires(
-    DeviceType &device,
-    _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
-    _In_range_(0, device.length - 1)
-        const std::remove_const_t<decltype(device.length)> offset,
-    _In_range_(1, device.length - offset) const ULONG wanted,
-    _Pre_equal_to_(0) ULONG &transferred) {
-    { device.length } -> std::same_as<const std::uint64_t &>;
-    { device.Read(buffer, offset, wanted, transferred) }
-        noexcept -> std::same_as<NTSTATUS>;
 };
 
 template <typename DeviceType>

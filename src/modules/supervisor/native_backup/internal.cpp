@@ -61,10 +61,16 @@ template <typename Operation>
     }
 }
 
+[[nodiscard]] auto VolumeImageName(
+    const std::wstring_view volume,
+    const std::wstring_view extension) -> std::wstring {
+    return std::format(
+        L"volume-{}{}", volume.substr(11, 36), extension);
+}
+
 [[nodiscard]] auto SnapshotImageName(
     const devicefs::vshadow::Snapshot &snapshot) -> std::wstring {
-    return std::format(
-        L"volume-{}.img", snapshot.original_volume.substr(11, 36));
+    return VolumeImageName(snapshot.original_volume, L".img");
 }
 
 [[nodiscard]] auto WaitForProcess(

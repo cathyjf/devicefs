@@ -518,6 +518,12 @@ struct ForegroundOptions {
             result.print_statistics = true;
         } else if (argument == L"--incremental-verify") {
             result.verify = true;
+        } else if (argument == L"--expose-synthetic-backup") {
+            if (++index == arguments.size()) {
+                throw std::invalid_argument(
+                    "--expose-synthetic-backup requires a mount point");
+            }
+            result.synthetic_backup_mount = arguments[index];
         } else if (argument == L"--namespace") {
             if (++index == arguments.size()) {
                 throw std::invalid_argument(
@@ -707,6 +713,7 @@ auto PrintHelp() noexcept {
         "[--namespace NAMESPACE]\n"
         "  backup-supervisor.exe [--incremental-verify] "
         "[--incremental-stats]\n"
+        "      [--expose-synthetic-backup MOUNT]\n"
         "      [--namespace NAMESPACE] [--baseline SNAPSHOT-ID]\n"
         "      [--volumes VOLUME[,VOLUME...]]\n"
         "  backup-supervisor.exe --install-service [--update]\n"
@@ -756,7 +763,8 @@ auto wmain(
                     arguments.subspan(1), "--query-manifest"));
         }
         if ((option == L"--incremental-stats") ||
-            (option == L"--incremental-verify")) {
+            (option == L"--incremental-verify") ||
+            (option == L"--expose-synthetic-backup")) {
             return RunIncrementalDiagnosticMode(
                 ParseIncrementalDiagnosticOptions(arguments));
         }

@@ -16,6 +16,8 @@
 
 module;
 
+#define RPC_USE_NATIVE_WCHAR
+
 #include <sal.h>
 #include <windows.h>
 #include <sddl.h>
@@ -23,10 +25,14 @@ module;
 // wil/stl.h uses symbols defined in <algorithm> without including it.
 #include <algorithm>
 
+#include <devicefs/rpc_block_device.h>
+#include <devicefs/midl_compat.h>
 #include <devicefs/winfsp_compat.h>
 #include <wil/resource.h>
+#include <wil/rpc_helpers.h>
 #include <wil/safecast.h>
 #include <wil/stl.h>
+#include <wil/win32_helpers.h>
 
 export module devicefs.filesystem;
 
@@ -52,6 +58,7 @@ namespace {
 
 constexpr auto kDefaultStopEvent = std::wstring_view(L"Local\\devicefs-stop");
 constexpr auto kFileSystemName = std::wstring_view(L"DEVICEFS");
+constexpr auto kRpcDevicePrefix = std::wstring_view{LR"(\\\)"};
 static_assert(kFileSystemName.size() + 1 <=
     std::size(FSP_FSCTL_VOLUME_PARAMS{}.FileSystemName),
     "The filesystem name and its terminator must fit the WinFsp volume parameters.");
@@ -75,6 +82,10 @@ struct Mapping {
     std::wstring name;
     std::wstring device;
 };
+
+[[nodiscard]] auto IsRpcDevice(const Mapping &mapping) noexcept {
+    return mapping.device.starts_with(kRpcDevicePrefix);
+}
 
 struct Mount {
     bool network = false;
@@ -198,6 +209,16 @@ auto Usage(std::ostream &output) noexcept {
                 std::format("duplicate filename in --map #{}", i + 1));
         }
     }
+    if (!result.mappings.empty()) {
+        const auto rpc = IsRpcDevice(result.mappings.front());
+        if (!std::ranges::all_of(result.mappings,
+                [rpc](const auto &mapping) {
+                    return IsRpcDevice(mapping) == rpc;
+                })) {
+            throw std::invalid_argument(
+                "all --map devices must use RPC when any one does");
+        }
+    }
 
     if ((result.mount.value.size() == 2) && (result.mount.value[1] == L':')) {
         result.mount.value = std::format(L"\\\\.\\{}", result.mount.value);
@@ -263,6 +284,95 @@ namespace {
 using devicefs::WindowsBlockDevice;
 using devicefs::VhdxViewer;
 
+[[nodiscard]] auto MakeRpcBinding(const wil::zwstring_view endpoint) {
+    auto endpoint_text = std::wstring{endpoint};
+    auto protocol_sequence = std::to_array(
+        DEVICEFS_RPC_PROTOCOL_SEQUENCE);
+    auto string_binding = wil::unique_rpc_wstr{};
+    const auto compose_error = RpcStringBindingComposeW(
+        nullptr, protocol_sequence.data(), nullptr,
+        endpoint_text.data(), nullptr, string_binding.put());
+    if (compose_error != RPC_S_OK) {
+        WinError("could not compose the RPC block-device binding",
+            ExplicitWin32Error{std::bit_cast<DWORD>(compose_error)});
+    }
+
+    auto result = wil::unique_rpc_binding{};
+    const auto error = RpcBindingFromStringBindingW(
+        string_binding.get(), result.put());
+    if (error != RPC_S_OK) {
+        WinError("could not create the RPC block-device binding",
+            ExplicitWin32Error{std::bit_cast<DWORD>(error)});
+    }
+    return wil::shared_rpc_binding{std::move(result)};
+}
+
+struct RPCBlockDevice {
+    const std::uint64_t length;
+
+    [[nodiscard]] static auto FromSymbol(
+        const wil::shared_rpc_binding &binding,
+        const std::wstring_view symbol) {
+        auto stored_symbol = std::wstring{symbol};
+        const auto length = [&] {
+            auto result = std::uint64_t{};
+            auto status = NTSTATUS{};
+            const auto error = wil::invoke_rpc_result_nothrow(
+                status, DeviceFsRpcClient_GetLength,
+                binding.get(), stored_symbol.c_str(), &result);
+            if (FAILED(error)) {
+                WinError("could not query the RPC block-device length",
+                    ExplicitWin32Error::FromHresult(error));
+            }
+            CheckNt(status, "could not query the RPC block-device length");
+            return result;
+        }();
+        return RPCBlockDevice{
+            length, std::move(stored_symbol), binding};
+    }
+
+    template <typename... Observers>
+    _Success_(return >= 0)
+    auto Read(
+        _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
+        _In_range_(0, length - 1) const std::uint64_t offset,
+        _In_range_(1, length - offset) const ULONG wanted,
+        _Pre_equal_to_(0) ULONG &transferred,
+        Observers &...observers) const noexcept -> NTSTATUS {
+        auto status = NTSTATUS{};
+        auto rpc_transferred = ULONG{};
+        (observers.BeginSourceRead(), ...);
+        const auto error = wil::invoke_rpc_result_nothrow(
+            status, DeviceFsRpcClient_Read,
+            binding_.get(), symbol_.c_str(), offset, wanted,
+            &rpc_transferred, static_cast<BYTE *>(buffer));
+        if (FAILED(error)) {
+            const auto win32_error =
+                ExplicitWin32Error::FromHresult(error).value;
+            devicefs::WriteToStream(std::cerr,
+                L"devicefs: RPC read failed for '{}': Windows error {}\n",
+                symbol_, win32_error);
+            return FspNtStatusFromWin32(win32_error);
+        }
+        transferred = rpc_transferred;
+        if (status >= 0) {
+            (observers.FinishSourceRead(rpc_transferred), ...);
+        }
+        return status;
+    }
+
+  private:
+    RPCBlockDevice(
+        const std::uint64_t length,
+        std::wstring symbol,
+        wil::shared_rpc_binding binding) noexcept
+        : length(length), symbol_(std::move(symbol)),
+          binding_(std::move(binding)) {}
+
+    std::wstring symbol_;
+    wil::shared_rpc_binding binding_;
+};
+
 template <typename DeviceType>
 concept BlockDevice = requires(
     DeviceType &device,
@@ -295,13 +405,23 @@ template <BlockDevice DeviceType>
 [[nodiscard]] auto OpenDevice(
     const Mapping &mapping, const bool extended_dasd,
     const bool cache, const bool synthetic_free_clusters,
-    const UINT64 map_number) {
-    auto source = WindowsBlockDevice::FromFilename(
-        std::filesystem::path{mapping.device}, extended_dasd,
-        cache, synthetic_free_clusters,
-        std::format("--map #{}", map_number));
+    const UINT64 map_number,
+    const wil::shared_rpc_binding &rpc_binding) {
+    auto source = [&] {
+        if constexpr ((std::same_as<DeviceType, RPCBlockDevice>) ||
+            (std::same_as<DeviceType, VhdxViewer<RPCBlockDevice>>)) {
+            return RPCBlockDevice::FromSymbol(rpc_binding,
+                std::wstring_view{mapping.device}.substr(
+                    kRpcDevicePrefix.size()));
+        } else {
+            return WindowsBlockDevice::FromFilename(
+                std::filesystem::path{mapping.device}, extended_dasd,
+                cache, synthetic_free_clusters,
+                std::format("--map #{}", map_number));
+        }
+    }();
     auto device = [&]() -> DeviceType {
-        if constexpr (std::same_as<DeviceType, WindowsBlockDevice>) {
+        if constexpr (std::same_as<DeviceType, decltype(source)>) {
             return std::move(source);
         } else {
             return DeviceType::FromBlockDevice(std::move(source));
@@ -685,14 +805,17 @@ auto WINAPI ControlHandler(const DWORD event) noexcept -> BOOL {
 }
 
 template <BlockDevice DeviceType>
-auto RunWithDevice(const Options &options) {
+auto RunWithDevice(
+    const Options &options,
+    const wil::shared_rpc_binding rpc_binding = nullptr) {
     auto security = MakeSecurityDescriptor(options.read_user);
     auto files = DeviceFiles<DeviceType>{};
     for (auto i = 0uz; i < options.mappings.size(); ++i) {
         const auto &mapping = options.mappings[i];
         files.emplace(Lowercase(mapping.name),
             OpenDevice<DeviceType>(mapping, options.extended_dasd,
-                options.cache, options.synthetic_free_clusters, i + 1));
+                options.cache, options.synthetic_free_clusters,
+                i + 1, rpc_binding));
     }
 
     auto stop_event = wil::unique_event_nothrow{};
@@ -756,6 +879,26 @@ auto RunWithDevice(const Options &options) {
 auto Run(const Options &options) {
     if (!NT_SUCCESS(FspLoad(nullptr))) {
         throw std::runtime_error("could not load WinFsp DLL");
+    }
+    const auto rpc = IsRpcDevice(options.mappings.front());
+    if (rpc) {
+        const auto binding = [] {
+            auto result = std::wstring{};
+            const auto error = wil::GetEnvironmentVariableW(
+                DEVICEFS_RPC_ENDPOINT_ENVIRONMENT_VARIABLE, result);
+            if (FAILED(error)) {
+                WinError("could not obtain the RPC block-device endpoint",
+                    ExplicitWin32Error::FromHresult(error));
+            }
+            if (result.empty()) {
+                throw std::runtime_error(
+                    "the RPC block-device endpoint is empty");
+            }
+            return MakeRpcBinding(result);
+        }();
+        return options.vhdx
+            ? RunWithDevice<VhdxViewer<RPCBlockDevice>>(options, binding)
+            : RunWithDevice<RPCBlockDevice>(options, binding);
     }
     if (options.vhdx) {
         return RunWithDevice<VhdxViewer<WindowsBlockDevice>>(options);

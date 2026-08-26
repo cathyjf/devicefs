@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 4.2)
 
-project(devicefs LANGUAGES CXX RC)
+project(devicefs LANGUAGES C CXX RC)
 
 if((NOT DEFINED CMAKE_VS_VERSION_BUILD_NUMBER)
         OR (CMAKE_VS_VERSION_BUILD_NUMBER VERSION_LESS 18))
@@ -81,6 +81,27 @@ target_module_interfaces(devicefs-common PUBLIC
     src/modules/stream_writer.ixx
 )
 
+set(DEVICEFS_RPC_CLIENT_STUB
+    "${CMAKE_CURRENT_BINARY_DIR}/rpc_block_device_c.c"
+)
+add_library(devicefs-rpc-block-device STATIC
+    src/modules/filesystem/rpc_block_device.idl
+    "${DEVICEFS_RPC_CLIENT_STUB}"
+)
+set_source_files_properties("${DEVICEFS_RPC_CLIENT_STUB}" PROPERTIES GENERATED TRUE)
+set_property(SOURCE src/modules/filesystem/rpc_block_device.idl PROPERTY VS_SETTINGS
+    "AdditionalOptions=/sal /prefix client \"DeviceFsRpcClient_\" %(AdditionalOptions)"
+    "ClientStubFile=${DEVICEFS_RPC_CLIENT_STUB}"
+    "GenerateClientFiles=Stub"
+    "GenerateServerFiles=None"
+    "OutputDirectory=$<TARGET_INTERMEDIATE_DIR:devicefs-rpc-block-device>/devicefs"
+)
+target_include_directories(devicefs-rpc-block-device PUBLIC
+    "$<TARGET_INTERMEDIATE_DIR:devicefs-rpc-block-device>"
+    PRIVATE "$<TARGET_INTERMEDIATE_DIR:devicefs-rpc-block-device>/devicefs"
+)
+target_link_libraries(devicefs-rpc-block-device PUBLIC rpcrt4)
+
 add_library(devicefs-filesystem STATIC)
 target_module_interfaces(devicefs-filesystem PUBLIC
     src/modules/filesystem.ixx
@@ -90,7 +111,9 @@ target_module_interfaces(devicefs-filesystem PUBLIC
 target_sources(devicefs-filesystem PRIVATE
     src/modules/filesystem_allocation_changes.cpp
 )
-target_link_libraries(devicefs-filesystem PRIVATE devicefs-common ole32)
+target_link_libraries(devicefs-filesystem PRIVATE
+    devicefs-common devicefs-rpc-block-device ole32
+)
 
 add_library(devicefs-vss-block-descriptors STATIC)
 target_module_interfaces(devicefs-vss-block-descriptors PUBLIC
@@ -177,6 +200,7 @@ endif()
 
 set(DEVICEFS_CODE_ANALYSIS_TARGETS
     devicefs-common
+    devicefs-rpc-block-device
     devicefs-filesystem
     devicefs-vss-block-descriptors
     devicefs

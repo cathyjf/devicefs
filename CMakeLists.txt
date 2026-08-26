@@ -216,6 +216,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/logging_console.ixx
     src/modules/supervisor/native_backup.ixx
     src/modules/supervisor/native_backup/devicefs_process.cpp
+    src/modules/supervisor/native_backup/filesystem_verifier.ixx
     src/modules/supervisor/native_backup/incremental.cpp
     src/modules/supervisor/native_backup/incremental_diagnostics.cpp
     src/modules/supervisor/native_backup/internal.cpp
@@ -290,7 +291,7 @@ target_compile_definitions(devicefs-filesystem PRIVATE
 
 target_compile_definitions(backup-supervisor PRIVATE _WIN32_WINNT=0x0A00)
 target_link_libraries(backup-supervisor PRIVATE
-    advapi32 ntdll ole32 shell32 userenv windowsapp
+    advapi32 ntdll ole32 shell32 userenv virtdisk windowsapp
 )
 
 find_program(POWERSHELL_EXECUTABLE NAMES pwsh REQUIRED)

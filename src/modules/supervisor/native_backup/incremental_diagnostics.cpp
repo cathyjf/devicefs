@@ -28,6 +28,7 @@ export module devicefs.supervisor.native_backup:incremental_diagnostics;
 import std;
 import <devicefs/windows_imports.h>;
 import :devicefs_process;
+import :filesystem_verifier;
 import :incremental;
 import :internal;
 import :manifest;
@@ -43,6 +44,8 @@ export struct IncrementalDiagnosticOptions {
     bool print_statistics = false;
     bool verify = false;
     std::optional<std::wstring> synthetic_backup_prefix;
+    std::optional<std::wstring> filesystem_verification_prefix;
+    double filesystem_verification_percentage = 100.0;
     std::optional<GUID> baseline_snapshot_identifier;
     std::optional<std::u8string> namespace_override;
     std::vector<std::wstring> volume_override;
@@ -111,6 +114,7 @@ struct DirtyBlockReportResult {
 struct IncrementalDiagnosticResult {
     int map_exit_code = 0;
     int verification_exit_code = 0;
+    int filesystem_verification_exit_code = 0;
     std::vector<VolumeReport> reports;
 };
 
@@ -339,12 +343,19 @@ using SyntheticBackupDevice =
 using SyntheticBackupServer =
     devicefs::RpcBlockDeviceServer<SyntheticBackupDevice>;
 
-auto AddBackupViews(
+enum class BackupViewPreparation {
+    Ready,
+    OptimizationUnavailable,
+    Failed,
+};
+
+[[nodiscard]] auto AddBackupViews(
     const VolumeReport &report,
     SyntheticBackupServer::Devices &devices,
     std::vector<internal::DeviceFsSource> &synthetic_sources,
     std::vector<internal::DeviceFsSource> &real_sources,
-    std::ostream &output) -> void {
+    std::vector<FilesystemVerificationVolume> &verification_volumes,
+    std::ostream &output) {
     const auto volume_identifier =
         winrt::to_hstring(report.volume_identifier);
     if (!report.map) {
@@ -354,7 +365,7 @@ auto AddBackupViews(
         devicefs::WriteToStream(output,
             "    Not exposed: dirty map unavailable: {}\n",
             report.map.error());
-        return;
+        return BackupViewPreparation::OptimizationUnavailable;
     }
 
     auto synthetic = [&]() -> std::optional<SyntheticBackupDevice> {
@@ -379,7 +390,7 @@ auto AddBackupViews(
         }
     }();
     if (!synthetic) {
-        return;
+        return BackupViewPreparation::Failed;
     }
 
     auto filename = internal::VolumeImageName(
@@ -415,33 +426,66 @@ auto AddBackupViews(
         .name = filename,
         .source = report.payload_device,
     });
+    verification_volumes.push_back({
+        .volume_identifier = report.volume_identifier,
+        .payload_snapshot_identifier =
+            report.payload_snapshot_identifier,
+        .filename = filename,
+    });
     devices.emplace_back(
         std::move(filename), std::move(*synthetic));
+    return BackupViewPreparation::Ready;
 }
 
-auto ExposeBackupViews(
+[[nodiscard]] auto RunBackupViewDiagnostics(
     const HANDLE cancellation_event,
     const std::span<const VolumeReport> reports,
-    const std::wstring_view mount_prefix) -> void {
-    auto &output = devicefs::WriteToStream(
-        std::cout, "Synthetic and real backup VHDX exposure:\n");
+    const std::wstring_view mount_prefix,
+    const std::optional<double> verification_percentage,
+    const std::size_t unavailable_snapshots) -> int {
+    auto &output = verification_percentage
+        ? devicefs::WriteToStream(std::cout,
+            "Synthetic and real backup VHDX verification:\n")
+        : devicefs::WriteToStream(std::cout,
+            "Synthetic and real backup VHDX exposure:\n");
     auto devices = SyntheticBackupServer::Devices{};
     auto synthetic_sources =
         std::vector<internal::DeviceFsSource>{};
     auto real_sources = std::vector<internal::DeviceFsSource>{};
+    auto verification_volumes =
+        std::vector<FilesystemVerificationVolume>{};
+    auto optimization_unavailable = unavailable_snapshots;
+    auto preparation_failures = 0uz;
     for (const auto &report : reports) {
-        AddBackupViews(report, devices,
-            synthetic_sources, real_sources, output);
+        switch (AddBackupViews(report, devices,
+            synthetic_sources, real_sources, verification_volumes,
+            output)) {
+        case BackupViewPreparation::Ready:
+            break;
+        case BackupViewPreparation::OptimizationUnavailable:
+            ++optimization_unavailable;
+            break;
+        case BackupViewPreparation::Failed:
+            ++preparation_failures;
+            break;
+        }
     }
-    if (devices.empty()) {
-        throw std::runtime_error(
-            "no synthetic backup VHDX could be exposed");
-    }
-
     const auto synthetic_mount =
         std::format(L"{}\\synthetic", mount_prefix);
     const auto real_mount =
         std::format(L"{}\\real", mount_prefix);
+    if (devices.empty()) {
+        if (verification_percentage) {
+            return VerifyFilesystemViews(
+                cancellation_event, verification_volumes,
+                synthetic_mount, real_mount,
+                *verification_percentage,
+                optimization_unavailable, preparation_failures);
+        }
+        throw std::runtime_error(
+            "no synthetic backup VHDX could be exposed");
+    }
+
     auto endpoint = std::format(
         L"devicefs-block-device-{}", internal::UniqueName());
     auto suspended_synthetic = internal::StartDeviceFs(
@@ -476,17 +520,43 @@ auto ExposeBackupViews(
             synthetic_devicefs.Process(), cancellation_event) ||
         !internal::WaitForDeviceFs(
             real_devicefs.Process(), cancellation_event)) {
+        if (verification_percentage) {
+            return VerifyFilesystemViews(
+                cancellation_event, verification_volumes,
+                synthetic_mount, real_mount,
+                *verification_percentage,
+                optimization_unavailable, preparation_failures);
+        }
+        return 0;
+    }
+
+    if (verification_percentage) {
+        devicefs::WriteToStream(
+            output,
+            L"\nMounted {} synthetic backup VHDX file(s) at {}.\n"
+            L"Mounted the corresponding real-B VHDX files at {}.\n",
+            synthetic_sources.size(), synthetic_mount, real_mount);
+        output.flush();
+        const auto result = VerifyFilesystemViews(
+            cancellation_event, verification_volumes,
+            synthetic_mount, real_mount,
+            *verification_percentage,
+            optimization_unavailable, preparation_failures);
+        if (result != 0) {
+            return result;
+        }
         synthetic_devicefs.Stop();
         real_devicefs.Stop();
-        return;
+        return 0;
     }
 
     devicefs::WriteToStream(
-        std::cout,
+        output,
         L"\nMounted {} synthetic backup VHDX file(s) at {}.\n"
         L"Mounted the corresponding real VHDX files at {}.\n"
         L"Press Ctrl+C to stop.\n",
         synthetic_sources.size(), synthetic_mount, real_mount);
+    output.flush();
     const auto processes = std::array{
         &synthetic_devicefs.Process(),
         &real_devicefs.Process(),
@@ -503,6 +573,7 @@ auto ExposeBackupViews(
     }
     synthetic_devicefs.Stop();
     real_devicefs.Stop();
+    return 0;
 }
 
 struct UnexpectedDifference {
@@ -1542,9 +1613,20 @@ auto PrintVerificationResult(
     if (options.synthetic_backup_prefix &&
         (result.map_exit_code == 0) &&
         !internal::CancellationRequested(cancellation_event)) {
-        ExposeBackupViews(
+        static_cast<void>(RunBackupViewDiagnostics(
             cancellation_event, result.reports,
-            *options.synthetic_backup_prefix);
+            *options.synthetic_backup_prefix, std::nullopt,
+            unavailable_snapshots));
+    }
+    if (options.filesystem_verification_prefix &&
+        (result.map_exit_code == 0) &&
+        !internal::CancellationRequested(cancellation_event)) {
+        result.filesystem_verification_exit_code =
+            RunBackupViewDiagnostics(
+                cancellation_event, result.reports,
+                *options.filesystem_verification_prefix,
+                options.filesystem_verification_percentage,
+                unavailable_snapshots);
     }
     return result;
 }
@@ -1617,5 +1699,7 @@ export [[nodiscard]] auto RunIncrementalDiagnostics(
     }
     return result.diagnostics.map_exit_code != 0
         ? result.diagnostics.map_exit_code
-        : result.diagnostics.verification_exit_code;
+        : result.diagnostics.verification_exit_code != 0
+            ? result.diagnostics.verification_exit_code
+            : result.diagnostics.filesystem_verification_exit_code;
 }

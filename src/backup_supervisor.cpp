@@ -512,6 +512,7 @@ struct ForegroundOptions {
     auto result = IncrementalDiagnosticOptions{};
     auto raw_namespace_override = std::optional<std::wstring_view>{};
     auto raw_volume_override = std::optional<std::wstring_view>{};
+    auto verification_percentage_supplied = false;
     for (auto index = 0uz; index < arguments.size(); ++index) {
         const auto argument = std::wstring_view{arguments[index]};
         if (argument == L"--incremental-stats") {
@@ -524,6 +525,41 @@ struct ForegroundOptions {
                     "--expose-synthetic-backup requires a UNC prefix");
             }
             result.synthetic_backup_prefix = arguments[index];
+        } else if (argument == L"--verify-synthetic-backup") {
+            if (++index == arguments.size()) {
+                throw std::invalid_argument(
+                    "--verify-synthetic-backup requires a UNC prefix");
+            }
+            result.filesystem_verification_prefix = arguments[index];
+        } else if (argument == L"--verify-percentage") {
+            if (++index == arguments.size()) {
+                throw std::invalid_argument(
+                    "--verify-percentage requires a value");
+            }
+            const auto text = std::wstring{arguments[index]};
+            auto consumed = std::size_t{};
+            try {
+                result.filesystem_verification_percentage =
+                    std::stod(text, &consumed);
+            } catch (const std::invalid_argument &) {
+                throw std::invalid_argument(
+                    "--verify-percentage requires a number greater than "
+                    "zero and no greater than 100");
+            } catch (const std::out_of_range &) {
+                throw std::invalid_argument(
+                    "--verify-percentage requires a number greater than "
+                    "zero and no greater than 100");
+            }
+            if ((consumed != text.size()) ||
+                !std::isfinite(
+                    result.filesystem_verification_percentage) ||
+                (result.filesystem_verification_percentage <= 0.0) ||
+                (result.filesystem_verification_percentage > 100.0)) {
+                throw std::invalid_argument(
+                    "--verify-percentage requires a number greater than "
+                    "zero and no greater than 100");
+            }
+            verification_percentage_supplied = true;
         } else if (argument == L"--namespace") {
             if (++index == arguments.size()) {
                 throw std::invalid_argument(
@@ -555,6 +591,17 @@ struct ForegroundOptions {
     }
     if (raw_volume_override) {
         result.volume_override = ParseVolumeList(*raw_volume_override);
+    }
+    if (result.synthetic_backup_prefix &&
+        result.filesystem_verification_prefix) {
+        throw std::invalid_argument(
+            "--expose-synthetic-backup and --verify-synthetic-backup "
+            "cannot be used together");
+    }
+    if (verification_percentage_supplied &&
+        !result.filesystem_verification_prefix) {
+        throw std::invalid_argument(
+            "--verify-percentage requires --verify-synthetic-backup");
     }
     return result;
 }
@@ -713,7 +760,9 @@ auto PrintHelp() noexcept {
         "[--namespace NAMESPACE]\n"
         "  backup-supervisor.exe [--incremental-verify] "
         "[--incremental-stats]\n"
-        "      [--expose-synthetic-backup UNC-PREFIX]\n"
+        "      [--expose-synthetic-backup UNC-PREFIX |\n"
+        "       --verify-synthetic-backup UNC-PREFIX "
+        "[--verify-percentage PERCENT]]\n"
         "      [--namespace NAMESPACE] [--baseline SNAPSHOT-ID]\n"
         "      [--volumes VOLUME[,VOLUME...]]\n"
         "  backup-supervisor.exe --install-service [--update]\n"
@@ -764,7 +813,8 @@ auto wmain(
         }
         if ((option == L"--incremental-stats") ||
             (option == L"--incremental-verify") ||
-            (option == L"--expose-synthetic-backup")) {
+            (option == L"--expose-synthetic-backup") ||
+            (option == L"--verify-synthetic-backup")) {
             return RunIncrementalDiagnosticMode(
                 ParseIncrementalDiagnosticOptions(arguments));
         }

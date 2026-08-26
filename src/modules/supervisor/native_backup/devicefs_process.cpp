@@ -105,8 +105,9 @@ struct DeviceFsStartRequest {
             request.rpc_endpoint->c_str())) {
         WinError("could not set the RPC block-device endpoint");
     }
-    devicefs::WriteToStream(
+    auto &output = devicefs::WriteToStream(
         std::cout, L"Setting up virtual filesystem: {}\n", command);
+    output.flush();
     const auto creation_flags = EXTENDED_STARTUPINFO_PRESENT |
         (request.rpc_endpoint ? CREATE_SUSPENDED : DWORD{});
     auto process = StartProcessWithHandles(

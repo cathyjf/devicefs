@@ -184,19 +184,35 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
     }
 }
 
+struct DeviceFsExit {
+    std::size_t process_index;
+    DWORD exit_code;
+};
+
 [[nodiscard]] auto WaitForDeviceFsExitOrCancellation(
-    const DeviceFsProcess &devicefs,
-    const HANDLE cancellation_event) -> std::optional<DWORD> {
-    const auto handles = std::array{
-        devicefs.process.hProcess, cancellation_event};
+    const std::span<const DeviceFsProcess *const> devicefs_processes,
+    const HANDLE cancellation_event) -> std::optional<DeviceFsExit> {
+    auto handles = devicefs_processes |
+        std::views::transform([](const auto devicefs) {
+            return devicefs->process.hProcess;
+        }) |
+        std::ranges::to<std::vector<HANDLE>>();
+    handles.push_back(cancellation_event);
     const auto result = WaitForMultipleObjects(
         wil::safe_cast_failfast<DWORD>(handles.size()),
         handles.data(), FALSE, INFINITE);
     if (result == WAIT_FAILED) {
         WinError("could not wait for devicefs or cancellation");
     }
-    if (result == WAIT_OBJECT_0) {
-        return ProcessExitCode(devicefs.process.hProcess);
+    [[gsl::suppress("type.4",
+        justification: "Braced initialization proves this construction safe at compile time.")]]
+    const auto process_index =
+        std::size_t{result - WAIT_OBJECT_0};
+    if (process_index < devicefs_processes.size()) {
+        return DeviceFsExit{
+            .process_index = process_index,
+            .exit_code = ProcessExitCode(handles[process_index]),
+        };
     }
     return std::nullopt;
 }
@@ -258,5 +274,41 @@ auto TryStopDeviceFs(const DeviceFsProcess &devicefs) noexcept {
         TryWriteError("devicefs cleanup failed", error);
     }
 }
+
+class DeviceFsChild {
+  public:
+    explicit DeviceFsChild(DeviceFsProcess devicefs) noexcept
+        : devicefs_{std::move(devicefs)} {}
+
+    DeviceFsChild(const DeviceFsChild &) = delete;
+    auto operator=(const DeviceFsChild &)
+        -> DeviceFsChild & = delete;
+    DeviceFsChild(DeviceFsChild &&) = delete;
+    auto operator=(DeviceFsChild &&)
+        -> DeviceFsChild & = delete;
+
+    ~DeviceFsChild() {
+        if (running_) {
+            TryStopDeviceFs(devicefs_);
+        }
+    }
+
+    [[nodiscard]] auto Process() const noexcept
+        -> const DeviceFsProcess & {
+        return devicefs_;
+    }
+
+    auto Stop() {
+        if (!running_) {
+            return;
+        }
+        StopDeviceFs(devicefs_, false);
+        running_ = false;
+    }
+
+  private:
+    DeviceFsProcess devicefs_;
+    bool running_ = true;
+};
 
 } // namespace internal

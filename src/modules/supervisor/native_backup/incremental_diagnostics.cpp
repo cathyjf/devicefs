@@ -42,7 +42,7 @@ import devicefs.vss_block_descriptors;
 export struct IncrementalDiagnosticOptions {
     bool print_statistics = false;
     bool verify = false;
-    std::optional<std::wstring> synthetic_backup_mount;
+    std::optional<std::wstring> synthetic_backup_prefix;
     std::optional<GUID> baseline_snapshot_identifier;
     std::optional<std::u8string> namespace_override;
     std::vector<std::wstring> volume_override;
@@ -339,10 +339,11 @@ using SyntheticBackupDevice =
 using SyntheticBackupServer =
     devicefs::RpcBlockDeviceServer<SyntheticBackupDevice>;
 
-auto AddSyntheticBackup(
+auto AddBackupViews(
     const VolumeReport &report,
     SyntheticBackupServer::Devices &devices,
-    std::vector<internal::DeviceFsSource> &sources,
+    std::vector<internal::DeviceFsSource> &synthetic_sources,
+    std::vector<internal::DeviceFsSource> &real_sources,
     std::ostream &output) -> void {
     const auto volume_identifier =
         winrt::to_hstring(report.volume_identifier);
@@ -406,73 +407,102 @@ auto AddSyntheticBackup(
         "    Dirty map: {} 16-KiB block(s)\n",
         report.map->block_offsets.size());
 
-    sources.push_back({
+    synthetic_sources.push_back({
         .name = filename,
         .source = filename,
+    });
+    real_sources.push_back({
+        .name = filename,
+        .source = report.payload_device,
     });
     devices.emplace_back(
         std::move(filename), std::move(*synthetic));
 }
 
-auto ExposeSyntheticBackups(
+auto ExposeBackupViews(
     const HANDLE cancellation_event,
     const std::span<const VolumeReport> reports,
-    const std::wstring_view mount_target) -> void {
+    const std::wstring_view mount_prefix) -> void {
     auto &output = devicefs::WriteToStream(
-        std::cout, "Synthetic backup VHDX exposure:\n");
+        std::cout, "Synthetic and real backup VHDX exposure:\n");
     auto devices = SyntheticBackupServer::Devices{};
-    auto sources = std::vector<internal::DeviceFsSource>{};
+    auto synthetic_sources =
+        std::vector<internal::DeviceFsSource>{};
+    auto real_sources = std::vector<internal::DeviceFsSource>{};
     for (const auto &report : reports) {
-        AddSyntheticBackup(report, devices, sources, output);
+        AddBackupViews(report, devices,
+            synthetic_sources, real_sources, output);
     }
     if (devices.empty()) {
         throw std::runtime_error(
             "no synthetic backup VHDX could be exposed");
     }
 
+    const auto synthetic_mount =
+        std::format(L"{}\\synthetic", mount_prefix);
+    const auto real_mount =
+        std::format(L"{}\\real", mount_prefix);
     auto endpoint = std::format(
         L"devicefs-block-device-{}", internal::UniqueName());
-    const auto devicefs = internal::StartDeviceFs(
+    auto suspended_synthetic = internal::StartDeviceFs(
         internal::DeviceFsStartRequest{
-            .sources = sources,
-            .mount_target = mount_target,
+            .sources = synthetic_sources,
+            .mount_target = synthetic_mount,
             .rpc_endpoint = endpoint,
             .vhdx = true,
         });
-    auto terminate_suspended = wil::scope_exit([&] {
+    auto terminate_synthetic = wil::scope_exit([&] {
         static_cast<void>(TerminateProcess(
-            devicefs.process.hProcess, ERROR_PROCESS_ABORTED));
+            suspended_synthetic.process.hProcess,
+            ERROR_PROCESS_ABORTED));
     });
+    // The child owners must be destroyed before the RPC server because
+    // unmounting the synthetic VHDX can issue final block-device reads.
     auto server = SyntheticBackupServer::Start(
-        endpoint, devicefs.process.dwProcessId,
+        endpoint, suspended_synthetic.process.dwProcessId,
         std::move(devices));
-    internal::ResumeDeviceFs(devicefs);
-    terminate_suspended.release();
-    auto cleanup = wil::scope_exit([&] {
-        internal::TryStopDeviceFs(devicefs);
-    });
+    internal::ResumeDeviceFs(suspended_synthetic);
+    auto synthetic_devicefs = internal::DeviceFsChild{
+        std::move(suspended_synthetic)};
+    terminate_synthetic.release();
+    auto real_devicefs = internal::DeviceFsChild{
+        internal::StartDeviceFs(
+            internal::DeviceFsStartRequest{
+                .sources = real_sources,
+                .mount_target = real_mount,
+                .vhdx = true,
+            })};
     if (!internal::WaitForDeviceFs(
-            devicefs, cancellation_event)) {
-        internal::StopDeviceFs(devicefs, false);
-        cleanup.release();
+            synthetic_devicefs.Process(), cancellation_event) ||
+        !internal::WaitForDeviceFs(
+            real_devicefs.Process(), cancellation_event)) {
+        synthetic_devicefs.Stop();
+        real_devicefs.Stop();
         return;
     }
 
     devicefs::WriteToStream(
         std::cout,
         L"\nMounted {} synthetic backup VHDX file(s) at {}.\n"
+        L"Mounted the corresponding real VHDX files at {}.\n"
         L"Press Ctrl+C to stop.\n",
-        sources.size(), mount_target);
-    const auto exit_code =
-        internal::WaitForDeviceFsExitOrCancellation(
-            devicefs, cancellation_event);
-    if (exit_code) {
+        synthetic_sources.size(), synthetic_mount, real_mount);
+    const auto processes = std::array{
+        &synthetic_devicefs.Process(),
+        &real_devicefs.Process(),
+    };
+    const auto exit = internal::WaitForDeviceFsExitOrCancellation(
+        processes, cancellation_event);
+    if (exit) {
+        constexpr auto kChildNames =
+            std::array{"synthetic", "real"};
         throw std::runtime_error(std::format(
-            "devicefs exited while exposing the synthetic backup "
-            "with code {}.", *exit_code));
+            "the {} devicefs child exited while exposing backup "
+            "views with code {}.",
+            kChildNames[exit->process_index], exit->exit_code));
     }
-    internal::StopDeviceFs(devicefs, false);
-    cleanup.release();
+    synthetic_devicefs.Stop();
+    real_devicefs.Stop();
 }
 
 struct UnexpectedDifference {
@@ -1509,12 +1539,12 @@ auto PrintVerificationResult(
             intervals.size() - result.reports.size(),
             unavailable_snapshots);
     }
-    if (options.synthetic_backup_mount &&
+    if (options.synthetic_backup_prefix &&
         (result.map_exit_code == 0) &&
         !internal::CancellationRequested(cancellation_event)) {
-        ExposeSyntheticBackups(
+        ExposeBackupViews(
             cancellation_event, result.reports,
-            *options.synthetic_backup_mount);
+            *options.synthetic_backup_prefix);
     }
     return result;
 }

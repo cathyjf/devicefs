@@ -521,9 +521,9 @@ struct ForegroundOptions {
         } else if (argument == L"--expose-synthetic-backup") {
             if (++index == arguments.size()) {
                 throw std::invalid_argument(
-                    "--expose-synthetic-backup requires a mount point");
+                    "--expose-synthetic-backup requires a UNC prefix");
             }
-            result.synthetic_backup_mount = arguments[index];
+            result.synthetic_backup_prefix = arguments[index];
         } else if (argument == L"--namespace") {
             if (++index == arguments.size()) {
                 throw std::invalid_argument(
@@ -713,7 +713,7 @@ auto PrintHelp() noexcept {
         "[--namespace NAMESPACE]\n"
         "  backup-supervisor.exe [--incremental-verify] "
         "[--incremental-stats]\n"
-        "      [--expose-synthetic-backup MOUNT]\n"
+        "      [--expose-synthetic-backup UNC-PREFIX]\n"
         "      [--namespace NAMESPACE] [--baseline SNAPSHOT-ID]\n"
         "      [--volumes VOLUME[,VOLUME...]]\n"
         "  backup-supervisor.exe --install-service [--update]\n"

@@ -36,6 +36,9 @@
 
 #pragma once
 
+#include <functional>
+#include <string_view>
+
 
 /////////////////////////////////////////////////////////////////////////
 //  Regular VSS client class 
@@ -48,8 +51,11 @@ class VssClient
 {
 public:
 
+    using StreamWriter =
+        std::move_only_function<void(std::wstring_view) const noexcept>;
+
     // Constructor
-    VssClient();
+    VssClient(StreamWriter);
 
     // Destructor
     ~VssClient();

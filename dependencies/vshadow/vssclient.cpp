@@ -38,18 +38,41 @@
 #include "shadow.h"
 #include <mutex>
 #include <objidl.h>
+#include <utility>
 
+
+namespace {
+auto g_streamWriter = VssClient::StreamWriter{};
+}
 
 
 // Constructor
-VssClient::VssClient()
+VssClient::VssClient(StreamWriter streamWriter)
 {
+    // Every client passes this gate before logging; the first selects the
+    // process-wide writer.
+    static auto streamWriterOnce = std::once_flag{};
+    std::call_once(streamWriterOnce, [&streamWriter] {
+        g_streamWriter = std::move(streamWriter);
+    });
     m_bCoInitializeCalled = false;
     m_hCancellationEvent = NULL;
     m_bSnapshotSetCreated = false;
     m_dwContext = VSS_CTX_BACKUP;
     m_latestSnapshotSetID = GUID_NULL;
     m_bDuringRestore = false;
+}
+
+
+namespace VShadowVendor {
+
+void WriteLog(const std::wstring_view text) noexcept
+{
+    if (g_streamWriter) {
+        g_streamWriter(text);
+    }
+}
+
 }
 
 

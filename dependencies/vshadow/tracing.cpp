@@ -38,11 +38,9 @@
 // Main header
 #include "shadow.h"
 
-#include <bit>
-#include <filesystem>
-#include <iterator>
-
-
+namespace VShadowVendor {
+void WriteLog(std::wstring_view) noexcept;
+}
 
 /////////////////////////////////////////////////////////////////////////
 //  Tracing class (very simple implementation) 
@@ -59,15 +57,7 @@ void FunctionTracer::WriteLine(wstring format, ...)
     wstring buffer;
     VPRINTF_VAR_PARAMS(buffer, format);
 
-    std::ranges::transform(
-        [](auto output) {
-            output.push_back(u8'\n');
-            return output;
-        }(std::filesystem::path{buffer.c_str()}.u8string()),
-        std::ostreambuf_iterator<char>{std::cout},
-        [](const char8_t value) noexcept {
-            return std::bit_cast<char>(value);
-        });
+    VShadowVendor::WriteLog(buffer);
     Trace(m_fileName, m_lineNumber, m_functionName, L"OUTPUT: %s", buffer.c_str());
 }
 

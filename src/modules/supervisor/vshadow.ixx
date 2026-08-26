@@ -60,7 +60,10 @@ class VssClientOwner final : private VssClient {
             "VssClientOwner does not have a default constructor. This variadic "
             "constructor requires at least one argument, but the analyzer "
             "incorrectly classifies it as a default constructor.")]]
-    explicit VssClientOwner(Arguments &&...arguments) {
+    explicit VssClientOwner(Arguments &&...arguments)
+        : VssClient{[](const std::wstring_view text) noexcept {
+              devicefs::WriteToStream(std::cout, L"{}\n", text);
+          }} {
         Initialize(std::forward<Arguments>(arguments)...);
     }
 

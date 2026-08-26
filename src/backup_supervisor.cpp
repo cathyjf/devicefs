@@ -520,17 +520,19 @@ struct ForegroundOptions {
         } else if (argument == L"--incremental-verify") {
             result.verify = true;
         } else if (argument == L"--expose-synthetic-backup") {
-            if (++index == arguments.size()) {
-                throw std::invalid_argument(
-                    "--expose-synthetic-backup requires a UNC prefix");
+            result.expose_synthetic_backup = true;
+            if (((index + 1) < arguments.size()) &&
+                !std::wstring_view{arguments[index + 1]}.starts_with(
+                    L"--")) {
+                result.backup_view_mount_root = arguments[++index];
             }
-            result.synthetic_backup_prefix = arguments[index];
         } else if (argument == L"--verify-synthetic-backup") {
-            if (++index == arguments.size()) {
-                throw std::invalid_argument(
-                    "--verify-synthetic-backup requires a UNC prefix");
+            result.verify_synthetic_backup = true;
+            if (((index + 1) < arguments.size()) &&
+                !std::wstring_view{arguments[index + 1]}.starts_with(
+                    L"--")) {
+                result.backup_view_mount_root = arguments[++index];
             }
-            result.filesystem_verification_prefix = arguments[index];
         } else if (argument == L"--verify-percentage") {
             if (++index == arguments.size()) {
                 throw std::invalid_argument(
@@ -592,14 +594,14 @@ struct ForegroundOptions {
     if (raw_volume_override) {
         result.volume_override = ParseVolumeList(*raw_volume_override);
     }
-    if (result.synthetic_backup_prefix &&
-        result.filesystem_verification_prefix) {
+    if (result.expose_synthetic_backup &&
+        result.verify_synthetic_backup) {
         throw std::invalid_argument(
             "--expose-synthetic-backup and --verify-synthetic-backup "
             "cannot be used together");
     }
     if (verification_percentage_supplied &&
-        !result.filesystem_verification_prefix) {
+        !result.verify_synthetic_backup) {
         throw std::invalid_argument(
             "--verify-percentage requires --verify-synthetic-backup");
     }
@@ -714,14 +716,14 @@ struct ForegroundOptions {
         });
 }
 
-[[nodiscard]] auto RunMountVhdx(std::wstring device) {
+[[nodiscard]] auto RunInventoryVhdx(std::wstring device) {
     const auto [input, console_mode] = GetForegroundConsoleInput(
-        "--mount-vhdx requires an attached console");
+        "--inventory-vhdx requires an attached console");
     return RunForegroundOperation(
         input, console_mode,
         [device = std::move(device)](
             const HANDLE cancellation_event) {
-            return MountVhdx(cancellation_event, device);
+            return InventoryVhdx(cancellation_event, device);
         });
 }
 
@@ -769,12 +771,13 @@ auto PrintHelp() noexcept {
         "      --namespace and --volumes override configured values.\n"
         "  backup-supervisor.exe --query-manifest "
         "[--namespace NAMESPACE]\n"
-        "  backup-supervisor.exe --mount-vhdx DEVICE\n"
+        "  backup-supervisor.exe --inventory-vhdx DEVICE\n"
         "  backup-supervisor.exe [--incremental-verify] "
         "[--incremental-stats]\n"
-        "      [--expose-synthetic-backup UNC-PREFIX |\n"
-        "       --verify-synthetic-backup UNC-PREFIX "
+        "      [--expose-synthetic-backup [MOUNT-POINT] |\n"
+        "       --verify-synthetic-backup [MOUNT-POINT] "
         "[--verify-percentage PERCENT]]\n"
+        "      Omit MOUNT-POINT to use a temporary SystemTemp directory.\n"
         "      [--namespace NAMESPACE] [--baseline SNAPSHOT-ID]\n"
         "      [--volumes VOLUME[,VOLUME...]]\n"
         "  backup-supervisor.exe --install-service [--update]\n"
@@ -823,12 +826,12 @@ auto wmain(
                 ParseNamespaceOverride(
                     arguments.subspan(1), "--query-manifest"));
         }
-        if (option == L"--mount-vhdx") {
+        if (option == L"--inventory-vhdx") {
             if (arguments.size() != 2) {
                 throw std::invalid_argument(
-                    "--mount-vhdx requires exactly one DEVICE");
+                    "--inventory-vhdx requires exactly one DEVICE");
             }
-            return RunMountVhdx(std::wstring{arguments[1]});
+            return RunInventoryVhdx(std::wstring{arguments[1]});
         }
         if ((option == L"--incremental-stats") ||
             (option == L"--incremental-verify") ||

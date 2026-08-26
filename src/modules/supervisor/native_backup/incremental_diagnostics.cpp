@@ -43,8 +43,9 @@ import devicefs.vss_block_descriptors;
 export struct IncrementalDiagnosticOptions {
     bool print_statistics = false;
     bool verify = false;
-    std::optional<std::wstring> synthetic_backup_prefix;
-    std::optional<std::wstring> filesystem_verification_prefix;
+    bool expose_synthetic_backup = false;
+    bool verify_synthetic_backup = false;
+    std::optional<std::wstring> backup_view_mount_root;
     double filesystem_verification_percentage = 100.0;
     std::optional<GUID> baseline_snapshot_identifier;
     std::optional<std::u8string> namespace_override;
@@ -440,7 +441,7 @@ enum class BackupViewPreparation {
 [[nodiscard]] auto RunBackupViewDiagnostics(
     const HANDLE cancellation_event,
     const std::span<const VolumeReport> reports,
-    const std::wstring_view mount_prefix,
+    const std::optional<std::wstring> &mount_root_override,
     const std::optional<double> verification_percentage,
     const std::size_t unavailable_snapshots) -> int {
     auto &output = verification_percentage
@@ -470,15 +471,16 @@ enum class BackupViewPreparation {
             break;
         }
     }
-    const auto synthetic_mount =
-        std::format(L"{}\\synthetic", mount_prefix);
-    const auto real_mount =
-        std::format(L"{}\\real", mount_prefix);
+    const auto mount_root = mount_root_override
+        ? std::filesystem::path{*mount_root_override}
+        : internal::TemporaryDeviceFsViewPath();
+    const auto synthetic_mount = mount_root / L"synthetic";
+    const auto real_mount = mount_root / L"real";
     if (devices.empty()) {
         if (verification_percentage) {
             return VerifyFilesystemViews(
                 cancellation_event, verification_volumes,
-                synthetic_mount, real_mount,
+                synthetic_mount.native(), real_mount.native(),
                 *verification_percentage,
                 optimization_unavailable, preparation_failures);
         }
@@ -486,12 +488,24 @@ enum class BackupViewPreparation {
             "no synthetic backup VHDX could be exposed");
     }
 
+    // WinFsp creates and removes the leaf mount directories. Only their
+    // shared parent must exist before the children start.
+    const auto mount_root_created =
+        std::filesystem::create_directory(mount_root);
+    auto remove_mount_root = wil::scope_exit([&] {
+        if (mount_root_created) {
+            auto ignored = std::error_code{};
+            static_cast<void>(
+                std::filesystem::remove(mount_root, ignored));
+        }
+    });
+
     auto endpoint = std::format(
         L"devicefs-block-device-{}", internal::UniqueName());
     auto suspended_synthetic = internal::StartDeviceFs(
         internal::DeviceFsStartRequest{
             .sources = synthetic_sources,
-            .mount_target = synthetic_mount,
+            .mount_target = synthetic_mount.native(),
             .rpc_endpoint = endpoint,
             .vhdx = true,
         });
@@ -513,7 +527,7 @@ enum class BackupViewPreparation {
         internal::StartDeviceFs(
             internal::DeviceFsStartRequest{
                 .sources = real_sources,
-                .mount_target = real_mount,
+                .mount_target = real_mount.native(),
                 .vhdx = true,
             })};
     if (!internal::WaitForDeviceFs(
@@ -523,7 +537,7 @@ enum class BackupViewPreparation {
         if (verification_percentage) {
             return VerifyFilesystemViews(
                 cancellation_event, verification_volumes,
-                synthetic_mount, real_mount,
+                synthetic_mount.native(), real_mount.native(),
                 *verification_percentage,
                 optimization_unavailable, preparation_failures);
         }
@@ -535,11 +549,11 @@ enum class BackupViewPreparation {
             output,
             L"\nMounted {} synthetic backup VHDX file(s) at {}.\n"
             L"Mounted the corresponding real-B VHDX files at {}.\n",
-            synthetic_sources.size(), synthetic_mount, real_mount);
-        output.flush();
+            synthetic_sources.size(), synthetic_mount.native(),
+            real_mount.native());
         const auto result = VerifyFilesystemViews(
             cancellation_event, verification_volumes,
-            synthetic_mount, real_mount,
+            synthetic_mount.native(), real_mount.native(),
             *verification_percentage,
             optimization_unavailable, preparation_failures);
         if (result != 0) {
@@ -555,8 +569,8 @@ enum class BackupViewPreparation {
         L"\nMounted {} synthetic backup VHDX file(s) at {}.\n"
         L"Mounted the corresponding real VHDX files at {}.\n"
         L"Press Ctrl+C to stop.\n",
-        synthetic_sources.size(), synthetic_mount, real_mount);
-    output.flush();
+        synthetic_sources.size(), synthetic_mount.native(),
+        real_mount.native());
     const auto processes = std::array{
         &synthetic_devicefs.Process(),
         &real_devicefs.Process(),
@@ -1266,15 +1280,11 @@ auto PrintClusterOwnership(
     }
 }
 
-auto FlushVerificationProgress(std::ostream &output) -> void {
+auto CheckVerificationProgressOutput(
+    const std::ostream &output) -> void {
     if (!output) {
         throw std::runtime_error(
             "could not write incremental verification progress");
-    }
-    output.flush();
-    if (!output) {
-        throw std::runtime_error(
-            "could not flush incremental verification progress");
     }
 }
 
@@ -1336,7 +1346,7 @@ auto PrintVerificationProgress(
         compared_total, volume_total,
         VerificationPercentage(compared_total, volume_total),
         differing_total, uncovered_total, coverage_unavailable);
-    FlushVerificationProgress(output);
+    CheckVerificationProgressOutput(output);
 
     for (auto &&[job, observation] :
         std::views::zip(jobs, observations)) {
@@ -1347,7 +1357,7 @@ auto PrintVerificationProgress(
         if (PrintOwnershipUpdate(
                 output, job.volume.get().volume_identifier,
                 job.ownership)) {
-            FlushVerificationProgress(output);
+            CheckVerificationProgressOutput(output);
         }
     }
 }
@@ -1610,21 +1620,21 @@ auto PrintVerificationResult(
             intervals.size() - result.reports.size(),
             unavailable_snapshots);
     }
-    if (options.synthetic_backup_prefix &&
+    if (options.expose_synthetic_backup &&
         (result.map_exit_code == 0) &&
         !internal::CancellationRequested(cancellation_event)) {
         static_cast<void>(RunBackupViewDiagnostics(
             cancellation_event, result.reports,
-            *options.synthetic_backup_prefix, std::nullopt,
+            options.backup_view_mount_root, std::nullopt,
             unavailable_snapshots));
     }
-    if (options.filesystem_verification_prefix &&
+    if (options.verify_synthetic_backup &&
         (result.map_exit_code == 0) &&
         !internal::CancellationRequested(cancellation_event)) {
         result.filesystem_verification_exit_code =
             RunBackupViewDiagnostics(
                 cancellation_event, result.reports,
-                *options.filesystem_verification_prefix,
+                options.backup_view_mount_root,
                 options.filesystem_verification_percentage,
                 unavailable_snapshots);
     }

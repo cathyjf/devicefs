@@ -35,7 +35,7 @@ import devicefs.supervisor.vshadow;
 
 export constexpr auto kCancelledExitCode = internal::kCancelledExitCode;
 
-export [[nodiscard]] auto MountVhdx(
+export [[nodiscard]] auto InventoryVhdx(
     HANDLE cancellation_event,
     std::wstring_view device) -> int;
 

@@ -160,13 +160,9 @@ auto Usage(std::ostream &output) noexcept {
 }
 
 auto WriteOutput(const std::string_view output) {
-    auto &stream = devicefs::WriteToStream(std::cout, "{}", output);
+    const auto &stream = devicefs::WriteToStream(std::cout, "{}", output);
     if (!stream) {
         throw std::runtime_error("could not write output");
-    }
-    stream.flush();
-    if (!stream) {
-        throw std::runtime_error("could not flush output");
     }
 }
 

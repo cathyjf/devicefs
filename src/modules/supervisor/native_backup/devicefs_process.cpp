@@ -61,6 +61,26 @@ struct DeviceFsStartRequest {
     bool vhdx = false;
 };
 
+[[nodiscard]] auto TemporarySystemDirectoryPath(
+    const std::wstring_view prefix) {
+    const auto windows_directory = [] {
+        auto result = std::wstring{};
+        const auto status = wil::GetWindowsDirectoryW(result);
+        if (FAILED(status)) {
+            WinError("could not obtain the Windows directory",
+                ExplicitWin32Error::FromHresult(status));
+        }
+        return result;
+    }();
+    return std::filesystem::path{windows_directory} /
+        L"SystemTemp" /
+        std::format(L"{}-{}", prefix, UniqueName());
+}
+
+[[nodiscard]] auto TemporaryDeviceFsViewPath() {
+    return TemporarySystemDirectoryPath(L"devicefs-view");
+}
+
 [[nodiscard]] auto StartDeviceFs(
     const DeviceFsStartRequest &request) {
     const auto supervisor = CurrentExecutablePath();
@@ -105,9 +125,8 @@ struct DeviceFsStartRequest {
             request.rpc_endpoint->c_str())) {
         WinError("could not set the RPC block-device endpoint");
     }
-    auto &output = devicefs::WriteToStream(
+    devicefs::WriteToStream(
         std::cout, L"Setting up virtual filesystem: {}\n", command);
-    output.flush();
     const auto creation_flags = EXTENDED_STARTUPINFO_PRESENT |
         (request.rpc_endpoint ? CREATE_SUSPENDED : DWORD{});
     auto process = StartProcessWithHandles(

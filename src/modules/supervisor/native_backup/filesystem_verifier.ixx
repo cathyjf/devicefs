@@ -92,6 +92,7 @@ enum class MismatchKind {
 };
 
 enum class FilesystemOperation {
+    QueryLayout,
     OpenStream,
     SeekStream,
     ReadStream,
@@ -147,8 +148,15 @@ struct OperationComparison {
     return FailuresMatch(comparison.synthetic, comparison.real);
 }
 
+[[nodiscard]] auto IsOperationMismatch(
+    const OperationComparison &comparison) noexcept {
+    return (comparison.key.operation != FilesystemOperation::QueryLayout) &&
+        !IsMatchedError(comparison);
+}
+
 struct FilesystemInventory {
     std::filesystem::path root;
+    std::optional<OperationFailure> layout_failure;
     std::vector<ObjectRecord> objects;
 };
 
@@ -338,12 +346,12 @@ auto RequestPendingIoCancellation(
 
 class VerificationState {
   public:
-    auto RecordLayoutEntries(
+    auto SetLayoutEntries(
         const VerificationEndpoint endpoint,
         const std::size_t entry_count) noexcept -> void {
         auto &entries = endpoint == VerificationEndpoint::Synthetic
             ? synthetic_layout_entries_ : real_layout_entries_;
-        entries.fetch_add(entry_count, std::memory_order_relaxed);
+        entries.store(entry_count, std::memory_order_relaxed);
     }
 
     auto SetPhase(const VerificationPhase phase) noexcept -> void {
@@ -524,9 +532,7 @@ class VerificationState {
         result.comparison_started = comparison_started_;
         result.mismatch_count = mismatches_.size() +
             std::ranges::count_if(operation_comparison_records_,
-                [](const OperationComparison &comparison) {
-                    return !IsMatchedError(comparison);
-                });
+                IsOperationMismatch);
         result.matched_error_count = std::ranges::count_if(
             operation_comparison_records_, IsMatchedError);
         result.failed = failed_.load(std::memory_order_acquire);
@@ -1113,6 +1119,20 @@ auto AppendLayoutBatch(
         path.starts_with(*std::prev(found));
 }
 
+[[nodiscard]] auto HasKnownOrdinaryDirectoryAncestors(
+    const std::wstring_view path,
+    const std::vector<std::wstring> &directories) {
+    for (auto separator = path.find(L'\\');
+        separator != std::wstring_view::npos;
+        separator = path.find(L'\\', separator + 1)) {
+        const auto ancestor = path.substr(0, separator);
+        if (!std::ranges::binary_search(directories, ancestor)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] auto InventoryFilesystem(
     const std::wstring_view root,
     const VerificationEndpoint endpoint,
@@ -1149,10 +1169,11 @@ auto AppendLayoutBatch(
         std::size_t{std::numeric_limits<DWORD>::max()};
     auto storage = std::vector<std::byte>(kLayoutQueryBatchSize);
     auto objects = std::vector<LayoutObject>{};
-    auto waiting_for_initial_layout = false;
-    constexpr auto readiness_retry_period = 10s;
-    const auto readiness_retry_deadline =
-        std::chrono::steady_clock::now() + readiness_retry_period;
+    auto best_partial_objects = std::vector<LayoutObject>{};
+    auto best_partial_error = DWORD{};
+    auto retry_deadline =
+        std::optional<std::chrono::steady_clock::time_point>{};
+    auto layout_failure = std::optional<OperationFailure>{};
 
     while (true) {
         if (internal::CancellationRequested(cancellation_event)) {
@@ -1166,14 +1187,12 @@ auto AppendLayoutBatch(
         if (DeviceIoControl(volume.get(), FSCTL_QUERY_FILE_LAYOUT,
                 &query, sizeof(query), buffer.data(), buffer_size_for_api,
                 &returned, nullptr)) {
-            const auto previous_size = objects.size();
             if (!AppendLayoutBatch(
                     buffer.first(returned), objects,
                     cancellation_event)) {
                 return std::nullopt;
             }
-            state.RecordLayoutEntries(
-                endpoint, objects.size() - previous_size);
+            state.SetLayoutEntries(endpoint, objects.size());
             query.Flags &= ~DWORD{QUERY_FILE_LAYOUT_RESTART};
             continue;
         }
@@ -1185,29 +1204,22 @@ auto AppendLayoutBatch(
         if (error == ERROR_HANDLE_EOF) {
             break;
         }
-        if (error == ERROR_INSUFFICIENT_BUFFER) {
-            if (storage.size() == kMaximumBufferSize) {
-                throw VerificationFailure(
-                    "a filesystem layout entry exceeds the maximum "
-                    "DeviceIoControl buffer size");
-            }
+        if ((error == ERROR_INSUFFICIENT_BUFFER) &&
+            (storage.size() != kMaximumBufferSize)) {
             storage.resize(std::min(
                 kMaximumBufferSize, storage.size() * 2));
             continue;
         }
-        const auto initial_query =
-            (query.Flags & DWORD{QUERY_FILE_LAYOUT_RESTART}) != 0;
-        if (initial_query &&
-            ((error == ERROR_FILE_CORRUPT) ||
-                (error == ERROR_DISK_CORRUPT)) &&
-            (std::chrono::steady_clock::now() <
-                readiness_retry_deadline)) {
-            if (!waiting_for_initial_layout) {
-                devicefs::WriteToStream(std::cout,
-                    "The {} filesystem layout is not ready; waiting.\n",
-                    endpoint_name);
-                waiting_for_initial_layout = true;
-            }
+        const auto now = std::chrono::steady_clock::now();
+        if (!retry_deadline) {
+            constexpr auto retry_period = 10s;
+            retry_deadline = now + retry_period;
+            devicefs::WriteToStream(std::cout,
+                "The {} filesystem layout query returned Windows error {}; "
+                "restarting it.\n",
+                endpoint_name, error);
+        }
+        if (now < *retry_deadline) {
             constexpr auto retry_interval = 100ms;
             const auto wait = WaitForSingleObject(
                 cancellation_event,
@@ -1221,10 +1233,44 @@ auto AppendLayoutBatch(
             if (wait == WAIT_OBJECT_0) {
                 return std::nullopt;
             }
+            // The failed call returned no usable continuation result.
+            if (objects.size() > best_partial_objects.size()) {
+                objects.swap(best_partial_objects);
+                best_partial_error = error;
+            }
+            objects.clear();
+            state.SetLayoutEntries(endpoint, 0);
+            query.Flags |= DWORD{QUERY_FILE_LAYOUT_RESTART};
             continue;
         }
-        WinError("could not query the {} filesystem layout after {} entries",
-            endpoint_name, objects.size(), ExplicitWin32Error{error});
+        layout_failure = OperationFailure{error};
+        break;
+    }
+
+    if (layout_failure) {
+        if (objects.size() < best_partial_objects.size()) {
+            objects.swap(best_partial_objects);
+            layout_failure = OperationFailure{best_partial_error};
+        }
+        state.SetLayoutEntries(endpoint, objects.size());
+        devicefs::WriteToStream(std::cout,
+            "The {} filesystem layout query ended with Windows error {}; "
+            "retaining its largest completed attempt of {} entries.\n",
+            endpoint_name, layout_failure->error, objects.size());
+    }
+    best_partial_objects = std::vector<LayoutObject>{};
+
+    auto known_ordinary_directories = std::vector<std::wstring>{};
+    if (layout_failure) {
+        for (const auto &object : objects) {
+            const auto segment = MftSegmentNumber(object.identity);
+            if ((object.kind == ObjectKind::Directory) &&
+                ((segment >= kFirstOrdinaryNtfsSegmentNumber) ||
+                    (segment == kNtfsRootSegmentNumber))) {
+                known_ordinary_directories.append_range(object.paths);
+            }
+        }
+        std::ranges::sort(known_ordinary_directories);
     }
 
     auto excluded_subtree_prefixes = std::vector<std::wstring>{};
@@ -1260,6 +1306,7 @@ auto AppendLayoutBatch(
 
     auto result = FilesystemInventory{
         .root = std::filesystem::path{root},
+        .layout_failure = layout_failure,
     };
     for (auto &object : objects) {
         if (internal::CancellationRequested(cancellation_event)) {
@@ -1271,6 +1318,14 @@ auto AppendLayoutBatch(
             continue;
         }
         for (auto &path : object.paths) {
+            // A partial layout can end before an ancestor's entry. Do not open
+            // a path unless the returned prefix proves that every ancestor is
+            // an ordinary directory rather than an unseen reparse point.
+            if (layout_failure &&
+                !HasKnownOrdinaryDirectoryAncestors(
+                    path, known_ordinary_directories)) {
+                continue;
+            }
             if (IsInExcludedSubtree(
                     path, excluded_subtree_prefixes)) {
                 continue;
@@ -1428,9 +1483,11 @@ auto AppendStreamTasks(
         std::bit_cast<std::array<std::uint32_t, 4>>(seed_identifier);
     auto seed = std::seed_seq{seed_parts.begin(), seed_parts.end()};
     auto random = std::mt19937_64{seed};
-    // Namespace, object type, stream presence, and stream length are always
-    // compared. The percentage independently selects ordinary stream-content
-    // chunks, with B's snapshot ID making the sample repeatable for this run.
+    // A complete inventory compares the whole namespace. After a terminal
+    // layout-query error, only objects discovered on both sides establish a
+    // comparison surface. The percentage independently selects ordinary
+    // stream-content chunks, with B's snapshot ID making the sample repeatable
+    // for this run.
     auto choose = std::bernoulli_distribution{percentage / 100.0};
     auto result = ComparisonPlan{};
     auto fallback = std::optional<ReadTask>{};
@@ -1455,6 +1512,14 @@ auto AppendStreamTasks(
         }
     };
     auto compared_identities = std::set<PairedFileIdentity>{};
+    const auto namespace_complete =
+        !synthetic.layout_failure && !real.layout_failure;
+    const auto add_missing_object = [&](const MismatchKind kind,
+        const ObjectRecord &object) {
+        if (namespace_complete) {
+            AddObjectMismatch(state, kind, object);
+        }
+    };
     auto synthetic_object = 0uz;
     auto real_object = 0uz;
     while ((synthetic_object < synthetic.objects.size()) ||
@@ -1464,32 +1529,28 @@ auto AppendStreamTasks(
         }
         if (synthetic_object == synthetic.objects.size()) {
             const auto &entry = real.objects[real_object++];
-            AddObjectMismatch(state,
-                MismatchKind::ObjectMissingFromSynthetic,
-                entry);
+            add_missing_object(
+                MismatchKind::ObjectMissingFromSynthetic, entry);
             continue;
         }
         if (real_object == real.objects.size()) {
             const auto &entry = synthetic.objects[synthetic_object++];
-            AddObjectMismatch(state,
-                MismatchKind::ObjectMissingFromReal,
-                entry);
+            add_missing_object(
+                MismatchKind::ObjectMissingFromReal, entry);
             continue;
         }
         const auto &synthetic_entry =
             synthetic.objects[synthetic_object];
         const auto &real_entry = real.objects[real_object];
         if (synthetic_entry.relative_path < real_entry.relative_path) {
-            AddObjectMismatch(state,
-                MismatchKind::ObjectMissingFromReal,
-                synthetic_entry);
+            add_missing_object(
+                MismatchKind::ObjectMissingFromReal, synthetic_entry);
             ++synthetic_object;
             continue;
         }
         if (real_entry.relative_path < synthetic_entry.relative_path) {
-            AddObjectMismatch(state,
-                MismatchKind::ObjectMissingFromSynthetic,
-                real_entry);
+            add_missing_object(
+                MismatchKind::ObjectMissingFromSynthetic, real_entry);
             ++real_object;
             continue;
         }
@@ -1806,8 +1867,8 @@ auto RunComparisonWorkers(
     }
     return !state.Failed() &&
         !internal::CancellationRequested(cancellation_event) &&
-        std::ranges::all_of(
-            state.OperationComparisonsAfterJoin(), IsMatchedError) &&
+        std::ranges::none_of(
+            state.OperationComparisonsAfterJoin(), IsOperationMismatch) &&
         (completed_tasks.load(std::memory_order_relaxed) ==
             plan.tasks.size());
 }
@@ -1841,7 +1902,7 @@ auto CompareAttachedFilesystems(
             return std::nullopt;
         }
         devicefs::WriteToStream(std::cout,
-            L"Synthetic inventory complete for volume {}; "
+            L"Synthetic inventory finished for volume {}; "
             L"beginning real-B inventory.\n",
             std::wstring_view{volume_identifier});
         state.SetPhase(VerificationPhase::InventoryingReal);
@@ -1850,8 +1911,15 @@ auto CompareAttachedFilesystems(
             "real-B", cancellation_event, state);
     }();
     if (synthetic && real && !state.Failed()) {
+        const auto layouts_complete =
+            !synthetic->layout_failure && !real->layout_failure;
+        if (synthetic->layout_failure || real->layout_failure) {
+            state.RecordOperationComparison({
+                .operation = FilesystemOperation::QueryLayout,
+            }, 0, synthetic->layout_failure, real->layout_failure);
+        }
         devicefs::WriteToStream(std::cout,
-            L"Both inventories complete for volume {}; "
+            L"Both inventories finished for volume {}; "
             L"preparing content comparisons.\n",
             std::wstring_view{volume_identifier});
         state.SetPhase(VerificationPhase::Planning);
@@ -1867,7 +1935,14 @@ auto CompareAttachedFilesystems(
             if (RunComparisonWorkers(
                     *plan, *synthetic, *real,
                     cancellation_event, io_cancellation, state)) {
-                state.CompleteComparison();
+                if (layouts_complete) {
+                    state.CompleteComparison();
+                } else {
+                    state.Fail(
+                        "at least one filesystem layout query did not "
+                        "complete; only the common discovered objects could "
+                        "be compared");
+                }
             }
         }
     }
@@ -1979,6 +2054,8 @@ struct VolumeJob {
 [[nodiscard]] auto OperationName(
     const FilesystemOperation operation) noexcept -> std::string_view {
     switch (operation) {
+    case FilesystemOperation::QueryLayout:
+        return "query filesystem layout";
     case FilesystemOperation::OpenStream:
         return "open stream";
     case FilesystemOperation::SeekStream:
@@ -2023,14 +2100,21 @@ auto PrintOperationComparison(
     if (matched) {
         devicefs::WriteToStream(
             output, "\nMatched filesystem error:\n");
+    } else if (comparison.key.operation ==
+        FilesystemOperation::QueryLayout) {
+        devicefs::WriteToStream(
+            output, "\nFilesystem inventory outcome difference:\n");
     } else {
         devicefs::WriteToStream(output,
             "\n*** FILESYSTEM VERIFICATION MISMATCH ***\n");
     }
     devicefs::WriteToStream(output,
-        L"  Volume ID: {}\n"
-        L"  Object: {}\n",
-        std::wstring_view{identifier}, DisplayPath(comparison.key.path));
+        L"  Volume ID: {}\n",
+        std::wstring_view{identifier});
+    if (comparison.key.operation != FilesystemOperation::QueryLayout) {
+        devicefs::WriteToStream(output,
+            L"  Object: {}\n", DisplayPath(comparison.key.path));
+    }
     if (!comparison.key.stream.empty() ||
         (comparison.key.operation == FilesystemOperation::OpenStream) ||
         (comparison.key.operation == FilesystemOperation::SeekStream) ||
@@ -2240,10 +2324,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
         const auto &operation_comparisons =
             job.state->OperationComparisonsAfterJoin();
         const auto operation_mismatches = std::ranges::count_if(
-            operation_comparisons,
-            [](const OperationComparison &comparison) {
-                return !IsMatchedError(comparison);
-            });
+            operation_comparisons, IsOperationMismatch);
         if (observation.matched_error_count != 0) {
             ++matched_error_volumes;
         }
@@ -2289,6 +2370,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                 "    Status: VERIFIED\n");
         }
         devicefs::WriteToStream(std::cout,
+            "    Layout entries received: synthetic {}; real B {}\n"
             "    Namespace: synthetic {} object(s), {} stream(s); "
             "real B {} object(s), {} stream(s)\n"
             "    Content available: {} bytes\n"
@@ -2296,6 +2378,8 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             "    Content compared: {} bytes ({:.2f}% of selection)\n"
             "    Mismatches: {}\n"
             "    Matched filesystem errors: {}\n",
+            observation.synthetic_layout_entries,
+            observation.real_layout_entries,
             observation.synthetic_objects,
             observation.synthetic_streams,
             observation.real_objects,
@@ -2446,6 +2530,14 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                             "requested device",
                             cancellation_event, state);
                     }();
+                    if (inventory && inventory->layout_failure) {
+                        WinError(
+                            "could not query the requested device "
+                            "filesystem layout after {} entries",
+                            state.Observe().synthetic_layout_entries,
+                            ExplicitWin32Error{
+                                inventory->layout_failure->error});
+                    }
                     state.SetPhase(VerificationPhase::Detaching);
                     DetachView(view, "requested device", state);
                     state.SetPhase(VerificationPhase::Complete);

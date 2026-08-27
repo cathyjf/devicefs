@@ -268,6 +268,7 @@ struct VerificationObservation {
     VerificationPhase phase = VerificationPhase::AttachingSynthetic;
     InventoryObservation synthetic;
     InventoryObservation real;
+    std::optional<std::uint64_t> layout_entry_estimate;
     std::uint64_t available_bytes = 0;
     std::uint64_t selected_bytes = 0;
     std::uint64_t compared_bytes = 0;
@@ -451,6 +452,11 @@ class VerificationState {
         traversal_complete_.store(true, std::memory_order_release);
     }
 
+    auto SetTraversalEstimate(const std::uint64_t estimate) -> void {
+        const auto lock = std::scoped_lock{mutex_};
+        layout_entry_estimate_ = estimate;
+    }
+
     auto SetPlan(const ComparisonPlan &plan) noexcept -> void {
         available_bytes_.store(
             plan.available_bytes, std::memory_order_relaxed);
@@ -603,6 +609,7 @@ class VerificationState {
             .comparison_complete = comparison_complete,
         };
         const auto lock = std::scoped_lock{mutex_};
+        result.layout_entry_estimate = layout_entry_estimate_;
         result.traversal_started = traversal_started_;
         result.comparison_started = comparison_started_;
         result.mismatch_count = std::ranges::count_if(
@@ -689,6 +696,10 @@ class VerificationState {
     std::atomic<bool> failed_{};
     mutable std::mutex mutex_;
     std::string failure_;
+    // This count comes from FSCTL_QUERY_FILE_LAYOUT, which has proved flaky
+    // and untrustworthy as filesystem inventory. Progress reporting is its
+    // only consumer; it is never evidence used by the verification result.
+    std::optional<std::uint64_t> layout_entry_estimate_;
     std::optional<std::chrono::steady_clock::time_point>
         traversal_started_;
     std::optional<std::chrono::steady_clock::time_point>
@@ -1165,6 +1176,170 @@ auto DetachView(
     }
     result.append(name);
     return result;
+}
+
+[[nodiscard]] auto TryEstimateTraversalLayoutEntries(
+    const std::wstring_view root,
+    const std::wstring_view endpoint_name,
+    const std::wstring_view volume_identifier,
+    const HANDLE cancellation_event,
+    SynchronousIoCancellation &io_cancellation)
+    -> std::optional<std::uint64_t> {
+    // This is not an inventory path. FSCTL_QUERY_FILE_LAYOUT has proved flaky
+    // and untrustworthy as inventory on ordinarily usable mounted filesystems.
+    // Only a complete enumeration supplies an approximate denominator for
+    // progress and ETA; neither its entries nor its failures are verification
+    // evidence or affect the result.
+    // A failed attempt is restarted because that estimate is useful during a
+    // much longer ordinary traversal, but its partial count is discarded.
+    devicefs::WriteToStream(std::cout,
+        L"Obtaining an optional {} layout-entry estimate for volume {} "
+        L"for traversal progress and ETA.\n",
+        endpoint_name, volume_identifier);
+
+    auto volume_path = std::wstring{root};
+    volume_path.pop_back();
+
+    // This control code has no required-size probe. With no inclusion flags,
+    // each result contains only fixed-size FILE_LAYOUT_ENTRY records. The
+    // established 4-MiB batch kept the call count low enough for the earlier
+    // whole-volume diagnostic to finish in about a minute.
+    constexpr auto batch_size = 4uz * 1024 * 1024;
+    static_assert((batch_size % sizeof(std::max_align_t)) == 0);
+    static_assert(batch_size >=
+        (sizeof(QUERY_FILE_LAYOUT_OUTPUT) + sizeof(FILE_LAYOUT_ENTRY)));
+    auto storage = std::vector<std::max_align_t>(
+        batch_size / sizeof(std::max_align_t));
+    const auto buffer = std::as_writable_bytes(std::span{storage});
+    const auto registration = io_cancellation.RegisterCurrentThread();
+    const auto query_once = [&]()
+        -> std::expected<std::uint64_t, DWORD> {
+        if (internal::CancellationRequested(cancellation_event)) {
+            return std::unexpected{DWORD{ERROR_CANCELLED}};
+        }
+        auto volume = wil::unique_hfile{CreateFileW(
+            volume_path.c_str(), GENERIC_READ, kShareMode, nullptr,
+            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+        if (!volume) {
+            return std::unexpected{GetLastError()};
+        }
+
+        auto query = QUERY_FILE_LAYOUT_INPUT{
+            .FilterEntryCount = 0,
+            .Flags = QUERY_FILE_LAYOUT_RESTART,
+            .FilterType = QUERY_FILE_LAYOUT_FILTER_TYPE_NONE,
+        };
+        auto count = std::uint64_t{};
+        while (true) {
+            if (internal::CancellationRequested(cancellation_event)) {
+                return std::unexpected{DWORD{ERROR_CANCELLED}};
+            }
+            auto returned = DWORD{};
+            if (DeviceIoControl(volume.get(), FSCTL_QUERY_FILE_LAYOUT,
+                    &query, sizeof(query), buffer.data(),
+                    wil::safe_cast_failfast<DWORD>(buffer.size()),
+                    &returned, nullptr)) {
+                auto output = QUERY_FILE_LAYOUT_OUTPUT{};
+                std::memcpy(std::addressof(output), buffer.data(),
+                    sizeof(output));
+                count += output.FileEntryCount;
+                query.Flags = 0;
+                continue;
+            }
+            const auto error = GetLastError();
+            if (error == ERROR_HANDLE_EOF) {
+                return count;
+            }
+            return std::unexpected{error};
+        }
+    };
+
+    auto retry_deadline =
+        std::optional<std::chrono::steady_clock::time_point>{};
+    while (true) {
+        auto estimate = query_once();
+        if (estimate) {
+            devicefs::WriteToStream(std::cout,
+                L"  Completed optional {} layout count for volume {}: {} "
+                L"entries. This count is used only for approximate "
+                L"traversal progress and ETA.\n",
+                endpoint_name, volume_identifier, *estimate);
+            return *estimate;
+        }
+        if (internal::CancellationRequested(cancellation_event)) {
+            return std::nullopt;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (!retry_deadline) {
+            constexpr auto retry_period = 10s;
+            retry_deadline = now + retry_period;
+            devicefs::WriteToStream(std::cout,
+                L"  The optional {} layout count for volume {} returned "
+                L"Windows error {}; complete attempts will be retried for "
+                L"approximately {} seconds.\n",
+                endpoint_name, volume_identifier, estimate.error(),
+                retry_period.count());
+        } else if (now >= *retry_deadline) {
+            devicefs::WriteToStream(std::cout,
+                L"  The optional {} layout count for volume {} remained "
+                L"unavailable after retries (Windows error {}). This does "
+                L"not affect the verification result.\n",
+                endpoint_name, volume_identifier, estimate.error());
+            return std::nullopt;
+        }
+
+        constexpr auto retry_interval = 100ms;
+        const auto wait = WaitForSingleObject(
+            cancellation_event,
+            wil::safe_cast_failfast<DWORD>(retry_interval.count()));
+        if (wait == WAIT_FAILED) {
+            WinError(
+                "could not wait before retrying the optional layout count");
+        }
+        if (wait == WAIT_OBJECT_0) {
+            return std::nullopt;
+        }
+    }
+}
+
+auto PublishTraversalLayoutEstimate(
+    const std::wstring_view real_root,
+    const std::wstring_view synthetic_root,
+    const std::wstring_view volume_identifier,
+    const HANDLE cancellation_event,
+    SynchronousIoCancellation &io_cancellation,
+    VerificationState &state) -> void {
+    try {
+        auto estimate = TryEstimateTraversalLayoutEntries(
+            real_root, L"real-B", volume_identifier,
+            cancellation_event, io_cancellation);
+        if (!estimate &&
+            !internal::CancellationRequested(cancellation_event)) {
+            devicefs::WriteToStream(std::cout,
+                L"Trying the synthetic view for volume {} because the "
+                L"real-B view supplied no complete layout count.\n",
+                volume_identifier);
+            estimate = TryEstimateTraversalLayoutEntries(
+                synthetic_root, L"synthetic", volume_identifier,
+                cancellation_event, io_cancellation);
+        }
+        if (estimate) {
+            state.SetTraversalEstimate(*estimate);
+        } else if (!internal::CancellationRequested(cancellation_event)) {
+            devicefs::WriteToStream(std::cout,
+                L"No complete layout count is available for volume {}; "
+                L"ordinary traversal will continue without a percentage "
+                L"or ETA.\n",
+                volume_identifier);
+        }
+    } catch (const std::exception &error) {
+        devicefs::WriteToStream(std::cout,
+            L"The optional layout count failed for volume {}. This does not "
+            L"affect the verification result.\n",
+            volume_identifier);
+        devicefs::WriteToStream(std::cout, "  Failure: {}\n", error.what());
+    }
 }
 
 class FilesystemTraverser {
@@ -2166,6 +2341,29 @@ auto CompareAttachedFilesystems(
                 real_attachment.Root(), VerificationEndpoint::Real,
                 cancellation_event, io_cancellation, state);
         });
+
+    // Launch the authoritative traversals before this optional telemetry task.
+    // Failure to start or run it leaves progress without an ETA and cannot
+    // change the verification result.
+    auto estimate_operation = [&]()
+        -> std::optional<std::future<void>> {
+        try {
+            return std::async(std::launch::async, [&] {
+                PublishTraversalLayoutEstimate(
+                    real_attachment.Root(), synthetic_attachment.Root(),
+                    std::wstring_view{volume_identifier},
+                    cancellation_event, io_cancellation, state);
+            });
+        } catch (const std::exception &error) {
+            devicefs::WriteToStream(std::cout,
+                L"Could not start the optional layout count for volume {}. "
+                L"Verification will continue without a percentage or ETA.\n",
+                std::wstring_view{volume_identifier});
+            devicefs::WriteToStream(
+                std::cout, "  Failure: {}\n", error.what());
+            return std::nullopt;
+        }
+    }();
     auto synthetic = synthetic_operation.get();
     auto real = real_operation.get();
     if (synthetic && real && !state.Failed() &&
@@ -2229,6 +2427,9 @@ auto CompareAttachedFilesystems(
                 }
             }
         }
+    }
+    if (estimate_operation) {
+        estimate_operation->wait();
     }
 }
 
@@ -2530,6 +2731,7 @@ auto PrintTraversalProgress(
     std::ostream &output,
     const std::string_view name,
     const InventoryObservation &inventory,
+    const std::optional<std::uint64_t> layout_entry_estimate,
     const double elapsed_seconds) noexcept -> void {
     const auto not_completed =
         inventory.tasks_discovered > inventory.tasks_completed
@@ -2559,6 +2761,38 @@ auto PrintTraversalProgress(
             static_cast<double>(inventory.stream_bytes) /
                 (1024.0 * 1024.0 * elapsed_seconds));
     }
+    if ((elapsed_seconds <= 0.0) ||
+        (inventory.tasks_completed == 0) ||
+        (not_completed == 0) ||
+        !layout_entry_estimate) {
+        return;
+    }
+
+    // Layout entries count file identities, while ordinary traversal work
+    // counts namespace names and can discover more work after this estimate
+    // was produced. The two task counters are also observed independently.
+    // Include both in the working denominator so this approximate ETA cannot
+    // overrule known work or underflow when a progress snapshot spans two
+    // counter updates.
+    const auto observed_tasks =
+        inventory.tasks_discovered > inventory.tasks_completed
+        ? inventory.tasks_discovered : inventory.tasks_completed;
+    const auto estimated_tasks =
+        *layout_entry_estimate > observed_tasks
+        ? *layout_entry_estimate : observed_tasks;
+    const auto remaining_tasks =
+        estimated_tasks - inventory.tasks_completed;
+    const auto tasks_per_second =
+        static_cast<double>(inventory.tasks_completed) /
+        elapsed_seconds;
+    devicefs::WriteToStream(output,
+        "      Approximate layout-based progress: {:.2f}% against a "
+        "working estimate of {} work item(s); ETA {:.1f} minute(s) at "
+        "the current average rate\n",
+        Percentage(inventory.tasks_completed, estimated_tasks),
+        estimated_tasks,
+        static_cast<double>(remaining_tasks) /
+            (tasks_per_second * 60.0));
 }
 
 auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
@@ -2583,10 +2817,12 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                     *observation.traversal_started).count();
             PrintTraversalProgress(std::cout, "Synthetic",
                 observation.synthetic,
+                observation.layout_entry_estimate,
                 observation.traversal_complete
                     ? 0.0 : traversal_seconds);
             PrintTraversalProgress(std::cout, "Real B",
                 observation.real,
+                observation.layout_entry_estimate,
                 observation.traversal_complete
                     ? 0.0 : traversal_seconds);
             if (observation.traversal_complete) {
@@ -2938,7 +3174,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                     : 0.0;
                 PrintTraversalProgress(std::cout,
                     "Requested device", observation.synthetic,
-                    elapsed);
+                    std::nullopt, elapsed);
                 next_progress = now + kProgressReportInterval;
             }
             std::this_thread::sleep_for(kReporterPollInterval);
@@ -2955,7 +3191,8 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                 *observation.traversal_started).count()
             : 0.0;
         PrintTraversalProgress(std::cout,
-            "Requested device", observation.synthetic, elapsed);
+            "Requested device", observation.synthetic,
+            std::nullopt, elapsed);
         for (const auto &failure : observation.cleanup_failures) {
             devicefs::WriteToStream(
                 std::cout, "  Cleanup failure: {}\n", failure);

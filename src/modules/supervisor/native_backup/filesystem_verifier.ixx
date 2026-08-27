@@ -98,6 +98,14 @@ enum class FilesystemOperation {
     ReadStream,
 };
 
+[[nodiscard]] constexpr auto IsVssExcludedPath(
+    const std::wstring_view path) noexcept {
+    constexpr auto directory =
+        std::wstring_view{L"System Volume Information"};
+    return (path == directory) ||
+        (path.starts_with(L"System Volume Information\\"));
+}
+
 using FileIdentity = std::uint64_t;
 
 struct StreamRecord {
@@ -151,7 +159,14 @@ struct OperationComparison {
 [[nodiscard]] auto IsOperationMismatch(
     const OperationComparison &comparison) noexcept {
     return (comparison.key.operation != FilesystemOperation::QueryLayout) &&
+        !IsVssExcludedPath(comparison.key.path) &&
         !IsMatchedError(comparison);
+}
+
+[[nodiscard]] auto IsVssExcludedDifference(
+    const OperationComparison &comparison) noexcept {
+    return !IsMatchedError(comparison) &&
+        IsVssExcludedPath(comparison.key.path);
 }
 
 struct FilesystemInventory {
@@ -225,6 +240,7 @@ struct VerificationObservation {
     std::optional<std::chrono::steady_clock::time_point>
         comparison_started;
     std::size_t mismatch_count = 0;
+    std::size_t exclusion_count = 0;
     std::size_t matched_error_count = 0;
     bool plan_ready = false;
     bool comparison_complete = false;
@@ -530,9 +546,18 @@ class VerificationState {
         };
         const auto lock = std::scoped_lock{mutex_};
         result.comparison_started = comparison_started_;
-        result.mismatch_count = mismatches_.size() +
+        result.mismatch_count = std::ranges::count_if(
+            mismatches_, [](const MismatchDetail &mismatch) {
+                return !IsVssExcludedPath(mismatch.path);
+            }) +
             std::ranges::count_if(operation_comparison_records_,
                 IsOperationMismatch);
+        result.exclusion_count = std::ranges::count_if(
+            mismatches_, [](const MismatchDetail &mismatch) {
+                return IsVssExcludedPath(mismatch.path);
+            }) +
+            std::ranges::count_if(operation_comparison_records_,
+                IsVssExcludedDifference);
         result.matched_error_count = std::ranges::count_if(
             operation_comparison_records_, IsMatchedError);
         result.failed = failed_.load(std::memory_order_acquire);
@@ -1662,7 +1687,7 @@ class ComparisonWorker {
             return false;
         }
         if (!current_stream_readable_) {
-            return current_stream_open_failure_matched_;
+            return current_stream_open_failure_accepted_;
         }
 
         const auto &synthetic_object =
@@ -1683,7 +1708,8 @@ class ComparisonWorker {
             RecordOperation(task, synthetic_object, synthetic_stream,
                 FilesystemOperation::SeekStream, 0,
                 synthetic_seek, real_seek);
-            return FailuresMatch(synthetic_seek, real_seek);
+            return FailuresMatch(synthetic_seek, real_seek) ||
+                IsVssExcludedPath(synthetic_object.relative_path);
         }
         const auto synthetic_chunk =
             std::span{synthetic_buffer_}.first(task.length);
@@ -1711,7 +1737,8 @@ class ComparisonWorker {
                 synthetic_read, real_read);
             if (!synthetic_read || !real_read ||
                 (*synthetic_read != *real_read)) {
-                return false;
+                return IsVssExcludedPath(
+                    synthetic_object.relative_path);
             }
             if (synthetic_read->error != ERROR_SUCCESS) {
                 return true;
@@ -1745,7 +1772,7 @@ class ComparisonWorker {
     [[nodiscard]] auto OpenStream(const ReadTask &task) -> bool {
         synthetic_handle_.reset();
         real_handle_.reset();
-        current_stream_open_failure_matched_ = false;
+        current_stream_open_failure_accepted_ = false;
         const auto &synthetic_object =
             synthetic_.objects[task.synthetic_object];
         const auto &real_object = real_.objects[task.real_object];
@@ -1768,13 +1795,15 @@ class ComparisonWorker {
             return false;
         }
         if (!synthetic_handle || !real_handle) {
-            current_stream_open_failure_matched_ = FailuresMatch(
-                synthetic_handle
-                    ? std::nullopt
-                    : std::optional{synthetic_handle.error()},
-                real_handle
-                    ? std::nullopt
-                    : std::optional{real_handle.error()});
+            current_stream_open_failure_accepted_ =
+                FailuresMatch(
+                    synthetic_handle
+                        ? std::nullopt
+                        : std::optional{synthetic_handle.error()},
+                    real_handle
+                        ? std::nullopt
+                        : std::optional{real_handle.error()}) ||
+                IsVssExcludedPath(synthetic_object.relative_path);
             RecordOperation(task, synthetic_object, synthetic_stream,
                 FilesystemOperation::OpenStream, 0,
                 synthetic_handle
@@ -1815,7 +1844,7 @@ class ComparisonWorker {
     std::vector<unsigned char> real_buffer_;
     std::optional<std::array<std::size_t, 4>> current_stream_;
     bool current_stream_readable_ = false;
-    bool current_stream_open_failure_matched_ = false;
+    bool current_stream_open_failure_accepted_ = false;
     wil::unique_hfile synthetic_handle_;
     wil::unique_hfile real_handle_;
 };
@@ -2104,6 +2133,10 @@ auto PrintOperationComparison(
         FilesystemOperation::QueryLayout) {
         devicefs::WriteToStream(
             output, "\nFilesystem inventory outcome difference:\n");
+    } else if (IsVssExcludedDifference(comparison)) {
+        devicefs::WriteToStream(output,
+            "\nIdentified difference in object known to be excluded "
+            "from VSS snapshots:\n");
     } else {
         devicefs::WriteToStream(output,
             "\n*** FILESYSTEM VERIFICATION MISMATCH ***\n");
@@ -2148,8 +2181,14 @@ auto PrintMismatch(
     const GUID &volume_identifier,
     const MismatchDetail &mismatch) -> void {
     const auto identifier = winrt::to_hstring(volume_identifier);
-    devicefs::WriteToStream(output,
-        "\n*** FILESYSTEM VERIFICATION MISMATCH ***\n");
+    if (IsVssExcludedPath(mismatch.path)) {
+        devicefs::WriteToStream(output,
+            "\nIdentified difference in object known to be excluded "
+            "from VSS snapshots:\n");
+    } else {
+        devicefs::WriteToStream(output,
+            "\n*** FILESYSTEM VERIFICATION MISMATCH ***\n");
+    }
     devicefs::WriteToStream(output,
         L"  Volume ID: {}\n"
         L"  Object: {}\n",
@@ -2285,8 +2324,10 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
         }
         devicefs::WriteToStream(std::cout,
             "    Mismatches observed: {}\n"
+            "    VSS exclusions observed: {}\n"
             "    Matched filesystem errors: {}\n",
             observation.mismatch_count,
+            observation.exclusion_count,
             observation.matched_error_count);
         if (observation.failed) {
             devicefs::WriteToStream(std::cout,
@@ -2318,22 +2359,24 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     auto incomplete = 0uz;
     auto cleanup_failed = 0uz;
     auto matched_error_volumes = 0uz;
+    auto exclusion_volumes = 0uz;
     for (const auto &job : jobs) {
         const auto observation = job.state->Observe();
         const auto &mismatches = job.state->MismatchesAfterJoin();
         const auto &operation_comparisons =
             job.state->OperationComparisonsAfterJoin();
-        const auto operation_mismatches = std::ranges::count_if(
-            operation_comparisons, IsOperationMismatch);
         if (observation.matched_error_count != 0) {
             ++matched_error_volumes;
+        }
+        if (observation.exclusion_count != 0) {
+            ++exclusion_volumes;
         }
         const auto identifier =
             winrt::to_hstring(job.volume_identifier);
         devicefs::WriteToStream(std::cout,
             L"\n  Volume ID: {}\n",
             std::wstring_view{identifier});
-        if (!mismatches.empty() || (operation_mismatches != 0)) {
+        if (observation.mismatch_count != 0) {
             ++mismatched;
             if (observation.failed) {
                 devicefs::WriteToStream(std::cout,
@@ -2377,6 +2420,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             "    Content selected: {} bytes ({:.2f}%)\n"
             "    Content compared: {} bytes ({:.2f}% of selection)\n"
             "    Mismatches: {}\n"
+            "    VSS exclusions: {}\n"
             "    Matched filesystem errors: {}\n",
             observation.synthetic_layout_entries,
             observation.real_layout_entries,
@@ -2392,6 +2436,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             Percentage(observation.compared_bytes,
                 observation.selected_bytes),
             observation.mismatch_count,
+            observation.exclusion_count,
             observation.matched_error_count);
         if (!observation.cleanup_failures.empty()) {
             ++cleanup_failed;
@@ -2419,12 +2464,14 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     devicefs::WriteToStream(std::cout,
         "\nSummary: {} verified, {} sample verified, {} mismatched, "
         "{} indeterminate, {} cancelled/incomplete, "
+        "{} volume(s) with VSS exclusions, "
         "{} volume(s) with matched filesystem errors, "
         "{} volume(s) optimization unavailable, "
         "{} view-preparation failure(s), and "
         "{} cleanup-failure volume(s).\n",
         verified, sample_verified, mismatched,
-        indeterminate, incomplete, matched_error_volumes,
+        indeterminate, incomplete, exclusion_volumes,
+        matched_error_volumes,
         optimization_unavailable,
         preparation_failures, cleanup_failed);
     if ((indeterminate != 0) || (mismatched != 0) ||

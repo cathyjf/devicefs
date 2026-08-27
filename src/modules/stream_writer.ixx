@@ -33,33 +33,19 @@ auto DisableStdioSynchronization() {
 } // namespace
 
 template <typename Operation>
-[[gsl::suppress("26447",
-    justification: "Output streams with exceptions enabled will fail fast.")]]
 auto Write(
     std::ostream &output,
-    const Operation &operation) noexcept -> std::ostream & {
-    if (output.exceptions() != std::ios_base::goodbit) [[unlikely]] {
-        __fastfail(FAST_FAIL_INVALID_ARG);
-    }
-    auto failed = false;
+    const Operation &operation) noexcept -> bool {
     try {
         DisableStdioSynchronization();
-        const auto ready = std::ostream::sentry{output};
-        if (!ready) {
-            return output;
-        }
         auto synchronized_output = std::osyncstream{output};
-        failed = operation(
+        const auto failed = operation(
             std::ostreambuf_iterator<char>{synchronized_output}).failed();
         std::flush_emit(synchronized_output);
-        failed = failed || !synchronized_output;
+        return !failed && synchronized_output;
     } catch (...) {
-        failed = true;
+        return false;
     }
-    if (failed) {
-        output.setstate(std::ios_base::badbit);
-    }
-    return output;
 }
 
 auto WriteUtf8(
@@ -114,7 +100,7 @@ using WFormatString = BasicFormatString<
 
 auto WriteToStream(
     std::ostream &output,
-    const std::u8string_view text) noexcept -> std::ostream & {
+    const std::u8string_view text) noexcept -> bool {
     return stream_writer_detail::Write(
         output,
         [text](const auto destination) {
@@ -126,7 +112,7 @@ template <typename... Arguments>
 auto WriteToStream(
     std::ostream &output,
     const stream_writer_detail::FormatString<Arguments...> format,
-    Arguments &&...arguments) noexcept -> std::ostream & {
+    Arguments &&...arguments) noexcept -> bool {
     return stream_writer_detail::Write(
         output,
         [&](const auto destination) {
@@ -141,7 +127,7 @@ template <typename... Arguments>
 auto WriteToStream(
     std::ostream &output,
     const stream_writer_detail::WFormatString<Arguments...> format,
-    Arguments &&...arguments) noexcept -> std::ostream & {
+    Arguments &&...arguments) noexcept -> bool {
     return stream_writer_detail::Write(
         output,
         [&](const auto destination) {

@@ -214,14 +214,10 @@ auto PrintUnavailableSnapshots(const std::size_t count) {
     if (count == 0) {
         return;
     }
-    const auto &output = devicefs::WriteToStream(
+    devicefs::WriteToStream(
         std::cout,
         "{} selected volume(s) had no retained snapshot and were skipped.\n",
         count);
-    if (!output) {
-        throw std::runtime_error(
-            "could not write incremental snapshot availability");
-    }
 }
 
 [[nodiscard]] constexpr auto VolumeBlockCount(
@@ -231,7 +227,7 @@ auto PrintUnavailableSnapshots(const std::size_t count) {
 }
 
 auto PrintStatistics(const std::span<const VolumeReport> reports) {
-    auto &output = devicefs::WriteToStream(
+    devicefs::WriteToStream(
         std::cout, "Incremental dirty-block statistics:\n");
     auto mapped = std::size_t{};
     auto candidate_total = std::size_t{};
@@ -239,10 +235,10 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
     for (const auto &report : reports) {
         const auto volume_identifier =
             winrt::to_hstring(report.volume_identifier);
-        devicefs::WriteToStream(output, L"\n  Volume ID: {}\n",
+        devicefs::WriteToStream(std::cout, L"\n  Volume ID: {}\n",
             std::wstring_view{volume_identifier});
         if (!report.map) {
-            devicefs::WriteToStream(output,
+            devicefs::WriteToStream(std::cout,
                 "    Dirty map unavailable: {}\n", report.map.error());
             continue;
         }
@@ -256,7 +252,7 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
             static_cast<double>(volume_blocks);
         candidate_total += candidate_blocks;
         volume_block_total += volume_blocks;
-        devicefs::WriteToStream(output,
+        devicefs::WriteToStream(std::cout,
             "    Volume size: {} bytes\n"
             "    Potentially dirty: {} of {} 16-KiB blocks ({:.2f}%)\n"
             "    Descriptor evidence: {} unique block(s) from {} "
@@ -276,14 +272,10 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
         ? 0.0
         : (static_cast<double>(candidate_total) * 100.0) /
             static_cast<double>(volume_block_total);
-    devicefs::WriteToStream(output,
+    devicefs::WriteToStream(std::cout,
         "\nSummary: {} volume(s) mapped, {} unavailable; {} of {} "
         "16-KiB blocks potentially dirty ({:.2f}%).\n",
         mapped, unavailable, candidate_total, volume_block_total, percentage);
-    if (!output) {
-        throw std::runtime_error(
-            "could not write the incremental dirty-block statistics");
-    }
 }
 
 [[nodiscard]] auto BuildVolumeReport(
@@ -444,11 +436,13 @@ enum class BackupViewPreparation {
     const std::optional<std::wstring> &mount_root_override,
     const std::optional<double> verification_percentage,
     const std::size_t unavailable_snapshots) -> int {
-    auto &output = verification_percentage
-        ? devicefs::WriteToStream(std::cout,
-            "Synthetic and real backup VHDX verification:\n")
-        : devicefs::WriteToStream(std::cout,
+    if (verification_percentage) {
+        devicefs::WriteToStream(std::cout,
+            "Synthetic and real backup VHDX verification:\n");
+    } else {
+        devicefs::WriteToStream(std::cout,
             "Synthetic and real backup VHDX exposure:\n");
+    }
     auto devices = SyntheticBackupServer::Devices{};
     auto synthetic_sources =
         std::vector<internal::DeviceFsSource>{};
@@ -460,7 +454,7 @@ enum class BackupViewPreparation {
     for (const auto &report : reports) {
         switch (AddBackupViews(report, devices,
             synthetic_sources, real_sources, verification_volumes,
-            output)) {
+            std::cout)) {
         case BackupViewPreparation::Ready:
             break;
         case BackupViewPreparation::OptimizationUnavailable:
@@ -546,7 +540,7 @@ enum class BackupViewPreparation {
 
     if (verification_percentage) {
         devicefs::WriteToStream(
-            output,
+            std::cout,
             L"\nMounted {} synthetic backup VHDX file(s) at {}.\n"
             L"Mounted the corresponding real-B VHDX files at {}.\n",
             synthetic_sources.size(), synthetic_mount.native(),
@@ -565,7 +559,7 @@ enum class BackupViewPreparation {
     }
 
     devicefs::WriteToStream(
-        output,
+        std::cout,
         L"\nMounted {} synthetic backup VHDX file(s) at {}.\n"
         L"Mounted the corresponding real VHDX files at {}.\n"
         L"Press Ctrl+C to stop.\n",
@@ -1218,10 +1212,10 @@ auto PrintStreamOwnership(
         ownership.payload.flags);
 }
 
-[[nodiscard]] auto PrintOwnershipUpdate(
+auto PrintOwnershipUpdate(
     std::ostream &output,
     const GUID &volume_identifier,
-    ClusterOwnershipCache &ownership) {
+    ClusterOwnershipCache &ownership) -> void {
     auto wrote_heading = false;
     for (auto &[name, stream] : ownership.streams) {
         if (stream.printed_during_progress) {
@@ -1240,7 +1234,6 @@ auto PrintStreamOwnership(
         PrintStreamOwnership(output, name, stream);
         stream.printed_during_progress = true;
     }
-    return wrote_heading;
 }
 
 auto PrintClusterOwnership(
@@ -1280,14 +1273,6 @@ auto PrintClusterOwnership(
     }
 }
 
-auto CheckVerificationProgressOutput(
-    const std::ostream &output) -> void {
-    if (!output) {
-        throw std::runtime_error(
-            "could not write incremental verification progress");
-    }
-}
-
 auto PrintVerificationProgress(
     const std::span<VerificationJob> jobs) {
     const auto observations = jobs |
@@ -1295,7 +1280,7 @@ auto PrintVerificationProgress(
             return job.state->Snapshot();
         }) |
         std::ranges::to<std::vector<ComparisonObservation>>();
-    auto &output = devicefs::WriteToStream(
+    devicefs::WriteToStream(
         std::cout, "\nIncremental verification progress:\n");
     auto compared_total = std::uint64_t{};
     auto volume_total = std::uint64_t{};
@@ -1311,10 +1296,10 @@ auto PrintVerificationProgress(
         volume_total += volume_size;
         differing_total += observation.differing_bytes;
         uncovered_total += observation.uncovered_blocks;
-        devicefs::WriteToStream(output,
+        devicefs::WriteToStream(std::cout,
             L"  Volume ID: {}\n",
             std::wstring_view{identifier});
-        devicefs::WriteToStream(output,
+        devicefs::WriteToStream(std::cout,
             "    Compared: {} of {} bytes ({:.2f}%)\n"
             "    Differences observed: {} byte(s) in {} 16-KiB block(s)\n",
             observation.compared_bytes, volume_size,
@@ -1324,41 +1309,37 @@ auto PrintVerificationProgress(
             observation.differing_blocks);
         if (!job.volume.get().map) {
             ++coverage_unavailable;
-            devicefs::WriteToStream(output,
+            devicefs::WriteToStream(std::cout,
                 "    Dirty-map coverage unavailable: {}\n",
                 job.volume.get().map.error());
         } else {
-            devicefs::WriteToStream(output,
+            devicefs::WriteToStream(std::cout,
                 "    Dirty-map coverage: {} differing block(s) "
                 "were absent\n",
                 observation.uncovered_blocks);
         }
         if (!observation.failure.empty()) {
-            devicefs::WriteToStream(output,
+            devicefs::WriteToStream(std::cout,
                 "    Verification unavailable: {}\n",
                 observation.failure);
         }
     }
-    devicefs::WriteToStream(output,
+    devicefs::WriteToStream(std::cout,
         "  Total: {} of {} bytes ({:.2f}%); {} differing byte(s), "
         "{} uncovered block(s); dirty-map coverage unavailable for "
         "{} volume(s)\n",
         compared_total, volume_total,
         VerificationPercentage(compared_total, volume_total),
         differing_total, uncovered_total, coverage_unavailable);
-    CheckVerificationProgressOutput(output);
-
     for (auto &&[job, observation] :
         std::views::zip(jobs, observations)) {
         if (observation.uncovered_clusters.empty()) {
             continue;
         }
         UpdateClusterOwnership(job, observation.uncovered_clusters);
-        if (PrintOwnershipUpdate(
-                output, job.volume.get().volume_identifier,
-                job.ownership)) {
-            CheckVerificationProgressOutput(output);
-        }
+        PrintOwnershipUpdate(
+            std::cout, job.volume.get().volume_identifier,
+            job.ownership);
     }
 }
 
@@ -1481,7 +1462,7 @@ auto PrintVerificationResult(
     const std::size_t unprocessed_volumes,
     const std::size_t unavailable_snapshots,
     const bool cancelled) {
-    auto &output = devicefs::WriteToStream(
+    devicefs::WriteToStream(
         std::cout, "\nIncremental verification results:\n");
     auto summary = VerificationSummary{};
     for (const auto &job : jobs) {
@@ -1493,9 +1474,10 @@ auto PrintVerificationResult(
             summary, observation, volume_size, complete,
             job.volume.get().map.has_value());
         PrintVerificationResult(
-            output, job, observation, volume_size, complete, cancelled);
+            std::cout, job, observation,
+            volume_size, complete, cancelled);
     }
-    devicefs::WriteToStream(output,
+    devicefs::WriteToStream(std::cout,
         "\nSummary: {} volume(s) verified, {} with uncovered differences, "
         "{} with dirty-map coverage unavailable, {} incomplete, "
         "{} not reached, {} selected without an available retained "
@@ -1510,10 +1492,6 @@ auto PrintVerificationResult(
             summary.compared_bytes, summary.volume_bytes),
         summary.differing_bytes, summary.differing_blocks,
         summary.uncovered_bytes, summary.uncovered_blocks);
-    if (!output) {
-        throw std::runtime_error(
-            "could not write the incremental verification results");
-    }
     if (cancelled) {
         return internal::kCancelledExitCode;
     }

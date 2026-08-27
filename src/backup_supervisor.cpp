@@ -665,18 +665,15 @@ struct ForegroundOptions {
             if (result->exit_code != 0) {
                 return result->exit_code;
             }
-            if (!devicefs::WriteToStream(
-                    std::cout, result->manifest)) {
-                throw std::runtime_error(
-                    "could not write the previous backup manifest");
-            }
+            devicefs::WriteToStream(std::cout, result->manifest);
 
             const auto snapshot_volumes =
                 result->ParseManifest().QuerySnapshotVolumes();
-            auto &output = devicefs::WriteToStream(
-                std::cout, "\n\nValidated snapshots still available:\n");
+            devicefs::WriteToStream(
+                std::cout,
+                "\n\nValidated snapshots still available:\n");
             if (snapshot_volumes.empty()) {
-                devicefs::WriteToStream(output, "  (none)\n");
+                devicefs::WriteToStream(std::cout, "  (none)\n");
             }
             for (const auto &[volume_identifier, snapshot] :
                 snapshot_volumes) {
@@ -685,17 +682,13 @@ struct ForegroundOptions {
                 const auto snapshot_identifier_text =
                     winrt::to_hstring(snapshot.snapshot_identifier);
                 devicefs::WriteToStream(
-                    output,
+                    std::cout,
                     L"  Volume ID: {}\n"
                     L"    Snapshot ID: {}\n"
                     L"    Device: {}\n",
                     std::wstring_view{volume_identifier_text},
                     std::wstring_view{snapshot_identifier_text},
                     snapshot.device);
-            }
-            if (!output) {
-                throw std::runtime_error(
-                    "could not write the available VSS snapshots");
             }
             return 0;
         });

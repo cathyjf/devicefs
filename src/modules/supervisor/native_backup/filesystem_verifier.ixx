@@ -68,6 +68,7 @@ enum class VerificationPhase {
     AttachingReal,
     InventoryingSynthetic,
     InventoryingReal,
+    ConfirmingInventory,
     Planning,
     Comparing,
     Detaching,
@@ -93,6 +94,11 @@ enum class MismatchKind {
 
 enum class FilesystemOperation {
     QueryLayout,
+    OpenParentDirectory,
+    QueryDirectory,
+    OpenObject,
+    QueryObject,
+    QueryStreams,
     OpenStream,
     SeekStream,
     ReadStream,
@@ -111,6 +117,8 @@ using FileIdentity = std::uint64_t;
 struct StreamRecord {
     std::wstring name;
     std::int64_t length;
+
+    bool operator==(const StreamRecord &) const = default;
 };
 
 struct ObjectRecord {
@@ -125,6 +133,52 @@ struct OperationFailure {
     DWORD transferred = 0;
 
     auto operator<=>(const OperationFailure &) const = default;
+};
+
+struct ObjectInspectionFailure {
+    FilesystemOperation operation;
+    OperationFailure failure;
+    std::optional<ObjectRecord> partial;
+    bool exact_name_present = false;
+};
+
+// A successful empty observation means that exact ordinary name is absent.
+using ObjectInspection = std::expected<
+    std::optional<ObjectRecord>, ObjectInspectionFailure>;
+
+struct DirectoryNameRecord {
+    std::wstring name;
+    FileIdentity identity;
+};
+
+using DirectoryInspection = std::expected<
+    std::vector<DirectoryNameRecord>, ObjectInspectionFailure>;
+
+struct DirectoryInspectionCacheEntry {
+    std::wstring relative_path;
+    DirectoryInspection inspection;
+};
+
+using DirectoryInspectionCache =
+    std::vector<DirectoryInspectionCacheEntry>;
+
+struct InventoryReconciliation {
+    std::wstring path;
+    std::optional<ObjectRecord> synthetic;
+    std::optional<ObjectRecord> real;
+};
+
+struct InventoryConfirmation {
+    std::size_t matching = 0;
+    std::size_t differing = 0;
+    std::size_t operation_outcomes = 0;
+    std::size_t suppressed_descendants = 0;
+    bool comparison_surface_incomplete = false;
+};
+
+struct InventoryBarrier {
+    std::wstring prefix;
+    bool comparison_surface_incomplete;
 };
 
 struct OperationIssueKey {
@@ -161,6 +215,14 @@ struct OperationComparison {
     return (comparison.key.operation != FilesystemOperation::QueryLayout) &&
         !IsVssExcludedPath(comparison.key.path) &&
         !IsMatchedError(comparison);
+}
+
+[[nodiscard]] auto IsContentOperationMismatch(
+    const OperationComparison &comparison) noexcept {
+    return IsOperationMismatch(comparison) &&
+        ((comparison.key.operation == FilesystemOperation::OpenStream) ||
+            (comparison.key.operation == FilesystemOperation::SeekStream) ||
+            (comparison.key.operation == FilesystemOperation::ReadStream));
 }
 
 [[nodiscard]] auto IsVssExcludedDifference(
@@ -234,6 +296,8 @@ struct VerificationObservation {
     std::uint64_t synthetic_streams = 0;
     std::uint64_t real_objects = 0;
     std::uint64_t real_streams = 0;
+    std::uint64_t confirmation_candidates = 0;
+    std::uint64_t confirmed_candidates = 0;
     std::uint64_t available_bytes = 0;
     std::uint64_t selected_bytes = 0;
     std::uint64_t compared_bytes = 0;
@@ -383,6 +447,29 @@ class VerificationState {
             ? synthetic_streams_ : real_streams_;
         objects.fetch_add(1, std::memory_order_relaxed);
         streams.fetch_add(stream_count, std::memory_order_relaxed);
+    }
+
+    auto SetInventory(
+        const VerificationEndpoint endpoint,
+        const std::size_t object_count,
+        const std::size_t stream_count) noexcept -> void {
+        auto &objects = endpoint == VerificationEndpoint::Synthetic
+            ? synthetic_objects_ : real_objects_;
+        auto &streams = endpoint == VerificationEndpoint::Synthetic
+            ? synthetic_streams_ : real_streams_;
+        objects.store(object_count, std::memory_order_relaxed);
+        streams.store(stream_count, std::memory_order_relaxed);
+    }
+
+    auto SetConfirmationCandidates(
+        const std::size_t count) noexcept -> void {
+        confirmation_candidates_.store(
+            count, std::memory_order_relaxed);
+        confirmed_candidates_.store(0, std::memory_order_relaxed);
+    }
+
+    auto RecordConfirmedCandidate() noexcept -> void {
+        confirmed_candidates_.fetch_add(1, std::memory_order_relaxed);
     }
 
     auto SetPlan(const ComparisonPlan &plan) noexcept -> void {
@@ -535,6 +622,12 @@ class VerificationState {
                 real_objects_.load(std::memory_order_relaxed),
             .real_streams =
                 real_streams_.load(std::memory_order_relaxed),
+            .confirmation_candidates =
+                confirmation_candidates_.load(
+                    std::memory_order_relaxed),
+            .confirmed_candidates =
+                confirmed_candidates_.load(
+                    std::memory_order_relaxed),
             .available_bytes =
                 available_bytes_.load(std::memory_order_relaxed),
             .selected_bytes =
@@ -575,6 +668,8 @@ class VerificationState {
     std::atomic<std::uint64_t> synthetic_streams_{};
     std::atomic<std::uint64_t> real_objects_{};
     std::atomic<std::uint64_t> real_streams_{};
+    std::atomic<std::uint64_t> confirmation_candidates_{};
+    std::atomic<std::uint64_t> confirmed_candidates_{};
     std::atomic<std::uint64_t> available_bytes_{};
     std::atomic<std::uint64_t> selected_bytes_{};
     std::atomic<std::uint64_t> compared_bytes_{};
@@ -962,13 +1057,36 @@ auto DetachView(
     }
 }
 
+[[nodiscard]] auto ObjectPath(
+    const FilesystemInventory &inventory,
+    const std::wstring_view relative_path) {
+    return relative_path.empty()
+        ? inventory.root
+        : inventory.root / relative_path;
+}
+
+[[nodiscard]] auto StreamPath(
+    const FilesystemInventory &inventory,
+    const ObjectRecord &object,
+    const StreamRecord &stream) {
+    auto path = ObjectPath(inventory, object.relative_path);
+    if (!stream.name.empty()) {
+        path = std::filesystem::path{
+            std::format(L"{}{}", path.native(), stream.name)};
+    }
+    return path;
+}
+
 [[nodiscard]] auto TryOpenFilesystemObject(
     const std::filesystem::path &path) noexcept
     -> std::expected<wil::unique_hfile, OperationFailure> {
+    // Preserve the exact spelling supplied by the namespace inventory when a
+    // case-sensitive directory contains names that differ only by case.
     auto result = wil::unique_hfile{CreateFileW(
         path.c_str(), GENERIC_READ, kShareMode, nullptr, OPEN_EXISTING,
         SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION |
-            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_POSIX_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT |
+            FILE_FLAG_BACKUP_SEMANTICS,
         nullptr)};
     if (!result) {
         return std::unexpected{OperationFailure{GetLastError()}};
@@ -991,6 +1109,192 @@ auto DetachView(
         return ObjectKind::FileReparsePoint;
     }
     return ObjectKind::File;
+}
+
+[[nodiscard]] auto InspectDirectoryNames(
+    const FilesystemInventory &inventory,
+    const std::wstring_view relative_path,
+    const HANDLE cancellation_event)
+    -> DirectoryInspection {
+    auto parent = TryOpenFilesystemObject(
+        ObjectPath(inventory, relative_path));
+    if (!parent) {
+        return std::unexpected{ObjectInspectionFailure{
+            .operation = FilesystemOperation::OpenParentDirectory,
+            .failure = parent.error(),
+        }};
+    }
+    auto result = std::vector<DirectoryNameRecord>{};
+    while (true) {
+        if (internal::CancellationRequested(cancellation_event)) {
+            return std::unexpected{ObjectInspectionFailure{
+                .operation = FilesystemOperation::QueryDirectory,
+                .failure = OperationFailure{ERROR_OPERATION_ABORTED},
+            }};
+        }
+        auto entries = wistd::unique_ptr<FILE_ID_BOTH_DIR_INFO>{};
+        const auto query =
+            wil::GetFileInfoNoThrow<FileIdBothDirectoryInfo>(
+                parent->get(), entries);
+        if (FAILED(query)) {
+            return std::unexpected{ObjectInspectionFailure{
+                .operation = FilesystemOperation::QueryDirectory,
+                .failure = OperationFailure{
+                    ExplicitWin32Error::FromHresult(query).value},
+            }};
+        }
+        if (!entries) {
+            return result;
+        }
+        for (const auto &entry :
+            wil::create_next_entry_offset_iterator(entries.get())) {
+            static_assert(
+                sizeof(FileIdentity) ==
+                sizeof(entry.FileId.QuadPart));
+            result.push_back({
+                .name = std::wstring{
+                    entry.FileName,
+                    entry.FileNameLength /
+                        sizeof(std::wstring::value_type),
+                },
+                .identity =
+                    std::bit_cast<FileIdentity>(
+                        entry.FileId.QuadPart),
+            });
+        }
+    }
+}
+
+[[nodiscard]] auto CachedDirectoryInspection(
+    const FilesystemInventory &inventory,
+    const std::wstring_view relative_path,
+    const HANDLE cancellation_event,
+    DirectoryInspectionCache &cache) -> const DirectoryInspection & {
+    const auto found = std::ranges::find(
+        cache, relative_path,
+        &DirectoryInspectionCacheEntry::relative_path);
+    if (found != cache.end()) {
+        return found->inspection;
+    }
+    cache.push_back({
+        .relative_path = std::wstring{relative_path},
+        .inspection = InspectDirectoryNames(
+            inventory, relative_path, cancellation_event),
+    });
+    return cache.back().inspection;
+}
+
+[[nodiscard]] auto TryConfirmExactObjectName(
+    const FilesystemInventory &inventory,
+    const std::wstring &relative_path,
+    const HANDLE cancellation_event,
+    DirectoryInspectionCache &cache)
+    -> std::expected<std::optional<FileIdentity>,
+        ObjectInspectionFailure> {
+    const auto relative = std::filesystem::path{relative_path};
+    const auto filename = relative.filename().native();
+    const auto &directory = CachedDirectoryInspection(
+        inventory, relative.parent_path().native(),
+        cancellation_event, cache);
+    if (!directory) {
+        return std::unexpected{directory.error()};
+    }
+    const auto entry = std::ranges::find(
+        *directory, filename, &DirectoryNameRecord::name);
+    if (entry == directory->end()) {
+        return std::optional<FileIdentity>{};
+    }
+    return std::optional<FileIdentity>{entry->identity};
+}
+
+[[nodiscard]] auto TryInspectFilesystemObject(
+    const FilesystemInventory &inventory,
+    const std::wstring &relative_path,
+    const HANDLE cancellation_event,
+    DirectoryInspectionCache &cache) -> ObjectInspection {
+    auto exact_identity = std::optional<FileIdentity>{};
+    if (!relative_path.empty()) {
+        const auto exact_name = TryConfirmExactObjectName(
+            inventory, relative_path, cancellation_event, cache);
+        if (!exact_name) {
+            return std::unexpected{exact_name.error()};
+        }
+        if (!*exact_name) {
+            return std::optional<ObjectRecord>{};
+        }
+        exact_identity = **exact_name;
+    }
+    const auto exact_name_present = !relative_path.empty();
+    auto object = TryOpenFilesystemObject(
+        ObjectPath(inventory, relative_path));
+    if (!object) {
+        return std::unexpected{ObjectInspectionFailure{
+            .operation = FilesystemOperation::OpenObject,
+            .failure = object.error(),
+            .exact_name_present = exact_name_present,
+        }};
+    }
+
+    auto information = BY_HANDLE_FILE_INFORMATION{};
+    if (!GetFileInformationByHandle(
+            object->get(), std::addressof(information))) {
+        return std::unexpected{ObjectInspectionFailure{
+            .operation = FilesystemOperation::QueryObject,
+            .failure = OperationFailure{GetLastError()},
+            .exact_name_present = exact_name_present,
+        }};
+    }
+
+    [[gsl::suppress("26493",
+        justification:
+            "Braced initialization proves this construction safe at compile time.")]]
+    const auto identity =
+        (std::uint64_t{information.nFileIndexHigh} << 32) |
+        information.nFileIndexLow;
+    if (exact_identity && (identity != *exact_identity)) {
+        return std::unexpected{ObjectInspectionFailure{
+            .operation = FilesystemOperation::OpenObject,
+            .failure = OperationFailure{ERROR_FILE_NOT_FOUND},
+            .exact_name_present = exact_name_present,
+        }};
+    }
+    auto result = ObjectRecord{
+        .relative_path = relative_path,
+        .kind = ClassifyObject(information.dwFileAttributes),
+        .identity = identity,
+    };
+    auto streams = wistd::unique_ptr<FILE_STREAM_INFO>{};
+    const auto stream_result =
+        wil::GetFileInfoNoThrow<FileStreamInfo>(
+            object->get(), streams);
+    if (FAILED(stream_result)) {
+        return std::unexpected{ObjectInspectionFailure{
+            .operation = FilesystemOperation::QueryStreams,
+            .failure = OperationFailure{
+                ExplicitWin32Error::FromHresult(
+                    stream_result).value},
+            .partial = std::move(result),
+            .exact_name_present = exact_name_present,
+        }};
+    }
+    for (const auto &stream :
+        wil::create_next_entry_offset_iterator(streams.get())) {
+        auto name = std::wstring{
+            stream.StreamName,
+            stream.StreamNameLength /
+                sizeof(std::wstring::value_type),
+        };
+        if (name == L"::$DATA") {
+            name.clear();
+        }
+        result.streams.push_back({
+            .name = std::move(name),
+            .length = stream.StreamSize.QuadPart,
+        });
+    }
+    std::ranges::sort(
+        result.streams, {}, &StreamRecord::name);
+    return std::optional<ObjectRecord>{std::move(result)};
 }
 
 // NTFS file references use the low 48 bits for the MFT segment number. NTFS
@@ -1369,6 +1673,373 @@ auto AppendLayoutBatch(
     return result;
 }
 
+[[nodiscard]] auto InventoryStreamCount(
+    const FilesystemInventory &inventory) noexcept {
+    return std::transform_reduce(
+        inventory.objects.begin(), inventory.objects.end(),
+        std::size_t{}, std::plus{},
+        [](const ObjectRecord &object) noexcept {
+            return object.streams.size();
+        });
+}
+
+// FSCTL_QUERY_FILE_LAYOUT makes whole-volume inventory practical, but it has
+// produced contradictory records in repeated observations of the same mounted
+// filesystem. Its disagreements are candidates until ordinary path operations
+// below confirm the object and its complete stream list on both views.
+[[nodiscard]] auto InventoryDiscrepancyPaths(
+    const FilesystemInventory &synthetic,
+    const FilesystemInventory &real) {
+    auto result = std::vector<std::wstring>{};
+    auto synthetic_object = 0uz;
+    auto real_object = 0uz;
+    const auto namespace_complete =
+        !synthetic.layout_failure && !real.layout_failure;
+    while ((synthetic_object < synthetic.objects.size()) ||
+        (real_object < real.objects.size())) {
+        const auto path = [&]() -> std::wstring_view {
+            if (synthetic_object == synthetic.objects.size()) {
+                return real.objects[real_object].relative_path;
+            }
+            if (real_object == real.objects.size()) {
+                return synthetic.objects[synthetic_object].relative_path;
+            }
+            return std::min(
+                std::wstring_view{synthetic.objects[
+                    synthetic_object].relative_path},
+                std::wstring_view{real.objects[
+                    real_object].relative_path});
+        }();
+
+        const auto synthetic_begin = synthetic_object;
+        while ((synthetic_object < synthetic.objects.size()) &&
+            (synthetic.objects[synthetic_object].relative_path == path)) {
+            ++synthetic_object;
+        }
+        const auto real_begin = real_object;
+        while ((real_object < real.objects.size()) &&
+            (real.objects[real_object].relative_path == path)) {
+            ++real_object;
+        }
+        const auto synthetic_count =
+            synthetic_object - synthetic_begin;
+        const auto real_count = real_object - real_begin;
+        const auto missing =
+            (synthetic_count == 0) || (real_count == 0);
+        const auto differs = missing
+            ? namespace_complete
+            : (synthetic_count != 1) || (real_count != 1) ||
+                (synthetic.objects[synthetic_begin].kind !=
+                    real.objects[real_begin].kind) ||
+                (synthetic.objects[synthetic_begin].streams !=
+                    real.objects[real_begin].streams);
+        if (differs) {
+            result.emplace_back(path);
+        }
+    }
+
+    return result;
+}
+
+auto RecordInspectionComparison(
+    const std::wstring &path,
+    const ObjectInspection &synthetic,
+    const ObjectInspection &real,
+    VerificationState &state) -> void {
+    if (synthetic && real) {
+        return;
+    }
+    const auto operation = [&] {
+        if (synthetic) {
+            return real.error().operation;
+        }
+        if (real) {
+            return synthetic.error().operation;
+        }
+        // Object-inspection operations are declared in execution order. If
+        // the views fail at different stages, compare the earlier failure
+        // against the other view's success at that same stage.
+        return std::min(
+            synthetic.error().operation,
+            real.error().operation);
+    }();
+    const auto outcome = [operation](
+        const ObjectInspection &inspection)
+        -> std::optional<OperationFailure> {
+        if (inspection ||
+            (inspection.error().operation != operation)) {
+            return std::nullopt;
+        }
+        return inspection.error().failure;
+    };
+    state.RecordOperationComparison({
+        .path = path,
+        .operation = operation,
+    }, 0, outcome(synthetic), outcome(real));
+}
+
+[[gsl::suppress("26415", "26418",
+    justification:
+        "ObjectInspection is a value-or-error result, not an owning smart pointer; "
+        "the reference avoids copying its contained record.")]]
+[[nodiscard]] auto AvailableObjectInformation(
+    const ObjectInspection &inspection) noexcept
+    -> const ObjectRecord * {
+    if (inspection) {
+        return *inspection
+            ? std::addressof(**inspection) : nullptr;
+    }
+    const auto &partial = inspection.error().partial;
+    return partial ? std::addressof(*partial) : nullptr;
+}
+
+[[gsl::suppress("26415", "26418",
+    justification:
+        "ObjectInspection is a value-or-error result, not an owning smart pointer; "
+        "the reference avoids copying its contained record.")]]
+[[nodiscard]] auto IsConfirmedAbsent(
+    const ObjectInspection &inspection) noexcept {
+    return inspection && !*inspection;
+}
+
+[[gsl::suppress("26415", "26418",
+    justification:
+        "ObjectInspection is a value-or-error result, not an owning smart pointer; "
+        "the reference avoids copying its contained record.")]]
+[[nodiscard]] auto IsConfirmedPresent(
+    const ObjectInspection &inspection) noexcept {
+    if (inspection.has_value()) {
+        return inspection->has_value();
+    }
+    return inspection.error().partial.has_value() ||
+        inspection.error().exact_name_present;
+}
+
+[[nodiscard]] auto IsBarrierDescendant(
+    const std::wstring_view path,
+    const InventoryBarrier &barrier) noexcept {
+    return barrier.prefix.empty()
+        ? !path.empty() : path.starts_with(barrier.prefix);
+}
+
+[[nodiscard]] auto PruneInventoryBarriers(
+    FilesystemInventory &inventory,
+    const std::vector<InventoryBarrier> &barriers) {
+    auto comparison_surface_incomplete = false;
+    std::erase_if(inventory.objects,
+        [&](const ObjectRecord &object) {
+            const auto past_barrier = std::ranges::upper_bound(
+                barriers, object.relative_path, {},
+                &InventoryBarrier::prefix);
+            if (past_barrier == barriers.begin()) {
+                return false;
+            }
+            const auto &barrier = *std::prev(past_barrier);
+            if (!IsBarrierDescendant(
+                    object.relative_path, barrier)) {
+                return false;
+            }
+            comparison_surface_incomplete |=
+                barrier.comparison_surface_incomplete;
+            return true;
+        });
+    return comparison_surface_incomplete;
+}
+
+auto ApplyInventoryReconciliations(
+    FilesystemInventory &inventory,
+    std::vector<InventoryReconciliation> &reconciliations,
+    std::optional<ObjectRecord> InventoryReconciliation::*const
+        replacement) -> void {
+    auto objects = std::vector<ObjectRecord>{};
+    objects.reserve(
+        inventory.objects.size() + reconciliations.size());
+    auto object = 0uz;
+    for (auto &reconciliation : reconciliations) {
+        while ((object < inventory.objects.size()) &&
+            (inventory.objects[object].relative_path <
+                reconciliation.path)) {
+            objects.push_back(
+                std::move(inventory.objects[object++]));
+        }
+        while ((object < inventory.objects.size()) &&
+            (inventory.objects[object].relative_path ==
+                reconciliation.path)) {
+            ++object;
+        }
+        auto &confirmed = reconciliation.*replacement;
+        if (confirmed) {
+            objects.push_back(std::move(*confirmed));
+        }
+    }
+    objects.insert(
+        objects.end(),
+        std::make_move_iterator(inventory.objects.begin() + object),
+        std::make_move_iterator(inventory.objects.end()));
+    inventory.objects = std::move(objects);
+}
+
+[[nodiscard]] auto ConfirmInventoryDiscrepancies(
+    FilesystemInventory &synthetic,
+    FilesystemInventory &real,
+    const std::span<const std::wstring> paths,
+    const HANDLE cancellation_event,
+    VerificationState &state)
+    -> std::optional<InventoryConfirmation> {
+    if (paths.empty()) {
+        return InventoryConfirmation{};
+    }
+    auto confirmation = InventoryConfirmation{};
+    auto reconciliations = std::vector<InventoryReconciliation>{};
+    reconciliations.reserve(paths.size());
+    auto barriers = std::vector<InventoryBarrier>{};
+    auto synthetic_directories = DirectoryInspectionCache{};
+    auto real_directories = DirectoryInspectionCache{};
+    for (const auto &path : paths) {
+        if (internal::CancellationRequested(cancellation_event)) {
+            return std::nullopt;
+        }
+        const auto barrier = std::ranges::find_if(
+            barriers, [&](const InventoryBarrier &candidate) {
+                return path.starts_with(candidate.prefix);
+            });
+        if (barrier != barriers.end()) {
+            reconciliations.push_back({.path = path});
+            ++confirmation.suppressed_descendants;
+            confirmation.comparison_surface_incomplete |=
+                barrier->comparison_surface_incomplete;
+            state.RecordConfirmedCandidate();
+            continue;
+        }
+        auto synthetic_object =
+            TryInspectFilesystemObject(
+                synthetic, path, cancellation_event,
+                synthetic_directories);
+        if (internal::CancellationRequested(cancellation_event)) {
+            return std::nullopt;
+        }
+        auto real_object = TryInspectFilesystemObject(
+            real, path, cancellation_event, real_directories);
+        if (internal::CancellationRequested(cancellation_event)) {
+            return std::nullopt;
+        }
+        const auto *const synthetic_information =
+            AvailableObjectInformation(synthetic_object);
+        const auto *const real_information =
+            AvailableObjectInformation(real_object);
+        const auto missing_from_synthetic =
+            IsConfirmedAbsent(synthetic_object) &&
+            IsConfirmedPresent(real_object);
+        const auto missing_from_real =
+            IsConfirmedAbsent(real_object) &&
+            IsConfirmedPresent(synthetic_object);
+        if (missing_from_synthetic) {
+            state.RecordMismatch({
+                .kind = MismatchKind::ObjectMissingFromSynthetic,
+                .path = path,
+            });
+        }
+        if (missing_from_real) {
+            state.RecordMismatch({
+                .kind = MismatchKind::ObjectMissingFromReal,
+                .path = path,
+            });
+        }
+        const auto presence_mismatch =
+            missing_from_synthetic || missing_from_real;
+        if (!presence_mismatch &&
+            (!synthetic_object || !real_object) &&
+            synthetic_information && real_information &&
+            (synthetic_information->kind != real_information->kind)) {
+            state.RecordMismatch({
+                .kind = MismatchKind::ObjectType,
+                .path = path,
+                .synthetic_kind = synthetic_information->kind,
+                .real_kind = real_information->kind,
+            });
+        }
+        const auto ordinary_directory = [](const ObjectRecord *object) {
+            return object && (object->kind == ObjectKind::Directory);
+        };
+        if (!ordinary_directory(synthetic_information) ||
+            !ordinary_directory(real_information)) {
+            auto prefix = path;
+            if (!prefix.empty()) {
+                prefix.push_back(L'\\');
+            }
+            // The operation result still describes this object, but cannot
+            // establish the comparison surface beneath an ancestor whose
+            // kind and presence remain unresolved.
+            const auto resolved =
+                (synthetic_information && real_information) ||
+                (IsConfirmedAbsent(synthetic_object) &&
+                    IsConfirmedAbsent(real_object)) ||
+                presence_mismatch;
+            barriers.push_back({
+                .prefix = std::move(prefix),
+                .comparison_surface_incomplete =
+                    !IsVssExcludedPath(path) && !resolved,
+            });
+        }
+        if (!presence_mismatch) {
+            RecordInspectionComparison(
+                path, synthetic_object, real_object, state);
+        }
+        auto reconciliation = InventoryReconciliation{.path = path};
+        // A confirmed presence mismatch or paired operation outcome already
+        // owns the result. Retain neither disputed bulk record, so planning
+        // cannot produce a second conclusion from unconfirmed metadata.
+        if (presence_mismatch) {
+            ++confirmation.differing;
+        } else if (synthetic_object && real_object) {
+            auto &synthetic_observation = *synthetic_object;
+            auto &real_observation = *real_object;
+            if (synthetic_observation && real_observation) {
+                if ((synthetic_observation->kind ==
+                        real_observation->kind) &&
+                    (synthetic_observation->streams ==
+                        real_observation->streams)) {
+                    ++confirmation.matching;
+                } else {
+                    ++confirmation.differing;
+                }
+            } else if (!synthetic_observation && !real_observation) {
+                ++confirmation.matching;
+            } else {
+                ++confirmation.differing;
+            }
+            reconciliation.synthetic =
+                std::move(synthetic_observation);
+            reconciliation.real = std::move(real_observation);
+        } else {
+            ++confirmation.operation_outcomes;
+        }
+        reconciliations.push_back(std::move(reconciliation));
+        state.RecordConfirmedCandidate();
+    }
+    ApplyInventoryReconciliations(
+        synthetic, reconciliations,
+        &InventoryReconciliation::synthetic);
+    ApplyInventoryReconciliations(
+        real, reconciliations,
+        &InventoryReconciliation::real);
+    std::ranges::sort(
+        barriers, {}, &InventoryBarrier::prefix);
+    const auto synthetic_surface_incomplete =
+        PruneInventoryBarriers(synthetic, barriers);
+    const auto real_surface_incomplete =
+        PruneInventoryBarriers(real, barriers);
+    confirmation.comparison_surface_incomplete |=
+        synthetic_surface_incomplete || real_surface_incomplete;
+    state.SetInventory(
+        VerificationEndpoint::Synthetic,
+        synthetic.objects.size(), InventoryStreamCount(synthetic));
+    state.SetInventory(
+        VerificationEndpoint::Real,
+        real.objects.size(), InventoryStreamCount(real));
+    return confirmation;
+}
+
 auto AddObjectMismatch(
     VerificationState &state,
     const MismatchKind kind,
@@ -1607,26 +2278,6 @@ auto AppendStreamTasks(
         result.tasks.push_back(std::move(*fallback));
     }
     return std::optional<ComparisonPlan>{std::move(result)};
-}
-
-[[nodiscard]] auto ObjectPath(
-    const FilesystemInventory &inventory,
-    const ObjectRecord &object) {
-    return object.relative_path.empty()
-        ? inventory.root
-        : inventory.root / object.relative_path;
-}
-
-[[nodiscard]] auto StreamPath(
-    const FilesystemInventory &inventory,
-    const ObjectRecord &object,
-    const StreamRecord &stream) {
-    auto path = ObjectPath(inventory, object);
-    if (!stream.name.empty()) {
-        path = std::filesystem::path{
-            std::format(L"{}{}", path.native(), stream.name)};
-    }
-    return path;
 }
 
 [[nodiscard]] auto TrySeekStream(
@@ -1897,7 +2548,8 @@ auto RunComparisonWorkers(
     return !state.Failed() &&
         !internal::CancellationRequested(cancellation_event) &&
         std::ranges::none_of(
-            state.OperationComparisonsAfterJoin(), IsOperationMismatch) &&
+            state.OperationComparisonsAfterJoin(),
+            IsContentOperationMismatch) &&
         (completed_tasks.load(std::memory_order_relaxed) ==
             plan.tasks.size());
 }
@@ -1947,11 +2599,49 @@ auto CompareAttachedFilesystems(
                 .operation = FilesystemOperation::QueryLayout,
             }, 0, synthetic->layout_failure, real->layout_failure);
         }
+        const auto discrepancy_paths =
+            InventoryDiscrepancyPaths(*synthetic, *real);
+        state.SetConfirmationCandidates(discrepancy_paths.size());
+        if (!discrepancy_paths.empty()) {
+            state.SetPhase(VerificationPhase::ConfirmingInventory);
+            devicefs::WriteToStream(std::cout,
+                L"Both inventories finished for volume {}; confirming "
+                L"{} bulk-inventory discrepancy candidate(s) through "
+                L"ordinary filesystem operations.\n",
+                std::wstring_view{volume_identifier},
+                discrepancy_paths.size());
+        }
+        const auto confirmation = ConfirmInventoryDiscrepancies(
+            *synthetic, *real, discrepancy_paths,
+            cancellation_event, state);
+        if (!confirmation) {
+            return;
+        }
+        if (!discrepancy_paths.empty()) {
+            devicefs::WriteToStream(std::cout,
+                L"Ordinary confirmation results for volume {}: {} "
+                L"candidate path(s) agreed; {} still differed; {} "
+                L"produced filesystem-operation outcomes; {} descendant "
+                L"candidate path(s) were skipped because their disputed "
+                L"ancestor could not be traversed on both views.\n",
+                std::wstring_view{volume_identifier},
+                confirmation->matching,
+                confirmation->differing,
+                confirmation->operation_outcomes,
+                confirmation->suppressed_descendants);
+            if (confirmation->comparison_surface_incomplete) {
+                devicefs::WriteToStream(std::cout,
+                    "  At least one skipped descendant remained outside "
+                    "the ordinary comparison surface because its disputed "
+                    "ancestor failed identically before its object type "
+                    "could be established.\n");
+            }
+        }
+        state.SetPhase(VerificationPhase::Planning);
         devicefs::WriteToStream(std::cout,
-            L"Both inventories finished for volume {}; "
+            L"Filesystem inventories are ready for volume {}; "
             L"preparing content comparisons.\n",
             std::wstring_view{volume_identifier});
-        state.SetPhase(VerificationPhase::Planning);
         auto plan = BuildComparisonPlan(
             *synthetic, *real, volume.payload_snapshot_identifier,
             percentage, cancellation_event, state);
@@ -1965,7 +2655,14 @@ auto CompareAttachedFilesystems(
                     *plan, *synthetic, *real,
                     cancellation_event, io_cancellation, state)) {
                 if (layouts_complete) {
-                    state.CompleteComparison();
+                    if (confirmation->comparison_surface_incomplete) {
+                        state.Fail(
+                            "ordinary confirmation could not establish "
+                            "the complete comparison surface beneath at "
+                            "least one disputed ancestor");
+                    } else {
+                        state.CompleteComparison();
+                    }
                 } else {
                     state.Fail(
                         "at least one filesystem layout query did not "
@@ -2048,6 +2745,8 @@ struct VolumeJob {
         return "inventorying the synthetic filesystem";
     case VerificationPhase::InventoryingReal:
         return "inventorying the real-B filesystem";
+    case VerificationPhase::ConfirmingInventory:
+        return "confirming bulk-inventory discrepancies";
     case VerificationPhase::Planning:
         return "preparing content comparisons";
     case VerificationPhase::Comparing:
@@ -2085,6 +2784,16 @@ struct VolumeJob {
     switch (operation) {
     case FilesystemOperation::QueryLayout:
         return "query filesystem layout";
+    case FilesystemOperation::OpenParentDirectory:
+        return "open parent directory";
+    case FilesystemOperation::QueryDirectory:
+        return "query parent directory";
+    case FilesystemOperation::OpenObject:
+        return "open object";
+    case FilesystemOperation::QueryObject:
+        return "query object information";
+    case FilesystemOperation::QueryStreams:
+        return "enumerate object streams";
     case FilesystemOperation::OpenStream:
         return "open stream";
     case FilesystemOperation::SeekStream:
@@ -2297,6 +3006,16 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             observation.synthetic_streams,
             observation.real_objects,
             observation.real_streams);
+        if (observation.phase ==
+            VerificationPhase::ConfirmingInventory) {
+            devicefs::WriteToStream(std::cout,
+                "    Bulk-inventory candidates confirmed: {} of {} "
+                "({:.2f}%)\n",
+                observation.confirmed_candidates,
+                observation.confirmation_candidates,
+                Percentage(observation.confirmed_candidates,
+                    observation.confirmation_candidates));
+        }
         if (observation.plan_ready) {
             devicefs::WriteToStream(std::cout,
                 "    Selected content: {} of {} bytes ({:.2f}% actual)\n"

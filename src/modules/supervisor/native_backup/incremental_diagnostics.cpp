@@ -210,7 +210,7 @@ struct SnapshotDiagnosticResult {
     return result;
 }
 
-auto PrintUnavailableSnapshots(const std::size_t count) {
+auto PrintUnavailableSnapshots(const std::size_t count) noexcept {
     if (count == 0) {
         return;
     }

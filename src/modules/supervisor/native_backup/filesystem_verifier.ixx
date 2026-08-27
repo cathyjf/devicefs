@@ -621,6 +621,9 @@ class VerificationState {
         partition_root);
     auto partition = [&] {
         constexpr auto retry_interval = 100ms;
+        constexpr auto retry_period = 10s;
+        const auto retry_deadline =
+            std::chrono::steady_clock::now() + retry_period;
         while (true) {
             auto result = wil::unique_hfile{CreateFileW(
                 partition_root_name.c_str(), 0,
@@ -630,9 +633,7 @@ class VerificationState {
                 return result;
             }
             const auto error = GetLastError();
-            if ((error != ERROR_FILE_NOT_FOUND) &&
-                (error != ERROR_PATH_NOT_FOUND) &&
-                (error != ERROR_NOT_READY)) {
+            if (std::chrono::steady_clock::now() >= retry_deadline) {
                 WinError("could not open attached VHDX Partition1 root {}",
                     std::filesystem::path{partition_root}.string(),
                     ExplicitWin32Error{error});

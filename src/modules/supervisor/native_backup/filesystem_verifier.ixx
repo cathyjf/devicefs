@@ -26,7 +26,6 @@ module;
 export module devicefs.supervisor.native_backup:filesystem_verifier;
 
 import std;
-import <cstddef>;
 import <devicefs/windows_imports.h>;
 import <wil/filesystem.h>;
 import :devicefs_process;
@@ -45,14 +44,10 @@ namespace {
 
 using namespace std::chrono_literals;
 
-// Four workers keep independent reads in flight on each volume without
-// allowing one volume to consume the workers assigned to another drive.
+// Each volume owns its worker pools. Four workers keep independent operations
+// in flight without allowing one volume to consume another drive's workers.
 constexpr auto kVerificationWorkerCount = 4uz;
 constexpr auto kReadChunkSize = 4uz * 1024 * 1024;
-// FSCTL_QUERY_FILE_LAYOUT has no required-size probe and returns only complete
-// file entries. A 4-MiB batch keeps the number of volume queries low while
-// remaining small beside the cached inventory and comparison-worker buffers.
-constexpr auto kLayoutQueryBatchSize = 4uz * 1024 * 1024;
 constexpr auto kProgressReportInterval = 1min;
 constexpr auto kReporterPollInterval = 100ms;
 constexpr auto kShareMode =
@@ -66,9 +61,7 @@ enum class VerificationEndpoint {
 enum class VerificationPhase {
     AttachingSynthetic,
     AttachingReal,
-    InventoryingSynthetic,
-    InventoryingReal,
-    ConfirmingInventory,
+    Traversing,
     Planning,
     Comparing,
     Detaching,
@@ -93,11 +86,8 @@ enum class MismatchKind {
 };
 
 enum class FilesystemOperation {
-    QueryLayout,
-    OpenParentDirectory,
     QueryDirectory,
     OpenObject,
-    QueryObject,
     QueryStreams,
     OpenStream,
     SeekStream,
@@ -126,6 +116,7 @@ struct ObjectRecord {
     ObjectKind kind;
     FileIdentity identity;
     std::vector<StreamRecord> streams;
+    bool streams_complete = false;
 };
 
 struct OperationFailure {
@@ -135,50 +126,10 @@ struct OperationFailure {
     auto operator<=>(const OperationFailure &) const = default;
 };
 
-struct ObjectInspectionFailure {
-    FilesystemOperation operation;
-    OperationFailure failure;
-    std::optional<ObjectRecord> partial;
-    bool exact_name_present = false;
-};
-
-// A successful empty observation means that exact ordinary name is absent.
-using ObjectInspection = std::expected<
-    std::optional<ObjectRecord>, ObjectInspectionFailure>;
-
-struct DirectoryNameRecord {
-    std::wstring name;
-    FileIdentity identity;
-};
-
-using DirectoryInspection = std::expected<
-    std::vector<DirectoryNameRecord>, ObjectInspectionFailure>;
-
-struct DirectoryInspectionCacheEntry {
+struct TraversalTask {
     std::wstring relative_path;
-    DirectoryInspection inspection;
-};
-
-using DirectoryInspectionCache =
-    std::vector<DirectoryInspectionCacheEntry>;
-
-struct InventoryReconciliation {
-    std::wstring path;
-    std::optional<ObjectRecord> synthetic;
-    std::optional<ObjectRecord> real;
-};
-
-struct InventoryConfirmation {
-    std::size_t matching = 0;
-    std::size_t differing = 0;
-    std::size_t operation_outcomes = 0;
-    std::size_t suppressed_descendants = 0;
-    bool comparison_surface_incomplete = false;
-};
-
-struct InventoryBarrier {
-    std::wstring prefix;
-    bool comparison_surface_incomplete;
+    ObjectKind kind;
+    std::optional<FileIdentity> identity;
 };
 
 struct OperationIssueKey {
@@ -199,6 +150,13 @@ struct OperationComparison {
     auto operator<=>(const OperationComparison &) const = default;
 };
 
+struct InventoryIssue {
+    OperationIssueKey key;
+    OperationFailure failure;
+
+    auto operator<=>(const InventoryIssue &) const = default;
+};
+
 [[nodiscard]] auto FailuresMatch(
     const std::optional<OperationFailure> &synthetic,
     const std::optional<OperationFailure> &real) noexcept {
@@ -212,8 +170,7 @@ struct OperationComparison {
 
 [[nodiscard]] auto IsOperationMismatch(
     const OperationComparison &comparison) noexcept {
-    return (comparison.key.operation != FilesystemOperation::QueryLayout) &&
-        !IsVssExcludedPath(comparison.key.path) &&
+    return !IsVssExcludedPath(comparison.key.path) &&
         !IsMatchedError(comparison);
 }
 
@@ -233,15 +190,9 @@ struct OperationComparison {
 
 struct FilesystemInventory {
     std::filesystem::path root;
-    std::optional<OperationFailure> layout_failure;
     std::vector<ObjectRecord> objects;
-};
-
-struct LayoutObject {
-    FileIdentity identity;
-    ObjectKind kind;
-    std::vector<std::wstring> paths;
-    std::vector<StreamRecord> streams;
+    std::vector<InventoryIssue> issues;
+    std::vector<std::wstring> incomplete_directories;
 };
 
 struct ReadTask {
@@ -288,24 +239,46 @@ struct MismatchDetail {
     std::uint64_t differing_chunks = 0;
 };
 
+struct InventoryObservation {
+    std::uint64_t tasks_discovered = 0;
+    std::uint64_t tasks_completed = 0;
+    std::uint64_t directories = 0;
+    std::uint64_t objects = 0;
+    std::uint64_t streams = 0;
+    std::uint64_t stream_bytes = 0;
+    std::uint64_t failures = 0;
+};
+
+[[nodiscard]] constexpr auto SaturatingSum(
+    const std::uint64_t left,
+    const std::uint64_t right) noexcept {
+    return right > std::numeric_limits<std::uint64_t>::max() - left
+        ? std::numeric_limits<std::uint64_t>::max()
+        : left + right;
+}
+
+[[nodiscard]] constexpr auto SaturationPrefix(
+    const std::uint64_t value) noexcept {
+    return value == std::numeric_limits<std::uint64_t>::max()
+        ? std::string_view{"at least "}
+        : std::string_view{};
+}
+
 struct VerificationObservation {
     VerificationPhase phase = VerificationPhase::AttachingSynthetic;
-    std::uint64_t synthetic_layout_entries = 0;
-    std::uint64_t real_layout_entries = 0;
-    std::uint64_t synthetic_objects = 0;
-    std::uint64_t synthetic_streams = 0;
-    std::uint64_t real_objects = 0;
-    std::uint64_t real_streams = 0;
-    std::uint64_t confirmation_candidates = 0;
-    std::uint64_t confirmed_candidates = 0;
+    InventoryObservation synthetic;
+    InventoryObservation real;
     std::uint64_t available_bytes = 0;
     std::uint64_t selected_bytes = 0;
     std::uint64_t compared_bytes = 0;
+    std::optional<std::chrono::steady_clock::time_point>
+        traversal_started;
     std::optional<std::chrono::steady_clock::time_point>
         comparison_started;
     std::size_t mismatch_count = 0;
     std::size_t exclusion_count = 0;
     std::size_t matched_error_count = 0;
+    bool traversal_complete = false;
     bool plan_ready = false;
     bool comparison_complete = false;
     bool failed = false;
@@ -426,12 +399,19 @@ auto RequestPendingIoCancellation(
 
 class VerificationState {
   public:
-    auto SetLayoutEntries(
+    auto BeginTraversal() -> void {
+        {
+            const auto lock = std::scoped_lock{mutex_};
+            traversal_started_ = std::chrono::steady_clock::now();
+        }
+        SetPhase(VerificationPhase::Traversing);
+    }
+
+    auto RecordTraversalTasks(
         const VerificationEndpoint endpoint,
-        const std::size_t entry_count) noexcept -> void {
-        auto &entries = endpoint == VerificationEndpoint::Synthetic
-            ? synthetic_layout_entries_ : real_layout_entries_;
-        entries.store(entry_count, std::memory_order_relaxed);
+        const std::size_t count) noexcept -> void {
+        Inventory(endpoint).tasks_discovered.fetch_add(
+            count, std::memory_order_relaxed);
     }
 
     auto SetPhase(const VerificationPhase phase) noexcept -> void {
@@ -440,36 +420,35 @@ class VerificationState {
 
     auto RecordInventory(
         const VerificationEndpoint endpoint,
-        const std::size_t stream_count) noexcept -> void {
-        auto &objects = endpoint == VerificationEndpoint::Synthetic
-            ? synthetic_objects_ : real_objects_;
-        auto &streams = endpoint == VerificationEndpoint::Synthetic
-            ? synthetic_streams_ : real_streams_;
-        objects.fetch_add(1, std::memory_order_relaxed);
-        streams.fetch_add(stream_count, std::memory_order_relaxed);
+        const std::size_t stream_count,
+        const std::uint64_t stream_bytes) noexcept -> void {
+        auto &inventory = Inventory(endpoint);
+        inventory.objects.fetch_add(1, std::memory_order_relaxed);
+        inventory.streams.fetch_add(
+            stream_count, std::memory_order_relaxed);
+        AddSaturating(inventory.stream_bytes, stream_bytes);
     }
 
-    auto SetInventory(
-        const VerificationEndpoint endpoint,
-        const std::size_t object_count,
-        const std::size_t stream_count) noexcept -> void {
-        auto &objects = endpoint == VerificationEndpoint::Synthetic
-            ? synthetic_objects_ : real_objects_;
-        auto &streams = endpoint == VerificationEndpoint::Synthetic
-            ? synthetic_streams_ : real_streams_;
-        objects.store(object_count, std::memory_order_relaxed);
-        streams.store(stream_count, std::memory_order_relaxed);
+    auto RecordTraversalTaskCompleted(
+        const VerificationEndpoint endpoint) noexcept -> void {
+        Inventory(endpoint).tasks_completed.fetch_add(
+            1, std::memory_order_relaxed);
     }
 
-    auto SetConfirmationCandidates(
-        const std::size_t count) noexcept -> void {
-        confirmation_candidates_.store(
-            count, std::memory_order_relaxed);
-        confirmed_candidates_.store(0, std::memory_order_relaxed);
+    auto RecordDirectory(
+        const VerificationEndpoint endpoint) noexcept -> void {
+        Inventory(endpoint).directories.fetch_add(
+            1, std::memory_order_relaxed);
     }
 
-    auto RecordConfirmedCandidate() noexcept -> void {
-        confirmed_candidates_.fetch_add(1, std::memory_order_relaxed);
+    auto RecordInventoryFailure(
+        const VerificationEndpoint endpoint) noexcept -> void {
+        Inventory(endpoint).failures.fetch_add(
+            1, std::memory_order_relaxed);
+    }
+
+    auto CompleteTraversal() noexcept -> void {
+        traversal_complete_.store(true, std::memory_order_release);
     }
 
     auto SetPlan(const ComparisonPlan &plan) noexcept -> void {
@@ -610,34 +589,21 @@ class VerificationState {
             comparison_complete_.load(std::memory_order_acquire);
         auto result = VerificationObservation{
             .phase = phase_.load(std::memory_order_acquire),
-            .synthetic_layout_entries =
-                synthetic_layout_entries_.load(std::memory_order_relaxed),
-            .real_layout_entries =
-                real_layout_entries_.load(std::memory_order_relaxed),
-            .synthetic_objects =
-                synthetic_objects_.load(std::memory_order_relaxed),
-            .synthetic_streams =
-                synthetic_streams_.load(std::memory_order_relaxed),
-            .real_objects =
-                real_objects_.load(std::memory_order_relaxed),
-            .real_streams =
-                real_streams_.load(std::memory_order_relaxed),
-            .confirmation_candidates =
-                confirmation_candidates_.load(
-                    std::memory_order_relaxed),
-            .confirmed_candidates =
-                confirmed_candidates_.load(
-                    std::memory_order_relaxed),
+            .synthetic = ObserveInventory(synthetic_inventory_),
+            .real = ObserveInventory(real_inventory_),
             .available_bytes =
                 available_bytes_.load(std::memory_order_relaxed),
             .selected_bytes =
                 selected_bytes_.load(std::memory_order_relaxed),
             .compared_bytes =
                 compared_bytes_.load(std::memory_order_relaxed),
+            .traversal_complete = traversal_complete_.load(
+                std::memory_order_acquire),
             .plan_ready = plan_ready,
             .comparison_complete = comparison_complete,
         };
         const auto lock = std::scoped_lock{mutex_};
+        result.traversal_started = traversal_started_;
         result.comparison_started = comparison_started_;
         result.mismatch_count = std::ranges::count_if(
             mismatches_, [](const MismatchDetail &mismatch) {
@@ -660,24 +626,71 @@ class VerificationState {
     }
 
   private:
+    static auto AddSaturating(
+        std::atomic<std::uint64_t> &value,
+        const std::uint64_t addend) noexcept -> void {
+        if (addend == 0) {
+            return;
+        }
+        auto current = value.load(std::memory_order_relaxed);
+        while ((current != std::numeric_limits<std::uint64_t>::max()) &&
+            !value.compare_exchange_weak(current,
+                SaturatingSum(current, addend),
+                std::memory_order_relaxed)) {}
+    }
+
+    struct InventoryCounters {
+        std::atomic<std::uint64_t> tasks_discovered{};
+        std::atomic<std::uint64_t> tasks_completed{};
+        std::atomic<std::uint64_t> directories{};
+        std::atomic<std::uint64_t> objects{};
+        std::atomic<std::uint64_t> streams{};
+        std::atomic<std::uint64_t> stream_bytes{};
+        std::atomic<std::uint64_t> failures{};
+    };
+
+    [[nodiscard]] auto Inventory(
+        const VerificationEndpoint endpoint) noexcept
+        -> InventoryCounters & {
+        return endpoint == VerificationEndpoint::Synthetic
+            ? synthetic_inventory_ : real_inventory_;
+    }
+
+    [[nodiscard]] static auto ObserveInventory(
+        const InventoryCounters &inventory) noexcept {
+        return InventoryObservation{
+            .tasks_discovered = inventory.tasks_discovered.load(
+                std::memory_order_relaxed),
+            .tasks_completed = inventory.tasks_completed.load(
+                std::memory_order_relaxed),
+            .directories = inventory.directories.load(
+                std::memory_order_relaxed),
+            .objects = inventory.objects.load(
+                std::memory_order_relaxed),
+            .streams = inventory.streams.load(
+                std::memory_order_relaxed),
+            .stream_bytes = inventory.stream_bytes.load(
+                std::memory_order_relaxed),
+            .failures = inventory.failures.load(
+                std::memory_order_relaxed),
+        };
+    }
+
     std::atomic<VerificationPhase> phase_{
         VerificationPhase::AttachingSynthetic};
-    std::atomic<std::uint64_t> synthetic_layout_entries_{};
-    std::atomic<std::uint64_t> real_layout_entries_{};
-    std::atomic<std::uint64_t> synthetic_objects_{};
-    std::atomic<std::uint64_t> synthetic_streams_{};
-    std::atomic<std::uint64_t> real_objects_{};
-    std::atomic<std::uint64_t> real_streams_{};
-    std::atomic<std::uint64_t> confirmation_candidates_{};
-    std::atomic<std::uint64_t> confirmed_candidates_{};
+    InventoryCounters synthetic_inventory_;
+    InventoryCounters real_inventory_;
     std::atomic<std::uint64_t> available_bytes_{};
     std::atomic<std::uint64_t> selected_bytes_{};
     std::atomic<std::uint64_t> compared_bytes_{};
+    std::atomic<bool> traversal_complete_{};
     std::atomic<bool> plan_ready_{};
     std::atomic<bool> comparison_complete_{};
     std::atomic<bool> failed_{};
     mutable std::mutex mutex_;
     std::string failure_;
+    std::optional<std::chrono::steady_clock::time_point>
+        traversal_started_;
     std::optional<std::chrono::steady_clock::time_point>
         comparison_started_;
     std::vector<std::string> cleanup_failures_;
@@ -1111,172 +1124,17 @@ auto DetachView(
     return ObjectKind::File;
 }
 
-[[nodiscard]] auto InspectDirectoryNames(
-    const FilesystemInventory &inventory,
-    const std::wstring_view relative_path,
-    const HANDLE cancellation_event)
-    -> DirectoryInspection {
-    auto parent = TryOpenFilesystemObject(
-        ObjectPath(inventory, relative_path));
-    if (!parent) {
-        return std::unexpected{ObjectInspectionFailure{
-            .operation = FilesystemOperation::OpenParentDirectory,
-            .failure = parent.error(),
-        }};
-    }
-    auto result = std::vector<DirectoryNameRecord>{};
-    while (true) {
-        if (internal::CancellationRequested(cancellation_event)) {
-            return std::unexpected{ObjectInspectionFailure{
-                .operation = FilesystemOperation::QueryDirectory,
-                .failure = OperationFailure{ERROR_OPERATION_ABORTED},
-            }};
-        }
-        auto entries = wistd::unique_ptr<FILE_ID_BOTH_DIR_INFO>{};
-        const auto query =
-            wil::GetFileInfoNoThrow<FileIdBothDirectoryInfo>(
-                parent->get(), entries);
-        if (FAILED(query)) {
-            return std::unexpected{ObjectInspectionFailure{
-                .operation = FilesystemOperation::QueryDirectory,
-                .failure = OperationFailure{
-                    ExplicitWin32Error::FromHresult(query).value},
-            }};
-        }
-        if (!entries) {
-            return result;
-        }
-        for (const auto &entry :
-            wil::create_next_entry_offset_iterator(entries.get())) {
-            static_assert(
-                sizeof(FileIdentity) ==
-                sizeof(entry.FileId.QuadPart));
-            result.push_back({
-                .name = std::wstring{
-                    entry.FileName,
-                    entry.FileNameLength /
-                        sizeof(std::wstring::value_type),
-                },
-                .identity =
-                    std::bit_cast<FileIdentity>(
-                        entry.FileId.QuadPart),
-            });
-        }
-    }
-}
-
-[[nodiscard]] auto CachedDirectoryInspection(
-    const FilesystemInventory &inventory,
-    const std::wstring_view relative_path,
-    const HANDLE cancellation_event,
-    DirectoryInspectionCache &cache) -> const DirectoryInspection & {
-    const auto found = std::ranges::find(
-        cache, relative_path,
-        &DirectoryInspectionCacheEntry::relative_path);
-    if (found != cache.end()) {
-        return found->inspection;
-    }
-    cache.push_back({
-        .relative_path = std::wstring{relative_path},
-        .inspection = InspectDirectoryNames(
-            inventory, relative_path, cancellation_event),
-    });
-    return cache.back().inspection;
-}
-
-[[nodiscard]] auto TryConfirmExactObjectName(
-    const FilesystemInventory &inventory,
-    const std::wstring &relative_path,
-    const HANDLE cancellation_event,
-    DirectoryInspectionCache &cache)
-    -> std::expected<std::optional<FileIdentity>,
-        ObjectInspectionFailure> {
-    const auto relative = std::filesystem::path{relative_path};
-    const auto filename = relative.filename().native();
-    const auto &directory = CachedDirectoryInspection(
-        inventory, relative.parent_path().native(),
-        cancellation_event, cache);
-    if (!directory) {
-        return std::unexpected{directory.error()};
-    }
-    const auto entry = std::ranges::find(
-        *directory, filename, &DirectoryNameRecord::name);
-    if (entry == directory->end()) {
-        return std::optional<FileIdentity>{};
-    }
-    return std::optional<FileIdentity>{entry->identity};
-}
-
-[[nodiscard]] auto TryInspectFilesystemObject(
-    const FilesystemInventory &inventory,
-    const std::wstring &relative_path,
-    const HANDLE cancellation_event,
-    DirectoryInspectionCache &cache) -> ObjectInspection {
-    auto exact_identity = std::optional<FileIdentity>{};
-    if (!relative_path.empty()) {
-        const auto exact_name = TryConfirmExactObjectName(
-            inventory, relative_path, cancellation_event, cache);
-        if (!exact_name) {
-            return std::unexpected{exact_name.error()};
-        }
-        if (!*exact_name) {
-            return std::optional<ObjectRecord>{};
-        }
-        exact_identity = **exact_name;
-    }
-    const auto exact_name_present = !relative_path.empty();
-    auto object = TryOpenFilesystemObject(
-        ObjectPath(inventory, relative_path));
-    if (!object) {
-        return std::unexpected{ObjectInspectionFailure{
-            .operation = FilesystemOperation::OpenObject,
-            .failure = object.error(),
-            .exact_name_present = exact_name_present,
-        }};
-    }
-
-    auto information = BY_HANDLE_FILE_INFORMATION{};
-    if (!GetFileInformationByHandle(
-            object->get(), std::addressof(information))) {
-        return std::unexpected{ObjectInspectionFailure{
-            .operation = FilesystemOperation::QueryObject,
-            .failure = OperationFailure{GetLastError()},
-            .exact_name_present = exact_name_present,
-        }};
-    }
-
-    [[gsl::suppress("26493",
-        justification:
-            "Braced initialization proves this construction safe at compile time.")]]
-    const auto identity =
-        (std::uint64_t{information.nFileIndexHigh} << 32) |
-        information.nFileIndexLow;
-    if (exact_identity && (identity != *exact_identity)) {
-        return std::unexpected{ObjectInspectionFailure{
-            .operation = FilesystemOperation::OpenObject,
-            .failure = OperationFailure{ERROR_FILE_NOT_FOUND},
-            .exact_name_present = exact_name_present,
-        }};
-    }
-    auto result = ObjectRecord{
-        .relative_path = relative_path,
-        .kind = ClassifyObject(information.dwFileAttributes),
-        .identity = identity,
-    };
+[[nodiscard]] auto QueryObjectStreams(const HANDLE object)
+    -> std::expected<std::vector<StreamRecord>, OperationFailure> {
     auto streams = wistd::unique_ptr<FILE_STREAM_INFO>{};
-    const auto stream_result =
-        wil::GetFileInfoNoThrow<FileStreamInfo>(
-            object->get(), streams);
-    if (FAILED(stream_result)) {
-        return std::unexpected{ObjectInspectionFailure{
-            .operation = FilesystemOperation::QueryStreams,
-            .failure = OperationFailure{
-                ExplicitWin32Error::FromHresult(
-                    stream_result).value},
-            .partial = std::move(result),
-            .exact_name_present = exact_name_present,
-        }};
+    const auto query = wil::GetFileInfoNoThrow<FileStreamInfo>(
+        object, streams);
+    if (FAILED(query)) {
+        return std::unexpected{OperationFailure{
+            ExplicitWin32Error::FromHresult(query).value}};
     }
+
+    auto result = std::vector<StreamRecord>{};
     for (const auto &stream :
         wil::create_next_entry_offset_iterator(streams.get())) {
         auto name = std::wstring{
@@ -1287,757 +1145,438 @@ auto DetachView(
         if (name == L"::$DATA") {
             name.clear();
         }
-        result.streams.push_back({
+        result.push_back({
             .name = std::move(name),
             .length = stream.StreamSize.QuadPart,
         });
     }
-    std::ranges::sort(
-        result.streams, {}, &StreamRecord::name);
-    return std::optional<ObjectRecord>{std::move(result)};
-}
-
-// NTFS file references use the low 48 bits for the MFT segment number. NTFS
-// reserves the first 16 MFT records; record 5 is the root directory of the
-// ordinary namespace. See
-// <https://learn.microsoft.com/en-us/windows/win32/devnotes/mft-segment-reference>
-// and
-// <https://learn.microsoft.com/en-us/windows/win32/devnotes/master-file-table>.
-constexpr auto kMftSegmentNumberMask =
-    (std::uint64_t{1} << 48) - 1;
-constexpr auto kNtfsRootSegmentNumber = std::uint64_t{5};
-constexpr auto kFirstOrdinaryNtfsSegmentNumber = std::uint64_t{16};
-
-// NTFS attribute type 0x80 is $DATA. FSCTL_QUERY_FILE_LAYOUT also returns
-// other attribute streams, which are not part of the verifier's ordinary
-// stream surface. See
-// <https://learn.microsoft.com/en-us/windows/win32/devnotes/attribute-record-header>.
-constexpr auto kNtfsDataAttributeType = DWORD{0x80};
-
-[[nodiscard]] constexpr auto MftSegmentNumber(
-    const FileIdentity identity) noexcept {
-    return identity & kMftSegmentNumberMask;
-}
-
-// Variable-tail layout entries are guaranteed only through the beginning of
-// their reported tail; the SDK's [1] placeholder and structure padding are
-// not part of a zero-length tail.
-template <typename Entry, std::size_t length = sizeof(Entry)>
-[[nodiscard]] auto LayoutEntryAt(
-    const std::span<const std::byte> buffer,
-    const std::size_t offset) noexcept {
-    static_assert(length <= sizeof(Entry));
-    const auto storage = buffer.subspan(offset, length);
-    auto result = Entry{};
-    std::memcpy(std::addressof(result), storage.data(), storage.size());
+    std::ranges::sort(result, {}, &StreamRecord::name);
     return result;
 }
 
-[[nodiscard]] auto LayoutString(
-    const std::span<const std::byte> buffer,
-    const std::size_t offset,
-    const DWORD length) {
-    if (length == 0) {
-        return std::wstring{};
+[[nodiscard]] auto ChildPath(
+    const std::wstring_view parent,
+    const std::wstring_view name) {
+    auto result = std::wstring{};
+    result.reserve(parent.size() + !parent.empty() + name.size());
+    result.append(parent);
+    if (!parent.empty()) {
+        result.push_back(L'\\');
     }
-    [[gsl::suppress("26493",
-        justification:
-            "Braced initialization proves this construction safe at compile time.")]]
-    const auto count = std::size_t{length} /
-        sizeof(std::wstring::value_type);
-    const auto storage = buffer.subspan(offset, length);
-    std::wstring result(count, L'\0');
-    std::memcpy(result.data(), storage.data(), storage.size());
+    result.append(name);
     return result;
 }
 
-auto AppendLayoutBatch(
-    const std::span<const std::byte> buffer,
-    std::vector<LayoutObject> &objects,
-    const HANDLE cancellation_event) -> bool {
-    const auto output =
-        LayoutEntryAt<QUERY_FILE_LAYOUT_OUTPUT>(buffer, 0);
-    [[gsl::suppress("26493",
-        justification:
-            "Braced initialization proves this construction safe at compile time.")]]
-    auto file_offset = std::size_t{output.FirstFileOffset};
-    for (auto file_index = DWORD{};
-        file_index < output.FileEntryCount; ++file_index) {
-        if (internal::CancellationRequested(cancellation_event)) {
-            return false;
-        }
-        const auto file =
-            LayoutEntryAt<FILE_LAYOUT_ENTRY>(buffer, file_offset);
-        auto object = LayoutObject{
-            .identity = file.FileReferenceNumber,
-            .kind = ClassifyObject(file.FileAttributes),
+class FilesystemTraverser {
+  public:
+    FilesystemTraverser(
+        const std::wstring_view root,
+        const VerificationEndpoint endpoint,
+        const HANDLE cancellation_event,
+        SynchronousIoCancellation &io_cancellation,
+        VerificationState &state)
+        : endpoint_{endpoint}, cancellation_event_{cancellation_event},
+          io_cancellation_{io_cancellation}, state_{state},
+          inventory_{.root = std::filesystem::path{root}} {}
+
+    [[nodiscard]] auto Run()
+        -> std::optional<FilesystemInventory> {
+        auto initial = std::vector{
+            TraversalTask{.kind = ObjectKind::Directory},
         };
+        Queue(std::move(initial));
 
-        if (MftSegmentNumber(object.identity) ==
-            kNtfsRootSegmentNumber) {
-            object.paths.emplace_back();
-        } else if (file.FirstNameOffset != 0) {
-            auto name_offset = file_offset + file.FirstNameOffset;
-            while (true) {
-                const auto name = LayoutEntryAt<FILE_LAYOUT_NAME_ENTRY,
-                    offsetof(FILE_LAYOUT_NAME_ENTRY, FileName)>(
-                        buffer, name_offset);
-                const auto dos =
-                    (name.Flags & FILE_LAYOUT_NAME_ENTRY_DOS) != 0;
-                const auto primary =
-                    (name.Flags & FILE_LAYOUT_NAME_ENTRY_PRIMARY) != 0;
-                if (!dos || primary) {
-                    const auto path = std::filesystem::path{LayoutString(
-                        buffer,
-                        name_offset +
-                            offsetof(FILE_LAYOUT_NAME_ENTRY, FileName),
-                        name.FileNameLength)};
-                    object.paths.push_back(
-                        path.relative_path().native());
-                }
-                if (name.NextNameOffset == 0) {
-                    break;
-                }
-                name_offset += name.NextNameOffset;
+        auto workers = std::vector<std::future<void>>{};
+        workers.reserve(kVerificationWorkerCount);
+        try {
+            for (auto index = 0uz;
+                index < kVerificationWorkerCount; ++index) {
+                workers.push_back(std::async(
+                    std::launch::async,
+                    [this] { Worker(); }));
             }
+        } catch (...) {
+            Fail(std::current_exception());
+        }
+        for (auto &worker : workers) {
+            worker.get();
         }
 
-        if (file.FirstStreamOffset != 0) {
-            auto stream_offset = file_offset + file.FirstStreamOffset;
-            while (true) {
-                const auto stream = LayoutEntryAt<STREAM_LAYOUT_ENTRY,
-                    offsetof(STREAM_LAYOUT_ENTRY, StreamIdentifier)>(
-                        buffer, stream_offset);
-                if (stream.AttributeTypeCode ==
-                    kNtfsDataAttributeType) {
-                    auto name = LayoutString(
-                        buffer,
-                        stream_offset + offsetof(
-                            STREAM_LAYOUT_ENTRY, StreamIdentifier),
-                        stream.StreamIdentifierLength);
-                    if (name == L"::$DATA") {
-                        name.clear();
-                    }
-                    object.streams.push_back({
-                        .name = std::move(name),
-                        .length = stream.EndOfFile.QuadPart,
-                    });
-                }
-                if (stream.NextStreamOffset == 0) {
-                    break;
-                }
-                stream_offset += stream.NextStreamOffset;
-            }
+        if (failure_) {
+            std::rethrow_exception(failure_);
         }
+        if (internal::CancellationRequested(cancellation_event_)) {
+            return std::nullopt;
+        }
+
         std::ranges::sort(
-            object.streams, {}, &StreamRecord::name);
-        objects.push_back(std::move(object));
+            inventory_.objects, {}, &ObjectRecord::relative_path);
+        std::ranges::sort(inventory_.issues);
+        std::ranges::sort(inventory_.incomplete_directories);
+        return std::move(inventory_);
+    }
 
-        if (file.NextFileOffset != 0) {
-            file_offset += file.NextFileOffset;
+  private:
+    [[nodiscard]] auto Cancelled() const {
+        return internal::CancellationRequested(cancellation_event_);
+    }
+
+    auto Queue(std::vector<TraversalTask> tasks) -> void {
+        if (tasks.empty()) {
+            return;
+        }
+        const auto count = tasks.size();
+        {
+            const auto lock = std::scoped_lock{mutex_};
+            if (Cancelled() || failure_) {
+                return;
+            }
+            pending_.insert(
+                pending_.end(),
+                std::make_move_iterator(tasks.begin()),
+                std::make_move_iterator(tasks.end()));
+            state_.RecordTraversalTasks(endpoint_, count);
+        }
+        ready_.notify_all();
+    }
+
+    [[nodiscard]] auto Take() -> std::optional<TraversalTask> {
+        auto lock = std::unique_lock{mutex_};
+        while (true) {
+            if (Cancelled() || failure_) {
+                return std::nullopt;
+            }
+            if (!pending_.empty()) {
+                auto result = std::move(pending_.front());
+                pending_.pop_front();
+                ++active_;
+                return result;
+            }
+            if (active_ == 0) {
+                return std::nullopt;
+            }
+            // A 100-ms poll keeps Ctrl+C responsive while workers wait for a
+            // directory to discover more work, without busy-waiting.
+            constexpr auto cancellation_poll = 100ms;
+            ready_.wait_for(lock, cancellation_poll);
         }
     }
-    return true;
-}
 
-[[nodiscard]] auto IsInExcludedSubtree(
-    const std::wstring_view path,
-    const std::vector<std::wstring> &prefixes) {
-    const auto found = std::ranges::upper_bound(prefixes, path);
-    return (found != prefixes.begin()) &&
-        path.starts_with(*std::prev(found));
-}
+    auto Complete() -> void {
+        {
+            const auto lock = std::scoped_lock{mutex_};
+            --active_;
+        }
+        state_.RecordTraversalTaskCompleted(endpoint_);
+        ready_.notify_all();
+    }
 
-[[nodiscard]] auto HasKnownOrdinaryDirectoryAncestors(
-    const std::wstring_view path,
-    const std::vector<std::wstring> &directories) {
-    for (auto separator = path.find(L'\\');
-        separator != std::wstring_view::npos;
-        separator = path.find(L'\\', separator + 1)) {
-        const auto ancestor = path.substr(0, separator);
-        if (!std::ranges::binary_search(directories, ancestor)) {
+    auto Fail(std::exception_ptr failure) -> void {
+        {
+            const auto lock = std::scoped_lock{mutex_};
+            if (!failure_) {
+                failure_ = std::move(failure);
+            }
+        }
+        ready_.notify_all();
+    }
+
+    auto Worker() -> void {
+        try {
+            const auto registration =
+                io_cancellation_.RegisterCurrentThread();
+            while (auto task = Take()) {
+                if (!Process(std::move(*task))) {
+                    return;
+                }
+                Complete();
+            }
+        } catch (...) {
+            Fail(std::current_exception());
+        }
+    }
+
+    [[nodiscard]] auto CachedStreams(
+        const std::optional<FileIdentity> identity)
+        -> std::optional<std::vector<StreamRecord>> {
+        if (!identity || (*identity == 0)) {
+            return std::nullopt;
+        }
+        const auto lock = std::scoped_lock{mutex_};
+        const auto found = streams_by_identity_.find(*identity);
+        if (found == streams_by_identity_.end()) {
+            return std::nullopt;
+        }
+        return inventory_.objects[found->second].streams;
+    }
+
+    auto Commit(ObjectRecord object) -> void {
+        const auto stream_count = object.streams.size();
+        const auto stream_bytes = std::accumulate(
+            object.streams.begin(), object.streams.end(), std::uint64_t{},
+            [](const std::uint64_t total, const StreamRecord &stream) {
+                return stream.length > 0
+                    ? SaturatingSum(total,
+                        wil::safe_cast_failfast<std::uint64_t>(
+                            stream.length))
+                    : total;
+            });
+        {
+            const auto lock = std::scoped_lock{mutex_};
+            const auto index = inventory_.objects.size();
+            inventory_.objects.push_back(std::move(object));
+            const auto &committed = inventory_.objects[index];
+            if (committed.streams_complete &&
+                (committed.kind != ObjectKind::Directory) &&
+                (committed.identity != 0)) {
+                streams_by_identity_.try_emplace(
+                    committed.identity, index);
+            }
+        }
+        state_.RecordInventory(
+            endpoint_, stream_count, stream_bytes);
+    }
+
+    auto RecordIssue(
+        const std::wstring &path,
+        const FilesystemOperation operation,
+        const OperationFailure failure,
+        const bool incomplete_directory = false) -> void {
+        {
+            const auto lock = std::scoped_lock{mutex_};
+            inventory_.issues.push_back({
+                .key = {
+                    .path = path,
+                    .operation = operation,
+                },
+                .failure = failure,
+            });
+            if (incomplete_directory) {
+                inventory_.incomplete_directories.push_back(path);
+            }
+        }
+        state_.RecordInventoryFailure(endpoint_);
+    }
+
+    [[nodiscard]] auto Process(TraversalTask task) -> bool {
+        if (Cancelled()) {
             return false;
         }
+        auto object = ObjectRecord{
+            .relative_path = std::move(task.relative_path),
+            .kind = task.kind,
+            .identity = task.identity.value_or(0),
+        };
+        auto handle = TryOpenFilesystemObject(
+            ObjectPath(inventory_, object.relative_path));
+        if (Cancelled()) {
+            return false;
+        }
+        if (!handle) {
+            RecordIssue(object.relative_path,
+                FilesystemOperation::OpenObject, handle.error(),
+                object.kind == ObjectKind::Directory);
+            const auto directory =
+                object.kind == ObjectKind::Directory;
+            Commit(std::move(object));
+            if (directory) {
+                state_.RecordDirectory(endpoint_);
+            }
+            return true;
+        }
+
+        if ((object.kind != ObjectKind::Directory) &&
+            task.identity) {
+            if (auto cached = CachedStreams(task.identity)) {
+                object.streams = std::move(*cached);
+                object.streams_complete = true;
+                Commit(std::move(object));
+                return true;
+            }
+        }
+
+        auto streams = QueryObjectStreams(handle->get());
+        if (Cancelled()) {
+            return false;
+        }
+        if (streams) {
+            object.streams = std::move(*streams);
+            object.streams_complete = true;
+        } else {
+            RecordIssue(object.relative_path,
+                FilesystemOperation::QueryStreams,
+                streams.error());
+        }
+        const auto directory =
+            object.kind == ObjectKind::Directory;
+        const auto relative_path = object.relative_path;
+        Commit(std::move(object));
+        if (!directory) {
+            return true;
+        }
+        if (!EnumerateDirectory(handle->get(), relative_path)) {
+            return false;
+        }
+        state_.RecordDirectory(endpoint_);
+        return true;
     }
-    return true;
-}
+
+    [[nodiscard]] auto EnumerateDirectory(
+        const HANDLE directory,
+        const std::wstring &relative_path) -> bool {
+        while (true) {
+            if (Cancelled()) {
+                return false;
+            }
+            auto entries = wistd::unique_ptr<FILE_ID_BOTH_DIR_INFO>{};
+            const auto query =
+                wil::GetFileInfoNoThrow<FileIdBothDirectoryInfo>(
+                    directory, entries);
+            if (Cancelled()) {
+                return false;
+            }
+            if (FAILED(query)) {
+                RecordIssue(relative_path,
+                    FilesystemOperation::QueryDirectory,
+                    OperationFailure{
+                        ExplicitWin32Error::FromHresult(query).value},
+                    true);
+                return true;
+            }
+            if (!entries) {
+                return true;
+            }
+
+            auto children = std::vector<TraversalTask>{};
+            for (const auto &entry :
+                wil::create_next_entry_offset_iterator(entries.get())) {
+                if (Cancelled()) {
+                    return false;
+                }
+                const auto name = std::wstring_view{
+                    entry.FileName,
+                    entry.FileNameLength /
+                        sizeof(std::wstring_view::value_type),
+                };
+                if ((name == L".") || (name == L"..")) {
+                    continue;
+                }
+                static_assert(
+                    sizeof(FileIdentity) ==
+                    sizeof(entry.FileId.QuadPart));
+                children.push_back({
+                    .relative_path = ChildPath(relative_path, name),
+                    .kind = ClassifyObject(entry.FileAttributes),
+                    .identity = std::bit_cast<FileIdentity>(
+                        entry.FileId.QuadPart),
+                });
+            }
+            if (Cancelled()) {
+                return false;
+            }
+            Queue(std::move(children));
+        }
+    }
+
+    VerificationEndpoint endpoint_;
+    HANDLE cancellation_event_;
+    SynchronousIoCancellation &io_cancellation_;
+    VerificationState &state_;
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    std::deque<TraversalTask> pending_;
+    std::size_t active_ = 0;
+    std::exception_ptr failure_;
+    FilesystemInventory inventory_;
+    std::map<FileIdentity, std::size_t> streams_by_identity_;
+};
 
 [[nodiscard]] auto InventoryFilesystem(
     const std::wstring_view root,
     const VerificationEndpoint endpoint,
-    const std::string_view endpoint_name,
     const HANDLE cancellation_event,
-    VerificationState &state)
-    -> std::optional<FilesystemInventory> {
-    auto volume_path = std::wstring{root};
-    volume_path.pop_back();
-    auto volume = wil::unique_hfile{CreateFileW(
-        volume_path.c_str(), GENERIC_READ, kShareMode, nullptr,
-        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
-    if (!volume) {
-        WinError("could not open the {} volume for filesystem inventory",
-            endpoint_name);
+    SynchronousIoCancellation &io_cancellation,
+    VerificationState &state) {
+    return FilesystemTraverser{
+        root, endpoint, cancellation_event,
+        io_cancellation, state}.Run();
+}
+
+struct InventoryFailures {
+    std::optional<OperationFailure> open;
+    std::optional<OperationFailure> streams;
+    std::optional<OperationFailure> directory;
+};
+
+[[nodiscard]] auto FailuresForObject(
+    const std::vector<InventoryIssue> &issues,
+    std::size_t &cursor,
+    const std::wstring_view path) noexcept {
+    while ((cursor < issues.size()) &&
+        (issues[cursor].key.path < path)) {
+        ++cursor;
     }
 
-    auto query = QUERY_FILE_LAYOUT_INPUT{
-        .FilterEntryCount = 0,
-        .Flags = QUERY_FILE_LAYOUT_RESTART |
-            QUERY_FILE_LAYOUT_INCLUDE_NAMES |
-            QUERY_FILE_LAYOUT_INCLUDE_STREAMS |
-            QUERY_FILE_LAYOUT_INCLUDE_STREAMS_WITH_NO_CLUSTERS_ALLOCATED |
-            QUERY_FILE_LAYOUT_INCLUDE_FULL_PATH_IN_NAMES,
-        .FilterType = QUERY_FILE_LAYOUT_FILTER_TYPE_NONE,
-    };
-    static_assert(
-        (std::numeric_limits<std::size_t>::max() / 2) >=
-        std::numeric_limits<DWORD>::max());
-    [[gsl::suppress("26493",
-        justification:
-            "Braced initialization proves this construction safe at compile time.")]]
-    constexpr auto kMaximumBufferSize =
-        std::size_t{std::numeric_limits<DWORD>::max()};
-    auto storage = std::vector<std::byte>(kLayoutQueryBatchSize);
-    auto objects = std::vector<LayoutObject>{};
-    auto best_partial_objects = std::vector<LayoutObject>{};
-    auto best_partial_error = DWORD{};
-    auto retry_deadline =
-        std::optional<std::chrono::steady_clock::time_point>{};
-    auto layout_failure = std::optional<OperationFailure>{};
-
-    while (true) {
-        if (internal::CancellationRequested(cancellation_event)) {
-            return std::nullopt;
-        }
-        const auto buffer = std::span{storage};
-        // The buffer is capped by the DWORD-sized DeviceIoControl parameter.
-        const auto buffer_size_for_api =
-            wil::safe_cast_failfast<DWORD>(buffer.size());
-        auto returned = DWORD{};
-        if (DeviceIoControl(volume.get(), FSCTL_QUERY_FILE_LAYOUT,
-                &query, sizeof(query), buffer.data(), buffer_size_for_api,
-                &returned, nullptr)) {
-            if (!AppendLayoutBatch(
-                    buffer.first(returned), objects,
-                    cancellation_event)) {
-                return std::nullopt;
-            }
-            state.SetLayoutEntries(endpoint, objects.size());
-            query.Flags &= ~DWORD{QUERY_FILE_LAYOUT_RESTART};
-            continue;
-        }
-        const auto error = GetLastError();
-        if (IsCancellationError(error) &&
-            internal::CancellationRequested(cancellation_event)) {
-            return std::nullopt;
-        }
-        if (error == ERROR_HANDLE_EOF) {
+    auto result = InventoryFailures{};
+    while ((cursor < issues.size()) &&
+        (issues[cursor].key.path == path)) {
+        const auto &issue = issues[cursor++];
+        switch (issue.key.operation) {
+        case FilesystemOperation::OpenObject:
+            result.open = issue.failure;
             break;
-        }
-        if ((error == ERROR_INSUFFICIENT_BUFFER) &&
-            (storage.size() != kMaximumBufferSize)) {
-            storage.resize(std::min(
-                kMaximumBufferSize, storage.size() * 2));
-            continue;
-        }
-        const auto now = std::chrono::steady_clock::now();
-        if (!retry_deadline) {
-            constexpr auto retry_period = 10s;
-            retry_deadline = now + retry_period;
-            devicefs::WriteToStream(std::cout,
-                "The {} filesystem layout query returned Windows error {}; "
-                "restarting it.\n",
-                endpoint_name, error);
-        }
-        if (now < *retry_deadline) {
-            constexpr auto retry_interval = 100ms;
-            const auto wait = WaitForSingleObject(
-                cancellation_event,
-                wil::safe_cast_failfast<DWORD>(
-                    retry_interval.count()));
-            if (wait == WAIT_FAILED) {
-                WinError(
-                    "could not wait for the {} filesystem layout",
-                    endpoint_name);
-            }
-            if (wait == WAIT_OBJECT_0) {
-                return std::nullopt;
-            }
-            // The failed call returned no usable continuation result.
-            if (objects.size() > best_partial_objects.size()) {
-                objects.swap(best_partial_objects);
-                best_partial_error = error;
-            }
-            objects.clear();
-            state.SetLayoutEntries(endpoint, 0);
-            query.Flags |= DWORD{QUERY_FILE_LAYOUT_RESTART};
-            continue;
-        }
-        layout_failure = OperationFailure{error};
-        break;
-    }
-
-    if (layout_failure) {
-        if (objects.size() < best_partial_objects.size()) {
-            objects.swap(best_partial_objects);
-            layout_failure = OperationFailure{best_partial_error};
-        }
-        state.SetLayoutEntries(endpoint, objects.size());
-        devicefs::WriteToStream(std::cout,
-            "The {} filesystem layout query ended with Windows error {}; "
-            "retaining its largest completed attempt of {} entries.\n",
-            endpoint_name, layout_failure->error, objects.size());
-    }
-    best_partial_objects = std::vector<LayoutObject>{};
-
-    auto known_ordinary_directories = std::vector<std::wstring>{};
-    if (layout_failure) {
-        for (const auto &object : objects) {
-            const auto segment = MftSegmentNumber(object.identity);
-            if ((object.kind == ObjectKind::Directory) &&
-                ((segment >= kFirstOrdinaryNtfsSegmentNumber) ||
-                    (segment == kNtfsRootSegmentNumber))) {
-                known_ordinary_directories.append_range(object.paths);
-            }
-        }
-        std::ranges::sort(known_ordinary_directories);
-    }
-
-    auto excluded_subtree_prefixes = std::vector<std::wstring>{};
-    for (const auto &object : objects) {
-        if (internal::CancellationRequested(cancellation_event)) {
-            return std::nullopt;
-        }
-        const auto segment = MftSegmentNumber(object.identity);
-        const auto reserved =
-            (segment < kFirstOrdinaryNtfsSegmentNumber) &&
-            (segment != kNtfsRootSegmentNumber);
-        if (reserved ||
-            (object.kind == ObjectKind::DirectoryReparsePoint)) {
-            for (const auto &path : object.paths) {
-                auto prefix = path;
-                prefix.push_back(L'\\');
-                excluded_subtree_prefixes.push_back(
-                    std::move(prefix));
-            }
+        case FilesystemOperation::QueryStreams:
+            result.streams = issue.failure;
+            break;
+        case FilesystemOperation::QueryDirectory:
+            result.directory = issue.failure;
+            break;
+        case FilesystemOperation::OpenStream:
+        case FilesystemOperation::SeekStream:
+        case FilesystemOperation::ReadStream:
+            std::unreachable();
         }
     }
-    std::ranges::sort(excluded_subtree_prefixes);
-    auto minimal_prefixes = std::vector<std::wstring>{};
-    for (auto &prefix : excluded_subtree_prefixes) {
-        // With a trailing separator, a nested prefix sorts contiguously
-        // after its ancestor and adds no excluded paths.
-        if (minimal_prefixes.empty() ||
-            !prefix.starts_with(minimal_prefixes.back())) {
-            minimal_prefixes.push_back(std::move(prefix));
-        }
-    }
-    excluded_subtree_prefixes = std::move(minimal_prefixes);
-
-    auto result = FilesystemInventory{
-        .root = std::filesystem::path{root},
-        .layout_failure = layout_failure,
-    };
-    for (auto &object : objects) {
-        if (internal::CancellationRequested(cancellation_event)) {
-            return std::nullopt;
-        }
-        const auto segment = MftSegmentNumber(object.identity);
-        if ((segment < kFirstOrdinaryNtfsSegmentNumber) &&
-            (segment != kNtfsRootSegmentNumber)) {
-            continue;
-        }
-        for (auto &path : object.paths) {
-            // A partial layout can end before an ancestor's entry. Do not open
-            // a path unless the returned prefix proves that every ancestor is
-            // an ordinary directory rather than an unseen reparse point.
-            if (layout_failure &&
-                !HasKnownOrdinaryDirectoryAncestors(
-                    path, known_ordinary_directories)) {
-                continue;
-            }
-            if (IsInExcludedSubtree(
-                    path, excluded_subtree_prefixes)) {
-                continue;
-            }
-            state.RecordInventory(endpoint, object.streams.size());
-            result.objects.push_back({
-                .relative_path = std::move(path),
-                .kind = object.kind,
-                .identity = object.identity,
-                .streams = object.streams,
-            });
-        }
-    }
-    std::ranges::sort(
-        result.objects, {}, &ObjectRecord::relative_path);
     return result;
 }
 
-[[nodiscard]] auto InventoryStreamCount(
-    const FilesystemInventory &inventory) noexcept {
-    return std::transform_reduce(
-        inventory.objects.begin(), inventory.objects.end(),
-        std::size_t{}, std::plus{},
-        [](const ObjectRecord &object) noexcept {
-            return object.streams.size();
-        });
-}
-
-// FSCTL_QUERY_FILE_LAYOUT makes whole-volume inventory practical, but it has
-// produced contradictory records in repeated observations of the same mounted
-// filesystem. Its disagreements are candidates until ordinary path operations
-// below confirm the object and its complete stream list on both views.
-[[nodiscard]] auto InventoryDiscrepancyPaths(
-    const FilesystemInventory &synthetic,
-    const FilesystemInventory &real) {
-    auto result = std::vector<std::wstring>{};
-    auto synthetic_object = 0uz;
-    auto real_object = 0uz;
-    const auto namespace_complete =
-        !synthetic.layout_failure && !real.layout_failure;
-    while ((synthetic_object < synthetic.objects.size()) ||
-        (real_object < real.objects.size())) {
-        const auto path = [&]() -> std::wstring_view {
-            if (synthetic_object == synthetic.objects.size()) {
-                return real.objects[real_object].relative_path;
-            }
-            if (real_object == real.objects.size()) {
-                return synthetic.objects[synthetic_object].relative_path;
-            }
-            return std::min(
-                std::wstring_view{synthetic.objects[
-                    synthetic_object].relative_path},
-                std::wstring_view{real.objects[
-                    real_object].relative_path});
-        }();
-
-        const auto synthetic_begin = synthetic_object;
-        while ((synthetic_object < synthetic.objects.size()) &&
-            (synthetic.objects[synthetic_object].relative_path == path)) {
-            ++synthetic_object;
-        }
-        const auto real_begin = real_object;
-        while ((real_object < real.objects.size()) &&
-            (real.objects[real_object].relative_path == path)) {
-            ++real_object;
-        }
-        const auto synthetic_count =
-            synthetic_object - synthetic_begin;
-        const auto real_count = real_object - real_begin;
-        const auto missing =
-            (synthetic_count == 0) || (real_count == 0);
-        const auto differs = missing
-            ? namespace_complete
-            : (synthetic_count != 1) || (real_count != 1) ||
-                (synthetic.objects[synthetic_begin].kind !=
-                    real.objects[real_begin].kind) ||
-                (synthetic.objects[synthetic_begin].streams !=
-                    real.objects[real_begin].streams);
-        if (differs) {
-            result.emplace_back(path);
-        }
-    }
-
-    return result;
-}
-
-auto RecordInspectionComparison(
+auto RecordInventoryOperationComparison(
+    VerificationState &state,
     const std::wstring &path,
-    const ObjectInspection &synthetic,
-    const ObjectInspection &real,
-    VerificationState &state) -> void {
-    if (synthetic && real) {
+    const FilesystemOperation operation,
+    const std::optional<OperationFailure> synthetic,
+    const std::optional<OperationFailure> real) -> void {
+    if (!synthetic && !real) {
         return;
     }
-    const auto operation = [&] {
-        if (synthetic) {
-            return real.error().operation;
-        }
-        if (real) {
-            return synthetic.error().operation;
-        }
-        // Object-inspection operations are declared in execution order. If
-        // the views fail at different stages, compare the earlier failure
-        // against the other view's success at that same stage.
-        return std::min(
-            synthetic.error().operation,
-            real.error().operation);
-    }();
-    const auto outcome = [operation](
-        const ObjectInspection &inspection)
-        -> std::optional<OperationFailure> {
-        if (inspection ||
-            (inspection.error().operation != operation)) {
-            return std::nullopt;
-        }
-        return inspection.error().failure;
-    };
     state.RecordOperationComparison({
         .path = path,
         .operation = operation,
-    }, 0, outcome(synthetic), outcome(real));
+    }, 0, synthetic, real);
 }
 
-[[gsl::suppress("26415", "26418",
-    justification:
-        "ObjectInspection is a value-or-error result, not an owning smart pointer; "
-        "the reference avoids copying its contained record.")]]
-[[nodiscard]] auto AvailableObjectInformation(
-    const ObjectInspection &inspection) noexcept
-    -> const ObjectRecord * {
-    if (inspection) {
-        return *inspection
-            ? std::addressof(**inspection) : nullptr;
-    }
-    const auto &partial = inspection.error().partial;
-    return partial ? std::addressof(*partial) : nullptr;
-}
-
-[[gsl::suppress("26415", "26418",
-    justification:
-        "ObjectInspection is a value-or-error result, not an owning smart pointer; "
-        "the reference avoids copying its contained record.")]]
-[[nodiscard]] auto IsConfirmedAbsent(
-    const ObjectInspection &inspection) noexcept {
-    return inspection && !*inspection;
-}
-
-[[gsl::suppress("26415", "26418",
-    justification:
-        "ObjectInspection is a value-or-error result, not an owning smart pointer; "
-        "the reference avoids copying its contained record.")]]
-[[nodiscard]] auto IsConfirmedPresent(
-    const ObjectInspection &inspection) noexcept {
-    if (inspection.has_value()) {
-        return inspection->has_value();
-    }
-    return inspection.error().partial.has_value() ||
-        inspection.error().exact_name_present;
-}
-
-[[nodiscard]] auto IsBarrierDescendant(
-    const std::wstring_view path,
-    const InventoryBarrier &barrier) noexcept {
-    return barrier.prefix.empty()
-        ? !path.empty() : path.starts_with(barrier.prefix);
-}
-
-[[nodiscard]] auto PruneInventoryBarriers(
-    FilesystemInventory &inventory,
-    const std::vector<InventoryBarrier> &barriers) {
-    auto comparison_surface_incomplete = false;
-    std::erase_if(inventory.objects,
-        [&](const ObjectRecord &object) {
-            const auto past_barrier = std::ranges::upper_bound(
-                barriers, object.relative_path, {},
-                &InventoryBarrier::prefix);
-            if (past_barrier == barriers.begin()) {
-                return false;
+[[nodiscard]] auto IsBelowIncompleteDirectory(
+    const FilesystemInventory &inventory,
+    const std::wstring_view path) {
+    return std::ranges::any_of(
+        inventory.incomplete_directories,
+        [path](const std::wstring &directory) {
+            if (directory.empty()) {
+                return !path.empty();
             }
-            const auto &barrier = *std::prev(past_barrier);
-            if (!IsBarrierDescendant(
-                    object.relative_path, barrier)) {
-                return false;
-            }
-            comparison_surface_incomplete |=
-                barrier.comparison_surface_incomplete;
-            return true;
+            return (path.size() > directory.size()) &&
+                path.starts_with(directory) &&
+                (path[directory.size()] == L'\\');
         });
-    return comparison_surface_incomplete;
 }
 
-auto ApplyInventoryReconciliations(
-    FilesystemInventory &inventory,
-    std::vector<InventoryReconciliation> &reconciliations,
-    std::optional<ObjectRecord> InventoryReconciliation::*const
-        replacement) -> void {
-    auto objects = std::vector<ObjectRecord>{};
-    objects.reserve(
-        inventory.objects.size() + reconciliations.size());
-    auto object = 0uz;
-    for (auto &reconciliation : reconciliations) {
-        while ((object < inventory.objects.size()) &&
-            (inventory.objects[object].relative_path <
-                reconciliation.path)) {
-            objects.push_back(
-                std::move(inventory.objects[object++]));
-        }
-        while ((object < inventory.objects.size()) &&
-            (inventory.objects[object].relative_path ==
-                reconciliation.path)) {
-            ++object;
-        }
-        auto &confirmed = reconciliation.*replacement;
-        if (confirmed) {
-            objects.push_back(std::move(*confirmed));
-        }
-    }
-    objects.insert(
-        objects.end(),
-        std::make_move_iterator(inventory.objects.begin() + object),
-        std::make_move_iterator(inventory.objects.end()));
-    inventory.objects = std::move(objects);
-}
-
-[[nodiscard]] auto ConfirmInventoryDiscrepancies(
-    FilesystemInventory &synthetic,
-    FilesystemInventory &real,
-    const std::span<const std::wstring> paths,
-    const HANDLE cancellation_event,
-    VerificationState &state)
-    -> std::optional<InventoryConfirmation> {
-    if (paths.empty()) {
-        return InventoryConfirmation{};
-    }
-    auto confirmation = InventoryConfirmation{};
-    auto reconciliations = std::vector<InventoryReconciliation>{};
-    reconciliations.reserve(paths.size());
-    auto barriers = std::vector<InventoryBarrier>{};
-    auto synthetic_directories = DirectoryInspectionCache{};
-    auto real_directories = DirectoryInspectionCache{};
-    for (const auto &path : paths) {
-        if (internal::CancellationRequested(cancellation_event)) {
-            return std::nullopt;
-        }
-        const auto barrier = std::ranges::find_if(
-            barriers, [&](const InventoryBarrier &candidate) {
-                return path.starts_with(candidate.prefix);
-            });
-        if (barrier != barriers.end()) {
-            reconciliations.push_back({.path = path});
-            ++confirmation.suppressed_descendants;
-            confirmation.comparison_surface_incomplete |=
-                barrier->comparison_surface_incomplete;
-            state.RecordConfirmedCandidate();
-            continue;
-        }
-        auto synthetic_object =
-            TryInspectFilesystemObject(
-                synthetic, path, cancellation_event,
-                synthetic_directories);
-        if (internal::CancellationRequested(cancellation_event)) {
-            return std::nullopt;
-        }
-        auto real_object = TryInspectFilesystemObject(
-            real, path, cancellation_event, real_directories);
-        if (internal::CancellationRequested(cancellation_event)) {
-            return std::nullopt;
-        }
-        const auto *const synthetic_information =
-            AvailableObjectInformation(synthetic_object);
-        const auto *const real_information =
-            AvailableObjectInformation(real_object);
-        const auto missing_from_synthetic =
-            IsConfirmedAbsent(synthetic_object) &&
-            IsConfirmedPresent(real_object);
-        const auto missing_from_real =
-            IsConfirmedAbsent(real_object) &&
-            IsConfirmedPresent(synthetic_object);
-        if (missing_from_synthetic) {
-            state.RecordMismatch({
-                .kind = MismatchKind::ObjectMissingFromSynthetic,
-                .path = path,
-            });
-        }
-        if (missing_from_real) {
-            state.RecordMismatch({
-                .kind = MismatchKind::ObjectMissingFromReal,
-                .path = path,
-            });
-        }
-        const auto presence_mismatch =
-            missing_from_synthetic || missing_from_real;
-        if (!presence_mismatch &&
-            (!synthetic_object || !real_object) &&
-            synthetic_information && real_information &&
-            (synthetic_information->kind != real_information->kind)) {
-            state.RecordMismatch({
-                .kind = MismatchKind::ObjectType,
-                .path = path,
-                .synthetic_kind = synthetic_information->kind,
-                .real_kind = real_information->kind,
-            });
-        }
-        const auto ordinary_directory = [](const ObjectRecord *object) {
-            return object && (object->kind == ObjectKind::Directory);
-        };
-        if (!ordinary_directory(synthetic_information) ||
-            !ordinary_directory(real_information)) {
-            auto prefix = path;
-            if (!prefix.empty()) {
-                prefix.push_back(L'\\');
-            }
-            // The operation result still describes this object, but cannot
-            // establish the comparison surface beneath an ancestor whose
-            // kind and presence remain unresolved.
-            const auto resolved =
-                (synthetic_information && real_information) ||
-                (IsConfirmedAbsent(synthetic_object) &&
-                    IsConfirmedAbsent(real_object)) ||
-                presence_mismatch;
-            barriers.push_back({
-                .prefix = std::move(prefix),
-                .comparison_surface_incomplete =
-                    !IsVssExcludedPath(path) && !resolved,
-            });
-        }
-        if (!presence_mismatch) {
-            RecordInspectionComparison(
-                path, synthetic_object, real_object, state);
-        }
-        auto reconciliation = InventoryReconciliation{.path = path};
-        // A confirmed presence mismatch or paired operation outcome already
-        // owns the result. Retain neither disputed bulk record, so planning
-        // cannot produce a second conclusion from unconfirmed metadata.
-        if (presence_mismatch) {
-            ++confirmation.differing;
-        } else if (synthetic_object && real_object) {
-            auto &synthetic_observation = *synthetic_object;
-            auto &real_observation = *real_object;
-            if (synthetic_observation && real_observation) {
-                if ((synthetic_observation->kind ==
-                        real_observation->kind) &&
-                    (synthetic_observation->streams ==
-                        real_observation->streams)) {
-                    ++confirmation.matching;
-                } else {
-                    ++confirmation.differing;
-                }
-            } else if (!synthetic_observation && !real_observation) {
-                ++confirmation.matching;
-            } else {
-                ++confirmation.differing;
-            }
-            reconciliation.synthetic =
-                std::move(synthetic_observation);
-            reconciliation.real = std::move(real_observation);
-        } else {
-            ++confirmation.operation_outcomes;
-        }
-        reconciliations.push_back(std::move(reconciliation));
-        state.RecordConfirmedCandidate();
-    }
-    ApplyInventoryReconciliations(
-        synthetic, reconciliations,
-        &InventoryReconciliation::synthetic);
-    ApplyInventoryReconciliations(
-        real, reconciliations,
-        &InventoryReconciliation::real);
-    std::ranges::sort(
-        barriers, {}, &InventoryBarrier::prefix);
-    const auto synthetic_surface_incomplete =
-        PruneInventoryBarriers(synthetic, barriers);
-    const auto real_surface_incomplete =
-        PruneInventoryBarriers(real, barriers);
-    confirmation.comparison_surface_incomplete |=
-        synthetic_surface_incomplete || real_surface_incomplete;
-    state.SetInventory(
-        VerificationEndpoint::Synthetic,
-        synthetic.objects.size(), InventoryStreamCount(synthetic));
-    state.SetInventory(
-        VerificationEndpoint::Real,
-        real.objects.size(), InventoryStreamCount(real));
-    return confirmation;
+[[nodiscard]] auto ComparisonSurfaceIncomplete(
+    const FilesystemInventory &inventory) {
+    return std::ranges::any_of(
+        inventory.incomplete_directories,
+        [](const std::wstring &directory) {
+            return !IsVssExcludedPath(directory);
+        });
 }
 
 auto AddObjectMismatch(
@@ -2179,11 +1718,8 @@ auto AppendStreamTasks(
         std::bit_cast<std::array<std::uint32_t, 4>>(seed_identifier);
     auto seed = std::seed_seq{seed_parts.begin(), seed_parts.end()};
     auto random = std::mt19937_64{seed};
-    // A complete inventory compares the whole namespace. After a terminal
-    // layout-query error, only objects discovered on both sides establish a
-    // comparison surface. The percentage independently selects ordinary
-    // stream-content chunks, with B's snapshot ID making the sample repeatable
-    // for this run.
+    // The percentage independently selects ordinary stream-content chunks,
+    // with B's snapshot ID making the sample repeatable for this run.
     auto choose = std::bernoulli_distribution{percentage / 100.0};
     auto result = ComparisonPlan{};
     auto fallback = std::optional<ReadTask>{};
@@ -2208,16 +1744,10 @@ auto AppendStreamTasks(
         }
     };
     auto compared_identities = std::set<PairedFileIdentity>{};
-    const auto namespace_complete =
-        !synthetic.layout_failure && !real.layout_failure;
-    const auto add_missing_object = [&](const MismatchKind kind,
-        const ObjectRecord &object) {
-        if (namespace_complete) {
-            AddObjectMismatch(state, kind, object);
-        }
-    };
     auto synthetic_object = 0uz;
     auto real_object = 0uz;
+    auto synthetic_issue = 0uz;
+    auto real_issue = 0uz;
     while ((synthetic_object < synthetic.objects.size()) ||
         (real_object < real.objects.size())) {
         if (internal::CancellationRequested(cancellation_event)) {
@@ -2225,38 +1755,81 @@ auto AppendStreamTasks(
         }
         if (synthetic_object == synthetic.objects.size()) {
             const auto &entry = real.objects[real_object++];
-            add_missing_object(
-                MismatchKind::ObjectMissingFromSynthetic, entry);
+            if (!IsBelowIncompleteDirectory(
+                    synthetic, entry.relative_path)) {
+                AddObjectMismatch(state,
+                    MismatchKind::ObjectMissingFromSynthetic, entry);
+            }
             continue;
         }
         if (real_object == real.objects.size()) {
             const auto &entry = synthetic.objects[synthetic_object++];
-            add_missing_object(
-                MismatchKind::ObjectMissingFromReal, entry);
+            if (!IsBelowIncompleteDirectory(
+                    real, entry.relative_path)) {
+                AddObjectMismatch(state,
+                    MismatchKind::ObjectMissingFromReal, entry);
+            }
             continue;
         }
         const auto &synthetic_entry =
             synthetic.objects[synthetic_object];
         const auto &real_entry = real.objects[real_object];
         if (synthetic_entry.relative_path < real_entry.relative_path) {
-            add_missing_object(
-                MismatchKind::ObjectMissingFromReal, synthetic_entry);
+            if (!IsBelowIncompleteDirectory(
+                    real, synthetic_entry.relative_path)) {
+                AddObjectMismatch(state,
+                    MismatchKind::ObjectMissingFromReal,
+                    synthetic_entry);
+            }
             ++synthetic_object;
             continue;
         }
         if (real_entry.relative_path < synthetic_entry.relative_path) {
-            add_missing_object(
-                MismatchKind::ObjectMissingFromSynthetic, real_entry);
+            if (!IsBelowIncompleteDirectory(
+                    synthetic, real_entry.relative_path)) {
+                AddObjectMismatch(state,
+                    MismatchKind::ObjectMissingFromSynthetic,
+                    real_entry);
+            }
             ++real_object;
             continue;
         }
+        const auto synthetic_failures = FailuresForObject(
+            synthetic.issues, synthetic_issue,
+            synthetic_entry.relative_path);
+        const auto real_failures = FailuresForObject(
+            real.issues, real_issue, real_entry.relative_path);
+        RecordInventoryOperationComparison(state,
+            synthetic_entry.relative_path,
+            FilesystemOperation::OpenObject,
+            synthetic_failures.open, real_failures.open);
+        const auto both_opened =
+            !synthetic_failures.open && !real_failures.open;
+        if (both_opened) {
+            RecordInventoryOperationComparison(state,
+                synthetic_entry.relative_path,
+                FilesystemOperation::QueryStreams,
+                synthetic_failures.streams, real_failures.streams);
+            if ((synthetic_entry.kind == ObjectKind::Directory) &&
+                (real_entry.kind == ObjectKind::Directory)) {
+                RecordInventoryOperationComparison(state,
+                    synthetic_entry.relative_path,
+                    FilesystemOperation::QueryDirectory,
+                    synthetic_failures.directory,
+                    real_failures.directory);
+            }
+        }
         if (synthetic_entry.kind != real_entry.kind) {
             AddTypeMismatch(state, synthetic_entry, real_entry);
-        } else {
+        } else if (both_opened &&
+            synthetic_entry.streams_complete &&
+            real_entry.streams_complete) {
             // Hard-link names remain separate namespace entries, but equal
             // paired file identities expose the same streams and need only one
             // content comparison.
             const auto compare_contents =
+                (synthetic_entry.identity == 0) ||
+                (real_entry.identity == 0) ||
                 compared_identities.insert({
                     .synthetic = synthetic_entry.identity,
                     .real = real_entry.identity,
@@ -2565,78 +2138,70 @@ auto CompareAttachedFilesystems(
     if (internal::CancellationRequested(cancellation_event)) {
         return;
     }
-    const auto registration =
-        io_cancellation.RegisterCurrentThread();
     const auto volume_identifier =
         winrt::to_hstring(volume.volume_identifier);
+    state.BeginTraversal();
     devicefs::WriteToStream(
         std::cout,
-        L"\nBeginning synthetic filesystem inventory for volume {}.\n",
-        std::wstring_view{volume_identifier});
-    state.SetPhase(VerificationPhase::InventoryingSynthetic);
-    auto synthetic = InventoryFilesystem(
-        synthetic_attachment.Root(), VerificationEndpoint::Synthetic,
-        "synthetic", cancellation_event, state);
-    auto real = [&]() -> std::optional<FilesystemInventory> {
-        if (!synthetic || state.Failed() ||
-            internal::CancellationRequested(cancellation_event)) {
-            return std::nullopt;
-        }
+        L"\nBeginning concurrent filesystem traversal for volume {}.\n"
+        L"  Synthetic volume: {}\n"
+        L"  Real-B volume: {}\n"
+        L"  Traversal workers per view: {}\n",
+        std::wstring_view{volume_identifier},
+        synthetic_attachment.Root(), real_attachment.Root(),
+        kVerificationWorkerCount);
+
+    auto synthetic_operation = std::async(
+        std::launch::async,
+        [&] {
+            return InventoryFilesystem(
+                synthetic_attachment.Root(),
+                VerificationEndpoint::Synthetic,
+                cancellation_event, io_cancellation, state);
+        });
+    auto real_operation = std::async(
+        std::launch::async,
+        [&] {
+            return InventoryFilesystem(
+                real_attachment.Root(), VerificationEndpoint::Real,
+                cancellation_event, io_cancellation, state);
+        });
+    auto synthetic = synthetic_operation.get();
+    auto real = real_operation.get();
+    if (synthetic && real && !state.Failed() &&
+        !internal::CancellationRequested(cancellation_event)) {
+        state.CompleteTraversal();
+        const auto observation = state.Observe();
         devicefs::WriteToStream(std::cout,
-            L"Synthetic inventory finished for volume {}; "
-            L"beginning real-B inventory.\n",
-            std::wstring_view{volume_identifier});
-        state.SetPhase(VerificationPhase::InventoryingReal);
-        return InventoryFilesystem(
-            real_attachment.Root(), VerificationEndpoint::Real,
-            "real-B", cancellation_event, state);
-    }();
-    if (synthetic && real && !state.Failed()) {
-        const auto layouts_complete =
-            !synthetic->layout_failure && !real->layout_failure;
-        if (synthetic->layout_failure || real->layout_failure) {
-            state.RecordOperationComparison({
-                .operation = FilesystemOperation::QueryLayout,
-            }, 0, synthetic->layout_failure, real->layout_failure);
-        }
-        const auto discrepancy_paths =
-            InventoryDiscrepancyPaths(*synthetic, *real);
-        state.SetConfirmationCandidates(discrepancy_paths.size());
-        if (!discrepancy_paths.empty()) {
-            state.SetPhase(VerificationPhase::ConfirmingInventory);
-            devicefs::WriteToStream(std::cout,
-                L"Both inventories finished for volume {}; confirming "
-                L"{} bulk-inventory discrepancy candidate(s) through "
-                L"ordinary filesystem operations.\n",
-                std::wstring_view{volume_identifier},
-                discrepancy_paths.size());
-        }
-        const auto confirmation = ConfirmInventoryDiscrepancies(
-            *synthetic, *real, discrepancy_paths,
-            cancellation_event, state);
-        if (!confirmation) {
-            return;
-        }
-        if (!discrepancy_paths.empty()) {
-            devicefs::WriteToStream(std::cout,
-                L"Ordinary confirmation results for volume {}: {} "
-                L"candidate path(s) agreed; {} still differed; {} "
-                L"produced filesystem-operation outcomes; {} descendant "
-                L"candidate path(s) were skipped because their disputed "
-                L"ancestor could not be traversed on both views.\n",
-                std::wstring_view{volume_identifier},
-                confirmation->matching,
-                confirmation->differing,
-                confirmation->operation_outcomes,
-                confirmation->suppressed_descendants);
-            if (confirmation->comparison_surface_incomplete) {
-                devicefs::WriteToStream(std::cout,
-                    "  At least one skipped descendant remained outside "
-                    "the ordinary comparison surface because its disputed "
-                    "ancestor failed identically before its object type "
-                    "could be established.\n");
-            }
-        }
+            L"Filesystem traversal finished for volume {}.\n"
+            L"  Synthetic: {} directories, {} object(s), {} "
+            L"stream(s), {}{} logical stream byte(s) observed, "
+            L"{} operation failure(s)\n"
+            L"  Real B: {} directories, {} object(s), {} "
+            L"stream(s), {}{} logical stream byte(s) observed, "
+            L"{} operation failure(s)\n",
+            std::wstring_view{volume_identifier},
+            observation.synthetic.directories,
+            observation.synthetic.objects,
+            observation.synthetic.streams,
+            observation.synthetic.stream_bytes ==
+                std::numeric_limits<std::uint64_t>::max()
+                ? std::wstring_view{L"at least "}
+                : std::wstring_view{},
+            observation.synthetic.stream_bytes,
+            observation.synthetic.failures,
+            observation.real.directories,
+            observation.real.objects,
+            observation.real.streams,
+            observation.real.stream_bytes ==
+                std::numeric_limits<std::uint64_t>::max()
+                ? std::wstring_view{L"at least "}
+                : std::wstring_view{},
+            observation.real.stream_bytes,
+            observation.real.failures);
+        const auto comparison_surface_incomplete =
+            ComparisonSurfaceIncomplete(*synthetic) ||
+            ComparisonSurfaceIncomplete(*real);
         state.SetPhase(VerificationPhase::Planning);
         devicefs::WriteToStream(std::cout,
             L"Filesystem inventories are ready for volume {}; "
@@ -2654,20 +2219,13 @@ auto CompareAttachedFilesystems(
             if (RunComparisonWorkers(
                     *plan, *synthetic, *real,
                     cancellation_event, io_cancellation, state)) {
-                if (layouts_complete) {
-                    if (confirmation->comparison_surface_incomplete) {
-                        state.Fail(
-                            "ordinary confirmation could not establish "
-                            "the complete comparison surface beneath at "
-                            "least one disputed ancestor");
-                    } else {
-                        state.CompleteComparison();
-                    }
-                } else {
+                if (comparison_surface_incomplete) {
                     state.Fail(
-                        "at least one filesystem layout query did not "
-                        "complete; only the common discovered objects could "
-                        "be compared");
+                        "ordinary filesystem traversal could not observe "
+                        "the complete namespace beneath at least one "
+                        "directory");
+                } else {
+                    state.CompleteComparison();
                 }
             }
         }
@@ -2741,12 +2299,8 @@ struct VolumeJob {
         return "attaching the synthetic VHDX";
     case VerificationPhase::AttachingReal:
         return "attaching the real-B VHDX";
-    case VerificationPhase::InventoryingSynthetic:
-        return "inventorying the synthetic filesystem";
-    case VerificationPhase::InventoryingReal:
-        return "inventorying the real-B filesystem";
-    case VerificationPhase::ConfirmingInventory:
-        return "confirming bulk-inventory discrepancies";
+    case VerificationPhase::Traversing:
+        return "traversing both filesystems";
     case VerificationPhase::Planning:
         return "preparing content comparisons";
     case VerificationPhase::Comparing:
@@ -2782,16 +2336,10 @@ struct VolumeJob {
 [[nodiscard]] auto OperationName(
     const FilesystemOperation operation) noexcept -> std::string_view {
     switch (operation) {
-    case FilesystemOperation::QueryLayout:
-        return "query filesystem layout";
-    case FilesystemOperation::OpenParentDirectory:
-        return "open parent directory";
     case FilesystemOperation::QueryDirectory:
-        return "query parent directory";
+        return "enumerate directory";
     case FilesystemOperation::OpenObject:
         return "open object";
-    case FilesystemOperation::QueryObject:
-        return "query object information";
     case FilesystemOperation::QueryStreams:
         return "enumerate object streams";
     case FilesystemOperation::OpenStream:
@@ -2838,10 +2386,6 @@ auto PrintOperationComparison(
     if (matched) {
         devicefs::WriteToStream(
             output, "\nMatched filesystem error:\n");
-    } else if (comparison.key.operation ==
-        FilesystemOperation::QueryLayout) {
-        devicefs::WriteToStream(
-            output, "\nFilesystem inventory outcome difference:\n");
     } else if (IsVssExcludedDifference(comparison)) {
         devicefs::WriteToStream(output,
             "\nIdentified difference in object known to be excluded "
@@ -2853,10 +2397,8 @@ auto PrintOperationComparison(
     devicefs::WriteToStream(output,
         L"  Volume ID: {}\n",
         std::wstring_view{identifier});
-    if (comparison.key.operation != FilesystemOperation::QueryLayout) {
-        devicefs::WriteToStream(output,
-            L"  Object: {}\n", DisplayPath(comparison.key.path));
-    }
+    devicefs::WriteToStream(output,
+        L"  Object: {}\n", DisplayPath(comparison.key.path));
     if (!comparison.key.stream.empty() ||
         (comparison.key.operation == FilesystemOperation::OpenStream) ||
         (comparison.key.operation == FilesystemOperation::SeekStream) ||
@@ -2984,6 +2526,41 @@ auto PrintNewMismatches(
             static_cast<double>(total)) * 100.0;
 }
 
+auto PrintTraversalProgress(
+    std::ostream &output,
+    const std::string_view name,
+    const InventoryObservation &inventory,
+    const double elapsed_seconds) noexcept -> void {
+    const auto not_completed =
+        inventory.tasks_discovered > inventory.tasks_completed
+        ? inventory.tasks_discovered - inventory.tasks_completed
+        : 0;
+    const auto stream_bytes_prefix =
+        SaturationPrefix(inventory.stream_bytes);
+    devicefs::WriteToStream(output,
+        "    {}: {} directories, {} object(s), {} stream(s), "
+        "{}{} logical stream byte(s) observed; "
+        "{} work item(s) not completed; "
+        "{} operation failure(s)\n",
+        name, inventory.directories, inventory.objects,
+        inventory.streams, stream_bytes_prefix,
+        inventory.stream_bytes,
+        not_completed, inventory.failures);
+    if ((elapsed_seconds > 0.0) && (not_completed != 0)) {
+        devicefs::WriteToStream(output,
+            "      Average traversal rate: {:.2f} directories/s, "
+            "{:.2f} object(s)/s, {}{:.2f} logical stream MiB "
+            "observed/s\n",
+            static_cast<double>(inventory.directories) /
+                elapsed_seconds,
+            static_cast<double>(inventory.objects) /
+                elapsed_seconds,
+            stream_bytes_prefix,
+            static_cast<double>(inventory.stream_bytes) /
+                (1024.0 * 1024.0 * elapsed_seconds));
+    }
+}
+
 auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     devicefs::WriteToStream(
         std::cout, "\nFilesystem verification progress:\n");
@@ -2995,26 +2572,27 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             L"  Volume ID: {}\n",
             std::wstring_view{identifier});
         devicefs::WriteToStream(std::cout,
-            "    Phase: {}\n"
-            "    Layout entries received: synthetic {}; real B {}\n"
-            "    Namespace inventory: synthetic {} object(s), {} "
-            "stream(s); real B {} object(s), {} stream(s)\n",
-            PhaseName(observation.phase),
-            observation.synthetic_layout_entries,
-            observation.real_layout_entries,
-            observation.synthetic_objects,
-            observation.synthetic_streams,
-            observation.real_objects,
-            observation.real_streams);
-        if (observation.phase ==
-            VerificationPhase::ConfirmingInventory) {
+            "    Phase: {}\n",
+            PhaseName(observation.phase));
+        if (observation.traversal_started) {
             devicefs::WriteToStream(std::cout,
-                "    Bulk-inventory candidates confirmed: {} of {} "
-                "({:.2f}%)\n",
-                observation.confirmed_candidates,
-                observation.confirmation_candidates,
-                Percentage(observation.confirmed_candidates,
-                    observation.confirmation_candidates));
+                "    Namespace traversal:\n");
+            const auto traversal_seconds =
+                std::chrono::duration<double>(
+                std::chrono::steady_clock::now() -
+                    *observation.traversal_started).count();
+            PrintTraversalProgress(std::cout, "Synthetic",
+                observation.synthetic,
+                observation.traversal_complete
+                    ? 0.0 : traversal_seconds);
+            PrintTraversalProgress(std::cout, "Real B",
+                observation.real,
+                observation.traversal_complete
+                    ? 0.0 : traversal_seconds);
+            if (observation.traversal_complete) {
+                devicefs::WriteToStream(std::cout,
+                    "    Namespace traversal completed on both views.\n");
+            }
         }
         if (observation.plan_ready) {
             devicefs::WriteToStream(std::cout,
@@ -3132,28 +2710,45 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                 "    Status: VERIFIED\n");
         }
         devicefs::WriteToStream(std::cout,
-            "    Layout entries received: synthetic {}; real B {}\n"
-            "    Namespace: synthetic {} object(s), {} stream(s); "
-            "real B {} object(s), {} stream(s)\n"
-            "    Content available: {} bytes\n"
-            "    Content selected: {} bytes ({:.2f}%)\n"
-            "    Content compared: {} bytes ({:.2f}% of selection)\n"
+            "    Synthetic namespace: {} directories, {} object(s), "
+            "{} stream(s), {}{} logical stream byte(s) observed, "
+            "{} operation failure(s)\n"
+            "    Real-B namespace: {} directories, {} object(s), "
+            "{} stream(s), {}{} logical stream byte(s) observed, "
+            "{} operation failure(s)\n",
+            observation.synthetic.directories,
+            observation.synthetic.objects,
+            observation.synthetic.streams,
+            SaturationPrefix(observation.synthetic.stream_bytes),
+            observation.synthetic.stream_bytes,
+            observation.synthetic.failures,
+            observation.real.directories,
+            observation.real.objects,
+            observation.real.streams,
+            SaturationPrefix(observation.real.stream_bytes),
+            observation.real.stream_bytes,
+            observation.real.failures);
+        if (observation.plan_ready) {
+            devicefs::WriteToStream(std::cout,
+                "    Content available: {} bytes\n"
+                "    Content selected: {} bytes ({:.2f}%)\n"
+                "    Content compared: {} bytes "
+                "({:.2f}% of selection)\n",
+                observation.available_bytes,
+                observation.selected_bytes,
+                Percentage(observation.selected_bytes,
+                    observation.available_bytes),
+                observation.compared_bytes,
+                Percentage(observation.compared_bytes,
+                    observation.selected_bytes));
+        } else {
+            devicefs::WriteToStream(std::cout,
+                "    Content comparison was not reached.\n");
+        }
+        devicefs::WriteToStream(std::cout,
             "    Mismatches: {}\n"
             "    VSS exclusions: {}\n"
             "    Matched filesystem errors: {}\n",
-            observation.synthetic_layout_entries,
-            observation.real_layout_entries,
-            observation.synthetic_objects,
-            observation.synthetic_streams,
-            observation.real_objects,
-            observation.real_streams,
-            observation.available_bytes,
-            observation.selected_bytes,
-            Percentage(observation.selected_bytes,
-                observation.available_bytes),
-            observation.compared_bytes,
-            Percentage(observation.compared_bytes,
-                observation.selected_bytes),
             observation.mismatch_count,
             observation.exclusion_count,
             observation.matched_error_count);
@@ -3278,31 +2873,34 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                         vhdx_path, "requested device",
                         cancellation_event,
                         virtual_disk_lock, io_cancellation);
-                    state.SetPhase(
-                        VerificationPhase::InventoryingSynthetic);
+                    state.BeginTraversal();
                     devicefs::WriteToStream(
                         std::cout,
                         L"\nBeginning VHDX filesystem inventory:\n"
                         L"  Source device: {}\n"
                         L"  VHDX file: {}\n"
-                        L"  Attached volume: {}\n",
-                        device, vhdx_path.native(), view.Root());
+                        L"  Attached volume: {}\n"
+                        L"  Traversal workers: {}\n",
+                        device, vhdx_path.native(), view.Root(),
+                        kVerificationWorkerCount);
                     const auto root = std::wstring{view.Root()};
-                    const auto inventory = [&] {
-                        const auto registration =
-                            io_cancellation.RegisterCurrentThread();
-                        return InventoryFilesystem(
-                            root, VerificationEndpoint::Synthetic,
-                            "requested device",
-                            cancellation_event, state);
-                    }();
-                    if (inventory && inventory->layout_failure) {
-                        WinError(
-                            "could not query the requested device "
-                            "filesystem layout after {} entries",
-                            state.Observe().synthetic_layout_entries,
-                            ExplicitWin32Error{
-                                inventory->layout_failure->error});
+                    const auto inventory = InventoryFilesystem(
+                        root, VerificationEndpoint::Synthetic,
+                        cancellation_event, io_cancellation, state);
+                    if (inventory) {
+                        state.CompleteTraversal();
+                    }
+                    if (inventory && !inventory->issues.empty()) {
+                        const auto &first = inventory->issues.front();
+                        throw VerificationFailure{std::format(
+                            "ordinary traversal retained {} filesystem-"
+                            "operation failure(s); first: {} for {} "
+                            "(Windows error {})",
+                            inventory->issues.size(),
+                            OperationName(first.key.operation),
+                            std::filesystem::path{DisplayPath(
+                                first.key.path)}.string(),
+                            first.failure.error)};
                     }
                     state.SetPhase(VerificationPhase::Detaching);
                     DetachView(view, "requested device", state);
@@ -3333,13 +2931,14 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             if (now >= next_progress) {
                 const auto observation = state.Observe();
                 devicefs::WriteToStream(std::cout,
-                    "\nVHDX inventory progress:\n"
-                    "  Layout entries received: {}\n"
-                    "  Namespace inventory: {} object(s), "
-                    "{} stream(s)\n",
-                    observation.synthetic_layout_entries,
-                    observation.synthetic_objects,
-                    observation.synthetic_streams);
+                    "\nVHDX inventory progress:\n");
+                const auto elapsed = observation.traversal_started
+                    ? std::chrono::duration<double>(
+                        now - *observation.traversal_started).count()
+                    : 0.0;
+                PrintTraversalProgress(std::cout,
+                    "Requested device", observation.synthetic,
+                    elapsed);
                 next_progress = now + kProgressReportInterval;
             }
             std::this_thread::sleep_for(kReporterPollInterval);
@@ -3348,13 +2947,15 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
         automatic_inventory_finished = true;
         const auto observation = state.Observe();
         devicefs::WriteToStream(std::cout,
-            "\nVHDX inventory {}:\n"
-            "  Layout entries received: {}\n"
-            "  Namespace inventory: {} object(s), {} stream(s)\n",
-            inventory_complete ? "complete" : "cancelled/incomplete",
-            observation.synthetic_layout_entries,
-            observation.synthetic_objects,
-            observation.synthetic_streams);
+            "\nVHDX inventory {}:\n",
+            inventory_complete ? "complete" : "cancelled/incomplete");
+        const auto elapsed = observation.traversal_started
+            ? std::chrono::duration<double>(
+                std::chrono::steady_clock::now() -
+                *observation.traversal_started).count()
+            : 0.0;
+        PrintTraversalProgress(std::cout,
+            "Requested device", observation.synthetic, elapsed);
         for (const auto &failure : observation.cleanup_failures) {
             devicefs::WriteToStream(
                 std::cout, "  Cleanup failure: {}\n", failure);

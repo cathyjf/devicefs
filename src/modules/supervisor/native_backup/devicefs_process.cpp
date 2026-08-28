@@ -16,9 +16,6 @@
 
 module;
 
-#define RPC_USE_NATIVE_WCHAR
-
-#include <devicefs/rpc_block_device.h>
 #include <devicefs/strsafe_compat.h>
 
 module devicefs.supervisor.native_backup:devicefs_process;
@@ -27,6 +24,7 @@ import std;
 import <devicefs/windows_imports.h>;
 import :internal;
 import devicefs.common;
+import devicefs.rpc_constants;
 import devicefs.stream_writer;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.vshadow;
@@ -121,7 +119,7 @@ struct DeviceFsStartRequest {
     auto command = wil::ArgvToCommandLine(arguments);
     if (request.rpc_endpoint &&
         !SetEnvironmentVariableW(
-            DEVICEFS_RPC_ENDPOINT_ENVIRONMENT_VARIABLE,
+            devicefs::rpc::kEndpointEnvironmentVariable.data(),
             request.rpc_endpoint->c_str())) {
         WinError("could not set the RPC block-device endpoint");
     }

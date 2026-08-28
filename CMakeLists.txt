@@ -125,6 +125,9 @@ add_library(devicefs-rpc-block-device STATIC
     "${DEVICEFS_RPC_CLIENT_STUB}"
     "${DEVICEFS_RPC_SERVER_STUB}"
 )
+target_module_interfaces(devicefs-rpc-block-device PUBLIC
+    src/modules/rpc_constants.ixx
+)
 set_source_files_properties(
     "${DEVICEFS_RPC_CLIENT_STUB}"
     "${DEVICEFS_RPC_SERVER_STUB}"
@@ -138,6 +141,8 @@ target_link_libraries(devicefs-rpc-block-device PUBLIC rpcrt4)
 add_library(devicefs-filesystem STATIC)
 target_module_interfaces(devicefs-filesystem PUBLIC
     src/modules/filesystem.ixx
+    src/modules/filesystem/internal.cpp
+    src/modules/filesystem/rpc_client.cpp
     src/modules/rpc_block_device_server.ixx
     src/modules/synthetic_backup_block_device.ixx
     src/modules/vhdx_viewer.ixx

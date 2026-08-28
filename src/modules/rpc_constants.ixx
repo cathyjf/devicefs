@@ -14,22 +14,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-[
-    uuid(29a0a383-f269-4f87-991d-ae32b5f816ba),
-    version(1.0),
-    pointer_default(ref)
-]
-interface DeviceFsBlockDevice {
-    long GetLength(
-        [in] handle_t binding,
-        [in, string] const wchar_t *symbol,
-        [out] unsigned hyper *length);
+export module devicefs.rpc_constants;
 
-    long Read(
-        [in] handle_t binding,
-        [in, string] const wchar_t *symbol,
-        [in] unsigned hyper offset,
-        [in] unsigned long wanted,
-        [out] unsigned long *transferred,
-        [out, size_is(wanted), length_is(*transferred)] byte *buffer);
-}
+import std;
+
+export namespace devicefs::rpc {
+
+constexpr auto kEndpointEnvironmentVariable =
+    std::wstring_view{L"DEVICEFS_RPC_ENDPOINT"};
+constexpr auto kProtocolSequence = std::wstring_view{L"ncalrpc"};
+
+} // namespace devicefs::rpc

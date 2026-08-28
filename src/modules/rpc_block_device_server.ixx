@@ -34,6 +34,7 @@ export module devicefs.rpc_block_device_server;
 import std;
 import devicefs.common;
 import devicefs.filesystem;
+import devicefs.rpc_constants;
 
 export namespace devicefs {
 
@@ -80,8 +81,8 @@ class RpcBlockDeviceServer {
         }
         active_.emplace(*this);
 
-        auto protocol_sequence = std::to_array(
-            DEVICEFS_RPC_PROTOCOL_SEQUENCE);
+        auto protocol_sequence = std::wstring{
+            devicefs::rpc::kProtocolSequence};
         const auto protocol_status = RpcServerUseProtseqEpW(
             protocol_sequence.data(),
             RPC_C_PROTSEQ_MAX_REQS_DEFAULT,

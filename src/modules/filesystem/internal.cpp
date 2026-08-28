@@ -14,22 +14,17 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-[
-    uuid(29a0a383-f269-4f87-991d-ae32b5f816ba),
-    version(1.0),
-    pointer_default(ref)
-]
-interface DeviceFsBlockDevice {
-    long GetLength(
-        [in] handle_t binding,
-        [in, string] const wchar_t *symbol,
-        [out] unsigned hyper *length);
+module devicefs.filesystem:internal;
 
-    long Read(
-        [in] handle_t binding,
-        [in, string] const wchar_t *symbol,
-        [in] unsigned hyper offset,
-        [in] unsigned long wanted,
-        [out] unsigned long *transferred,
-        [out, size_is(wanted), length_is(*transferred)] byte *buffer);
-}
+import std;
+
+namespace internal {
+
+struct Mapping {
+    std::wstring name;
+    std::wstring device;
+};
+
+constexpr auto kRpcDevicePrefix = std::wstring_view{LR"(\\\)"};
+
+} // namespace internal

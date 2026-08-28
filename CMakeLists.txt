@@ -271,6 +271,7 @@ foreach(target IN LISTS DEVICEFS_CODE_ANALYSIS_TARGETS)
 endforeach()
 
 foreach(target devicefs vss-descriptor-dump backup-supervisor)
+    target_sources(${target} PRIVATE src/resources/devicefs.manifest)
     target_link_options(${target} PRIVATE
         /GUARD:CF /guard:ehcont /CETCOMPAT
     )

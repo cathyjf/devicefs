@@ -47,21 +47,11 @@ namespace rpc_client {
 }
 
 [[nodiscard]] auto MakeRpcBinding(const wil::zwstring_view endpoint) {
-    auto endpoint_text = std::wstring{endpoint};
-    auto protocol_sequence = std::wstring{
-        devicefs::rpc::kProtocolSequence};
-    auto string_binding = wil::unique_rpc_wstr{};
-    const auto compose_error = RpcStringBindingComposeW(
-        nullptr, protocol_sequence.data(), nullptr,
-        endpoint_text.data(), nullptr, string_binding.put());
-    if (compose_error != RPC_S_OK) {
-        WinError("could not compose the RPC block-device binding",
-            ExplicitWin32Error{std::bit_cast<DWORD>(compose_error)});
-    }
-
+    auto string_binding = std::format(
+        L"{}:[{}]", devicefs::rpc::kProtocolSequence, endpoint);
     auto result = wil::unique_rpc_binding{};
     const auto error = RpcBindingFromStringBindingW(
-        string_binding.get(), result.put());
+        string_binding.data(), result.put());
     if (error != RPC_S_OK) {
         WinError("could not create the RPC block-device binding",
             ExplicitWin32Error{std::bit_cast<DWORD>(error)});

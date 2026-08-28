@@ -22,9 +22,9 @@ namespace internal {
 
 struct Mapping {
     std::wstring name;
-    std::wstring device;
+    std::string device;
 };
 
-constexpr auto kRpcDevicePrefix = std::wstring_view{LR"(\\\)"};
+constexpr auto kRpcDevicePrefix = std::string_view{R"(\\\)"};
 
 } // namespace internal

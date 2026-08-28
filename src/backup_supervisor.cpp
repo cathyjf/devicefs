@@ -17,6 +17,7 @@
 #include <devicefs/strsafe_compat.h>
 
 import std;
+import <clocale>;
 import <devicefs/windows_imports.h>;
 import <sal.h>;
 import devicefs.common;
@@ -33,27 +34,26 @@ namespace {
 using namespace std::chrono_literals;
 
 constexpr auto kCancellationEventName =
-    wil::zwstring_view(L"Local\\devicefs-backup-stop");
-constexpr auto kOrchestrateOption = std::wstring_view(L"--orchestrate");
+    wil::zstring_view("Local\\devicefs-backup-stop");
+constexpr auto kOrchestrateOption = std::string_view("--orchestrate");
 
 [[nodiscard]] auto CreateCancellationEvent(
-    _In_opt_z_ const wchar_t *const name) {
-    auto event = wil::unique_event_nothrow{};
-    auto already_exists = false;
-    if (!event.try_create(wil::EventOptions::ManualReset,
-            name, nullptr, &already_exists)) {
+    _In_opt_z_ const char *const name) {
+    auto event = wil::unique_event_nothrow{CreateEventExA(
+        nullptr, name, CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS)};
+    if (!event) {
         WinError("could not create the cancellation event");
     }
-    if (already_exists) {
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
         throw std::runtime_error("the cancellation event already exists");
     }
     return event;
 }
 
 [[nodiscard]] auto OpenCancellationEvent() {
-    auto event = wil::unique_event_nothrow{};
-    if (!event.try_open(
-            kCancellationEventName.c_str(), SYNCHRONIZE)) {
+    auto event = wil::unique_event_nothrow{OpenEventA(
+        SYNCHRONIZE, FALSE, kCancellationEventName.c_str())};
+    if (!event) {
         WinError("could not open the backup cancellation event");
     }
     return event;
@@ -150,12 +150,12 @@ struct BackupProcess {
 [[nodiscard]] auto StartOrchestrator(Log &log) {
     auto console = LoggingConsole(log);
     auto job = CreateChildJob();
-    const auto supervisor = CurrentExecutablePath();
+    const auto supervisor = CurrentExecutablePath().string();
     const auto arguments = std::array{
-        std::wstring_view{supervisor.native()}, kOrchestrateOption};
+        std::string_view{supervisor}, kOrchestrateOption};
     auto command = wil::ArgvToCommandLine(arguments);
     auto process = console.StartProcess(
-        job.get(), wil::zwstring_view(supervisor.native()), command);
+        job.get(), wil::zstring_view(supervisor), command);
     return BackupProcess{
         .console = std::move(console),
         .process = std::move(process),
@@ -448,23 +448,23 @@ template <typename Operation>
 struct ForegroundOptions {
     bool no_writers = false;
     std::optional<std::u8string> namespace_override;
-    std::vector<std::wstring> volume_override;
+    std::vector<std::string> volume_override;
 };
 
-[[nodiscard]] auto ParseVolumeList(std::wstring_view source) {
-    auto result = std::vector<std::wstring>{};
-    constexpr auto kWhitespace = std::wstring_view{L" \t\r\n\f\v"};
+[[nodiscard]] auto ParseVolumeList(std::string_view source) {
+    auto result = std::vector<std::string>{};
+    constexpr auto kWhitespace = std::string_view{" \t\r\n\f\v"};
     while (true) {
-        const auto separator = source.find(L',');
+        const auto separator = source.find(',');
         const auto field = source.substr(0, separator);
         const auto first = field.find_first_not_of(kWhitespace);
-        if (first == std::wstring_view::npos) {
+        if (first == std::string_view::npos) {
             throw std::invalid_argument(
                 "--volume/--volumes must not contain an empty volume");
         }
         const auto last = field.find_last_not_of(kWhitespace);
         result.emplace_back(field.substr(first, last - first + 1));
-        if (separator == std::wstring_view::npos) {
+        if (separator == std::string_view::npos) {
             return result;
         }
         source.remove_prefix(separator + 1);
@@ -472,21 +472,21 @@ struct ForegroundOptions {
 }
 
 [[nodiscard]] auto ParseForegroundOptions(
-    const std::span<const wchar_t *const> arguments) {
+    const std::span<const std::string> arguments) {
     auto result = ForegroundOptions{};
-    auto raw_namespace_override = std::optional<std::wstring_view>{};
-    auto raw_volume_override = std::optional<std::wstring_view>{};
+    auto raw_namespace_override = std::optional<std::string_view>{};
+    auto raw_volume_override = std::optional<std::string_view>{};
     for (auto index = 0uz; index < arguments.size(); ++index) {
-        const auto argument = std::wstring_view{arguments[index]};
-        if (argument == L"--no-writers") {
+        const auto &argument = arguments[index];
+        if (argument == "--no-writers") {
             result.no_writers = true;
-        } else if (argument == L"--namespace") {
+        } else if (argument == "--namespace") {
             if (++index == arguments.size()) {
                 throw std::invalid_argument("--namespace requires a value");
             }
             raw_namespace_override = arguments[index];
-        } else if ((argument == L"--volume") ||
-            (argument == L"--volumes")) {
+        } else if ((argument == "--volume") ||
+            (argument == "--volumes")) {
             if (++index == arguments.size()) {
                 throw std::invalid_argument(
                     "--volume/--volumes requires a value");
@@ -498,8 +498,8 @@ struct ForegroundOptions {
         }
     }
     if (raw_namespace_override) {
-        result.namespace_override =
-            std::filesystem::path{*raw_namespace_override}.u8string();
+        result.namespace_override = std::u8string{
+            raw_namespace_override->begin(), raw_namespace_override->end()};
     }
     if (raw_volume_override) {
         result.volume_override = ParseVolumeList(*raw_volume_override);
@@ -508,37 +508,37 @@ struct ForegroundOptions {
 }
 
 [[nodiscard]] auto ParseIncrementalDiagnosticOptions(
-    const std::span<const wchar_t *const> arguments) {
+    const std::span<const std::string> arguments) {
     auto result = IncrementalDiagnosticOptions{};
-    auto raw_namespace_override = std::optional<std::wstring_view>{};
-    auto raw_volume_override = std::optional<std::wstring_view>{};
+    auto raw_namespace_override = std::optional<std::string_view>{};
+    auto raw_volume_override = std::optional<std::string_view>{};
     auto verification_percentage_supplied = false;
     for (auto index = 0uz; index < arguments.size(); ++index) {
-        const auto argument = std::wstring_view{arguments[index]};
-        if (argument == L"--incremental-stats") {
+        const auto &argument = arguments[index];
+        if (argument == "--incremental-stats") {
             result.print_statistics = true;
-        } else if (argument == L"--incremental-verify") {
+        } else if (argument == "--incremental-verify") {
             result.verify = true;
-        } else if (argument == L"--expose-synthetic-backup") {
+        } else if (argument == "--expose-synthetic-backup") {
             result.expose_synthetic_backup = true;
             if (((index + 1) < arguments.size()) &&
-                !std::wstring_view{arguments[index + 1]}.starts_with(
-                    L"--")) {
-                result.backup_view_mount_root = arguments[++index];
+                !arguments[index + 1].starts_with("--")) {
+                result.backup_view_mount_root =
+                    std::filesystem::path{arguments[++index]};
             }
-        } else if (argument == L"--verify-synthetic-backup") {
+        } else if (argument == "--verify-synthetic-backup") {
             result.verify_synthetic_backup = true;
             if (((index + 1) < arguments.size()) &&
-                !std::wstring_view{arguments[index + 1]}.starts_with(
-                    L"--")) {
-                result.backup_view_mount_root = arguments[++index];
+                !arguments[index + 1].starts_with("--")) {
+                result.backup_view_mount_root =
+                    std::filesystem::path{arguments[++index]};
             }
-        } else if (argument == L"--verify-percentage") {
+        } else if (argument == "--verify-percentage") {
             if (++index == arguments.size()) {
                 throw std::invalid_argument(
                     "--verify-percentage requires a value");
             }
-            const auto text = std::wstring{arguments[index]};
+            const auto &text = arguments[index];
             auto consumed = std::size_t{};
             try {
                 result.filesystem_verification_percentage =
@@ -562,34 +562,34 @@ struct ForegroundOptions {
                     "zero and no greater than 100");
             }
             verification_percentage_supplied = true;
-        } else if (argument == L"--namespace") {
+        } else if (argument == "--namespace") {
             if (++index == arguments.size()) {
                 throw std::invalid_argument(
                     "--namespace requires a value");
             }
             raw_namespace_override = arguments[index];
-        } else if ((argument == L"--volume") ||
-            (argument == L"--volumes")) {
+        } else if ((argument == "--volume") ||
+            (argument == "--volumes")) {
             if (++index == arguments.size()) {
                 throw std::invalid_argument(
                     "--volume/--volumes requires a value");
             }
             raw_volume_override = arguments[index];
-        } else if (argument == L"--baseline") {
+        } else if (argument == "--baseline") {
             if (++index == arguments.size()) {
                 throw std::invalid_argument(
                     "--baseline requires a value");
             }
             result.baseline_snapshot_identifier =
-                winrt::guid{std::wstring_view{arguments[index]}};
+                winrt::guid{std::string_view{arguments[index]}};
         } else {
             throw std::invalid_argument(
                 "incremental diagnostics received an unknown argument");
         }
     }
     if (raw_namespace_override) {
-        result.namespace_override =
-            std::filesystem::path{*raw_namespace_override}.u8string();
+        result.namespace_override = std::u8string{
+            raw_namespace_override->begin(), raw_namespace_override->end()};
     }
     if (raw_volume_override) {
         result.volume_override = ParseVolumeList(*raw_volume_override);
@@ -609,18 +609,18 @@ struct ForegroundOptions {
 }
 
 [[nodiscard]] auto ParseNamespaceOverride(
-    const std::span<const wchar_t *const> arguments,
+    const std::span<const std::string> arguments,
     const std::string_view mode)
     -> std::optional<std::u8string> {
     if (arguments.empty()) {
         return std::nullopt;
     }
     if ((arguments.size() != 2) ||
-        (std::wstring_view{arguments[0]} != L"--namespace")) {
+        (arguments[0] != "--namespace")) {
         throw std::invalid_argument(std::format(
             "{} accepts only --namespace NAMESPACE", mode));
     }
-    return std::filesystem::path{arguments[1]}.u8string();
+    return std::u8string{arguments[1].begin(), arguments[1].end()};
 }
 
 [[nodiscard]] auto GetForegroundConsoleInput(
@@ -677,17 +677,14 @@ struct ForegroundOptions {
             }
             for (const auto &[volume_identifier, snapshot] :
                 snapshot_volumes) {
-                const auto volume_identifier_text =
-                    winrt::to_hstring(volume_identifier);
-                const auto snapshot_identifier_text =
-                    winrt::to_hstring(snapshot.snapshot_identifier);
                 devicefs::WriteToStream(
                     std::cout,
-                    L"  Volume ID: {}\n"
-                    L"    Snapshot ID: {}\n"
-                    L"    Device: {}\n",
-                    std::wstring_view{volume_identifier_text},
-                    std::wstring_view{snapshot_identifier_text},
+                    "  Volume ID: {}\n"
+                    "    Snapshot ID: {}\n"
+                    "    Device: {}\n",
+                    winrt::to_string(winrt::to_hstring(volume_identifier)),
+                    winrt::to_string(
+                        winrt::to_hstring(snapshot.snapshot_identifier)),
                     snapshot.device);
             }
             return 0;
@@ -709,7 +706,7 @@ struct ForegroundOptions {
         });
 }
 
-[[nodiscard]] auto RunInventoryVhdx(std::wstring device) {
+[[nodiscard]] auto RunInventoryVhdx(std::string device) {
     const auto [input, console_mode] = GetForegroundConsoleInput(
         "--inventory-vhdx requires an attached console");
     return RunForegroundOperation(
@@ -721,9 +718,9 @@ struct ForegroundOptions {
 }
 
 auto WINAPI ServiceMain(
-    const DWORD argc, wchar_t **) noexcept -> void {
+    const DWORD argc, char **) noexcept -> void {
     static auto context = ServiceContext{};
-    context.status_handle = RegisterServiceCtrlHandlerExW(
+    context.status_handle = RegisterServiceCtrlHandlerExA(
         kServiceName.data(), ServiceControlHandler, &context);
     if (context.status_handle == nullptr) {
         return;
@@ -739,15 +736,15 @@ auto WINAPI ServiceMain(
 auto RunServiceDispatcher() {
     [[gsl::suppress("type.3",
         justification: "The SCM retains a mutable historical parameter for an input-only service name.")]]
-    auto *const service_name = const_cast<PWSTR>(kServiceName.data());
+    auto *const service_name = const_cast<PSTR>(kServiceName.data());
     auto entries = std::array{
-        SERVICE_TABLE_ENTRYW{
+        SERVICE_TABLE_ENTRYA{
             .lpServiceName = service_name,
             .lpServiceProc = ServiceMain,
         },
-        SERVICE_TABLE_ENTRYW{},
+        SERVICE_TABLE_ENTRYA{},
     };
-    if (!StartServiceCtrlDispatcherW(entries.data())) {
+    if (!StartServiceCtrlDispatcherA(entries.data())) {
         WinError("could not connect to the Service Control Manager");
     }
     return 0;
@@ -782,19 +779,24 @@ auto PrintHelp() noexcept {
 auto wmain(
     _Pre_satisfies_(argc > 0) const int argc,
     _In_reads_(argc) wchar_t **const argv) -> int {
+    std::ignore = std::setlocale(LC_CTYPE, ".UTF8");
     try {
         HardenProcess();
         const auto arguments =
-            std::span<const wchar_t *const>{argv + 1, argv + argc};
+            std::span{argv + 1, argv + argc} |
+            std::views::transform([](const auto argument) {
+                return std::filesystem::path{argument}.string();
+            }) |
+            std::ranges::to<std::vector<std::string>>();
         if (!arguments.empty() &&
-            (std::wstring_view(arguments.front()) == L"--devicefs")) {
+            (arguments.front() == "--devicefs")) {
             return devicefs::Main(arguments);
         }
         if (arguments.empty()) {
             PrintHelp();
             return 0;
         }
-        const auto option = std::wstring_view(arguments.front());
+        const auto &option = arguments.front();
         if (option == kRunServiceOption) {
             if (arguments.size() != 1) {
                 throw std::invalid_argument(
@@ -814,33 +816,33 @@ auto wmain(
             return RunNativeBackup(
                 cancellation_event.get(), false, {}, std::nullopt);
         }
-        if (option == L"--query-manifest") {
+        if (option == "--query-manifest") {
             return RunQueryManifest(
                 ParseNamespaceOverride(
-                    arguments.subspan(1), "--query-manifest"));
+                    std::span{arguments}.subspan(1), "--query-manifest"));
         }
-        if (option == L"--inventory-vhdx") {
+        if (option == "--inventory-vhdx") {
             if (arguments.size() != 2) {
                 throw std::invalid_argument(
                     "--inventory-vhdx requires exactly one DEVICE");
             }
-            return RunInventoryVhdx(std::wstring{arguments[1]});
+            return RunInventoryVhdx(arguments[1]);
         }
-        if ((option == L"--incremental-stats") ||
-            (option == L"--incremental-verify") ||
-            (option == L"--expose-synthetic-backup") ||
-            (option == L"--verify-synthetic-backup")) {
+        if ((option == "--incremental-stats") ||
+            (option == "--incremental-verify") ||
+            (option == "--expose-synthetic-backup") ||
+            (option == "--verify-synthetic-backup")) {
             return RunIncrementalDiagnosticMode(
                 ParseIncrementalDiagnosticOptions(arguments));
         }
-        if (option == L"--install-service") {
+        if (option == "--install-service") {
             if (arguments.size() == 1) {
                 InstallService(InstallMode::CreateOnly,
                     ServiceContext::kMinimumPreshutdownTimeout);
                 return 0;
             }
             if ((arguments.size() == 2) &&
-                (std::wstring_view(arguments[1]) == L"--update")) {
+                (arguments[1] == "--update")) {
                 InstallService(InstallMode::CreateOrUpdate,
                     ServiceContext::kMinimumPreshutdownTimeout);
                 return 0;
@@ -848,9 +850,9 @@ auto wmain(
             throw std::invalid_argument(
                 "--install-service accepts only the optional --update argument");
         }
-        if (option == L"--foreground") {
+        if (option == "--foreground") {
             return RunForeground(
-                ParseForegroundOptions(arguments.subspan(1)));
+                ParseForegroundOptions(std::span{arguments}.subspan(1)));
         }
         throw std::invalid_argument("unknown backup-supervisor argument");
     } catch (const std::invalid_argument &error) {

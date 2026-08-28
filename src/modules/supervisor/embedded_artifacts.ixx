@@ -26,10 +26,10 @@ import devicefs.common;
 namespace {
 
 [[nodiscard]] auto LoadProgram(
-    _In_z_ const wchar_t *const name,
+    _In_z_ const char *const name,
     const std::string_view description) {
-    const auto resource = FindResourceW(
-        nullptr, name, L"DEVICEFS_ARTIFACT");
+    const auto resource = FindResourceA(
+        nullptr, name, "DEVICEFS_ARTIFACT");
     if (resource == nullptr) {
         WinError("could not find {}", description);
     }
@@ -50,5 +50,5 @@ namespace {
 } // namespace
 
 export [[nodiscard]] auto StartPbsProgram() {
-    return LoadProgram(L"START_PBS", "an embedded backup program");
+    return LoadProgram("START_PBS", "an embedded backup program");
 }

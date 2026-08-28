@@ -33,10 +33,10 @@ export using SecureUtf8String = std::basic_string<
     char8_t, std::char_traits<char8_t>, wil::secure_allocator<char8_t>>;
 
 export struct BackupConfiguration {
-    std::wstring windows_username;
+    std::string windows_username;
     wil::secure_wstring windows_password;
-    std::wstring wsl_distribution;
-    std::optional<std::wstring> wsl_linux_user;
+    std::string wsl_distribution;
+    std::optional<std::string> wsl_linux_user;
     std::u8string wsl_client_path;
     std::u8string pbs_server;
     std::uint16_t pbs_port = 0;
@@ -47,7 +47,7 @@ export struct BackupConfiguration {
     std::u8string pbs_fingerprint;
     SecureUtf8String pbs_authentication_secret;
     SecureUtf8String pbs_encryption_key;
-    std::vector<std::wstring> volumes;
+    std::vector<std::string> volumes;
 };
 
 namespace {
@@ -147,10 +147,10 @@ template <typename String>
 Utf8TextDestination(String BackupConfiguration::*)
     -> Utf8TextDestination<String>;
 
-struct OptionalWideStringDestination :
-    MemberDestination<std::optional<std::wstring>> {
+struct OptionalStringDestination :
+    MemberDestination<std::optional<std::string>> {
     using MemberDestination<
-        std::optional<std::wstring>>::MemberDestination;
+        std::optional<std::string>>::MemberDestination;
 
     [[nodiscard]] static constexpr auto TemplateValue() noexcept {
         return std::string_view{"null"};
@@ -192,10 +192,10 @@ struct SerializedJsonObjectDestination :
     }
 };
 
-struct NonemptyWideStringArrayDestination :
-    MemberDestination<std::vector<std::wstring>> {
+struct NonemptyStringArrayDestination :
+    MemberDestination<std::vector<std::string>> {
     using MemberDestination<
-        std::vector<std::wstring>>::MemberDestination;
+        std::vector<std::string>>::MemberDestination;
 
     [[nodiscard]] static constexpr auto TemplateValue() noexcept {
         return std::string_view{"[]"};
@@ -206,16 +206,16 @@ struct ConfigurationField;
 using ConfigurationFields = std::vector<ConfigurationField>;
 
 using FieldDestination = std::variant<
-    WideTextDestination<std::wstring>,
+    Utf8TextDestination<std::string>,
     WideTextDestination<wil::secure_wstring>,
     Utf8TextDestination<std::u8string>,
     Utf8TextDestination<SecureUtf8String>,
-    OptionalWideStringDestination,
+    OptionalStringDestination,
     OptionalUtf8StringDestination,
     OptionalBooleanDestination,
     PortDestination,
     SerializedJsonObjectDestination,
-    NonemptyWideStringArrayDestination,
+    NonemptyStringArrayDestination,
     ConfigurationFields>;
 
 struct ConfigurationField {
@@ -245,7 +245,7 @@ constexpr ConfigurationField::~ConfigurationField() = default;
     return ConfigurationFields{
         {"windows_account", ConfigurationFields{
             {"username",
-                WideTextDestination{
+                Utf8TextDestination{
                     &BackupConfiguration::windows_username}},
             {"password",
                 WideTextDestination{
@@ -253,10 +253,10 @@ constexpr ConfigurationField::~ConfigurationField() = default;
         }},
         {"wsl", ConfigurationFields{
             {"distribution",
-                WideTextDestination{
+                Utf8TextDestination{
                     &BackupConfiguration::wsl_distribution}},
             {"linux_user",
-                OptionalWideStringDestination{
+                OptionalStringDestination{
                     &BackupConfiguration::wsl_linux_user}},
             {"client_path",
                 Utf8TextDestination{
@@ -286,7 +286,7 @@ constexpr ConfigurationField::~ConfigurationField() = default;
                 &BackupConfiguration::pbs_encryption_key}},
         }},
         {"volumes",
-            NonemptyWideStringArrayDestination{
+            NonemptyStringArrayDestination{
                 &BackupConfiguration::volumes}},
     };
 }
@@ -346,7 +346,7 @@ struct DefaultFieldReader {
     }
 
     auto operator()(
-        const OptionalWideStringDestination &destination) const noexcept {
+        const OptionalStringDestination &destination) const noexcept {
         destination.Get(configuration.get()).reset();
         return true;
     }
@@ -418,8 +418,8 @@ struct FieldReader {
     }
 
     auto operator()(
-        const OptionalWideStringDestination &destination) const -> void {
-        destination.Get(configuration.get()) = CopyWide<std::wstring>(
+        const OptionalStringDestination &destination) const -> void {
+        destination.Get(configuration.get()) = ToUtf8<std::string>(
             ReadString(value.get(), member));
     }
 
@@ -470,7 +470,7 @@ struct FieldReader {
     }
 
     auto operator()(
-        const NonemptyWideStringArrayDestination &destination) const -> void {
+        const NonemptyStringArrayDestination &destination) const -> void {
         const auto &json_value = value.get();
         if (json_value.ValueType() != JsonValueType::Array) {
             ConfigurationError(member, "must be an array");
@@ -486,7 +486,7 @@ struct FieldReader {
                     "must not contain an empty string");
             }
             destination.Get(configuration.get()).emplace_back(
-                text.begin(), text.end());
+                ToUtf8<std::string>(text));
         }
     }
 

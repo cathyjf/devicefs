@@ -40,8 +40,7 @@ constexpr auto kProcessCommandLineInformation =
     static_cast<PROCESSINFOCLASS>(60);
 
 [[nodiscard]] auto Utf8(const std::wstring_view value) {
-    const auto encoded = std::filesystem::path(value).u8string();
-    return std::string(encoded.begin(), encoded.end());
+    return std::filesystem::path{value}.string();
 }
 
 [[nodiscard]] auto ProcessCommandLine(const HANDLE process) {

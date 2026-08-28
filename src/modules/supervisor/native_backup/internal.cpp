@@ -62,15 +62,15 @@ template <typename Operation>
 }
 
 [[nodiscard]] auto VolumeImageName(
-    const std::wstring_view volume,
-    const std::wstring_view extension) -> std::wstring {
+    const std::string_view volume,
+    const std::string_view extension) -> std::string {
     return std::format(
-        L"volume-{}{}", volume.substr(11, 36), extension);
+        "volume-{}{}", volume.substr(11, 36), extension);
 }
 
 [[nodiscard]] auto SnapshotImageName(
-    const devicefs::vshadow::Snapshot &snapshot) -> std::wstring {
-    return VolumeImageName(snapshot.original_volume, L".img");
+    const devicefs::vshadow::Snapshot &snapshot) -> std::string {
+    return VolumeImageName(snapshot.original_volume, ".img");
 }
 
 [[nodiscard]] auto WaitForProcess(
@@ -149,9 +149,9 @@ template <typename Start>
         WinError("could not restrict inherited process handles");
     }
 
-    auto startup = STARTUPINFOEXW{
+    auto startup = STARTUPINFOEXA{
         .StartupInfo = {
-            .cb = sizeof(STARTUPINFOEXW),
+            .cb = sizeof(STARTUPINFOEXA),
             .dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES,
             .wShowWindow = SW_HIDE,
             .hStdInput = inherited_handles[0],
@@ -186,7 +186,7 @@ auto TryWriteError(
             ExplicitWin32Error::FromHresult(error));
     }
     return std::format(
-        L"{:08x}{:04x}{:04x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        "{:08x}{:04x}{:04x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
         id.Data1, id.Data2, id.Data3,
         id.Data4[0], id.Data4[1], id.Data4[2], id.Data4[3],
         id.Data4[4], id.Data4[5], id.Data4[6], id.Data4[7]);

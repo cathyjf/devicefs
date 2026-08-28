@@ -37,14 +37,14 @@ export constexpr auto kCancelledExitCode = internal::kCancelledExitCode;
 
 export [[nodiscard]] auto InventoryVhdx(
     HANDLE cancellation_event,
-    std::wstring_view device) -> int;
+    std::string_view device) -> int;
 
 namespace internal {
 
 [[nodiscard]] auto RunSnapshotBackup(
     const HANDLE cancellation_event,
     const devicefs::vshadow::SnapshotSet &snapshot_set,
-    const std::wstring_view read_user,
+    const std::string_view read_user,
     const std::optional<std::u8string> &namespace_override) {
     const auto cancelled = WaitForSingleObject(cancellation_event, 0);
     if (cancelled == WAIT_FAILED) {
@@ -95,7 +95,7 @@ namespace internal {
 export [[nodiscard]] auto RunNativeBackup(
     const HANDLE cancellation_event,
     const bool no_writers,
-    const std::span<const std::wstring> volume_override,
+    const std::span<const std::string> volume_override,
     const std::optional<std::u8string> &namespace_override) -> int {
     const auto cancelled = WaitForSingleObject(cancellation_event, 0);
     if (cancelled == WAIT_FAILED) {

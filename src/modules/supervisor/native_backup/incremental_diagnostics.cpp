@@ -45,11 +45,11 @@ export struct IncrementalDiagnosticOptions {
     bool verify = false;
     bool expose_synthetic_backup = false;
     bool verify_synthetic_backup = false;
-    std::optional<std::wstring> backup_view_mount_root;
+    std::optional<std::filesystem::path> backup_view_mount_root;
     double filesystem_verification_percentage = 100.0;
     std::optional<GUID> baseline_snapshot_identifier;
     std::optional<std::u8string> namespace_override;
-    std::vector<std::wstring> volume_override;
+    std::vector<std::string> volume_override;
 };
 
 namespace {
@@ -84,26 +84,26 @@ constexpr auto kTemporarySnapshotsComplete = 1;
 struct AvailableBaseline {
     GUID volume_identifier;
     GUID snapshot_identifier;
-    std::wstring volume;
-    std::wstring device;
+    std::string volume;
+    std::string device;
 };
 
 struct SnapshotInterval {
     GUID volume_identifier;
     GUID baseline_snapshot_identifier;
     GUID payload_snapshot_identifier;
-    std::wstring volume;
-    std::wstring baseline_device;
-    std::wstring payload_device;
+    std::string volume;
+    std::string baseline_device;
+    std::string payload_device;
 };
 
 struct VolumeReport {
     GUID volume_identifier;
     GUID baseline_snapshot_identifier;
     GUID payload_snapshot_identifier;
-    std::wstring volume;
-    std::wstring baseline_device;
-    std::wstring payload_device;
+    std::string volume;
+    std::string baseline_device;
+    std::string payload_device;
     std::expected<DirtyBlockMap, std::string> map;
 };
 
@@ -124,10 +124,12 @@ struct SnapshotDiagnosticResult {
     IncrementalDiagnosticResult diagnostics;
 };
 
+[[nodiscard]] auto GuidText(const GUID &identifier) {
+    return winrt::to_string(winrt::to_hstring(identifier));
+}
+
 [[nodiscard]] auto VolumeName(const GUID &identifier) {
-    const auto text = winrt::to_hstring(identifier);
-    return std::format(
-        L"\\\\?\\Volume{}\\", std::wstring_view{text});
+    return std::format("\\\\?\\Volume{}\\", GuidText(identifier));
 }
 
 [[nodiscard]] auto CollectAvailableBaselines(
@@ -155,8 +157,8 @@ struct SnapshotDiagnosticResult {
         return {};
     }
     return {{
-        .volume_identifier = winrt::guid{
-            snapshot->original_volume.substr(11, 36)},
+        .volume_identifier = winrt::guid{std::string_view{
+            snapshot->original_volume}.substr(11, 36)},
         .snapshot_identifier = snapshot_identifier,
         .volume = std::move(snapshot->original_volume),
         .device = std::move(snapshot->device),
@@ -165,23 +167,25 @@ struct SnapshotDiagnosticResult {
 
 [[nodiscard]] auto SelectPayloadVolumes(
     const std::span<const AvailableBaseline> baselines,
-    const std::span<const std::wstring> volume_override) {
+    const std::span<const std::string> volume_override) {
     if (!volume_override.empty()) {
-        return std::vector<std::wstring>{
+        return std::vector<std::string>{
             volume_override.begin(), volume_override.end()};
     }
     return baselines |
         std::views::transform(&AvailableBaseline::volume) |
-        std::ranges::to<std::vector<std::wstring>>();
+        std::ranges::to<std::vector<std::string>>();
 }
 
 [[nodiscard]] auto SameVolume(
-    const std::wstring_view left,
-    const std::wstring_view right) {
-    return CompareStringOrdinal(
-        left.data(), wil::safe_cast_failfast<int>(left.size()),
-        right.data(), wil::safe_cast_failfast<int>(right.size()),
-        TRUE) == CSTR_EQUAL;
+    const std::string_view left,
+    const std::string_view right) {
+    const auto lowercase = [](const char value) {
+        return (value >= 'A') && (value <= 'Z')
+            ? value + ('a' - 'A') : value;
+    };
+    return std::ranges::equal(
+        left, right, std::ranges::equal_to{}, lowercase, lowercase);
 }
 
 [[nodiscard]] auto AssociateSnapshotIntervals(
@@ -233,10 +237,8 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
     auto candidate_total = std::size_t{};
     auto volume_block_total = std::uint64_t{};
     for (const auto &report : reports) {
-        const auto volume_identifier =
-            winrt::to_hstring(report.volume_identifier);
-        devicefs::WriteToStream(std::cout, L"\n  Volume ID: {}\n",
-            std::wstring_view{volume_identifier});
+        devicefs::WriteToStream(std::cout, "\n  Volume ID: {}\n",
+            GuidText(report.volume_identifier));
         if (!report.map) {
             devicefs::WriteToStream(std::cout,
                 "    Dirty map unavailable: {}\n", report.map.error());
@@ -309,7 +311,7 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
     const std::span<const SnapshotInterval> intervals) {
     const auto successor_volumes = intervals |
         std::views::transform(&SnapshotInterval::volume) |
-        std::ranges::to<std::vector<std::wstring>>();
+        std::ranges::to<std::vector<std::string>>();
     auto reports = std::vector<VolumeReport>{};
 
     // C only makes payload B nonlatest; it is not a map input.
@@ -349,12 +351,11 @@ enum class BackupViewPreparation {
     std::vector<internal::DeviceFsSource> &real_sources,
     std::vector<FilesystemVerificationVolume> &verification_volumes,
     std::ostream &output) {
-    const auto volume_identifier =
-        winrt::to_hstring(report.volume_identifier);
+    const auto volume_identifier = GuidText(report.volume_identifier);
     if (!report.map) {
         devicefs::WriteToStream(output,
-            L"\n  Volume ID: {}\n",
-            std::wstring_view{volume_identifier});
+            "\n  Volume ID: {}\n",
+            volume_identifier);
         devicefs::WriteToStream(output,
             "    Not exposed: dirty map unavailable: {}\n",
             report.map.error());
@@ -375,8 +376,8 @@ enum class BackupViewPreparation {
                 report.map->block_offsets);
         } catch (const std::runtime_error &error) {
             devicefs::WriteToStream(output,
-                L"\n  Volume ID: {}\n",
-                std::wstring_view{volume_identifier});
+                "\n  Volume ID: {}\n",
+                volume_identifier);
             devicefs::WriteToStream(output,
                 "    Not exposed: {}\n", error.what());
             return std::nullopt;
@@ -387,24 +388,20 @@ enum class BackupViewPreparation {
     }
 
     auto filename = internal::VolumeImageName(
-        report.volume, L".vhdx");
-    const auto baseline_identifier =
-        winrt::to_hstring(report.baseline_snapshot_identifier);
-    const auto payload_identifier =
-        winrt::to_hstring(report.payload_snapshot_identifier);
+        report.volume, ".vhdx");
     devicefs::WriteToStream(output,
-        L"\n  File: {}\n"
-        L"    Volume ID: {}\n"
-        L"    Snapshot A: {}\n"
-        L"      Device: {}\n"
-        L"    Snapshot B: {}\n"
-        L"      Device: {}\n"
-        L"    RPC symbol: {}\n",
+        "\n  File: {}\n"
+        "    Volume ID: {}\n"
+        "    Snapshot A: {}\n"
+        "      Device: {}\n"
+        "    Snapshot B: {}\n"
+        "      Device: {}\n"
+        "    RPC symbol: {}\n",
         filename,
-        std::wstring_view{volume_identifier},
-        std::wstring_view{baseline_identifier},
+        volume_identifier,
+        GuidText(report.baseline_snapshot_identifier),
         report.baseline_device,
-        std::wstring_view{payload_identifier},
+        GuidText(report.payload_snapshot_identifier),
         report.payload_device,
         filename);
     devicefs::WriteToStream(output,
@@ -426,10 +423,8 @@ enum class BackupViewPreparation {
         .filename = filename,
     });
     devices.emplace_back(
-        [](const std::u8string_view encoded_symbol) {
-            return std::basic_string<unsigned char>{
-                encoded_symbol.begin(), encoded_symbol.end()};
-        }(std::filesystem::path{filename}.u8string()),
+        std::basic_string<unsigned char>{
+            filename.begin(), filename.end()},
         std::move(*synthetic));
     return BackupViewPreparation::Ready;
 }
@@ -437,7 +432,7 @@ enum class BackupViewPreparation {
 [[nodiscard]] auto RunBackupViewDiagnostics(
     const HANDLE cancellation_event,
     const std::span<const VolumeReport> reports,
-    const std::optional<std::wstring> &mount_root_override,
+    const std::optional<std::filesystem::path> &mount_root_override,
     const std::optional<double> verification_percentage,
     const std::size_t unavailable_snapshots) -> int {
     if (verification_percentage) {
@@ -470,7 +465,7 @@ enum class BackupViewPreparation {
         }
     }
     const auto mount_root = mount_root_override
-        ? std::filesystem::path{*mount_root_override}
+        ? *mount_root_override
         : internal::TemporaryDeviceFsViewPath();
     const auto synthetic_mount = mount_root / L"synthetic";
     const auto real_mount = mount_root / L"real";
@@ -478,7 +473,7 @@ enum class BackupViewPreparation {
         if (verification_percentage) {
             return VerifyFilesystemViews(
                 cancellation_event, verification_volumes,
-                synthetic_mount.native(), real_mount.native(),
+                synthetic_mount, real_mount,
                 *verification_percentage,
                 optimization_unavailable, preparation_failures);
         }
@@ -498,12 +493,14 @@ enum class BackupViewPreparation {
         }
     });
 
+    const auto synthetic_mount_text = synthetic_mount.string();
+    const auto real_mount_text = real_mount.string();
     auto endpoint = std::format(
-        L"devicefs-block-device-{}", internal::UniqueName());
+        "devicefs-block-device-{}", internal::UniqueName());
     auto suspended_synthetic = internal::StartDeviceFs(
         internal::DeviceFsStartRequest{
             .sources = synthetic_sources,
-            .mount_target = synthetic_mount.native(),
+            .mount_target = synthetic_mount_text,
             .rpc_endpoint = endpoint,
             .vhdx = true,
         });
@@ -515,7 +512,8 @@ enum class BackupViewPreparation {
     // The child owners must be destroyed before the RPC server because
     // unmounting the synthetic VHDX can issue final block-device reads.
     auto server = SyntheticBackupServer::Start(
-        endpoint, suspended_synthetic.process.dwProcessId,
+        std::filesystem::path{endpoint}.wstring(),
+        suspended_synthetic.process.dwProcessId,
         std::move(devices));
     internal::ResumeDeviceFs(suspended_synthetic);
     auto synthetic_devicefs = internal::DeviceFsChild{
@@ -525,7 +523,7 @@ enum class BackupViewPreparation {
         internal::StartDeviceFs(
             internal::DeviceFsStartRequest{
                 .sources = real_sources,
-                .mount_target = real_mount.native(),
+                .mount_target = real_mount_text,
                 .vhdx = true,
             })};
     if (!internal::WaitForDeviceFs(
@@ -535,7 +533,7 @@ enum class BackupViewPreparation {
         if (verification_percentage) {
             return VerifyFilesystemViews(
                 cancellation_event, verification_volumes,
-                synthetic_mount.native(), real_mount.native(),
+                synthetic_mount, real_mount,
                 *verification_percentage,
                 optimization_unavailable, preparation_failures);
         }
@@ -545,13 +543,13 @@ enum class BackupViewPreparation {
     if (verification_percentage) {
         devicefs::WriteToStream(
             std::cout,
-            L"\nMounted {} synthetic backup VHDX file(s) at {}.\n"
-            L"Mounted the corresponding real-B VHDX files at {}.\n",
-            synthetic_sources.size(), synthetic_mount.native(),
-            real_mount.native());
+            "\nMounted {} synthetic backup VHDX file(s) at {}.\n"
+            "Mounted the corresponding real-B VHDX files at {}.\n",
+            synthetic_sources.size(), synthetic_mount_text,
+            real_mount_text);
         const auto result = VerifyFilesystemViews(
             cancellation_event, verification_volumes,
-            synthetic_mount.native(), real_mount.native(),
+            synthetic_mount, real_mount,
             *verification_percentage,
             optimization_unavailable, preparation_failures);
         if (result != 0) {
@@ -564,11 +562,11 @@ enum class BackupViewPreparation {
 
     devicefs::WriteToStream(
         std::cout,
-        L"\nMounted {} synthetic backup VHDX file(s) at {}.\n"
-        L"Mounted the corresponding real VHDX files at {}.\n"
-        L"Press Ctrl+C to stop.\n",
-        synthetic_sources.size(), synthetic_mount.native(),
-        real_mount.native());
+        "\nMounted {} synthetic backup VHDX file(s) at {}.\n"
+        "Mounted the corresponding real VHDX files at {}.\n"
+        "Press Ctrl+C to stop.\n",
+        synthetic_sources.size(), synthetic_mount_text,
+        real_mount_text);
     const auto processes = std::array{
         &synthetic_devicefs.Process(),
         &real_devicefs.Process(),
@@ -702,11 +700,10 @@ struct VerificationJob {
 };
 
 [[nodiscard]] auto OpenVerificationSnapshot(
-    const std::wstring_view source,
+    const std::string &source,
     const std::string_view description) {
-    const auto path = std::filesystem::path{source};
-    auto result = wil::unique_hfile{CreateFileW(
-        path.c_str(), GENERIC_READ,
+    auto result = wil::unique_hfile{CreateFileA(
+        source.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING,
         SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
@@ -1017,7 +1014,7 @@ auto StartVerificationWorkers(
 }
 
 [[nodiscard]] auto LookupSnapshotStreams(
-    const std::wstring_view snapshot,
+    const std::string &snapshot,
     const std::string_view description,
     const std::span<const std::uint64_t> clusters) {
     const auto api_clusters = clusters |
@@ -1124,7 +1121,7 @@ auto StartVerificationWorkers(
 auto ResolveSnapshotOwnership(
     ClusterOwnershipCache &ownership_cache,
     const SnapshotEndpoint endpoint,
-    const std::wstring_view snapshot,
+    const std::string &snapshot,
     const std::span<const std::uint64_t> clusters) -> void {
     const auto description = endpoint == SnapshotEndpoint::Baseline
         ? kBaselineDescription : kPayloadDescription;
@@ -1226,11 +1223,8 @@ auto PrintOwnershipUpdate(
             continue;
         }
         if (!wrote_heading) {
-            const auto identifier =
-                winrt::to_hstring(volume_identifier);
             devicefs::WriteToStream(output,
-                L"  Volume ID: {}\n",
-                std::wstring_view{identifier});
+                "  Volume ID: {}\n", GuidText(volume_identifier));
             devicefs::WriteToStream(
                 output, "    NTFS ownership update:\n");
             wrote_heading = true;
@@ -1293,16 +1287,14 @@ auto PrintVerificationProgress(
     auto coverage_unavailable = std::size_t{};
     for (auto &&[job, observation] :
         std::views::zip(jobs, observations)) {
-        const auto identifier =
-            winrt::to_hstring(job.volume.get().volume_identifier);
         const auto volume_size = job.volume_size;
         compared_total += observation.compared_bytes;
         volume_total += volume_size;
         differing_total += observation.differing_bytes;
         uncovered_total += observation.uncovered_blocks;
         devicefs::WriteToStream(std::cout,
-            L"  Volume ID: {}\n",
-            std::wstring_view{identifier});
+            "  Volume ID: {}\n",
+            GuidText(job.volume.get().volume_identifier));
         devicefs::WriteToStream(std::cout,
             "    Compared: {} of {} bytes ({:.2f}%)\n"
             "    Differences observed: {} byte(s) in {} 16-KiB block(s)\n",
@@ -1392,11 +1384,9 @@ auto PrintVerificationResult(
     const std::uint64_t volume_size,
     const bool complete,
     const bool cancelled) {
-    const auto identifier =
-        winrt::to_hstring(job.volume.get().volume_identifier);
     devicefs::WriteToStream(output,
-        L"\n  Volume ID: {}\n",
-        std::wstring_view{identifier});
+        "\n  Volume ID: {}\n",
+        GuidText(job.volume.get().volume_identifier));
     if (!observation.failure.empty()) {
         devicefs::WriteToStream(output,
             "    Status: failed after comparing {} byte(s): {}\n",
@@ -1625,7 +1615,7 @@ auto PrintVerificationResult(
 
 [[nodiscard]] auto RunSnapshotDiagnostics(
     const HANDLE cancellation_event,
-    const std::span<const std::wstring> volumes,
+    const std::span<const std::string> volumes,
     const std::span<const AvailableBaseline> baselines,
     const IncrementalDiagnosticOptions &options) {
     auto result = SnapshotDiagnosticResult{};

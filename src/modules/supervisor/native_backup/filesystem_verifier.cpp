@@ -37,7 +37,7 @@ import devicefs.stream_writer;
 export struct FilesystemVerificationVolume {
     GUID volume_identifier;
     GUID payload_snapshot_identifier;
-    std::wstring filename;
+    std::string filename;
 };
 
 namespace {
@@ -3041,19 +3041,19 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
 
 [[nodiscard]] auto InventoryVhdx(
     const HANDLE cancellation_event,
-    const std::wstring_view device) -> int {
-    const auto mount_target = internal::TemporaryDeviceFsViewPath();
+    const std::string_view device) -> int {
     const auto sources = std::array{
         internal::DeviceFsSource{
-            .name = L"device.vhdx",
-            .source = std::wstring{device},
+            .name = "device.vhdx",
+            .source = std::string{device},
         },
     };
     auto child = internal::DeviceFsChild{
         internal::StartDeviceFs(
             internal::DeviceFsStartRequest{
                 .sources = sources,
-                .mount_target = mount_target.native(),
+                .mount_target =
+                    internal::TemporaryDeviceFsViewPath().string(),
                 .vhdx = true,
             })};
     if (!internal::WaitForDeviceFs(
@@ -3117,7 +3117,8 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                         L"  VHDX file: {}\n"
                         L"  Attached volume: {}\n"
                         L"  Traversal workers: {}\n",
-                        device, vhdx_path.native(), view.Root(),
+                        std::filesystem::path{device}.wstring(),
+                        vhdx_path.native(), view.Root(),
                         kVerificationWorkerCount);
                     const auto root = std::wstring{view.Root()};
                     const auto inventory = InventoryFilesystem(
@@ -3222,8 +3223,8 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
 export [[nodiscard]] auto VerifyFilesystemViews(
     const HANDLE cancellation_event,
     const std::span<const FilesystemVerificationVolume> volumes,
-    const std::wstring_view synthetic_mount,
-    const std::wstring_view real_mount,
+    const std::filesystem::path &synthetic_mount,
+    const std::filesystem::path &real_mount,
     const double percentage,
     const std::size_t optimization_unavailable,
     const std::size_t preparation_failures) -> int {
@@ -3264,10 +3265,8 @@ export [[nodiscard]] auto VerifyFilesystemViews(
     for (const auto &volume : volumes) {
         auto state = std::make_unique<VerificationState>();
         auto *const borrowed_state = state.get();
-        auto synthetic_vhdx =
-            std::filesystem::path{synthetic_mount} / volume.filename;
-        auto real_vhdx =
-            std::filesystem::path{real_mount} / volume.filename;
+        auto synthetic_vhdx = synthetic_mount / volume.filename;
+        auto real_vhdx = real_mount / volume.filename;
         auto operation = [&]() -> std::future<void> {
             try {
                 return std::async(std::launch::async,

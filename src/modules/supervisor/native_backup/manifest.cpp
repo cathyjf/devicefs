@@ -44,7 +44,7 @@ export struct PreviousBackupManifestResult {
 
         struct SnapshotVolume {
             GUID snapshot_identifier{};
-            std::wstring device;
+            std::string device;
         };
 
         using SnapshotVolumes = std::map<GUID, SnapshotVolume, GuidLess>;
@@ -192,19 +192,18 @@ auto PreviousBackupManifestResult::SnapshotManifest::QuerySnapshotVolumes() cons
     auto snapshot_properties =
         devicefs::vshadow::QuerySnapshotProperties(snapshot_identifiers);
     const auto parse_volume_identifier = [](
-        const std::wstring &volume) -> std::optional<GUID> {
-        constexpr auto prefix = std::wstring_view{LR"(\\?\Volume)"};
-        if (!volume.starts_with(prefix) || !volume.ends_with(L'\\')) {
+        const std::string_view volume) -> std::optional<GUID> {
+        constexpr auto prefix = std::string_view{R"(\\?\Volume)"};
+        if (!volume.starts_with(prefix) || !volume.ends_with('\\')) {
             return std::nullopt;
         }
         const auto identifier = volume.substr(
             prefix.size(), volume.size() - prefix.size() - 1);
-        auto result = GUID{};
-        if (IIDFromString(
-                wil::zwstring_view{identifier}.c_str(), &result) != S_OK) {
+        try {
+            return winrt::guid{identifier};
+        } catch (const std::invalid_argument &) {
             return std::nullopt;
         }
-        return result;
     };
 
     auto result = SnapshotVolumes{};
@@ -240,7 +239,7 @@ export [[nodiscard]] auto RetrievePreviousBackupManifest(
     -> std::optional<PreviousBackupManifestResult> {
     try {
         constexpr auto arguments =
-            std::array{std::wstring_view{L"--print-manifest"}};
+            std::array{std::string_view{"--print-manifest"}};
         auto result = internal::RunPbsFish(
             cancellation_event,
             namespace_override,
@@ -274,22 +273,25 @@ namespace internal {
 
         auto volumes = JsonObject{};
         for (const auto &snapshot : snapshot_set.snapshots) {
+            const auto original_volume = std::filesystem::path{
+                snapshot.original_volume}.wstring();
             auto mount_points = JsonArray{};
             for (const auto &mount_point :
-                VolumeMountPoints(snapshot.original_volume)) {
+                VolumeMountPoints(original_volume)) {
                 mount_points.Append(
                     JsonValue::CreateStringValue(mount_point));
             }
             auto notes = JsonObject{};
             notes.SetNamedValue(L"mount-points", mount_points);
             notes.SetNamedValue(L"volume-label", JsonValue::CreateStringValue(
-                VolumeLabel(snapshot.original_volume)));
+                VolumeLabel(original_volume)));
 
             auto volume = JsonObject{};
             volume.SetNamedValue(L"snapshot-id", JsonValue::CreateStringValue(
                 winrt::to_hstring(snapshot.identifier)));
             volume.SetNamedValue(L"notes", notes);
-            volumes.SetNamedValue(SnapshotImageName(snapshot), volume);
+            volumes.SetNamedValue(std::filesystem::path{
+                SnapshotImageName(snapshot)}.wstring(), volume);
         }
 
         auto result = JsonObject{};

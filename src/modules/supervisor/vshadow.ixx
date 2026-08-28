@@ -27,14 +27,14 @@ export namespace devicefs::vshadow {
 
 struct Snapshot {
     GUID identifier{};
-    std::wstring original_volume;
-    std::wstring device;
+    std::string original_volume;
+    std::string device;
 };
 
 struct SnapshotProperties {
     GUID snapshot_set_identifier{};
-    std::wstring original_volume;
-    std::wstring device;
+    std::string original_volume;
+    std::string device;
 };
 
 struct SnapshotSet {
@@ -143,8 +143,9 @@ class Backup {
                 snapshot_devices)) {
             snapshot_set.snapshots.push_back({
                 .identifier = identifier,
-                .original_volume = original_volume,
-                .device = device,
+                .original_volume = std::filesystem::path{
+                    original_volume}.string(),
+                .device = std::filesystem::path{device}.string(),
             });
         }
 
@@ -203,8 +204,9 @@ export namespace devicefs::vshadow {
                     snapshot_set_identifier, original_volume, device);
                 properties = SnapshotProperties{
                     .snapshot_set_identifier = snapshot_set_identifier,
-                    .original_volume = std::move(original_volume),
-                    .device = std::move(device),
+                    .original_volume = std::filesystem::path{
+                        original_volume}.string(),
+                    .device = std::filesystem::path{device}.string(),
                 };
             } catch (const HRESULT) {
                 // One unavailable old snapshot does not affect the others.
@@ -219,12 +221,13 @@ export namespace devicefs::vshadow {
 [[nodiscard]] auto Run(
     const HANDLE cancellation_event,
     const bool use_writers,
-    const std::span<const std::wstring> volumes,
+    const std::span<const std::string> volumes,
     const std::function<int(const SnapshotSet &)> &operation) -> int {
     try {
         auto canonical_volumes = volumes |
-            std::views::transform([](const std::wstring &volume) {
-                return GetUniqueVolumeNameForPath(volume, true);
+            std::views::transform([](const std::string &volume) {
+                return GetUniqueVolumeNameForPath(
+                    std::filesystem::path{volume}.wstring(), true);
             }) |
             std::ranges::to<std::vector<std::wstring>>();
 

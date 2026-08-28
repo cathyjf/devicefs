@@ -219,7 +219,7 @@ export namespace devicefs::svi {
 // The caller owns SeBackupPrivilege. Reparse-point objects and their named
 // streams are measured, but directory reparse targets are not followed.
 [[nodiscard]] auto ReadBlockOffsets(
-    const std::wstring_view snapshot_device) -> std::set<std::uint64_t> {
+    const std::string_view snapshot_device) -> std::set<std::uint64_t> {
     const auto device_path = std::filesystem::path{snapshot_device};
     auto device = wil::unique_hfile{CreateFileW(
         device_path.c_str(), GENERIC_READ, kShareMode, nullptr, OPEN_EXISTING,

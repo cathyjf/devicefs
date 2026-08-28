@@ -40,7 +40,7 @@ enum class PbsStandardOutput {
 };
 
 struct PbsFishRequest {
-    std::span<const std::wstring_view> additional_arguments{};
+    std::span<const std::string_view> additional_arguments{};
     std::optional<std::u8string_view> snapshot_manifest;
     PbsStandardOutput standard_output = PbsStandardOutput::Forward;
     std::chrono::milliseconds term_grace = 45s;
@@ -83,7 +83,7 @@ constexpr auto kWslCreationFlags = DWORD{
     const wil::zwstring_view username,
     const wil::zwstring_view password,
     const std::filesystem::path &wsl_path,
-    std::wstring &command,
+    std::string &command,
     const std::filesystem::path &working_directory,
     const HANDLE standard_input,
     const HANDLE standard_output,
@@ -101,7 +101,8 @@ constexpr auto kWslCreationFlags = DWORD{
         .hStdOutput = child_handles[1].get(),
         .hStdError = child_handles[2].get(),
     };
-    if (command.length() > 1024) {
+    auto wide_command = std::filesystem::path{command}.wstring();
+    if (wide_command.length() > 1024) {
         // CreateProcessWithLogonW supports a maximum command line length of
         // 1024 characters. A longer command line will cause
         // CreateProcessWithLogonW to fail in a manner that is difficult to
@@ -109,11 +110,7 @@ constexpr auto kWslCreationFlags = DWORD{
         // See <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw>.
         throw std::runtime_error{std::format(
             "command line is {} characters, which is too long for CreateProcessWithLogonW: {}",
-            command.length(),
-            ([](const auto &str) {
-                return std::string(str.begin(), str.end());
-            })(std::filesystem::path(command).u8string())
-        )};
+            wide_command.length(), command)};
     }
     auto process = wil::unique_process_information{};
     // This API copies STARTF_USESTDHANDLES itself and, unlike the service
@@ -121,7 +118,7 @@ constexpr auto kWslCreationFlags = DWORD{
     // Manual backups create no supervisor job, so do not request breakaway.
     if (!CreateProcessWithLogonW(
             username.c_str(), kLocalDomain.c_str(), password.c_str(),
-            LOGON_WITH_PROFILE, wsl_path.c_str(), command.data(),
+            LOGON_WITH_PROFILE, wsl_path.c_str(), wide_command.data(),
             kWslCreationFlags,
             nullptr, working_directory.c_str(), &startup, &process)) {
         WinError("could not start WSL as the configured account");
@@ -325,19 +322,23 @@ struct WslProcess {
 
 [[nodiscard]] auto StartWslAsConfiguredUser(
     const BackupConfiguration &configuration,
-    const std::span<const std::wstring_view> arguments,
+    const std::span<const std::string_view> arguments,
     const HANDLE standard_input,
     const HANDLE standard_output,
     const HANDLE standard_error) {
     const auto wsl_path = ProgramFilesDirectory() / L"WSL" / L"wsl.exe";
-    auto argument_views = std::vector<std::wstring_view>{wsl_path.native()};
+    const auto wsl_path_text = wsl_path.string();
+    auto argument_views = std::vector<std::string_view>{wsl_path_text};
     argument_views.append_range(arguments);
     auto command = wil::ArgvToCommandLine(argument_views);
     const auto wsl_directory = wsl_path.parent_path();
+    const auto windows_username =
+        std::filesystem::path{
+            configuration.windows_username}.wstring();
     if (!RunningAsLocalSystem()) {
         auto result = WslProcess{};
         result.process = StartWslWithLogon(
-            configuration.windows_username,
+            windows_username,
             configuration.windows_password,
             wsl_path, command, wsl_directory,
             standard_input, standard_output, standard_error);
@@ -346,13 +347,13 @@ struct WslProcess {
 
     auto result = WslProcess{};
     result.token = LogOnWindowsAccount(
-        configuration.windows_username,
+        windows_username,
         configuration.windows_password);
 
     [[gsl::suppress("type.3",
         justification: "LoadUserProfileW retains a mutable historical parameter for an input-only username.")]]
     auto *const profile_user =
-        const_cast<PWSTR>(configuration.windows_username.c_str());
+        const_cast<PWSTR>(windows_username.c_str());
     auto profile = PROFILEINFOW{
         .dwSize = sizeof(PROFILEINFOW),
         .dwFlags = PI_NOUI,
@@ -389,13 +390,13 @@ struct WslProcess {
         standard_input,
         standard_output,
         standard_error,
-        [&](STARTUPINFOW *const startup, PROCESS_INFORMATION *const process) {
-            return CreateProcessAsUserW(
-                result.token.get(), wsl_path.c_str(), command.data(),
+        [&](STARTUPINFOA *const startup, PROCESS_INFORMATION *const process) {
+            return CreateProcessAsUserA(
+                result.token.get(), wsl_path_text.c_str(), command.data(),
                 nullptr, nullptr, TRUE,
                 kWslCreationFlags | CREATE_BREAKAWAY_FROM_JOB |
                     EXTENDED_STARTUPINFO_PRESENT,
-                environment.get(), wsl_directory.c_str(), startup, process);
+                environment.get(), wsl_directory.string().c_str(), startup, process);
         },
         "could not start WSL as the configured account");
     return result;
@@ -410,7 +411,7 @@ struct StartedWslFish {
 
 [[nodiscard]] auto StartWslFishProcess(
     const BackupConfiguration &configuration,
-    const std::span<const std::wstring_view> arguments) -> StartedWslFish {
+    const std::span<const std::string_view> arguments) -> StartedWslFish {
     auto input_read = wil::unique_handle{};
     auto input_write = wil::unique_handle{};
     if (!CreatePipe(input_read.addressof(), input_write.addressof(),
@@ -430,17 +431,17 @@ struct StartedWslFish {
         WinError("could not create the WSL error channel");
     }
 
-    auto wsl_arguments = std::vector<std::wstring_view>{
-        L"--distribution", configuration.wsl_distribution,
+    auto wsl_arguments = std::vector<std::string_view>{
+        "--distribution", configuration.wsl_distribution,
     };
     if (configuration.wsl_linux_user) {
-        wsl_arguments.push_back(L"--user");
+        wsl_arguments.push_back("--user");
         wsl_arguments.push_back(*configuration.wsl_linux_user);
     }
-    wsl_arguments.append_range(std::to_array<std::wstring_view>({
-        L"--exec", L"/usr/bin/fish", L"--no-config", L"-c",
-        L"read --null --global DEVICEFS_FISH_PROGRAM && eval $DEVICEFS_FISH_PROGRAM",
-        L"--",
+    wsl_arguments.append_range(std::to_array<std::string_view>({
+        "--exec", "/usr/bin/fish", "--no-config", "-c",
+        "read --null --global DEVICEFS_FISH_PROGRAM && eval $DEVICEFS_FISH_PROGRAM",
+        "--",
     }));
     wsl_arguments.append_range(arguments);
     auto process = StartWslAsConfiguredUser(
@@ -462,7 +463,7 @@ struct StartedWslFish {
 
 [[nodiscard]] auto StartWslFish(
     const BackupConfiguration &configuration,
-    const std::span<const std::wstring_view> arguments,
+    const std::span<const std::string_view> arguments,
     const std::span<const char> program,
     const std::span<const char8_t> standard_input,
     const PbsStandardOutput standard_output = PbsStandardOutput::Forward) {
@@ -518,25 +519,20 @@ enum class PbsFishSignal {
     Kill,
 };
 
-struct PbsFishSignalText {
-    std::wstring_view argument;
-    std::string_view diagnostic;
-};
-
 [[nodiscard]] constexpr auto SignalText(
-    const PbsFishSignal signal) noexcept {
+    const PbsFishSignal signal) noexcept -> std::string_view {
     switch (signal) {
     case PbsFishSignal::Term:
-        return PbsFishSignalText{L"TERM", "TERM"};
+        return "TERM";
     case PbsFishSignal::Kill:
-        return PbsFishSignalText{L"KILL", "KILL"};
+        return "KILL";
     }
     std::unreachable();
 }
 
 auto SendPbsFishSignal(
-    const std::wstring_view pid_file,
-    const std::wstring_view stop_file,
+    const std::string_view pid_file,
+    const std::string_view stop_file,
     const PbsFishSignal signal) {
     constexpr auto kControlTimeout = 15s;
     constexpr auto program = std::string_view(
@@ -544,7 +540,7 @@ auto SendPbsFishSignal(
         "if test -s $argv[1]; kill -s $argv[3] (cat $argv[1]); end");
     const auto text = SignalText(signal);
     const auto arguments = std::array{
-        pid_file, stop_file, text.argument};
+        pid_file, stop_file, text};
     auto request = [&] {
         const auto persistent = ResolvePersistentPaths();
         const auto configuration =
@@ -559,19 +555,19 @@ auto SendPbsFishSignal(
             request.process.hProcess, kControlTimeout)) {
         throw std::runtime_error(std::format(
             "the WSL {} request did not exit before its timeout",
-            text.diagnostic));
+            text));
     }
     const auto result = FinishWsl(request);
     if (result.exit_code != 0) {
         throw std::runtime_error(std::format(
             "the WSL {} request exited with code {}",
-            text.diagnostic, result.exit_code));
+            text, result.exit_code));
     }
 }
 
 auto TrySendPbsFishSignal(
-    const std::wstring_view pid_file,
-    const std::wstring_view stop_file,
+    const std::string_view pid_file,
+    const std::string_view stop_file,
     const PbsFishSignal signal) noexcept {
     try {
         SendPbsFishSignal(pid_file, stop_file, signal);
@@ -586,19 +582,19 @@ auto TrySendPbsFishSignal(
     const PbsFishRequest &request) -> std::optional<PbsFishResult> {
     constexpr auto kPollInterval = 100ms;
     const auto control_path = std::format(
-        L"/tmp/devicefs-{}", UniqueName());
-    const auto pid_file = std::format(L"{}.pid", control_path);
-    const auto stop_file = std::format(L"{}.stop", control_path);
-    const auto computer_name =
-        wil::GetEnvironmentVariableW<std::wstring>(L"COMPUTERNAME");
+        "/tmp/devicefs-{}", UniqueName());
+    const auto pid_file = std::format("{}.pid", control_path);
+    const auto stop_file = std::format("{}.stop", control_path);
+    const auto computer_name = std::filesystem::path{
+        wil::GetEnvironmentVariableW<std::wstring>(L"COMPUTERNAME")}.string();
     auto operation = [&] {
         const auto persistent = ResolvePersistentPaths();
         const auto configuration =
             ReadBackupConfiguration(persistent.configuration);
-        auto arguments = std::vector<std::wstring_view>{
+        auto arguments = std::vector<std::string_view>{
             pid_file, stop_file, computer_name};
         if (configuration.pbs_parallelize_image_upload) {
-            arguments.push_back(L"--parallel-images");
+            arguments.push_back("--parallel-images");
         }
         arguments.append_range(request.additional_arguments);
 

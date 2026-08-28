@@ -63,12 +63,12 @@ class SnapshotAllocationBitmap {
     std::unique_ptr<State> state_;
 
     friend auto LoadSnapshotAllocationBitmap(
-        std::wstring_view,
+        std::string_view,
         std::string_view) -> SnapshotAllocationBitmap;
 };
 
 [[nodiscard]] auto LoadSnapshotAllocationBitmap(
-    std::wstring_view snapshot,
+    std::string_view snapshot,
     std::string_view description) -> SnapshotAllocationBitmap;
 
 struct AllocationChangeBlocks {
@@ -78,8 +78,8 @@ struct AllocationChangeBlocks {
 };
 
 [[nodiscard]] auto ReadAllocationChangeBlocks(
-    std::wstring_view previous_snapshot,
-    std::wstring_view current_snapshot,
+    std::string_view previous_snapshot,
+    std::string_view current_snapshot,
     std::uint64_t block_size) -> AllocationChangeBlocks;
 
 } // namespace devicefs
@@ -450,7 +450,7 @@ auto WindowsBlockDevice::FromFilename(
     std::filesystem::path filename, const bool extended_dasd,
     const bool cache, const bool synthetic_free_clusters,
     const std::string_view description) -> WindowsBlockDevice {
-    auto handle = wil::unique_hfile(CreateFileW(filename.c_str(), GENERIC_READ,
+    auto handle = wil::unique_hfile(CreateFileA(filename.string().c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
     if (!handle) {

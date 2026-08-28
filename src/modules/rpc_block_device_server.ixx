@@ -82,8 +82,8 @@ class RpcBlockDeviceServer {
         }
         active_.emplace(*this);
 
-        auto protocol_sequence = std::wstring{
-            devicefs::rpc::kProtocolSequence};
+        auto protocol_sequence = std::filesystem::path{
+            devicefs::rpc::kProtocolSequence}.wstring();
         const auto protocol_status = RpcServerUseProtseqEpW(
             protocol_sequence.data(),
             RPC_C_PROTSEQ_MAX_REQS_DEFAULT,

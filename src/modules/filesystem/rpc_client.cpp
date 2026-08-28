@@ -46,9 +46,9 @@ namespace rpc_client {
     return mapping.device.starts_with(internal::kRpcDevicePrefix);
 }
 
-[[nodiscard]] auto MakeRpcBinding(const wil::zwstring_view endpoint) {
-    auto string_binding = std::format(
-        L"{}:[{}]", devicefs::rpc::kProtocolSequence, endpoint);
+[[nodiscard]] auto MakeRpcBinding(const wil::zstring_view endpoint) {
+    auto string_binding = std::filesystem::path{std::format(
+        "{}:[{}]", devicefs::rpc::kProtocolSequence, endpoint)}.wstring();
     auto result = wil::unique_rpc_binding{};
     const auto error = RpcBindingFromStringBindingW(
         string_binding.data(), result.put());
@@ -64,11 +64,9 @@ struct RPCBlockDevice {
 
     [[nodiscard]] static auto FromSymbol(
         const wil::shared_rpc_binding &binding,
-        const std::wstring_view symbol) {
-        auto stored_symbol = [](const std::u8string_view encoded_symbol) {
-            return std::basic_string<unsigned char>{
-                encoded_symbol.begin(), encoded_symbol.end()};
-        }(std::filesystem::path{symbol}.u8string());
+        const std::string_view symbol) {
+        auto stored_symbol = std::basic_string<unsigned char>{
+            symbol.begin(), symbol.end()};
         const auto length = [&] {
             auto result = std::uint64_t{};
             auto status = NTSTATUS{};

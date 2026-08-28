@@ -390,8 +390,8 @@ public:
 
     [[nodiscard]] auto StartProcess(
         const HANDLE job,
-        const wil::zwstring_view application,
-        std::wstring &command) {
+        const wil::zstring_view application,
+        std::string &command) {
         constexpr auto kAttributeCount = DWORD{2};
         auto attribute_bytes = SIZE_T{};
         InitializeProcThreadAttributeList(
@@ -429,12 +429,12 @@ public:
                 sizeof(jobs), nullptr, nullptr)) {
             WinError("could not assign the child process to its job");
         }
-        auto startup = STARTUPINFOEXW{
-            .StartupInfo = {.cb = sizeof(STARTUPINFOEXW)},
+        auto startup = STARTUPINFOEXA{
+            .StartupInfo = {.cb = sizeof(STARTUPINFOEXA)},
             .lpAttributeList = attributes,
         };
         auto process = wil::unique_process_information{};
-        if (!CreateProcessW(application.c_str(), command.data(),
+        if (!CreateProcessA(application.c_str(), command.data(),
                 nullptr, nullptr, FALSE,
                 CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
                 nullptr, nullptr,

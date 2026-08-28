@@ -37,30 +37,30 @@ struct DeviceFsProcess {
     static constexpr auto kPollInterval = 100ms;
     static constexpr auto kStartTimeout = 30s;
     static constexpr auto kShutdownTimeout = 60s;
-    static constexpr auto kMountTarget = std::wstring_view(L"X:");
+    static constexpr auto kMountTarget = std::string_view("X:");
     static constexpr auto kMountDriveMask =
-        DWORD{1} << (kMountTarget.front() - L'A');
+        DWORD{1} << (kMountTarget.front() - 'A');
 
     wil::unique_process_information process;
     std::filesystem::path readiness_path;
-    std::wstring stop_event_name;
+    std::string stop_event_name;
 };
 
 struct DeviceFsSource {
-    std::wstring name;
-    std::wstring source;
+    std::string name;
+    std::string source;
 };
 
 struct DeviceFsStartRequest {
     std::span<const DeviceFsSource> sources;
-    std::wstring_view mount_target;
-    std::optional<std::wstring_view> read_user;
-    std::optional<wil::zwstring_view> rpc_endpoint;
+    std::string mount_target;
+    std::optional<std::string> read_user;
+    std::optional<std::string> rpc_endpoint;
     bool vhdx = false;
 };
 
 [[nodiscard]] auto TemporarySystemDirectoryPath(
-    const std::wstring_view prefix) {
+    const std::string_view prefix) {
     const auto windows_directory = [] {
         auto result = std::wstring{};
         const auto status = wil::GetWindowsDirectoryW(result);
@@ -71,68 +71,67 @@ struct DeviceFsStartRequest {
         return result;
     }();
     return std::filesystem::path{windows_directory} /
-        L"SystemTemp" /
-        std::format(L"{}-{}", prefix, UniqueName());
+        "SystemTemp" /
+        std::format("{}-{}", prefix, UniqueName());
 }
 
 [[nodiscard]] auto TemporaryDeviceFsViewPath() {
-    return TemporarySystemDirectoryPath(L"devicefs-view");
+    return TemporarySystemDirectoryPath("devicefs-view");
 }
 
 [[nodiscard]] auto StartDeviceFs(
     const DeviceFsStartRequest &request) {
-    const auto supervisor = CurrentExecutablePath();
-    auto mount_target = std::wstring{request.mount_target};
+    const auto supervisor = CurrentExecutablePath().string();
     auto stop_event_name = std::format(
-        L"Global\\devicefs-stop-{}", UniqueName());
-    auto arguments = std::vector<std::wstring>{
-        supervisor.native(),
-        L"--devicefs",
-        L"--synthetic-free-clusters",
-        L"--cache",
+        "Global\\devicefs-stop-{}", UniqueName());
+    auto arguments = std::vector<std::string>{
+        supervisor,
+        "--devicefs",
+        "--synthetic-free-clusters",
+        "--cache",
     };
     if (request.vhdx) {
-        arguments.emplace_back(L"--vhdx");
+        arguments.emplace_back("--vhdx");
     }
-    arguments.emplace_back(L"--mount");
-    arguments.emplace_back(mount_target);
+    arguments.emplace_back("--mount");
+    arguments.emplace_back(request.mount_target);
     if (request.read_user) {
-        arguments.emplace_back(L"--read-user");
+        arguments.emplace_back("--read-user");
         arguments.emplace_back(*request.read_user);
     }
-    arguments.emplace_back(L"--stop-event");
+    arguments.emplace_back("--stop-event");
     arguments.emplace_back(stop_event_name);
 
     auto readiness_path = std::filesystem::path{};
     for (const auto &source : request.sources) {
         if (readiness_path.empty()) {
             readiness_path = std::filesystem::path(
-                std::format(L"{}\\", mount_target)) /
+                std::format("{}\\", request.mount_target)) /
                 source.name;
         }
-        arguments.emplace_back(L"--map");
+        arguments.emplace_back("--map");
         arguments.emplace_back(source.name);
         arguments.emplace_back(request.rpc_endpoint
-            ? std::format(LR"(\\\{})", source.source)
+            ? std::format(R"(\\\{})", source.source)
             : source.source);
     }
     auto command = wil::ArgvToCommandLine(arguments);
     if (request.rpc_endpoint &&
-        !SetEnvironmentVariableW(
+        !SetEnvironmentVariableA(
             devicefs::rpc::kEndpointEnvironmentVariable.data(),
             request.rpc_endpoint->c_str())) {
         WinError("could not set the RPC block-device endpoint");
     }
     devicefs::WriteToStream(
-        std::cout, L"Setting up virtual filesystem: {}\n", command);
+        std::cout, "Setting up virtual filesystem: {}\n", command);
     const auto creation_flags = EXTENDED_STARTUPINFO_PRESENT |
         (request.rpc_endpoint ? CREATE_SUSPENDED : DWORD{});
     auto process = StartProcessWithHandles(
         GetStdHandle(STD_INPUT_HANDLE),
         GetStdHandle(STD_OUTPUT_HANDLE),
         GetStdHandle(STD_ERROR_HANDLE),
-        [&](STARTUPINFOW *const startup, PROCESS_INFORMATION *const result) {
-            return CreateProcessW(
+        [&](STARTUPINFOA *const startup, PROCESS_INFORMATION *const result) {
+            return CreateProcessA(
                 supervisor.c_str(), command.data(),
                 nullptr, nullptr, TRUE,
                 creation_flags,
@@ -155,7 +154,7 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
 
 [[nodiscard]] auto StartDeviceFs(
     const std::span<const devicefs::vshadow::Snapshot> snapshots,
-    const std::wstring_view read_user) {
+    const std::string_view read_user) {
     const auto sources = snapshots |
         std::views::transform([](const auto &snapshot) {
             return DeviceFsSource{
@@ -166,8 +165,8 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
         std::ranges::to<std::vector<DeviceFsSource>>();
     return StartDeviceFs(DeviceFsStartRequest{
         .sources = sources,
-        .mount_target = DeviceFsProcess::kMountTarget,
-        .read_user = read_user,
+        .mount_target = std::string{DeviceFsProcess::kMountTarget},
+        .read_user = std::string{read_user},
     });
 }
 
@@ -244,10 +243,10 @@ auto StopDeviceFs(
     auto stop_requested = false;
     while (!WaitForProcess(devicefs.process.hProcess, 0ms)) {
         if (!stop_requested) {
-            auto stop_event = wil::unique_event_nothrow{};
-            if (stop_event.try_open(
-                    devicefs.stop_event_name.c_str(),
-                    EVENT_MODIFY_STATE)) {
+            auto stop_event = wil::unique_event_nothrow{OpenEventA(
+                EVENT_MODIFY_STATE, FALSE,
+                devicefs.stop_event_name.c_str())};
+            if (stop_event) {
                 if (!SetEvent(stop_event.get())) {
                     WinError("could not request devicefs shutdown");
                 }

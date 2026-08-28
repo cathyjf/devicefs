@@ -60,7 +60,7 @@ auto SnapshotAllocationBitmap::SynthesizeFreeClusters(
 }
 
 auto LoadSnapshotAllocationBitmap(
-    const std::wstring_view snapshot,
+    const std::string_view snapshot,
     const std::string_view description) -> SnapshotAllocationBitmap {
     auto device = WindowsBlockDevice::FromFilename(
         std::filesystem::path{snapshot}, false, false, true, description);
@@ -73,8 +73,8 @@ auto LoadSnapshotAllocationBitmap(
 }
 
 auto ReadAllocationChangeBlocks(
-    const std::wstring_view previous_snapshot,
-    const std::wstring_view current_snapshot,
+    const std::string_view previous_snapshot,
+    const std::string_view current_snapshot,
     const std::uint64_t block_size) -> AllocationChangeBlocks {
     constexpr auto previous_description =
         std::string_view{"the previous snapshot"};

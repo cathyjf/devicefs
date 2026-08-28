@@ -70,8 +70,8 @@ auto SortAndDeduplicate(
 
 export [[nodiscard]] auto BuildDirtyBlockMap(
     const GUID &baseline_snapshot_identifier,
-    const std::wstring_view baseline_device,
-    const std::wstring_view payload_device) {
+    const std::string_view baseline_device,
+    const std::string_view payload_device) {
     const auto descriptors = devicefs::vss::ReadBlockDescriptors(
         payload_device, baseline_snapshot_identifier);
     auto descriptor_blocks = ProjectDescriptorBlocks(descriptors);

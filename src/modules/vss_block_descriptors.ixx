@@ -104,7 +104,7 @@ struct StoreBlockDescriptors {
 // handle path or a flat byte-for-byte image of that volume. The result preserves
 // every nonempty raw descriptor's traversal order and multiplicity.
 [[nodiscard]] auto ReadBlockDescriptors(
-    std::wstring_view source, const GUID &snapshot_identifier)
+    std::string_view source, const GUID &snapshot_identifier)
     -> StoreBlockDescriptors;
 
 } // namespace devicefs::vss
@@ -181,8 +181,8 @@ constexpr auto kVssIdentifier = std::array{
 
 class RawSource {
   public:
-    explicit RawSource(const std::wstring_view path) {
-        auto normalized_path = std::wstring{path};
+    explicit RawSource(const std::string_view path) {
+        auto normalized_path = std::filesystem::path{path}.wstring();
         constexpr auto volume_guid_prefix =
             std::wstring_view{LR"(\\?\Volume{)"};
         const auto volume_guid_end =
@@ -967,7 +967,7 @@ class DescriptorState {
 namespace devicefs::vss {
 
 auto ReadBlockDescriptors(
-    const std::wstring_view source_path,
+    const std::string_view source_path,
     const GUID &snapshot_identifier) -> StoreBlockDescriptors {
     auto source = RawSource{source_path};
     const auto signature = source.Read(

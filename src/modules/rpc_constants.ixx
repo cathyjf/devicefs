@@ -21,7 +21,7 @@ import std;
 export namespace devicefs::rpc {
 
 constexpr auto kEndpointEnvironmentVariable =
-    std::wstring_view{L"DEVICEFS_RPC_ENDPOINT"};
-constexpr auto kProtocolSequence = std::wstring_view{L"ncalrpc"};
+    std::string_view{"DEVICEFS_RPC_ENDPOINT"};
+constexpr auto kProtocolSequence = std::string_view{"ncalrpc"};
 
 } // namespace devicefs::rpc

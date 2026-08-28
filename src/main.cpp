@@ -15,6 +15,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import std;
+import <clocale>;
 import <sal.h>;
 import devicefs.common;
 import devicefs.filesystem;
@@ -23,9 +24,15 @@ import devicefs.stream_writer;
 auto wmain(
     _Pre_satisfies_(argc > 0) const int argc,
     _In_reads_(argc) wchar_t **const argv) -> int {
+    std::ignore = std::setlocale(LC_CTYPE, ".UTF8");
     try {
         HardenProcess();
-        return devicefs::Main({argv, argv + argc});
+        return devicefs::Main(
+            std::span{argv, argv + argc} |
+            std::views::transform([](const auto argument) {
+                return std::filesystem::path{argument}.string();
+            }) |
+            std::ranges::to<std::vector<std::string>>());
     } catch (const std::runtime_error &error) {
         devicefs::WriteToStream(
             std::cerr, "devicefs: {}\n", error.what());

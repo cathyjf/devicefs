@@ -77,7 +77,7 @@ auto internal::CheckNt(
 
 namespace {
 
-constexpr auto kDefaultStopEvent = std::wstring_view(L"Local\\devicefs-stop");
+constexpr auto kDefaultStopEvent = std::string_view("Local\\devicefs-stop");
 constexpr auto kFileSystemName = std::wstring_view(L"DEVICEFS");
 static_assert(kFileSystemName.size() + 1 <=
     std::size(FSP_FSCTL_VOLUME_PARAMS{}.FileSystemName),
@@ -105,8 +105,8 @@ struct Mount {
 
 struct Options {
     Mount mount;
-    std::wstring read_user;
-    std::wstring stop_event{kDefaultStopEvent};
+    std::string read_user;
+    std::string stop_event{kDefaultStopEvent};
     std::vector<internal::Mapping> mappings;
     bool cache = false;
     bool extended_dasd = true;
@@ -146,33 +146,33 @@ auto FurtherHardenProcess() {
     if (!GetUserNameW(result.data(), &length)) {
         WinError("could not obtain the current user name");
     }
-    result.resize(length - 1);
-    return result;
+    return std::filesystem::path{
+        std::wstring_view{result.data(), length - 1}}.string();
 }
 
 auto Usage(std::ostream &output) noexcept {
     devicefs::WriteToStream(output,
-        L"Usage: devicefs --mount TARGET --map NAME DEVICE"
-        L" [--map NAME DEVICE ...] [OPTIONS]\n\n"
-        L"Options:\n"
-        L"  --mount TARGET             Drive letter, directory, or network prefix\n"
-        L"  --read-user USER           User granted read access (default: current user)\n"
-        L"  --map NAME DEVICE          Virtual filename and block device (repeatable)\n"
-        L"  --stop-event NAME          Named shutdown event (default: {})\n"
-        L"  --cache                    Enable file-data caching (requires read-only volumes)\n"
-        L"  --no-extended-dasd-io      Do not issue FSCTL_ALLOW_EXTENDED_DASD_IO\n"
-        L"  --synthetic-free-clusters  Return zeros for free clusters on read-only NTFS volumes\n"
-        L"  --vhdx                     Expose each mapped volume as a VHDX disk\n"
-        L"  -h, --help                 Show this help\n\n"
-        L"Example:\n"
-        L"  devicefs --mount X: `\n"
-        L"    --map C.img '\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy12'\n",
+        "Usage: devicefs --mount TARGET --map NAME DEVICE"
+        " [--map NAME DEVICE ...] [OPTIONS]\n\n"
+        "Options:\n"
+        "  --mount TARGET             Drive letter, directory, or network prefix\n"
+        "  --read-user USER           User granted read access (default: current user)\n"
+        "  --map NAME DEVICE          Virtual filename and block device (repeatable)\n"
+        "  --stop-event NAME          Named shutdown event (default: {})\n"
+        "  --cache                    Enable file-data caching (requires read-only volumes)\n"
+        "  --no-extended-dasd-io      Do not issue FSCTL_ALLOW_EXTENDED_DASD_IO\n"
+        "  --synthetic-free-clusters  Return zeros for free clusters on read-only NTFS volumes\n"
+        "  --vhdx                     Expose each mapped volume as a VHDX disk\n"
+        "  -h, --help                 Show this help\n\n"
+        "Example:\n"
+        "  devicefs --mount X: `\n"
+        "    --map C.img '\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy12'\n",
         kDefaultStopEvent);
 }
 
-[[nodiscard]] auto ParseArgs(const std::span<const wchar_t *const> args) {
+[[nodiscard]] auto ParseArgs(const std::span<const std::string> args) {
     auto result = Options{};
-    const auto next = [&](auto &i) {
+    const auto next = [&](auto &i) -> const std::string & {
         if (++i == args.size()) {
             throw std::invalid_argument(
                 std::format("missing value after argument {}", i - 1));
@@ -181,26 +181,28 @@ auto Usage(std::ostream &output) noexcept {
     };
 
     for (auto i = 1uz; i < args.size(); ++i) {
-        const auto arg = std::wstring_view(args[i]);
-        if ((arg == L"-h") || (arg == L"--help")) {
+        const auto &arg = args[i];
+        if ((arg == "-h") || (arg == "--help")) {
             result.help = true;
-        } else if (arg == L"--mount") {
-            result.mount.value = next(i);
-        } else if (arg == L"--read-user") {
+        } else if (arg == "--mount") {
+            result.mount.value =
+                std::filesystem::path{next(i)}.wstring();
+        } else if (arg == "--read-user") {
             result.read_user = next(i);
-        } else if (arg == L"--stop-event") {
+        } else if (arg == "--stop-event") {
             result.stop_event = next(i);
-        } else if (arg == L"--map") {
-            const auto *const name = next(i);
-            const auto *const device = next(i);
-            result.mappings.push_back({.name = name, .device = device});
-        } else if (arg == L"--cache") {
+        } else if (arg == "--map") {
+            result.mappings.push_back({
+                .name = std::filesystem::path{next(i)}.wstring(),
+                .device = next(i),
+            });
+        } else if (arg == "--cache") {
             result.cache = true;
-        } else if (arg == L"--no-extended-dasd-io") {
+        } else if (arg == "--no-extended-dasd-io") {
             result.extended_dasd = false;
-        } else if (arg == L"--synthetic-free-clusters") {
+        } else if (arg == "--synthetic-free-clusters") {
             result.synthetic_free_clusters = true;
-        } else if (arg == L"--vhdx") {
+        } else if (arg == "--vhdx") {
             result.vhdx = true;
         } else {
             throw std::invalid_argument(std::format("unknown option at argument {}", i));
@@ -256,33 +258,33 @@ auto Usage(std::ostream &output) noexcept {
     return result;
 }
 
-[[nodiscard]] auto MakeSecurityDescriptor(const std::wstring &account) {
+[[nodiscard]] auto MakeSecurityDescriptor(const std::string &account) {
     auto sid_size = DWORD{};
     auto domain_size = DWORD{};
     auto use = SID_NAME_USE{};
-    LookupAccountNameW(nullptr, account.c_str(), nullptr, &sid_size, nullptr, &domain_size, &use);
+    LookupAccountNameA(nullptr, account.c_str(), nullptr, &sid_size, nullptr, &domain_size, &use);
     if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
         WinError("could not resolve --read-user");
     }
 
     auto sid = std::vector<BYTE>(sid_size);
-    auto domain = std::vector<wchar_t>(std::max<DWORD>(1, domain_size));
-    if (!LookupAccountNameW(nullptr, account.c_str(), sid.data(), &sid_size,
+    auto domain = std::vector<char>(std::max<DWORD>(1, domain_size));
+    if (!LookupAccountNameA(nullptr, account.c_str(), sid.data(), &sid_size,
             domain.data(), &domain_size, &use)) {
         WinError("could not resolve --read-user");
     }
 
-    auto sid_text = wil::unique_hlocal_string{};
-    if (!ConvertSidToStringSidW(sid.data(), sid_text.addressof())) {
+    auto sid_text = wil::unique_hlocal_ansistring{};
+    if (!ConvertSidToStringSidA(sid.data(), sid_text.addressof())) {
         WinError("could not format --read-user SID");
     }
 
     // SYSTEM and Administrators get full access.
     // The user specified by `--read-user` gets read and execute.
     auto descriptor = wil::unique_hlocal_security_descriptor{};
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
             std::format(
-                L"O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;{})",
+                "O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;{})",
                 sid_text.get()).c_str(),
             SDDL_REVISION_1, descriptor.addressof(), nullptr)) {
         WinError("could not create the filesystem ACL");
@@ -316,7 +318,7 @@ template <BlockDevice DeviceType>
         if constexpr ((std::same_as<DeviceType, RPCBlockDevice>) ||
             (std::same_as<DeviceType, VhdxViewer<RPCBlockDevice>>)) {
             return RPCBlockDevice::FromSymbol(rpc_binding,
-                std::wstring_view{mapping.device}.substr(
+                std::string_view{mapping.device}.substr(
                     internal::kRpcDevicePrefix.size()));
         } else {
             return WindowsBlockDevice::FromFilename(
@@ -723,13 +725,13 @@ auto RunWithDevice(
                 i + 1, rpc_binding));
     }
 
-    auto stop_event = wil::unique_event_nothrow{};
-    auto already_exists = false;
-    if (!stop_event.try_create(wil::EventOptions::ManualReset,
-            options.stop_event.c_str(), nullptr, &already_exists)) {
+    auto stop_event = wil::unique_event_nothrow{CreateEventExA(
+        nullptr, options.stop_event.c_str(),
+        CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS)};
+    if (!stop_event) {
         WinError("could not create shutdown event");
     }
-    if (already_exists) {
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
         throw std::runtime_error("--stop-event already exists");
     }
     auto stopped_event = wil::unique_event_nothrow{};
@@ -759,9 +761,10 @@ auto RunWithDevice(
 
         devicefs::WriteToStream(
             std::cout,
-            L"devicefs: mounted {} device(s) at {}; read access: {}; "
-            L"stop event: {}\n",
-            options.mappings.size(), options.mount.value,
+            "devicefs: mounted {} device(s) at {}; read access: {}; "
+            "stop event: {}\n",
+            options.mappings.size(),
+            std::filesystem::path{options.mount.value}.string(),
             options.read_user, options.stop_event);
         if (WaitForSingleObject(stop_event.get(), INFINITE) == WAIT_FAILED) {
             wait_error = GetLastError();
@@ -790,7 +793,9 @@ auto Run(const Options &options) {
         const auto binding = [] {
             auto result = std::wstring{};
             const auto error = wil::GetEnvironmentVariableW(
-                devicefs::rpc::kEndpointEnvironmentVariable.data(), result);
+                std::filesystem::path{
+                    devicefs::rpc::kEndpointEnvironmentVariable}.c_str(),
+                result);
             if (FAILED(error)) {
                 WinError("could not obtain the RPC block-device endpoint",
                     ExplicitWin32Error::FromHresult(error));
@@ -799,7 +804,8 @@ auto Run(const Options &options) {
                 throw std::runtime_error(
                     "the RPC block-device endpoint is empty");
             }
-            return rpc_client::MakeRpcBinding(result);
+            return rpc_client::MakeRpcBinding(
+                std::filesystem::path{result}.string());
         }();
         return options.vhdx
             ? RunWithDevice<VhdxViewer<RPCBlockDevice>>(options, binding)
@@ -815,7 +821,7 @@ auto Run(const Options &options) {
 
 export namespace devicefs {
 
-auto Main(const std::span<const wchar_t *const> arguments) -> int {
+auto Main(const std::span<const std::string> arguments) -> int {
     try {
         FurtherHardenProcess();
         auto options = Options{};

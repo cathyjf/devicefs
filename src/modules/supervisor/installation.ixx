@@ -44,50 +44,50 @@ export struct PersistentPaths {
 };
 
 export constexpr auto kServiceName =
-    std::wstring_view(L"DeviceFsBackup");
+    std::string_view("DeviceFsBackup");
 export constexpr auto kRunServiceOption =
-    std::wstring_view(L"--run-service");
+    std::string_view("--run-service");
 
 namespace {
 
-constexpr auto kProductDirectoryName = std::wstring_view(L"devicefs");
-constexpr auto kExecutableName = std::wstring_view(L"backup-supervisor.exe");
-constexpr auto kLogDirectoryName = std::wstring_view(L"logs");
-constexpr auto kCredentialsDirectoryName = std::wstring_view(L"credentials");
-constexpr auto kConfigurationName = std::wstring_view(L"backup.json");
+constexpr auto kProductDirectoryName = std::string_view("devicefs");
+constexpr auto kExecutableName = std::string_view("backup-supervisor.exe");
+constexpr auto kLogDirectoryName = std::string_view("logs");
+constexpr auto kCredentialsDirectoryName = std::string_view("credentials");
+constexpr auto kConfigurationName = std::string_view("backup.json");
 constexpr auto kBackupLockName =
-    std::wstring_view(L"pbs-vss-backup.lock");
-constexpr auto kServiceDisplayName = std::wstring_view(L"DeviceFs Backup");
-constexpr auto kLocalSystemAccount = std::wstring_view(L".\\LocalSystem");
-constexpr auto kNoDependencies = std::array{L'\0', L'\0'};
+    std::string_view("pbs-vss-backup.lock");
+constexpr auto kServiceDisplayName = std::string_view("DeviceFs Backup");
+constexpr auto kLocalSystemAccount = std::string_view(".\\LocalSystem");
+constexpr auto kNoDependencies = std::array{'\0', '\0'};
 
 // Newly created public directories are readable and traversable by ordinary
 // users, but only LocalSystem and the built-in Administrators group may modify
 // them. Protecting the DACL prevents permissive parent ACEs from being inherited.
-constexpr auto kPublicDirectorySecurity = wil::zwstring_view(
-    L"O:BA"                         // Owner: built-in Administrators.
-    L"D:P"                          // Protected DACL.
-    L"(A;OICI;FA;;;SY)"             // LocalSystem: full control.
-    L"(A;OICI;FA;;;BA)"             // Administrators: full control.
-    L"(A;OICI;GRGX;;;BU)");         // Users: read and execute.
-constexpr auto kExecutableSecurity = wil::zwstring_view(
-    L"O:BA"
-    L"D:P"
-    L"(A;;FA;;;SY)"
-    L"(A;;FA;;;BA)"
-    L"(A;;GRGX;;;BU)");
+constexpr auto kPublicDirectorySecurity = wil::zstring_view(
+    "O:BA"                          // Owner: built-in Administrators.
+    "D:P"                           // Protected DACL.
+    "(A;OICI;FA;;;SY)"              // LocalSystem: full control.
+    "(A;OICI;FA;;;BA)"              // Administrators: full control.
+    "(A;OICI;GRGX;;;BU)");          // Users: read and execute.
+constexpr auto kExecutableSecurity = wil::zstring_view(
+    "O:BA"
+    "D:P"
+    "(A;;FA;;;SY)"
+    "(A;;FA;;;BA)"
+    "(A;;GRGX;;;BU)");
 
 // Newly created credentials objects are not readable by ordinary users.
-constexpr auto kPrivateDirectorySecurity = wil::zwstring_view(
-    L"O:BA"
-    L"D:P"
-    L"(A;OICI;FA;;;SY)"
-    L"(A;OICI;FA;;;BA)");
-constexpr auto kPrivateFileSecurity = wil::zwstring_view(
-    L"O:BA"
-    L"D:P"
-    L"(A;;FA;;;SY)"
-    L"(A;;FA;;;BA)");
+constexpr auto kPrivateDirectorySecurity = wil::zstring_view(
+    "O:BA"
+    "D:P"
+    "(A;OICI;FA;;;SY)"
+    "(A;OICI;FA;;;BA)");
+constexpr auto kPrivateFileSecurity = wil::zstring_view(
+    "O:BA"
+    "D:P"
+    "(A;;FA;;;SY)"
+    "(A;;FA;;;BA)");
 
 [[nodiscard]] auto KnownFolderPath(
     const KNOWNFOLDERID &identifier,
@@ -114,8 +114,8 @@ constexpr auto kPrivateFileSecurity = wil::zwstring_view(
 
 class SecurityDescriptor final {
 public:
-    explicit SecurityDescriptor(const wil::zwstring_view text) {
-        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+    explicit SecurityDescriptor(const wil::zstring_view text) {
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
                 text.c_str(), SDDL_REVISION_1,
                 descriptor_.addressof(), nullptr)) {
             WinError("could not create an installation security descriptor");
@@ -215,14 +215,14 @@ auto InstallExecutable(
 
     if (!destination_exists) {
         auto attributes = security.Attributes();
-        auto destination_file = wil::unique_hfile(CreateFileW(
-            destination.c_str(), 0, 0, &attributes,
+        auto destination_file = wil::unique_hfile(CreateFileA(
+            destination.string().c_str(), 0, 0, &attributes,
             CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
         if (!destination_file) {
             WinError("could not create the installed backup supervisor");
         }
     }
-    if (!CopyFileW(source.c_str(), destination.c_str(), FALSE)) {
+    if (!CopyFileA(source.string().c_str(), destination.string().c_str(), FALSE)) {
         WinError("could not copy the backup supervisor into Program Files");
     }
 }
@@ -276,7 +276,7 @@ export auto InstallService(
     if (!manager) {
         WinError("could not open the Service Control Manager");
     }
-    auto service = wil::unique_schandle(OpenServiceW(
+    auto service = wil::unique_schandle(OpenServiceA(
         manager.get(), kServiceName.data(), SERVICE_CHANGE_CONFIG));
     if (service && (mode == InstallMode::CreateOnly)) {
         WinError("the backup service is already installed",
@@ -329,34 +329,35 @@ export auto InstallService(
 
     InstallExecutable(
         CurrentExecutablePath(), installed_executable, executable_security);
+    const auto installed_executable_text = installed_executable.string();
     const auto binary_path = wil::ArgvToCommandLine(std::array{
-        std::wstring_view(installed_executable.native()),
+        std::string_view(installed_executable_text),
         kRunServiceOption,
     });
 
     if (service) {
-        if (!ChangeServiceConfigW(service.get(),
+        if (!ChangeServiceConfigA(service.get(),
                 SERVICE_WIN32_OWN_PROCESS,
                 SERVICE_DEMAND_START,
                 SERVICE_ERROR_NORMAL,
-                binary_path.c_str(), L"", nullptr, kNoDependencies.data(),
-                kLocalSystemAccount.data(), L"",
+                binary_path.c_str(), "", nullptr, kNoDependencies.data(),
+                kLocalSystemAccount.data(), "",
                 kServiceDisplayName.data())) {
             WinError("could not update the backup service");
         }
         ConfigurePreshutdownTimeout(service.get(), preshutdown_timeout);
         devicefs::WriteToStream(
-            std::cout, L"backup-supervisor: updated {} at {}\n",
-            kServiceName, installed_executable.native());
+            std::cout, "backup-supervisor: updated {} at {}\n",
+            kServiceName, installed_executable_text);
         return;
     }
 
-    service.reset(CreateServiceW(
+    service.reset(CreateServiceA(
         manager.get(), kServiceName.data(), kServiceDisplayName.data(),
         SERVICE_CHANGE_CONFIG | DELETE,
         SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL,
         binary_path.c_str(), nullptr, nullptr, nullptr,
-        kLocalSystemAccount.data(), L""));
+        kLocalSystemAccount.data(), ""));
     if (!service) {
         WinError("could not install the backup service");
     }
@@ -366,6 +367,6 @@ export auto InstallService(
     ConfigurePreshutdownTimeout(service.get(), preshutdown_timeout);
     remove_incomplete_service.release();
     devicefs::WriteToStream(
-        std::cout, L"backup-supervisor: installed {} at {}\n",
-        kServiceName, installed_executable.native());
+        std::cout, "backup-supervisor: installed {} at {}\n",
+        kServiceName, installed_executable_text);
 }

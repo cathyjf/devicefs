@@ -18,6 +18,7 @@
 #include <objbase.h>
 
 import std;
+import <clocale>;
 import <sal.h>;
 import devicefs.common;
 import devicefs.svi_extents;
@@ -27,8 +28,8 @@ import devicefs.vss_block_descriptors;
 namespace {
 
 struct Options {
-    std::wstring_view source;
-    std::wstring_view snapshot_identifier;
+    std::string_view source;
+    std::string_view snapshot_identifier;
     bool svi_extents = false;
     bool help = false;
 };
@@ -48,25 +49,25 @@ auto Usage(std::ostream &output) noexcept {
 }
 
 [[nodiscard]] auto ParseOptions(
-    const std::span<const wchar_t *const> arguments) {
+    const std::span<const std::string> arguments) {
     auto result = Options{};
     const auto next = [&](auto &index) {
         if (++index == arguments.size()) {
             throw std::invalid_argument(std::format(
                 "missing value after argument {}", index));
         }
-        return std::wstring_view{arguments[index]};
+        return std::string_view{arguments[index]};
     };
 
     for (auto index = 0uz; index < arguments.size(); ++index) {
-        const auto argument = std::wstring_view{arguments[index]};
-        if ((argument == L"-h") || (argument == L"--help")) {
+        const auto &argument = arguments[index];
+        if ((argument == "-h") || (argument == "--help")) {
             result.help = true;
-        } else if (argument == L"--source") {
+        } else if (argument == "--source") {
             result.source = next(index);
-        } else if (argument == L"--snapshot-id") {
+        } else if (argument == "--snapshot-id") {
             result.snapshot_identifier = next(index);
-        } else if (argument == L"--svi-extents") {
+        } else if (argument == "--svi-extents") {
             result.svi_extents = true;
         } else {
             throw std::invalid_argument(std::format(
@@ -90,8 +91,8 @@ auto Usage(std::ostream &output) noexcept {
     return result;
 }
 
-[[nodiscard]] auto ParseGuid(const std::wstring_view value) {
-    auto text = std::wstring{value};
+[[nodiscard]] auto ParseGuid(const std::string_view value) {
+    auto text = std::filesystem::path{value}.wstring();
     if (!text.starts_with(L'{')) {
         text = std::format(L"{{{}}}", text);
     }
@@ -165,7 +166,7 @@ auto WriteOutput(const std::string_view output) {
     }
 }
 
-auto Run(const std::span<const wchar_t *const> arguments) {
+auto Run(const std::span<const std::string> arguments) {
     const auto options = ParseOptions(arguments);
     if (options.help) {
         Usage(std::cout);
@@ -189,10 +190,16 @@ auto Run(const std::span<const wchar_t *const> arguments) {
 auto wmain(
     _Pre_satisfies_(argc > 0) const int argc,
     _In_reads_(argc) wchar_t **const argv) -> int {
+    std::ignore = std::setlocale(LC_CTYPE, ".UTF8");
     try {
         HardenProcess();
         try {
-            return Run({argv + 1, argv + argc});
+            return Run(
+                std::span{argv + 1, argv + argc} |
+                std::views::transform([](const auto argument) {
+                    return std::filesystem::path{argument}.string();
+                }) |
+                std::ranges::to<std::vector<std::string>>());
         } catch (const std::invalid_argument &error) {
             devicefs::WriteToStream(
                 std::cerr, "vss-descriptor-dump: {}\n\n", error.what());

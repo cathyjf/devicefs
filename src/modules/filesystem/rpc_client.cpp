@@ -65,7 +65,10 @@ struct RPCBlockDevice {
     [[nodiscard]] static auto FromSymbol(
         const wil::shared_rpc_binding &binding,
         const std::wstring_view symbol) {
-        auto stored_symbol = std::wstring{symbol};
+        auto stored_symbol = [](const std::u8string_view encoded_symbol) {
+            return std::basic_string<unsigned char>{
+                encoded_symbol.begin(), encoded_symbol.end()};
+        }(std::filesystem::path{symbol}.u8string());
         const auto length = [&] {
             auto result = std::uint64_t{};
             auto status = NTSTATUS{};
@@ -102,8 +105,11 @@ struct RPCBlockDevice {
             const auto win32_error =
                 ExplicitWin32Error::FromHresult(error).value;
             devicefs::WriteToStream(std::cerr,
-                L"devicefs: RPC read failed for '{}': Windows error {}\n",
-                symbol_, win32_error);
+                "devicefs: RPC read failed for '{:s}': Windows error {}\n",
+                symbol_ | std::views::transform(
+                    [](const unsigned char byte) noexcept {
+                        return std::bit_cast<char>(byte);
+                    }), win32_error);
             return FspNtStatusFromWin32(win32_error);
         }
         transferred = rpc_transferred;
@@ -116,12 +122,12 @@ struct RPCBlockDevice {
   private:
     RPCBlockDevice(
         const std::uint64_t length,
-        std::wstring symbol,
+        std::basic_string<unsigned char> symbol,
         wil::shared_rpc_binding binding) noexcept
         : length(length), symbol_(std::move(symbol)),
           binding_(std::move(binding)) {}
 
-    std::wstring symbol_;
+    std::basic_string<unsigned char> symbol_;
     wil::shared_rpc_binding binding_;
 };
 

@@ -42,7 +42,8 @@ template <BlockDevice DeviceType>
 class RpcBlockDeviceServer {
   public:
     using Devices =
-        std::vector<std::pair<std::wstring, DeviceType>>;
+        std::vector<std::pair<
+            std::basic_string<unsigned char>, DeviceType>>;
 
     [[nodiscard]] static auto Start(
         std::wstring endpoint,
@@ -126,10 +127,10 @@ class RpcBlockDeviceServer {
     }
 
     [[nodiscard]] auto FindDevice(
-        const std::wstring_view symbol) const noexcept
+        const std::basic_string_view<unsigned char> symbol) const noexcept
         -> const DeviceType * {
         for (const auto &[candidate, device] : devices_) {
-            if (std::wstring_view{candidate} == symbol) {
+            if (std::basic_string_view<unsigned char>{candidate} == symbol) {
                 return std::addressof(device);
             }
         }
@@ -141,7 +142,7 @@ class RpcBlockDeviceServer {
             "The generated RPC callback signature requires a pointer. The "
             "`_Out_` annotation reflects that `length` cannot be null.")]]
     static auto GetLength(const handle_t binding,
-        _In_z_ const wchar_t *const symbol,
+        _In_z_ const unsigned char *const symbol,
         _Out_ std::uint64_t *const length) noexcept -> NTSTATUS {
         *length = 0;
         if (!ClientAuthorized(binding)) {
@@ -161,7 +162,7 @@ class RpcBlockDeviceServer {
             "output annotations reflect that `transferred` and `buffer` "
             "cannot be null.")]]
     static auto Read(const handle_t binding,
-        _In_z_ const wchar_t *const symbol,
+        _In_z_ const unsigned char *const symbol,
         const std::uint64_t offset, const ULONG wanted,
         _Out_ ULONG *const transferred,
         _Out_writes_bytes_to_(wanted, *transferred)

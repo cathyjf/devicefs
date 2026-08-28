@@ -426,7 +426,11 @@ enum class BackupViewPreparation {
         .filename = filename,
     });
     devices.emplace_back(
-        std::move(filename), std::move(*synthetic));
+        [](const std::u8string_view encoded_symbol) {
+            return std::basic_string<unsigned char>{
+                encoded_symbol.begin(), encoded_symbol.end()};
+        }(std::filesystem::path{filename}.u8string()),
+        std::move(*synthetic));
     return BackupViewPreparation::Ready;
 }
 

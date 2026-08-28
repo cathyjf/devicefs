@@ -22,12 +22,12 @@
 interface DeviceFsBlockDevice {
     long GetLength(
         [in] handle_t binding,
-        [in, string] const wchar_t *symbol,
+        [in, string] const unsigned char *symbol,
         [out] unsigned hyper *length);
 
     long Read(
         [in] handle_t binding,
-        [in, string] const wchar_t *symbol,
+        [in, string] const unsigned char *symbol,
         [in] unsigned hyper offset,
         [in] unsigned long wanted,
         [out] unsigned long *transferred,

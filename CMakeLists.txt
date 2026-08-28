@@ -216,7 +216,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/logging_console.ixx
     src/modules/supervisor/native_backup.ixx
     src/modules/supervisor/native_backup/devicefs_process.cpp
-    src/modules/supervisor/native_backup/filesystem_verifier.ixx
+    src/modules/supervisor/native_backup/filesystem_verifier.cpp
     src/modules/supervisor/native_backup/incremental.cpp
     src/modules/supervisor/native_backup/incremental_diagnostics.cpp
     src/modules/supervisor/native_backup/internal.cpp

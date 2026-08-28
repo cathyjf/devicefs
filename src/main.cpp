@@ -18,24 +18,36 @@ import std;
 import <clocale>;
 import <sal.h>;
 import devicefs.common;
+#if defined(DEVICEFS_PROGRAM_DEVICEFS)
 import devicefs.filesystem;
+#endif
 import devicefs.stream_writer;
 
-auto wmain(
+auto BackupSupervisorMain(std::span<const std::string_view>) -> int;
+auto VssDescriptorDumpMain(std::span<const std::string_view>) -> int;
+
+[[gsl::suppress("26429",
+    justification:
+        "C++ [basic.start.main] guarantees that `argv` is not null.")]]
+auto main(
     _Pre_satisfies_(argc > 0) const int argc,
-    _In_reads_(argc) wchar_t **const argv) -> int {
+    _In_reads_(argc) char **const argv) -> int {
     std::ignore = std::setlocale(LC_CTYPE, ".UTF8");
     try {
         HardenProcess();
-        return devicefs::Main(
+        const auto arguments =
             std::span{argv, argv + argc} |
-            std::views::transform([](const auto argument) {
-                return std::filesystem::path{argument}.string();
-            }) |
-            std::ranges::to<std::vector<std::string>>());
+            std::ranges::to<std::vector<std::string_view>>();
+#if defined(DEVICEFS_PROGRAM_DEVICEFS)
+        return devicefs::Main(arguments);
+#elif defined(DEVICEFS_PROGRAM_VSS_DESCRIPTOR_DUMP)
+        return VssDescriptorDumpMain(std::span{arguments}.subspan(1));
+#else
+        return BackupSupervisorMain(std::span{arguments}.subspan(1));
+#endif
     } catch (const std::runtime_error &error) {
         devicefs::WriteToStream(
-            std::cerr, "devicefs: {}\n", error.what());
+            std::cerr, "{}: {}\n", argv[0], error.what());
         return 1;
     }
 }

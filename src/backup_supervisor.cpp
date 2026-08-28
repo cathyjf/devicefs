@@ -17,7 +17,6 @@
 #include <devicefs/strsafe_compat.h>
 
 import std;
-import <clocale>;
 import <devicefs/windows_imports.h>;
 import <sal.h>;
 import devicefs.common;
@@ -472,12 +471,12 @@ struct ForegroundOptions {
 }
 
 [[nodiscard]] auto ParseForegroundOptions(
-    const std::span<const std::string> arguments) {
+    const std::span<const std::string_view> arguments) {
     auto result = ForegroundOptions{};
     auto raw_namespace_override = std::optional<std::string_view>{};
     auto raw_volume_override = std::optional<std::string_view>{};
     for (auto index = 0uz; index < arguments.size(); ++index) {
-        const auto &argument = arguments[index];
+        const auto argument = arguments[index];
         if (argument == "--no-writers") {
             result.no_writers = true;
         } else if (argument == "--namespace") {
@@ -508,13 +507,13 @@ struct ForegroundOptions {
 }
 
 [[nodiscard]] auto ParseIncrementalDiagnosticOptions(
-    const std::span<const std::string> arguments) {
+    const std::span<const std::string_view> arguments) {
     auto result = IncrementalDiagnosticOptions{};
     auto raw_namespace_override = std::optional<std::string_view>{};
     auto raw_volume_override = std::optional<std::string_view>{};
     auto verification_percentage_supplied = false;
     for (auto index = 0uz; index < arguments.size(); ++index) {
-        const auto &argument = arguments[index];
+        const auto argument = arguments[index];
         if (argument == "--incremental-stats") {
             result.print_statistics = true;
         } else if (argument == "--incremental-verify") {
@@ -538,7 +537,7 @@ struct ForegroundOptions {
                 throw std::invalid_argument(
                     "--verify-percentage requires a value");
             }
-            const auto &text = arguments[index];
+            const auto text = std::string{arguments[index]};
             auto consumed = std::size_t{};
             try {
                 result.filesystem_verification_percentage =
@@ -581,7 +580,7 @@ struct ForegroundOptions {
                     "--baseline requires a value");
             }
             result.baseline_snapshot_identifier =
-                winrt::guid{std::string_view{arguments[index]}};
+                winrt::guid{arguments[index]};
         } else {
             throw std::invalid_argument(
                 "incremental diagnostics received an unknown argument");
@@ -609,7 +608,7 @@ struct ForegroundOptions {
 }
 
 [[nodiscard]] auto ParseNamespaceOverride(
-    const std::span<const std::string> arguments,
+    const std::span<const std::string_view> arguments,
     const std::string_view mode)
     -> std::optional<std::u8string> {
     if (arguments.empty()) {
@@ -776,18 +775,9 @@ auto PrintHelp() noexcept {
 
 } // namespace
 
-auto wmain(
-    _Pre_satisfies_(argc > 0) const int argc,
-    _In_reads_(argc) wchar_t **const argv) -> int {
-    std::ignore = std::setlocale(LC_CTYPE, ".UTF8");
+auto BackupSupervisorMain(
+    const std::span<const std::string_view> arguments) -> int {
     try {
-        HardenProcess();
-        const auto arguments =
-            std::span{argv + 1, argv + argc} |
-            std::views::transform([](const auto argument) {
-                return std::filesystem::path{argument}.string();
-            }) |
-            std::ranges::to<std::vector<std::string>>();
         if (!arguments.empty() &&
             (arguments.front() == "--devicefs")) {
             return devicefs::Main(arguments);
@@ -796,7 +786,7 @@ auto wmain(
             PrintHelp();
             return 0;
         }
-        const auto &option = arguments.front();
+        const auto option = arguments.front();
         if (option == kRunServiceOption) {
             if (arguments.size() != 1) {
                 throw std::invalid_argument(
@@ -826,7 +816,7 @@ auto wmain(
                 throw std::invalid_argument(
                     "--inventory-vhdx requires exactly one DEVICE");
             }
-            return RunInventoryVhdx(arguments[1]);
+            return RunInventoryVhdx(std::string{arguments[1]});
         }
         if ((option == "--incremental-stats") ||
             (option == "--incremental-verify") ||
@@ -863,9 +853,5 @@ auto wmain(
         devicefs::WriteToStream(
             std::cerr, "backup-supervisor: {}\n", error.what());
         return 2;
-    } catch (const std::runtime_error &error) {
-        devicefs::WriteToStream(
-            std::cerr, "backup-supervisor: {}\n", error.what());
-        return 1;
     }
 }

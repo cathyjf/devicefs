@@ -94,7 +94,7 @@ constexpr auto kPrivateFileSecurity = wil::zstring_view(
     const std::string_view description) {
     // Microsoft requires COM to be initialized on the calling thread before
     // SHGetKnownFolderPath. ServiceMain is dispatched on a different thread
-    // from wmain, so the initialization belongs at this narrow call boundary.
+    // from main, so the initialization belongs at this narrow call boundary.
     const auto com_error = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const auto uninitialize =
         wil::unique_couninitialize_call(SUCCEEDED(com_error));

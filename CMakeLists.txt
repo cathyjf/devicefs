@@ -189,14 +189,22 @@ target_link_libraries(vshadow PRIVATE
 )
 
 add_executable(devicefs src/main.cpp)
+target_compile_definitions(devicefs PRIVATE DEVICEFS_PROGRAM_DEVICEFS)
 target_link_libraries(devicefs PRIVATE devicefs-common devicefs-filesystem)
 
-add_executable(vss-descriptor-dump src/vss_descriptor_dump.cpp)
+add_executable(vss-descriptor-dump
+    src/main.cpp
+    src/vss_descriptor_dump.cpp
+)
+target_compile_definitions(vss-descriptor-dump PRIVATE
+    DEVICEFS_PROGRAM_VSS_DESCRIPTOR_DUMP
+)
 target_link_libraries(vss-descriptor-dump PRIVATE
     devicefs-common devicefs-vss-block-descriptors ole32
 )
 
 add_executable(backup-supervisor
+    src/main.cpp
     src/backup_supervisor.cpp
 )
 target_link_libraries(backup-supervisor PRIVATE

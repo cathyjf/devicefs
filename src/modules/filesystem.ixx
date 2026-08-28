@@ -170,9 +170,10 @@ auto Usage(std::ostream &output) noexcept {
         kDefaultStopEvent);
 }
 
-[[nodiscard]] auto ParseArgs(const std::span<const std::string> args) {
+[[nodiscard]] auto ParseArgs(
+    const std::span<const std::string_view> args) {
     auto result = Options{};
-    const auto next = [&](auto &i) -> const std::string & {
+    const auto next = [&](auto &i) {
         if (++i == args.size()) {
             throw std::invalid_argument(
                 std::format("missing value after argument {}", i - 1));
@@ -181,7 +182,7 @@ auto Usage(std::ostream &output) noexcept {
     };
 
     for (auto i = 1uz; i < args.size(); ++i) {
-        const auto &arg = args[i];
+        const auto arg = args[i];
         if ((arg == "-h") || (arg == "--help")) {
             result.help = true;
         } else if (arg == "--mount") {
@@ -194,7 +195,7 @@ auto Usage(std::ostream &output) noexcept {
         } else if (arg == "--map") {
             result.mappings.push_back({
                 .name = std::filesystem::path{next(i)}.wstring(),
-                .device = next(i),
+                .device = std::string{next(i)},
             });
         } else if (arg == "--cache") {
             result.cache = true;
@@ -821,7 +822,7 @@ auto Run(const Options &options) {
 
 export namespace devicefs {
 
-auto Main(const std::span<const std::string> arguments) -> int {
+auto Main(const std::span<const std::string_view> arguments) -> int {
     try {
         FurtherHardenProcess();
         auto options = Options{};

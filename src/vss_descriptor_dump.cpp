@@ -18,9 +18,6 @@
 #include <objbase.h>
 
 import std;
-import <clocale>;
-import <sal.h>;
-import devicefs.common;
 import devicefs.svi_extents;
 import devicefs.stream_writer;
 import devicefs.vss_block_descriptors;
@@ -49,18 +46,18 @@ auto Usage(std::ostream &output) noexcept {
 }
 
 [[nodiscard]] auto ParseOptions(
-    const std::span<const std::string> arguments) {
+    const std::span<const std::string_view> arguments) {
     auto result = Options{};
     const auto next = [&](auto &index) {
         if (++index == arguments.size()) {
             throw std::invalid_argument(std::format(
                 "missing value after argument {}", index));
         }
-        return std::string_view{arguments[index]};
+        return arguments[index];
     };
 
     for (auto index = 0uz; index < arguments.size(); ++index) {
-        const auto &argument = arguments[index];
+        const auto argument = arguments[index];
         if ((argument == "-h") || (argument == "--help")) {
             result.help = true;
         } else if (argument == "--source") {
@@ -166,7 +163,7 @@ auto WriteOutput(const std::string_view output) {
     }
 }
 
-auto Run(const std::span<const std::string> arguments) {
+auto Run(const std::span<const std::string_view> arguments) {
     const auto options = ParseOptions(arguments);
     if (options.help) {
         Usage(std::cout);
@@ -187,28 +184,14 @@ auto Run(const std::span<const std::string> arguments) {
 
 } // namespace
 
-auto wmain(
-    _Pre_satisfies_(argc > 0) const int argc,
-    _In_reads_(argc) wchar_t **const argv) -> int {
-    std::ignore = std::setlocale(LC_CTYPE, ".UTF8");
+auto VssDescriptorDumpMain(
+    const std::span<const std::string_view> arguments) -> int {
     try {
-        HardenProcess();
-        try {
-            return Run(
-                std::span{argv + 1, argv + argc} |
-                std::views::transform([](const auto argument) {
-                    return std::filesystem::path{argument}.string();
-                }) |
-                std::ranges::to<std::vector<std::string>>());
-        } catch (const std::invalid_argument &error) {
-            devicefs::WriteToStream(
-                std::cerr, "vss-descriptor-dump: {}\n\n", error.what());
-            Usage(std::cerr);
-            return 2;
-        }
-    } catch (const std::runtime_error &error) {
+        return Run(arguments);
+    } catch (const std::invalid_argument &error) {
         devicefs::WriteToStream(
-            std::cerr, "vss-descriptor-dump: {}\n", error.what());
-        return 1;
+            std::cerr, "vss-descriptor-dump: {}\n\n", error.what());
+        Usage(std::cerr);
+        return 2;
     }
 }

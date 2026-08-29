@@ -1,0 +1,24 @@
+// SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+[
+    uuid("29a0a383-f269-4f87-991d-ae32b5f816ba"),
+    endpoint("ncacn_ip_tcp:"),
+    version(1.0),
+    pointer_default(ref)
+]
+interface devicefs_block_device
+{
+    NTSTATUS GetLength(
+        [in,string,charset(UTF8)] uint8 *symbol,
+        [out] hyper *length
+    );
+
+    NTSTATUS Read(
+        [in,string,charset(UTF8)] uint8 *symbol,
+        [in] hyper offset,
+        [in] uint32 wanted,
+        [out] uint32 *transferred,
+        [out,size_is(wanted),length_is(*transferred)] uint8 buffer[]
+    );
+}

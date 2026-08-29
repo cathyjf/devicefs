@@ -12,3 +12,7 @@
 // Include this compatibility header only in translation units where the
 // supported compiler reproduces the defect.
 #include <strsafe.h>
+
+// Remove unwanted macros transitively included by the above header.
+#undef stderr
+#undef stdout

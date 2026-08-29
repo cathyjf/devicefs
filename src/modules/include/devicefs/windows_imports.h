@@ -28,3 +28,7 @@
 #include <wil/win32_helpers.h>
 
 #include <winrt/base.h>
+
+// Remove unwanted macros transitively included by the above headers.
+#undef stderr
+#undef stdout

@@ -415,7 +415,7 @@ template <typename Operation>
                     WinError("could not request cancellation");
                 }
                 devicefs::WriteToStream(
-                    std::cout,
+                    devicefs::stdout,
                     "Cancellation requested; waiting for cleanup.\n");
             }
             if (!GetNumberOfConsoleInputEvents(input, &available)) {
@@ -664,20 +664,20 @@ struct ForegroundOptions {
             if (result->exit_code != 0) {
                 return result->exit_code;
             }
-            devicefs::WriteToStream(std::cout, result->manifest);
+            devicefs::WriteToStream(devicefs::stdout, result->manifest);
 
             const auto snapshot_volumes =
                 result->ParseManifest().QuerySnapshotVolumes();
             devicefs::WriteToStream(
-                std::cout,
+                devicefs::stdout,
                 "\n\nValidated snapshots still available:\n");
             if (snapshot_volumes.empty()) {
-                devicefs::WriteToStream(std::cout, "  (none)\n");
+                devicefs::WriteToStream(devicefs::stdout, "  (none)\n");
             }
             for (const auto &[volume_identifier, snapshot] :
                 snapshot_volumes) {
                 devicefs::WriteToStream(
-                    std::cout,
+                    devicefs::stdout,
                     "  Volume ID: {}\n"
                     "    Snapshot ID: {}\n"
                     "    Device: {}\n",
@@ -751,7 +751,7 @@ auto RunServiceDispatcher() {
 
 auto PrintHelp() noexcept {
     devicefs::WriteToStream(
-        std::cout,
+        devicefs::stdout,
         "Usage:\n"
         "  backup-supervisor.exe --devicefs [devicefs arguments]\n"
         "  backup-supervisor.exe --foreground [--no-writers] "
@@ -847,11 +847,11 @@ auto BackupSupervisorMain(
         throw std::invalid_argument("unknown backup-supervisor argument");
     } catch (const std::invalid_argument &error) {
         devicefs::WriteToStream(
-            std::cerr, "backup-supervisor: {}\n", error.what());
+            devicefs::stderr, "backup-supervisor: {}\n", error.what());
         return 2;
     } catch (const devicefs::vshadow::OperationError &error) {
         devicefs::WriteToStream(
-            std::cerr, "backup-supervisor: {}\n", error.what());
+            devicefs::stderr, "backup-supervisor: {}\n", error.what());
         return 2;
     }
 }

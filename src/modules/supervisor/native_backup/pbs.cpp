@@ -654,7 +654,7 @@ auto TrySendPbsFishSignal(
     const auto result = FinishWsl(operation);
     if (result.exit_code != 0) {
         devicefs::WriteToStream(
-            std::cout,
+            devicefs::stdout,
             "The PBS operation exited with code {} during cancellation.\n",
             result.exit_code);
     }

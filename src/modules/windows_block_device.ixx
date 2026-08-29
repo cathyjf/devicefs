@@ -29,6 +29,9 @@ module;
 
 #include <cstddef>
 
+#undef stderr
+#undef stdout
+
 export module devicefs.windows_block_device;
 
 import std;
@@ -262,7 +265,7 @@ struct WindowsBlockDevice {
         }
         const auto failure = [&](const DWORD error) {
             devicefs::WriteToStream(
-                std::cerr,
+                devicefs::stderr,
                 L"devicefs: read failed for '{}': Windows error {}\n",
                 filename.native(), error);
             return FspNtStatusFromWin32(error);
@@ -501,10 +504,10 @@ auto WindowsBlockDevice::FromFilename(
         const auto error = std::error_code(
             std::bit_cast<int>(dasd_error), std::system_category());
         devicefs::WriteToStream(
-            std::cerr,
+            devicefs::stderr,
             L"devicefs: warning: FSCTL_ALLOW_EXTENDED_DASD_IO failed for '{}': ",
             filename.native());
-        devicefs::WriteToStream(std::cerr, "{}\n", error.message());
+        devicefs::WriteToStream(devicefs::stderr, "{}\n", error.message());
     }
 
     if (cache || synthetic_free_clusters) {

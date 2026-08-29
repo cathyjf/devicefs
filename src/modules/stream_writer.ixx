@@ -14,43 +14,35 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-module;
-
 export module devicefs.stream_writer;
 
 import std;
-import <windows.h>;
-import <intrin.h>;
 
 namespace devicefs::stream_writer_detail {
 
-auto DisableStdioSynchronization() {
-    static auto once = std::once_flag{};
-    std::call_once(once, [] {
-        std::ios_base::sync_with_stdio(false);
-    });
+struct Stdout {};
+struct Stderr {};
 
-} // namespace
+auto Print(Stdout, std::string_view) noexcept -> bool;
+auto Print(Stderr, std::string_view) noexcept -> bool;
 
-template <typename Operation>
+template <typename Output, typename Operation>
 auto Write(
-    std::ostream &output,
+    const Output output,
     const Operation &operation) noexcept -> bool {
     try {
-        DisableStdioSynchronization();
-        auto synchronized_output = std::osyncstream{output};
-        const auto failed = operation(
-            std::ostreambuf_iterator<char>{synchronized_output}).failed();
-        std::flush_emit(synchronized_output);
-        return !failed && synchronized_output;
+        auto text = std::string{};
+        operation(std::back_inserter(text));
+        return Print(output, text);
     } catch (...) {
         return false;
     }
 }
 
+template <typename Output>
 auto WriteUtf8(
-    std::ostreambuf_iterator<char> output,
-    const std::u8string_view text) -> std::ostreambuf_iterator<char> {
+    Output output,
+    const std::u8string_view text) -> Output {
     return std::ranges::transform(
         text,
         output,
@@ -98,8 +90,12 @@ using WFormatString = BasicFormatString<
 
 } // namespace stream_writer_detail
 
+constexpr auto stdout = stream_writer_detail::Stdout{};
+constexpr auto stderr = stream_writer_detail::Stderr{};
+
+template <typename Output>
 auto WriteToStream(
-    std::ostream &output,
+    const Output output,
     const std::u8string_view text) noexcept -> bool {
     return stream_writer_detail::Write(
         output,
@@ -108,9 +104,9 @@ auto WriteToStream(
         });
 }
 
-template <typename... Arguments>
+template <typename Output, typename... Arguments>
 auto WriteToStream(
-    std::ostream &output,
+    const Output output,
     const stream_writer_detail::FormatString<Arguments...> format,
     Arguments &&...arguments) noexcept -> bool {
     return stream_writer_detail::Write(
@@ -123,9 +119,9 @@ auto WriteToStream(
         });
 }
 
-template <typename... Arguments>
+template <typename Output, typename... Arguments>
 auto WriteToStream(
-    std::ostream &output,
+    const Output output,
     const stream_writer_detail::WFormatString<Arguments...> format,
     Arguments &&...arguments) noexcept -> bool {
     return stream_writer_detail::Write(

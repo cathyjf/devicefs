@@ -62,7 +62,7 @@ class VssClientOwner final : private VssClient {
             "incorrectly classifies it as a default constructor.")]]
     explicit VssClientOwner(Arguments &&...arguments)
         : VssClient{[](const std::wstring_view text) noexcept {
-              devicefs::WriteToStream(std::cout, L"{}\n", text);
+              devicefs::WriteToStream(devicefs::stdout, L"{}\n", text);
           }} {
         Initialize(std::forward<Arguments>(arguments)...);
     }
@@ -108,7 +108,7 @@ class Backup {
             }
         } catch (const HRESULT error) {
             if (completion_ == Completion::Success) {
-                devicefs::WriteToStream(std::cerr,
+                devicefs::WriteToStream(devicefs::stderr,
                     "backup-supervisor: VSS writer completion failed "
                     "(HRESULT 0x{:08X}); the backup succeeded and the "
                     "snapshot set was retained.\n",
@@ -116,7 +116,7 @@ class Backup {
             }
         } catch (...) {
             if (completion_ == Completion::Success) {
-                devicefs::WriteToStream(std::cerr,
+                devicefs::WriteToStream(devicefs::stderr,
                     "backup-supervisor: VSS writer completion failed with "
                     "an unexpected error; the backup succeeded and the "
                     "snapshot set was retained.\n");
@@ -160,7 +160,7 @@ class Backup {
     auto TryDeleteCreatedSnapshotSet() noexcept -> void {
         const auto error = client_.TryDeleteCreatedSnapshotSet();
         if (FAILED(error)) {
-            devicefs::WriteToStream(std::cerr,
+            devicefs::WriteToStream(devicefs::stderr,
                 "backup-supervisor: could not delete the persistent VSS "
                 "snapshot set (HRESULT 0x{:08X}); the snapshot set may "
                 "remain.\n",

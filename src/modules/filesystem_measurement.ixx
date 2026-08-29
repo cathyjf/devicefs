@@ -125,7 +125,7 @@ public:
             nonzero_clusters_.load(std::memory_order_relaxed);
         const auto nonzero_bytes =
             nonzero_bytes_.load(std::memory_order_relaxed);
-        devicefs::WriteToStream(std::cerr,
+        devicefs::WriteToStream(devicefs::stderr,
             L"devicefs: free-cluster measurement for '{}': "
             L"{} of {} bitmap-free clusters fully examined in one read; "
             L"{} of those clusters contained nonzero data ({} bytes total)\n",
@@ -425,25 +425,25 @@ public:
             AccumulateTiming(total.synthetic_timing, thread->synthetic_timing);
         }
 
-        devicefs::WriteToStream(std::cerr,
+        devicefs::WriteToStream(devicefs::stderr,
             "devicefs: WinFsp Read-callback measurement\n");
-        devicefs::WriteToStream(std::cerr,
+        devicefs::WriteToStream(devicefs::stderr,
             "  reads satisfied above this callback are not observed\n");
-        devicefs::WriteToStream(std::cerr,
+        devicefs::WriteToStream(devicefs::stderr,
             "  opens: total={} sequential={} random={} "
                 "no-intermediate-buffering={}\n",
             total.open_count,
             total.sequential_open_count,
             total.random_open_count,
             total.unbuffered_open_count);
-        devicefs::WriteToStream(std::cerr,
+        devicefs::WriteToStream(devicefs::stderr,
             "  measured reads: count={} requested-bytes={} wanted-bytes={} "
                 "maximum-request={}\n",
             total.read_count,
             total.requested_bytes,
             total.wanted_bytes,
             total.maximum_request);
-        devicefs::WriteToStream(std::cerr,
+        devicefs::WriteToStream(devicefs::stderr,
             "  request lengths: <=4K={} <=8K={} <=16K={} <=32K={} "
                 "<=64K={} <=128K={} <=256K={} <=512K={} "
                 "<=1M={} <=2M={} <=4M={} >4M={}\n",
@@ -459,7 +459,7 @@ public:
             total.request_lengths[9],
             total.request_lengths[10],
             total.request_lengths[11]);
-        devicefs::WriteToStream(std::cerr,
+        devicefs::WriteToStream(devicefs::stderr,
             "  paths: no-bounce-reads={} no-bounce-bytes={} "
                 "bounce-reads={} bounce-wanted-bytes={} "
                 "bounce-backing-bytes={} synthetic-all-free-reads={} "
@@ -472,7 +472,7 @@ public:
             total.synthetic_read_count,
             total.synthetic_bytes,
             total.unfinished_read_count);
-        devicefs::WriteToStream(std::cerr,
+        devicefs::WriteToStream(devicefs::stderr,
             "  backing reads: started={} completed={} bytes={} "
                 "immediate={} pending={}\n",
             total.source_read_count,
@@ -480,14 +480,14 @@ public:
             total.source_bytes,
             total.immediate_source_read_count,
             total.pending_source_read_count);
-        devicefs::WriteToStream(std::cerr,
+        devicefs::WriteToStream(devicefs::stderr,
             "  concurrency: read-threads={} peak-active={} active-at-stop={} "
                 "unrecorded-threads={}\n",
             read_threads,
             total.maximum_active_reads,
             active_reads_.load(std::memory_order_relaxed),
             registration_failures_.load(std::memory_order_relaxed));
-        devicefs::WriteToStream(std::cerr,
+        devicefs::WriteToStream(devicefs::stderr,
             "  sampled timing (1/{} per thread, averages in ns): "
                 "no-bounce-samples={} no-bounce-callback={} "
                 "no-bounce-backing={} "

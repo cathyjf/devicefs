@@ -80,6 +80,9 @@ target_module_interfaces(devicefs-common PUBLIC
     src/modules/common.ixx
     src/modules/stream_writer.ixx
 )
+target_sources(devicefs-common PRIVATE
+    src/modules/stream_writer.cpp
+)
 
 set(DEVICEFS_RPC_DEFINITION
     "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/filesystem/rpc_block_device.idl"

@@ -27,6 +27,9 @@ module;
 #include <wil/stl.h>
 #include <wil/win32_helpers.h>
 
+#undef stderr
+#undef stdout
+
 export module devicefs.filesystem;
 
 import std;
@@ -150,7 +153,7 @@ auto FurtherHardenProcess() {
         std::wstring_view{result.data(), length - 1}}.string();
 }
 
-auto Usage(std::ostream &output) noexcept {
+auto Usage(const auto output) noexcept {
     devicefs::WriteToStream(output,
         "Usage: devicefs --mount TARGET --map NAME DEVICE"
         " [--map NAME DEVICE ...] [OPTIONS]\n\n"
@@ -417,7 +420,7 @@ public:
     auto WaitForOpenFilesToClose() const noexcept {
         auto open_files = open_file_count_.load();
         if (open_files != 0) {
-            devicefs::WriteToStream(std::cerr,
+            devicefs::WriteToStream(devicefs::stderr,
                 "devicefs: waiting for open files to close before shutdown\n");
         }
         while (open_files != 0) {
@@ -745,7 +748,7 @@ auto RunWithDevice(
         if constexpr (WindowsBlockDevice::kMeasureFreeClusterData) {
             if (options.synthetic_free_clusters) {
                 devicefs::WriteToStream(
-                    std::cerr,
+                    devicefs::stderr,
                     "devicefs: free-cluster measurement is enabled; "
                     "free-only reads will access the source device\n");
             }
@@ -761,7 +764,7 @@ auto RunWithDevice(
         }
 
         devicefs::WriteToStream(
-            std::cout,
+            devicefs::stdout,
             "devicefs: mounted {} device(s) at {}; read access: {}; "
             "stop event: {}\n",
             options.mappings.size(),
@@ -830,12 +833,12 @@ auto Main(const std::span<const std::string_view> arguments) -> int {
             options = ParseArgs(arguments);
         } catch (const std::invalid_argument &error) {
             devicefs::WriteToStream(
-                std::cerr, "devicefs: {}\n\n", error.what());
-            Usage(std::cerr);
+                devicefs::stderr, "devicefs: {}\n\n", error.what());
+            Usage(devicefs::stderr);
             return 2;
         }
         if (options.help) {
-            Usage(std::cout);
+            Usage(devicefs::stdout);
             return 0;
         }
         if (options.read_user.empty()) {
@@ -844,7 +847,7 @@ auto Main(const std::span<const std::string_view> arguments) -> int {
         return Run(options);
     } catch (const std::runtime_error &error) {
         devicefs::WriteToStream(
-            std::cerr, "devicefs: {}\n", error.what());
+            devicefs::stderr, "devicefs: {}\n", error.what());
         return 1;
     }
 }

@@ -31,7 +31,7 @@ struct Options {
     bool help = false;
 };
 
-auto Usage(std::ostream &output) noexcept {
+auto Usage(const auto output) noexcept {
     devicefs::WriteToStream(
         output,
         "Usage: vss-descriptor-dump --source SOURCE --snapshot-id GUID\n"
@@ -158,7 +158,7 @@ auto Usage(std::ostream &output) noexcept {
 }
 
 auto WriteOutput(const std::string_view output) {
-    if (!devicefs::WriteToStream(std::cout, "{}", output)) {
+    if (!devicefs::WriteToStream(devicefs::stdout, "{}", output)) {
         throw std::runtime_error("could not write output");
     }
 }
@@ -166,7 +166,7 @@ auto WriteOutput(const std::string_view output) {
 auto Run(const std::span<const std::string_view> arguments) {
     const auto options = ParseOptions(arguments);
     if (options.help) {
-        Usage(std::cout);
+        Usage(devicefs::stdout);
         return 0;
     }
     if (options.svi_extents) {
@@ -190,8 +190,8 @@ auto VssDescriptorDumpMain(
         return Run(arguments);
     } catch (const std::invalid_argument &error) {
         devicefs::WriteToStream(
-            std::cerr, "vss-descriptor-dump: {}\n\n", error.what());
-        Usage(std::cerr);
+            devicefs::stderr, "vss-descriptor-dump: {}\n\n", error.what());
+        Usage(devicefs::stderr);
         return 2;
     }
 }

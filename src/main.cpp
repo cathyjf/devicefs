@@ -47,7 +47,7 @@ auto main(
 #endif
     } catch (const std::runtime_error &error) {
         devicefs::WriteToStream(
-            std::cerr, "{}: {}\n", argv[0], error.what());
+            devicefs::stderr, "{}: {}\n", argv[0], error.what());
         return 1;
     }
 }

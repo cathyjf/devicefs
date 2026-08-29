@@ -34,6 +34,9 @@ import :privileges;
 import devicefs.common;
 import devicefs.stream_writer;
 
+#undef stderr
+#undef stdout
+
 export struct FilesystemVerificationVolume {
     GUID volume_identifier;
     GUID payload_snapshot_identifier;
@@ -392,7 +395,7 @@ auto RequestPendingIoCancellation(
     }
     first_failure = error;
     devicefs::WriteToStream(
-        std::cout,
+        devicefs::stdout,
         "Could not interrupt pending filesystem-verification I/O "
         "(Windows error {}).\n",
         error);
@@ -765,7 +768,7 @@ class VerificationState {
         disk_number);
     const auto partition_root_name = wil::zwstring_view{partition_root};
     devicefs::WriteToStream(
-        std::cout,
+        devicefs::stdout,
         L"  Partition root: {}\n"
         L"  Opening its filesystem root.\n",
         partition_root);
@@ -802,7 +805,7 @@ class VerificationState {
         }
     }();
 
-    devicefs::WriteToStream(std::cout,
+    devicefs::WriteToStream(devicefs::stdout,
         "  Filesystem root opened.\n"
         "  Querying its volume-GUID name.\n");
     auto volume_root = wil::unique_cotaskmem_string{};
@@ -855,13 +858,13 @@ class VerificationState {
     const auto cancelled = wait == (WAIT_OBJECT_0 + 1);
     if (cancelled) {
         devicefs::WriteToStream(
-            std::cout,
+            devicefs::stdout,
             "Cancellation requested while VHDX attachment was pending; "
             "requesting cancellation of that attachment.\n");
         if (!CancelIoEx(disk, &operation)) {
             const auto error = GetLastError();
             if (error != ERROR_NOT_FOUND) {
-                devicefs::WriteToStream(std::cout,
+                devicefs::WriteToStream(devicefs::stdout,
                     "Could not cancel the pending VHDX attachment "
                     "(Windows error {}); waiting for it to finish.\n",
                     error);
@@ -901,10 +904,10 @@ class AttachedVhdx {
                     ExplicitWin32Error{ERROR_CANCELLED});
             }
             devicefs::WriteToStream(
-                std::cout,
+                devicefs::stdout,
                 "\nPreparing the {} VHDX attachment:\n", name);
             devicefs::WriteToStream(
-                std::cout,
+                devicefs::stdout,
                 L"  File: {}\n"
                 L"  Opening the VHDX.\n",
                 path.native());
@@ -934,7 +937,7 @@ class AttachedVhdx {
                     path.string(), ExplicitWin32Error{open_status});
             }
             devicefs::WriteToStream(
-                std::cout, "  VHDX opened.\n  Attaching the VHDX.\n");
+                devicefs::stdout, "  VHDX opened.\n  Attaching the VHDX.\n");
             if (internal::CancellationRequested(cancellation_event)) {
                 WinError("VHDX attachment was cancelled",
                     ExplicitWin32Error{ERROR_CANCELLED});
@@ -952,7 +955,7 @@ class AttachedVhdx {
                 const auto detach_status = DetachVirtualDisk(
                     disk.get(), DETACH_VIRTUAL_DISK_FLAG_NONE, 0);
                 if (detach_status != ERROR_SUCCESS) {
-                    devicefs::WriteToStream(std::cout,
+                    devicefs::WriteToStream(devicefs::stdout,
                         "  Cancellation arrived as the VHDX attachment "
                         "completed, but detaching it failed with Windows "
                         "error {}. Closing its nonpermanent attachment "
@@ -963,27 +966,27 @@ class AttachedVhdx {
                 WinError("VHDX attachment was cancelled",
                     ExplicitWin32Error{ERROR_CANCELLED});
             }
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 "  VHDX attached.\n"
                 "  Querying its physical-disk path.\n");
             const auto physical_path = QueryPhysicalDiskPath(disk.get());
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 L"  Attached physical disk: {}\n"
                 L"  Opening that physical disk.\n",
                 physical_path);
             auto physical_disk = OpenPhysicalDisk(physical_path);
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 "  Physical disk opened.\n"
                 "  Querying its disk number.\n");
             const auto disk_number = QueryDiskNumber(physical_disk.get());
             devicefs::WriteToStream(
-                std::cout,
+                devicefs::stdout,
                 "  Disk number: {}\n",
                 disk_number);
             auto root = QueryVolumeRoot(
                 disk_number, cancellation_event);
             devicefs::WriteToStream(
-                std::cout, L"  Attached volume: {}\n", root);
+                devicefs::stdout, L"  Attached volume: {}\n", root);
             return AttachedVhdx{
                 std::move(disk), std::move(root), virtual_disk_lock};
         } catch (const VerificationFailure &error) {
@@ -1054,9 +1057,9 @@ auto DetachView(
     VerificationState &state) noexcept -> void {
     try {
         devicefs::WriteToStream(
-            std::cout, "Detaching the {} VHDX view.\n", name);
+            devicefs::stdout, "Detaching the {} VHDX view.\n", name);
         devicefs::WriteToStream(
-            std::cout, L"  Volume: {}\n", view.Root());
+            devicefs::stdout, L"  Volume: {}\n", view.Root());
     } catch (const std::exception &) {
         // Diagnostic output cannot replace or prevent VHDX cleanup.
     }
@@ -1073,9 +1076,9 @@ auto DetachView(
     }
     try {
         devicefs::WriteToStream(
-            std::cout, "The {} VHDX view was detached.\n", name);
+            devicefs::stdout, "The {} VHDX view was detached.\n", name);
         devicefs::WriteToStream(
-            std::cout, L"  Volume: {}\n", view.Root());
+            devicefs::stdout, L"  Volume: {}\n", view.Root());
     } catch (const std::exception &) {
         // Diagnostic output cannot replace completed VHDX cleanup.
     }
@@ -1192,7 +1195,7 @@ auto DetachView(
     // evidence or affect the result.
     // A failed attempt is restarted because that estimate is useful during a
     // much longer ordinary traversal, but its partial count is discarded.
-    devicefs::WriteToStream(std::cout,
+    devicefs::WriteToStream(devicefs::stdout,
         L"Obtaining an optional {} layout-entry estimate for volume {} "
         L"for traversal progress and ETA.\n",
         endpoint_name, volume_identifier);
@@ -1259,7 +1262,7 @@ auto DetachView(
     while (true) {
         auto estimate = query_once();
         if (estimate) {
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 L"  Completed optional {} layout count for volume {}: {} "
                 L"entries. This count is used only for approximate "
                 L"traversal progress and ETA.\n",
@@ -1274,14 +1277,14 @@ auto DetachView(
         if (!retry_deadline) {
             constexpr auto retry_period = 10s;
             retry_deadline = now + retry_period;
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 L"  The optional {} layout count for volume {} returned "
                 L"Windows error {}; complete attempts will be retried for "
                 L"approximately {} seconds.\n",
                 endpoint_name, volume_identifier, estimate.error(),
                 retry_period.count());
         } else if (now >= *retry_deadline) {
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 L"  The optional {} layout count for volume {} remained "
                 L"unavailable after retries (Windows error {}). This does "
                 L"not affect the verification result.\n",
@@ -1316,7 +1319,7 @@ auto PublishTraversalLayoutEstimate(
             cancellation_event, io_cancellation);
         if (!estimate &&
             !internal::CancellationRequested(cancellation_event)) {
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 L"Trying the synthetic view for volume {} because the "
                 L"real-B view supplied no complete layout count.\n",
                 volume_identifier);
@@ -1327,18 +1330,18 @@ auto PublishTraversalLayoutEstimate(
         if (estimate) {
             state.SetTraversalEstimate(*estimate);
         } else if (!internal::CancellationRequested(cancellation_event)) {
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 L"No complete layout count is available for volume {}; "
                 L"ordinary traversal will continue without a percentage "
                 L"or ETA.\n",
                 volume_identifier);
         }
     } catch (const std::exception &error) {
-        devicefs::WriteToStream(std::cout,
+        devicefs::WriteToStream(devicefs::stdout,
             L"The optional layout count failed for volume {}. This does not "
             L"affect the verification result.\n",
             volume_identifier);
-        devicefs::WriteToStream(std::cout, "  Failure: {}\n", error.what());
+        devicefs::WriteToStream(devicefs::stdout, "  Failure: {}\n", error.what());
     }
 }
 
@@ -2317,7 +2320,7 @@ auto CompareAttachedFilesystems(
         winrt::to_hstring(volume.volume_identifier);
     state.BeginTraversal();
     devicefs::WriteToStream(
-        std::cout,
+        devicefs::stdout,
         L"\nBeginning concurrent filesystem traversal for volume {}.\n"
         L"  Synthetic volume: {}\n"
         L"  Real-B volume: {}\n"
@@ -2355,12 +2358,12 @@ auto CompareAttachedFilesystems(
                     cancellation_event, io_cancellation, state);
             });
         } catch (const std::exception &error) {
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 L"Could not start the optional layout count for volume {}. "
                 L"Verification will continue without a percentage or ETA.\n",
                 std::wstring_view{volume_identifier});
             devicefs::WriteToStream(
-                std::cout, "  Failure: {}\n", error.what());
+                devicefs::stdout, "  Failure: {}\n", error.what());
             return std::nullopt;
         }
     }();
@@ -2370,7 +2373,7 @@ auto CompareAttachedFilesystems(
         !internal::CancellationRequested(cancellation_event)) {
         state.CompleteTraversal();
         const auto observation = state.Observe();
-        devicefs::WriteToStream(std::cout,
+        devicefs::WriteToStream(devicefs::stdout,
             L"Filesystem traversal finished for volume {}.\n"
             L"  Synthetic: {} directories, {} object(s), {} "
             L"stream(s), {}{} logical stream byte(s) observed, "
@@ -2401,7 +2404,7 @@ auto CompareAttachedFilesystems(
             ComparisonSurfaceIncomplete(*synthetic) ||
             ComparisonSurfaceIncomplete(*real);
         state.SetPhase(VerificationPhase::Planning);
-        devicefs::WriteToStream(std::cout,
+        devicefs::WriteToStream(devicefs::stdout,
             L"Filesystem inventories are ready for volume {}; "
             L"preparing content comparisons.\n",
             std::wstring_view{volume_identifier});
@@ -2554,7 +2557,7 @@ struct VolumeJob {
 }
 
 auto PrintOperationOutcome(
-    std::ostream &output,
+    const auto output,
     const std::string_view name,
     const std::optional<OperationFailure> &failure,
     const DWORD requested) -> void {
@@ -2579,7 +2582,7 @@ auto PrintOperationOutcome(
 }
 
 auto PrintOperationComparison(
-    std::ostream &output,
+    const auto output,
     const GUID &volume_identifier,
     const OperationComparison &comparison) -> void {
     const auto matched = IsMatchedError(comparison);
@@ -2629,7 +2632,7 @@ auto PrintOperationComparison(
 }
 
 auto PrintMismatch(
-    std::ostream &output,
+    const auto output,
     const GUID &volume_identifier,
     const MismatchDetail &mismatch) -> void {
     const auto identifier = winrt::to_hstring(volume_identifier);
@@ -2702,7 +2705,7 @@ auto PrintMismatch(
 
 auto PrintNewMismatches(
     std::span<VolumeJob> jobs,
-    std::ostream &output) -> void {
+    const auto output) -> void {
     for (auto &job : jobs) {
         for (const auto &mismatch :
             job.state->NewMismatches(job.printed_mismatches)) {
@@ -2728,7 +2731,7 @@ auto PrintNewMismatches(
 }
 
 auto PrintTraversalProgress(
-    std::ostream &output,
+    const auto output,
     const std::string_view name,
     const InventoryObservation &inventory,
     const std::optional<std::uint64_t> layout_entry_estimate,
@@ -2797,41 +2800,41 @@ auto PrintTraversalProgress(
 
 auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     devicefs::WriteToStream(
-        std::cout, "\nFilesystem verification progress:\n");
+        devicefs::stdout, "\nFilesystem verification progress:\n");
     for (const auto &job : jobs) {
         const auto observation = job.state->Observe();
         const auto identifier =
             winrt::to_hstring(job.volume_identifier);
-        devicefs::WriteToStream(std::cout,
+        devicefs::WriteToStream(devicefs::stdout,
             L"  Volume ID: {}\n",
             std::wstring_view{identifier});
-        devicefs::WriteToStream(std::cout,
+        devicefs::WriteToStream(devicefs::stdout,
             "    Phase: {}\n",
             PhaseName(observation.phase));
         if (observation.traversal_started) {
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 "    Namespace traversal:\n");
             const auto traversal_seconds =
                 std::chrono::duration<double>(
                 std::chrono::steady_clock::now() -
                     *observation.traversal_started).count();
-            PrintTraversalProgress(std::cout, "Synthetic",
+            PrintTraversalProgress(devicefs::stdout, "Synthetic",
                 observation.synthetic,
                 observation.layout_entry_estimate,
                 observation.traversal_complete
                     ? 0.0 : traversal_seconds);
-            PrintTraversalProgress(std::cout, "Real B",
+            PrintTraversalProgress(devicefs::stdout, "Real B",
                 observation.real,
                 observation.layout_entry_estimate,
                 observation.traversal_complete
                     ? 0.0 : traversal_seconds);
             if (observation.traversal_complete) {
-                devicefs::WriteToStream(std::cout,
+                devicefs::WriteToStream(devicefs::stdout,
                     "    Namespace traversal completed on both views.\n");
             }
         }
         if (observation.plan_ready) {
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 "    Selected content: {} of {} bytes ({:.2f}% actual)\n"
                 "    Compared: {} bytes ({:.2f}% of selection)\n",
                 observation.selected_bytes,
@@ -2851,11 +2854,11 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                 ? 0.0
                 : static_cast<double>(observation.compared_bytes) /
                     (1024.0 * 1024.0 * elapsed);
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 "    Comparison rate: {:.2f} MiB/s\n",
                 mebibytes_per_second);
         }
-        devicefs::WriteToStream(std::cout,
+        devicefs::WriteToStream(devicefs::stdout,
             "    Mismatches observed: {}\n"
             "    VSS exclusions observed: {}\n"
             "    Matched filesystem errors: {}\n",
@@ -2863,7 +2866,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             observation.exclusion_count,
             observation.matched_error_count);
         if (observation.failed) {
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 "    Verification failure: {}\n",
                 observation.failure);
         }
@@ -2884,7 +2887,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     const std::size_t optimization_unavailable,
     const std::size_t preparation_failures) {
     devicefs::WriteToStream(
-        std::cout, "\nFilesystem verification results:\n");
+        devicefs::stdout, "\nFilesystem verification results:\n");
     auto verified = 0uz;
     auto sample_verified = 0uz;
     auto mismatched = 0uz;
@@ -2906,46 +2909,46 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
         }
         const auto identifier =
             winrt::to_hstring(job.volume_identifier);
-        devicefs::WriteToStream(std::cout,
+        devicefs::WriteToStream(devicefs::stdout,
             L"\n  Volume ID: {}\n",
             std::wstring_view{identifier});
         if (observation.mismatch_count != 0) {
             ++mismatched;
             if (observation.failed) {
-                devicefs::WriteToStream(std::cout,
+                devicefs::WriteToStream(devicefs::stdout,
                     "    Status: MISMATCH; an operational failure also "
                     "prevented complete comparison\n");
-                devicefs::WriteToStream(std::cout,
+                devicefs::WriteToStream(devicefs::stdout,
                     "    Failure: {}\n", observation.failure);
             } else if (observation.comparison_complete) {
                 devicefs::WriteToStream(
-                    std::cout, "    Status: MISMATCH\n");
+                    devicefs::stdout, "    Status: MISMATCH\n");
             } else {
-                devicefs::WriteToStream(std::cout,
+                devicefs::WriteToStream(devicefs::stdout,
                     "    Status: MISMATCH; comparison incomplete\n");
             }
         } else if (observation.failed) {
             ++indeterminate;
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 "    Status: INDETERMINATE\n"
                 "    Failure: {}\n",
                 observation.failure);
         } else if (!observation.comparison_complete) {
             ++incomplete;
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 "    Status: CANCELLED/INCOMPLETE\n");
         } else if (observation.selected_bytes !=
             observation.available_bytes) {
             ++sample_verified;
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 "    Status: SAMPLE VERIFIED ({:.2f}% requested)\n",
                 job.percentage);
         } else {
             ++verified;
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 "    Status: VERIFIED\n");
         }
-        devicefs::WriteToStream(std::cout,
+        devicefs::WriteToStream(devicefs::stdout,
             "    Synthetic namespace: {} directories, {} object(s), "
             "{} stream(s), {}{} logical stream byte(s) observed, "
             "{} operation failure(s)\n"
@@ -2965,7 +2968,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             observation.real.stream_bytes,
             observation.real.failures);
         if (observation.plan_ready) {
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 "    Content available: {} bytes\n"
                 "    Content selected: {} bytes ({:.2f}%)\n"
                 "    Content compared: {} bytes "
@@ -2978,10 +2981,10 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                 Percentage(observation.compared_bytes,
                     observation.selected_bytes));
         } else {
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 "    Content comparison was not reached.\n");
         }
-        devicefs::WriteToStream(std::cout,
+        devicefs::WriteToStream(devicefs::stdout,
             "    Mismatches: {}\n"
             "    VSS exclusions: {}\n"
             "    Matched filesystem errors: {}\n",
@@ -2991,27 +2994,27 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
         if (!observation.cleanup_failures.empty()) {
             ++cleanup_failed;
             for (const auto &failure : observation.cleanup_failures) {
-                devicefs::WriteToStream(std::cout,
+                devicefs::WriteToStream(devicefs::stdout,
                     "    Cleanup failure: {}\n", failure);
             }
         }
         for (const auto &mismatch : mismatches) {
-            PrintMismatch(std::cout, job.volume_identifier, mismatch);
+            PrintMismatch(devicefs::stdout, job.volume_identifier, mismatch);
         }
         for (const auto &comparison : operation_comparisons) {
             if (!IsMatchedError(comparison)) {
                 PrintOperationComparison(
-                    std::cout, job.volume_identifier, comparison);
+                    devicefs::stdout, job.volume_identifier, comparison);
             }
         }
         for (const auto &comparison : operation_comparisons) {
             if (IsMatchedError(comparison)) {
                 PrintOperationComparison(
-                    std::cout, job.volume_identifier, comparison);
+                    devicefs::stdout, job.volume_identifier, comparison);
             }
         }
     }
-    devicefs::WriteToStream(std::cout,
+    devicefs::WriteToStream(devicefs::stdout,
         "\nSummary: {} verified, {} sample verified, {} mismatched, "
         "{} indeterminate, {} cancelled/incomplete, "
         "{} volume(s) with VSS exclusions, "
@@ -3064,10 +3067,10 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     const auto preserve_for_manual_mount =
         [&](const std::string_view error) {
             devicefs::WriteToStream(
-                std::cout,
+                devicefs::stdout,
                 "\nAutomatic VHDX inventory failed: {}\n",
                 error);
-            devicefs::WriteToStream(std::cout,
+            devicefs::WriteToStream(devicefs::stdout,
                 L"The VHDX remains available for manual mounting:\n"
                 L"  VHDX file: {}\n"
                 L"After unmounting any manual attachment, press Ctrl+C "
@@ -3078,7 +3081,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                 internal::WaitForDeviceFsExitOrCancellation(
                     processes, cancellation_event);
             if (result) {
-                devicefs::WriteToStream(std::cout,
+                devicefs::WriteToStream(devicefs::stdout,
                     "devicefs exited with code {}.\n",
                     result->exit_code);
             }
@@ -3111,7 +3114,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                         virtual_disk_lock, io_cancellation);
                     state.BeginTraversal();
                     devicefs::WriteToStream(
-                        std::cout,
+                        devicefs::stdout,
                         L"\nBeginning VHDX filesystem inventory:\n"
                         L"  Source device: {}\n"
                         L"  VHDX file: {}\n"
@@ -3167,13 +3170,13 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             const auto now = std::chrono::steady_clock::now();
             if (now >= next_progress) {
                 const auto observation = state.Observe();
-                devicefs::WriteToStream(std::cout,
+                devicefs::WriteToStream(devicefs::stdout,
                     "\nVHDX inventory progress:\n");
                 const auto elapsed = observation.traversal_started
                     ? std::chrono::duration<double>(
                         now - *observation.traversal_started).count()
                     : 0.0;
-                PrintTraversalProgress(std::cout,
+                PrintTraversalProgress(devicefs::stdout,
                     "Requested device", observation.synthetic,
                     std::nullopt, elapsed);
                 next_progress = now + kProgressReportInterval;
@@ -3183,7 +3186,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
         const auto inventory_complete = operation.get();
         automatic_inventory_finished = true;
         const auto observation = state.Observe();
-        devicefs::WriteToStream(std::cout,
+        devicefs::WriteToStream(devicefs::stdout,
             "\nVHDX inventory {}:\n",
             inventory_complete ? "complete" : "cancelled/incomplete");
         const auto elapsed = observation.traversal_started
@@ -3191,12 +3194,12 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                 std::chrono::steady_clock::now() -
                 *observation.traversal_started).count()
             : 0.0;
-        PrintTraversalProgress(std::cout,
+        PrintTraversalProgress(devicefs::stdout,
             "Requested device", observation.synthetic,
             std::nullopt, elapsed);
         for (const auto &failure : observation.cleanup_failures) {
             devicefs::WriteToStream(
-                std::cout, "  Cleanup failure: {}\n", failure);
+                devicefs::stdout, "  Cleanup failure: {}\n", failure);
         }
         privileges.Restore();
         child.Stop();
@@ -3320,7 +3323,7 @@ export [[nodiscard]] auto VerifyFilesystemViews(
         }
         const auto now = std::chrono::steady_clock::now();
         if (now >= next_progress) {
-            PrintNewMismatches(jobs, std::cout);
+            PrintNewMismatches(jobs, devicefs::stdout);
             PrintProgress(jobs);
             next_progress = now + kProgressReportInterval;
         }

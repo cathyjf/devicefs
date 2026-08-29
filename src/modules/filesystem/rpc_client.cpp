@@ -28,6 +28,9 @@ module;
 #include <wil/stl.h>
 #include <wil/rpc_helpers.h>
 
+#undef stderr
+#undef stdout
+
 module devicefs.filesystem:rpc_client;
 
 import std;
@@ -102,7 +105,7 @@ struct RPCBlockDevice {
         if (FAILED(error)) {
             const auto win32_error =
                 ExplicitWin32Error::FromHresult(error).value;
-            devicefs::WriteToStream(std::cerr,
+            devicefs::WriteToStream(devicefs::stderr,
                 "devicefs: RPC read failed for '{:s}': Windows error {}\n",
                 symbol_ | std::views::transform(
                     [](const unsigned char byte) noexcept {

@@ -175,7 +175,7 @@ auto TryWriteError(
             "std::exception::what is noexcept. WriteToStream cannot "
             "throw.")]]
     devicefs::WriteToStream(
-        std::cerr, "backup-supervisor: {}: {}\n", context, error.what());
+        devicefs::stderr, "backup-supervisor: {}: {}\n", context, error.what());
 }
 
 [[nodiscard]] auto UniqueName() {

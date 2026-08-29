@@ -132,11 +132,11 @@ export [[nodiscard]] auto RunNativeBackup(
                         namespace_override);
                 } catch (const wil::ResultException &error) {
                     devicefs::WriteToStream(
-                        std::cerr, "backup-supervisor: {}\n", error.what());
+                        devicefs::stderr, "backup-supervisor: {}\n", error.what());
                     return kCallbackFailureExitCode;
                 } catch (const std::runtime_error &error) {
                     devicefs::WriteToStream(
-                        std::cerr, "backup-supervisor: {}\n", error.what());
+                        devicefs::stderr, "backup-supervisor: {}\n", error.what());
                     return kCallbackFailureExitCode;
                 }
             });

@@ -347,7 +347,7 @@ export auto InstallService(
         }
         ConfigurePreshutdownTimeout(service.get(), preshutdown_timeout);
         devicefs::WriteToStream(
-            std::cout, "backup-supervisor: updated {} at {}\n",
+            devicefs::stdout, "backup-supervisor: updated {} at {}\n",
             kServiceName, installed_executable_text);
         return;
     }
@@ -367,6 +367,6 @@ export auto InstallService(
     ConfigurePreshutdownTimeout(service.get(), preshutdown_timeout);
     remove_incomplete_service.release();
     devicefs::WriteToStream(
-        std::cout, "backup-supervisor: installed {} at {}\n",
+        devicefs::stdout, "backup-supervisor: installed {} at {}\n",
         kServiceName, installed_executable_text);
 }

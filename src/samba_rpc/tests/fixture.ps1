@@ -5,29 +5,33 @@
 #requires -Version 7.4
 
 param(
-    [Parameter(Mandatory)]
-    [string] $MktempPath,
-
-    [Parameter(Mandatory)]
-    [string] $PdbEditPath,
-
-    [Parameter(Mandatory)]
-    [string] $SambaDcerpcdPath,
-
-    [Parameter(Mandatory)]
-    [string] $HelperPath,
-
-    [Parameter(Mandatory)]
-    [string] $ClientPath,
-
-    [string] $HdiutilPath,
-
-    [string] $LosetupPath
+    [string] $CMakeCachePath = [IO.Path]::GetFullPath(
+        '../../../build/samba_rpc/CMakeCache.txt', $PSScriptRoot)
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+$CMakeCachePath = [IO.Path]::GetFullPath($CMakeCachePath)
+function Get-CachedPath([string] $Name) {
+    $record = & grep -m 1 "^${Name}:" -- $CMakeCachePath
+    if ($LASTEXITCODE -ne 0) {
+        throw "CMake cache does not define $Name."
+    }
+    return ($record -split '=', 2)[1]
+}
+$MktempPath = Get-CachedPath 'MKTEMP_EXECUTABLE'
+$PdbEditPath = Get-CachedPath 'PDBEDIT_EXECUTABLE'
+$SambaDcerpcdPath = Get-CachedPath 'SAMBA_DCERPCD_EXECUTABLE'
+$build_directory = [IO.Path]::GetDirectoryName($CMakeCachePath)
+$HelperPath = [IO.Path]::Combine($build_directory, 'rpcd_devicefs')
+$ClientPath = [IO.Path]::Combine(
+    $build_directory, 'rpcd_devicefs_test_client')
+if ($IsMacOS) {
+    $HdiutilPath = Get-CachedPath 'HDIUTIL_EXECUTABLE'
+} else {
+    $LosetupPath = Get-CachedPath 'LOSETUP_EXECUTABLE'
+}
 $expected = [Text.Encoding]::UTF8.GetBytes("DeviceFs Samba RPC fixture`n")
 $backing_length = 1024 * 1024
 $password = 'devicefs-fixture-password'

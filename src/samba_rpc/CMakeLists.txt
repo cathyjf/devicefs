@@ -138,16 +138,10 @@ if(BUILD_TESTING)
     )
     if(APPLE)
         find_program(HDIUTIL_EXECUTABLE NAMES hdiutil REQUIRED)
-        set(BLOCK_DEVICE_ARGUMENTS
-            -HdiutilPath "${HDIUTIL_EXECUTABLE}"
-        )
     elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         find_program(LOSETUP_EXECUTABLE NAMES losetup
             PATH_SUFFIXES sbin
             REQUIRED
-        )
-        set(BLOCK_DEVICE_ARGUMENTS
-            -LosetupPath "${LOSETUP_EXECUTABLE}"
         )
     else()
         message(FATAL_ERROR
@@ -195,12 +189,7 @@ if(BUILD_TESTING)
         COMMAND "${POWERSHELL_EXECUTABLE}"
             -NoLogo -NoProfile -NonInteractive -File
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixture.ps1"
-            -MktempPath "${MKTEMP_EXECUTABLE}"
-            -PdbEditPath "${PDBEDIT_EXECUTABLE}"
-            -SambaDcerpcdPath "${SAMBA_DCERPCD_EXECUTABLE}"
-            -HelperPath "$<TARGET_FILE:rpcd_devicefs>"
-            -ClientPath "$<TARGET_FILE:rpcd_devicefs_test_client>"
-            ${BLOCK_DEVICE_ARGUMENTS}
+            "${CMAKE_BINARY_DIR}/CMakeCache.txt"
     )
     set_tests_properties(rpcd_devicefs_authenticated PROPERTIES TIMEOUT 30)
 endif()

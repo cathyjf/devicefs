@@ -21,12 +21,17 @@ module;
 #include <sal.h>
 #include <windows.h>
 
+#define SECURITY_WIN32
+#include <sspi.h>
+
 #include <devicefs/rpc_block_device.h>
 #include <devicefs/midl_compat.h>
 #include <devicefs/winfsp_compat.h>
 #include <wil/resource.h>
+#include <wil/safecast.h>
 #include <wil/stl.h>
 #include <wil/rpc_helpers.h>
+#include <wil/win32_helpers.h>
 
 #undef stderr
 #undef stdout
@@ -45,13 +50,21 @@ auto CheckNt(NTSTATUS, wil::zstring_view) -> void;
 
 namespace rpc_client {
 
+constexpr auto kTcpPrefix = std::string_view{"tcp:"};
+constexpr auto kTcpUsername = std::string_view{"devicefs"};
+
 [[nodiscard]] auto IsRpcDevice(const internal::Mapping &mapping) noexcept {
     return mapping.device.starts_with(internal::kRpcDevicePrefix);
 }
 
-[[nodiscard]] auto MakeRpcBinding(const wil::zstring_view endpoint) {
-    auto string_binding = std::filesystem::path{std::format(
-        "{}:[{}]", devicefs::rpc::kProtocolSequence, endpoint)}.wstring();
+[[nodiscard]] auto IsTcpDevice(const internal::Mapping &mapping) noexcept {
+    return IsRpcDevice(mapping) &&
+        std::string_view{mapping.device}.substr(
+            internal::kRpcDevicePrefix.size()).starts_with(kTcpPrefix);
+}
+
+[[nodiscard]] auto MakeRpcBinding(const std::string_view binding) {
+    auto string_binding = std::filesystem::path{binding}.wstring();
     auto result = wil::unique_rpc_binding{};
     const auto error = RpcBindingFromStringBindingW(
         string_binding.data(), result.put());
@@ -60,6 +73,76 @@ namespace rpc_client {
             ExplicitWin32Error{std::bit_cast<DWORD>(error)});
     }
     return wil::shared_rpc_binding{std::move(result)};
+}
+
+[[nodiscard]] auto LocalRpcBinding() -> const wil::shared_rpc_binding & {
+    static const auto binding = [] {
+        auto endpoint = std::wstring{};
+        const auto error = wil::GetEnvironmentVariableW(
+            std::filesystem::path{
+                devicefs::rpc::kEndpointEnvironmentVariable}.c_str(),
+            endpoint);
+        if (FAILED(error)) {
+            WinError("could not obtain the RPC block-device endpoint",
+                ExplicitWin32Error::FromHresult(error));
+        }
+        if (endpoint.empty()) {
+            throw std::runtime_error(
+                "the RPC block-device endpoint is empty");
+        }
+        return MakeRpcBinding(std::format(
+            "{}:[{}]", devicefs::rpc::kProtocolSequence,
+            std::filesystem::path{endpoint}.string()));
+    }();
+    return binding;
+}
+
+[[nodiscard]] auto MakeTcpRpcBinding(
+    const internal::Mapping &mapping,
+    const std::string_view password) {
+    const auto source = std::string_view{mapping.device}.substr(
+        internal::kRpcDevicePrefix.size() + kTcpPrefix.size());
+    auto fields = source | std::views::split(':');
+    auto position = fields.begin();
+    const auto next = [&]() {
+        if (position == fields.end()) {
+            throw std::runtime_error{"invalid TCP RPC source"};
+        }
+        const auto field = *position;
+        ++position;
+        return std::string_view{field.begin(), field.end()};
+    };
+    const auto address = next();
+    const auto port = next();
+    if (address.empty() || port.empty() || (position != fields.end())) {
+        throw std::runtime_error{"invalid TCP RPC source"};
+    }
+
+    auto result = MakeRpcBinding(
+        std::format("ncacn_ip_tcp:{}[{}]", address, port));
+    auto username = std::basic_string<unsigned char>{
+        kTcpUsername.begin(), kTcpUsername.end()};
+    auto encoded_password = std::basic_string<unsigned char,
+        std::char_traits<unsigned char>,
+        wil::secure_allocator<unsigned char>>{
+            password.begin(), password.end()};
+    auto identity = SEC_WINNT_AUTH_IDENTITY_A{
+        .User = username.data(),
+        .UserLength = wil::safe_cast<ULONG>(username.size()),
+        .Domain = nullptr,
+        .DomainLength = 0,
+        .Password = encoded_password.data(),
+        .PasswordLength = wil::safe_cast<ULONG>(encoded_password.size()),
+        .Flags = SEC_WINNT_AUTH_IDENTITY_ANSI,
+    };
+    const auto error = RpcBindingSetAuthInfoA(
+        result.get(), nullptr, RPC_C_AUTHN_LEVEL_CONNECT,
+        RPC_C_AUTHN_WINNT, &identity, RPC_C_AUTHZ_NONE);
+    if (error != RPC_S_OK) {
+        WinError("could not authenticate the RPC block-device binding",
+            ExplicitWin32Error{std::bit_cast<DWORD>(error)});
+    }
+    return result;
 }
 
 struct RPCBlockDevice {

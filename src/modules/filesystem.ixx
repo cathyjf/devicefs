@@ -25,7 +25,6 @@ module;
 #include <wil/resource.h>
 #include <wil/safecast.h>
 #include <wil/stl.h>
-#include <wil/win32_helpers.h>
 
 #undef stderr
 #undef stdout
@@ -37,7 +36,6 @@ import :internal;
 import :rpc_client;
 export import devicefs.windows_block_device;
 import devicefs.common;
-import devicefs.rpc_constants;
 import devicefs.stream_writer;
 import devicefs.vhdx_viewer;
 
@@ -317,13 +315,19 @@ template <BlockDevice DeviceType>
     const internal::Mapping &mapping, const bool extended_dasd,
     const bool cache, const bool synthetic_free_clusters,
     const UINT64 map_number,
-    const wil::shared_rpc_binding &rpc_binding) {
+    const std::string_view rpc_password) {
     auto source = [&] {
         if constexpr ((std::same_as<DeviceType, RPCBlockDevice>) ||
             (std::same_as<DeviceType, VhdxViewer<RPCBlockDevice>>)) {
-            return RPCBlockDevice::FromSymbol(rpc_binding,
-                std::string_view{mapping.device}.substr(
-                    internal::kRpcDevicePrefix.size()));
+            const auto tcp = rpc_client::IsTcpDevice(mapping);
+            return RPCBlockDevice::FromSymbol(
+                tcp
+                    ? rpc_client::MakeTcpRpcBinding(mapping, rpc_password)
+                    : rpc_client::LocalRpcBinding(),
+                tcp
+                    ? std::string_view{}
+                    : std::string_view{mapping.device}.substr(
+                        internal::kRpcDevicePrefix.size()));
         } else {
             return WindowsBlockDevice::FromFilename(
                 std::filesystem::path{mapping.device}, extended_dasd,
@@ -716,19 +720,9 @@ auto WINAPI ControlHandler(const DWORD event) noexcept -> BOOL {
 }
 
 template <BlockDevice DeviceType>
-auto RunWithDevice(
-    const Options &options,
-    const wil::shared_rpc_binding rpc_binding = nullptr) {
+auto RunWithDevices(
+    const Options &options, DeviceFiles<DeviceType> files) {
     auto security = MakeSecurityDescriptor(options.read_user);
-    auto files = DeviceFiles<DeviceType>{};
-    for (auto i = 0uz; i < options.mappings.size(); ++i) {
-        const auto &mapping = options.mappings[i];
-        files.emplace(Lowercase(mapping.name),
-            OpenDevice<DeviceType>(mapping, options.extended_dasd,
-                options.cache, options.synthetic_free_clusters,
-                i + 1, rpc_binding));
-    }
-
     auto stop_event = wil::unique_event_nothrow{CreateEventExA(
         nullptr, options.stop_event.c_str(),
         CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS)};
@@ -788,37 +782,48 @@ auto RunWithDevice(
     return 0;
 }
 
+template <BlockDevice DeviceType>
+[[nodiscard]] auto OpenDevices(
+    const Options &options,
+    wil::secure_string rpc_password = {}) {
+    return std::views::iota(0uz, options.mappings.size())
+        | std::views::transform([&](const auto i) {
+            const auto &mapping = options.mappings[i];
+            return std::pair{
+                Lowercase(mapping.name),
+                OpenDevice<DeviceType>(mapping, options.extended_dasd,
+                    options.cache, options.synthetic_free_clusters,
+                    i + 1, std::string_view{rpc_password})};
+        })
+        | std::ranges::to<DeviceFiles<DeviceType>>();
+}
+
 auto Run(const Options &options) {
     if (!NT_SUCCESS(FspLoad(nullptr))) {
         throw std::runtime_error("could not load WinFsp DLL");
     }
-    const auto rpc = rpc_client::IsRpcDevice(options.mappings.front());
-    if (rpc) {
-        const auto binding = [] {
-            auto result = std::wstring{};
-            const auto error = wil::GetEnvironmentVariableW(
-                std::filesystem::path{
-                    devicefs::rpc::kEndpointEnvironmentVariable}.c_str(),
-                result);
-            if (FAILED(error)) {
-                WinError("could not obtain the RPC block-device endpoint",
-                    ExplicitWin32Error::FromHresult(error));
+    const auto run = [&]<BlockDevice DeviceType = WindowsBlockDevice>(
+            wil::secure_string password = {}) {
+        if (options.vhdx) {
+            return RunWithDevices(options,
+                OpenDevices<VhdxViewer<DeviceType>>(
+                    options, std::move(password)));
+        }
+        return RunWithDevices(options,
+            OpenDevices<DeviceType>(options, std::move(password)));
+    };
+    if (rpc_client::IsRpcDevice(options.mappings.front())) {
+        return run.operator()<RPCBlockDevice>([&] {
+            auto password = wil::secure_string{};
+            if (std::ranges::any_of(options.mappings, rpc_client::IsTcpDevice) &&
+                !std::getline(std::cin, password)) {
+                throw std::runtime_error{
+                    "could not read the RPC password from standard input"};
             }
-            if (result.empty()) {
-                throw std::runtime_error(
-                    "the RPC block-device endpoint is empty");
-            }
-            return rpc_client::MakeRpcBinding(
-                std::filesystem::path{result}.string());
-        }();
-        return options.vhdx
-            ? RunWithDevice<VhdxViewer<RPCBlockDevice>>(options, binding)
-            : RunWithDevice<RPCBlockDevice>(options, binding);
+            return password;
+        }());
     }
-    if (options.vhdx) {
-        return RunWithDevice<VhdxViewer<WindowsBlockDevice>>(options);
-    }
-    return RunWithDevice<WindowsBlockDevice>(options);
+    return run();
 }
 
 } // namespace

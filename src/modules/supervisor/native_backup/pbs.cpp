@@ -432,11 +432,11 @@ struct StartedWslFish {
     }
 
     auto wsl_arguments = std::vector<std::string_view>{
-        "--distribution", configuration.wsl_distribution,
+        "--distribution", configuration.wsl_backup.distribution,
     };
-    if (configuration.wsl_linux_user) {
+    if (configuration.wsl_backup.linux_user) {
         wsl_arguments.push_back("--user");
-        wsl_arguments.push_back(*configuration.wsl_linux_user);
+        wsl_arguments.push_back(*configuration.wsl_backup.linux_user);
     }
     wsl_arguments.append_range(std::to_array<std::string_view>({
         "--exec", "/usr/bin/fish", "--no-config", "-c",
@@ -606,7 +606,7 @@ auto TrySendPbsFishSignal(
             input.append(value);
             input.push_back(u8'\0');
         };
-        append_record(configuration.wsl_client_path);
+        append_record(configuration.wsl_backup.client_path);
         append_record(configuration.pbs_server);
         const auto port = std::to_string(configuration.pbs_port);
         append_record(std::u8string{port.begin(), port.end()});

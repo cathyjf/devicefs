@@ -120,14 +120,14 @@ target_link_libraries(rpcd_devicefs PRIVATE
 )
 
 include(CTest)
-if(BUILD_TESTING AND APPLE)
+if(BUILD_TESTING)
     find_library(DCERPC_LIBRARY dcerpc REQUIRED)
     find_library(SAMBA_CREDENTIALS_LIBRARY samba-credentials REQUIRED)
     find_library(SAMBA_ERRORS_LIBRARY samba-errors REQUIRED)
     find_library(SAMBA_HOSTCONFIG_LIBRARY samba-hostconfig REQUIRED)
     find_library(TEVENT_LIBRARY tevent REQUIRED)
     find_library(TEVENT_UTIL_LIBRARY tevent-util REQUIRED)
-    find_program(HDIUTIL_EXECUTABLE NAMES hdiutil REQUIRED)
+    find_program(MKTEMP_EXECUTABLE NAMES gmktemp mktemp REQUIRED)
     find_program(PDBEDIT_EXECUTABLE NAMES pdbedit REQUIRED)
     find_program(POWERSHELL_EXECUTABLE NAMES pwsh-preview pwsh REQUIRED)
     find_program(SAMBA_DCERPCD_EXECUTABLE
@@ -136,6 +136,24 @@ if(BUILD_TESTING AND APPLE)
         PATH_SUFFIXES libexec/samba
         REQUIRED
     )
+    if(APPLE)
+        find_program(HDIUTIL_EXECUTABLE NAMES hdiutil REQUIRED)
+        set(BLOCK_DEVICE_ARGUMENTS
+            -HdiutilPath "${HDIUTIL_EXECUTABLE}"
+        )
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        find_program(LOSETUP_EXECUTABLE NAMES losetup
+            PATH_SUFFIXES sbin
+            REQUIRED
+        )
+        set(BLOCK_DEVICE_ARGUMENTS
+            -LosetupPath "${LOSETUP_EXECUTABLE}"
+        )
+    else()
+        message(FATAL_ERROR
+            "The authenticated Samba RPC test requires Linux or macOS"
+        )
+    endif()
 
     add_executable(rpcd_devicefs_test_client
         tests/client.cpp
@@ -177,12 +195,12 @@ if(BUILD_TESTING AND APPLE)
         COMMAND "${POWERSHELL_EXECUTABLE}"
             -NoLogo -NoProfile -NonInteractive -File
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixture.ps1"
-            -StateRoot "${CMAKE_CURRENT_BINARY_DIR}/test-state"
+            -MktempPath "${MKTEMP_EXECUTABLE}"
             -PdbEditPath "${PDBEDIT_EXECUTABLE}"
             -SambaDcerpcdPath "${SAMBA_DCERPCD_EXECUTABLE}"
             -HelperPath "$<TARGET_FILE:rpcd_devicefs>"
             -ClientPath "$<TARGET_FILE:rpcd_devicefs_test_client>"
-            -HdiutilPath "${HDIUTIL_EXECUTABLE}"
+            ${BLOCK_DEVICE_ARGUMENTS}
     )
     set_tests_properties(rpcd_devicefs_authenticated PROPERTIES TIMEOUT 30)
 endif()

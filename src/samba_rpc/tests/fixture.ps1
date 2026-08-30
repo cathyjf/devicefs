@@ -6,7 +6,7 @@
 
 param(
     [Parameter(Mandatory)]
-    [string] $StateRoot,
+    [string] $MktempPath,
 
     [Parameter(Mandatory)]
     [string] $PdbEditPath,
@@ -20,8 +20,9 @@ param(
     [Parameter(Mandatory)]
     [string] $ClientPath,
 
-    [Parameter(Mandatory)]
-    [string] $HdiutilPath
+    [string] $HdiutilPath,
+
+    [string] $LosetupPath
 )
 
 Set-StrictMode -Version Latest
@@ -30,7 +31,10 @@ $PSNativeCommandUseErrorActionPreference = $false
 $expected = [Text.Encoding]::UTF8.GetBytes("DeviceFs Samba RPC fixture`n")
 $backing_length = 1024 * 1024
 $password = 'devicefs-fixture-password'
-$root = [IO.Path]::Combine($StateRoot, [string]$PID)
+$root = ([string](& $MktempPath --directory)).Trim()
+if (($LASTEXITCODE -ne 0) -or ($root.Length -eq 0)) {
+    throw 'mktemp could not create the test directory.'
+}
 foreach ($directory in 'private', 'state', 'cache', 'lock', 'pid', 'ncalrpc') {
     [void][IO.Directory]::CreateDirectory(
         [IO.Path]::Combine($root, $directory))
@@ -100,12 +104,21 @@ $server = $null
 $device = $null
 $failure = $null
 try {
-    $attachment = @(& $HdiutilPath attach -nomount -readonly `
-        -imagekey diskimage-class=CRawDiskImage $backing 2>&1)
-    if ($LASTEXITCODE -ne 0) {
-        throw "hdiutil attach failed:`n$($attachment | Out-String)"
+    if ($IsMacOS) {
+        $attachment = @(& $HdiutilPath attach -nomount -readonly `
+            -imagekey diskimage-class=CRawDiskImage $backing 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "hdiutil attach failed:`n$($attachment | Out-String)"
+        }
+        $device = ([string]($attachment | Select-Object -First 1)).Split()[0]
+    } else {
+        $attachment = @(& $LosetupPath --find --show --read-only `
+            $backing 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "losetup failed:`n$($attachment | Out-String)"
+        }
+        $device = ([string]($attachment | Select-Object -First 1)).Trim()
     }
-    $device = ([string]($attachment | Select-Object -First 1)).Split()[0]
     $start_info.Environment['DEVICEFS_SAMBA_RPC_DEVICE'] = $device
     $server = [Diagnostics.Process]::Start($start_info)
     $binding = "ncacn_ip_tcp:127.0.0.1[$port,connect]"
@@ -150,10 +163,16 @@ try {
         }
     }
     if ($null -ne $device) {
-        $detach_output = & $HdiutilPath detach $device 2>&1
+        if ($IsMacOS) {
+            $detach_operation = 'hdiutil detach'
+            $detach_output = & $HdiutilPath detach $device 2>&1
+        } else {
+            $detach_operation = 'losetup --detach'
+            $detach_output = & $LosetupPath --detach $device 2>&1
+        }
         if ($LASTEXITCODE -ne 0) {
             $detach_failure =
-                "hdiutil detach failed:`n$($detach_output | Out-String)"
+                "$detach_operation failed:`n$($detach_output | Out-String)"
             if ($null -eq $failure) {
                 $failure = $detach_failure
             } else {
@@ -161,6 +180,8 @@ try {
             }
         }
     }
+    Set-Location ([IO.Path]::GetDirectoryName($root))
+    Remove-Item -LiteralPath $root -Recurse -Force
 }
 if ($null -ne $failure) {
     throw $failure

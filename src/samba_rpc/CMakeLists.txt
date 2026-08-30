@@ -130,6 +130,10 @@ if(BUILD_TESTING)
     find_program(MKTEMP_EXECUTABLE NAMES gmktemp mktemp REQUIRED)
     find_program(PDBEDIT_EXECUTABLE NAMES pdbedit REQUIRED)
     find_program(POWERSHELL_EXECUTABLE NAMES pwsh-preview pwsh REQUIRED)
+    set(DEVICEFS_EXECUTABLE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../build/windows-x64/Release/devicefs.exe"
+        CACHE FILEPATH "DeviceFs executable used by the interactive fixture"
+    )
     find_program(SAMBA_DCERPCD_EXECUTABLE
         NAMES samba-dcerpcd
         HINTS /opt/homebrew/opt/samba/libexec/samba
@@ -143,6 +147,19 @@ if(BUILD_TESTING)
             PATH_SUFFIXES sbin
             REQUIRED
         )
+        find_program(MKFS_FAT_EXECUTABLE NAMES mkfs.fat
+            PATH_SUFFIXES sbin
+            REQUIRED
+        )
+        find_program(MOUNT_EXECUTABLE NAMES mount
+            PATH_SUFFIXES bin sbin
+            REQUIRED
+        )
+        find_program(UMOUNT_EXECUTABLE NAMES umount
+            PATH_SUFFIXES bin sbin
+            REQUIRED
+        )
+        find_program(WINDOWS_POWERSHELL_EXECUTABLE NAMES pwsh.exe)
     else()
         message(FATAL_ERROR
             "The authenticated Samba RPC test requires Linux or macOS"
@@ -190,6 +207,7 @@ if(BUILD_TESTING)
             -NoLogo -NoProfile -NonInteractive -File
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixture.ps1"
             "${CMAKE_BINARY_DIR}/CMakeCache.txt"
+            -TestClient
     )
     set_tests_properties(rpcd_devicefs_authenticated PROPERTIES TIMEOUT 30)
 endif()

@@ -1,12 +1,15 @@
 # SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# Run the authenticated helper against synthetic Samba state and backing data.
+# Run DeviceFs against the authenticated helper and a synthetic FAT32 image.
+# -TestClient runs the automated protocol and authentication checks instead.
 #requires -Version 7.4
 
 param(
     [string] $CMakeCachePath = [IO.Path]::GetFullPath(
-        '../../../build/samba_rpc/CMakeCache.txt', $PSScriptRoot)
+        '../../../build/samba_rpc/CMakeCache.txt', $PSScriptRoot),
+
+    [switch] $TestClient
 )
 
 Set-StrictMode -Version Latest
@@ -15,7 +18,7 @@ $PSNativeCommandUseErrorActionPreference = $false
 $CMakeCachePath = [IO.Path]::GetFullPath($CMakeCachePath)
 function Get-CachedPath([string] $Name) {
     $record = & grep -m 1 "^${Name}:" -- $CMakeCachePath
-    if ($LASTEXITCODE -ne 0) {
+    if (($LASTEXITCODE -ne 0) -or $record.EndsWith('-NOTFOUND')) {
         throw "CMake cache does not define $Name."
     }
     return ($record -split '=', 2)[1]
@@ -32,8 +35,32 @@ if ($IsMacOS) {
 } else {
     $LosetupPath = Get-CachedPath 'LOSETUP_EXECUTABLE'
 }
+if (-not $TestClient) {
+    if (-not $IsLinux) {
+        throw 'The DeviceFs fixture mode requires Linux under WSL.'
+    }
+    $DeviceFsPath = Get-CachedPath 'DEVICEFS_EXECUTABLE'
+    $MkfsFatPath = Get-CachedPath 'MKFS_FAT_EXECUTABLE'
+    $MountPath = Get-CachedPath 'MOUNT_EXECUTABLE'
+    $UmountPath = Get-CachedPath 'UMOUNT_EXECUTABLE'
+    $WindowsPowerShellPath =
+        Get-CachedPath 'WINDOWS_POWERSHELL_EXECUTABLE'
+    $used_drive_letters = [char[]](& $WindowsPowerShellPath -NoProfile -Command `
+        '[Console]::Write(((Get-Volume).DriveLetter) -join [string]::Empty)')
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not obtain the mounted Windows drive letters.'
+    }
+    Write-Host "Mounted Windows drive letters: $($used_drive_letters -join ', ')"
+    $mount_drive = 'D'..'Z' |
+        Where-Object { -not $used_drive_letters.Contains($_) } |
+        Select-Object -First 1
+    if ($null -eq $mount_drive) {
+        throw 'No Windows drive letter is available for DeviceFs.'
+    }
+    $devicefs_mount = "${mount_drive}:"
+}
 $expected = [Text.Encoding]::UTF8.GetBytes("DeviceFs Samba RPC fixture`n")
-$backing_length = 1024 * 1024
+$backing_length = if ($TestClient) { 1024 * 1024 } else { 64 * 1024 * 1024 }
 $password = 'devicefs-fixture-password'
 $root = ([string](& $MktempPath --directory)).Trim()
 if (($LASTEXITCODE -ne 0) -or ($root.Length -eq 0)) {
@@ -49,7 +76,9 @@ $backing = [IO.Path]::Combine($root, 'backing.img')
 $backing_stream = [IO.File]::Create($backing)
 try {
     $backing_stream.SetLength($backing_length)
-    $backing_stream.Write($expected)
+    if ($TestClient) {
+        $backing_stream.Write($expected)
+    }
 } finally {
     $backing_stream.Dispose()
 }
@@ -61,6 +90,11 @@ try {
     $listener.Stop()
 }
 
+$username = [Environment]::UserName
+$username_map = [IO.Path]::Combine($root, 'username.map')
+# DeviceFs authenticates with the fixed name "devicefs". Map that name to the
+# existing Unix user whose isolated Samba password entry is created below.
+[IO.File]::WriteAllText($username_map, "$username = devicefs`n")
 $configuration = [IO.Path]::Combine($root, 'smb.conf')
 # Samba creates Unix-domain sockets beneath its runtime directories. Relative
 # values keep those socket names short when the build directory itself is long.
@@ -75,16 +109,15 @@ $configuration = [IO.Path]::Combine($root, 'smb.conf')
     interfaces = 127.0.0.1
     bind interfaces only = yes
     passdb backend = smbpasswd:private/smbpasswd
+    username map = $username_map
     private dir = private
     state directory = state
     cache directory = cache
     lock directory = lock
     pid directory = pid
     ncalrpc dir = ncalrpc
-    log file = samba.log
 "@)
 
-$username = [Environment]::UserName
 "$password`n$password" |
     & $PdbEditPath "--configfile=$configuration" --create `
         "--user=$username" --password-from-stdin
@@ -96,9 +129,14 @@ $start_info = [Diagnostics.ProcessStartInfo]::new()
 $start_info.FileName = $SambaDcerpcdPath
 $start_info.WorkingDirectory = $root
 $start_info.UseShellExecute = $false
+$ready_pipe = [IO.Pipes.AnonymousPipeServerStream]::new(
+    [IO.Pipes.PipeDirection]::In,
+    [IO.HandleInheritability]::Inheritable)
 foreach ($argument in @(
         '--foreground',
         '--debug-stdout',
+        "--ready-signal-fd=$($ready_pipe.GetClientHandleAsString())",
+        "--log-basename=$root",
         "--configfile=$configuration",
         $HelperPath)) {
     $start_info.ArgumentList.Add($argument)
@@ -106,8 +144,30 @@ foreach ($argument in @(
 
 $server = $null
 $device = $null
+$mounted_directory = $null
 $failure = $null
 try {
+    if (-not $TestClient) {
+        $format_output = & $MkfsFatPath -F 32 $backing 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "mkfs.fat failed:`n$($format_output | Out-String)"
+        }
+        $mounted_directory = [IO.Path]::Combine($root, 'volume')
+        [void][IO.Directory]::CreateDirectory($mounted_directory)
+        $mount_output = & $MountPath -o loop $backing $mounted_directory 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $mounted_directory = $null
+            throw "mount failed:`n$($mount_output | Out-String)"
+        }
+        [IO.File]::WriteAllText(
+            [IO.Path]::Combine($mounted_directory, 'magic.txt'),
+            'hello world from the Samba helper')
+        $unmount_output = & $UmountPath $mounted_directory 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "umount failed:`n$($unmount_output | Out-String)"
+        }
+        $mounted_directory = $null
+    }
     if ($IsMacOS) {
         $attachment = @(& $HdiutilPath attach -nomount -readonly `
             -imagekey diskimage-class=CRawDiskImage $backing 2>&1)
@@ -125,28 +185,48 @@ try {
     }
     $start_info.Environment['DEVICEFS_SAMBA_RPC_DEVICE'] = $device
     $server = [Diagnostics.Process]::Start($start_info)
-    $binding = "ncacn_ip_tcp:127.0.0.1[$port,connect]"
-    for ($attempt = 0; $attempt -lt 50; ++$attempt) {
-        $client_output =
-            & $ClientPath $configuration $binding $username $password 2>&1 |
-            Out-String
-        $client_exit_code = $LASTEXITCODE
-        if ($client_exit_code -eq 0) {
-            break
-        }
-        if ($server.HasExited) {
-            throw "samba-dcerpcd exited before accepting the connection."
-        }
-        Start-Sleep -Milliseconds 100
+    $ready_pipe.DisposeLocalCopyOfClientHandle()
+    [void]$ready_pipe.ReadByte()
+    $ready_pipe.Dispose()
+    if ($server.HasExited) {
+        throw 'samba-dcerpcd exited during initialization.'
     }
-    if ($client_exit_code -ne 0) {
-        throw "The authenticated RPC client failed:`n$client_output"
-    }
+    Write-Host 'samba-dcerpcd is ready'
+    if (-not $TestClient) {
+        Write-Host "Temporary directory: $root"
+        Write-Host "Backing device: $device"
+        Write-Host "RPC endpoint: 127.0.0.1:$port"
+        Write-Host "DeviceFs mount point: $devicefs_mount"
+        $password | & $DeviceFsPath --vhdx `
+            --mount $devicefs_mount `
+            --map fixture.vhdx "\\\tcp:127.0.0.1:$port"
+        if ($LASTEXITCODE -ne 0) {
+            throw "DeviceFs failed with exit code $LASTEXITCODE."
+        }
+    } else {
+        $binding = "ncacn_ip_tcp:127.0.0.1[$port,connect]"
+        for ($attempt = 0; $attempt -lt 50; ++$attempt) {
+            $client_output =
+                & $ClientPath $configuration $binding $username $password 2>&1 |
+                Out-String
+            $client_exit_code = $LASTEXITCODE
+            if ($client_exit_code -eq 0) {
+                break
+            }
+            if ($server.HasExited) {
+                throw "samba-dcerpcd exited before accepting the connection."
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($client_exit_code -ne 0) {
+            throw "The authenticated RPC client failed:`n$client_output"
+        }
 
-    & $ClientPath $configuration $binding $username 'wrong-password' 2>&1 |
-        Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        throw 'Samba accepted an incorrect password.'
+        & $ClientPath $configuration $binding $username 'wrong-password' 2>&1 |
+            Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            throw 'Samba accepted an incorrect password.'
+        }
     }
 } catch {
     $failure = $_
@@ -164,6 +244,18 @@ try {
             $failure = $_
         } else {
             Write-Warning "Stopping samba-dcerpcd also failed: $_"
+        }
+    }
+    if ($null -ne $mounted_directory) {
+        $unmount_output = & $UmountPath $mounted_directory 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $unmount_failure =
+                "umount failed:`n$($unmount_output | Out-String)"
+            if ($null -eq $failure) {
+                $failure = $unmount_failure
+            } else {
+                Write-Warning $unmount_failure
+            }
         }
     }
     if ($null -ne $device) {

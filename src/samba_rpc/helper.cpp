@@ -34,6 +34,7 @@
 
 #include "compat/rpc_worker.h"
 
+#include <grpc/grpc.h>
 #include <grpcpp/create_channel.h>
 #include "generated/block-device.grpc.pb.h"
 
@@ -198,6 +199,14 @@ class GrpcBackingDevice final : public AbstractBackingDevice {
 public:
     explicit GrpcBackingDevice(const std::filesystem::path &path) {
         auto arguments = grpc::ChannelArguments{};
+        /*
+         * gRPC C++ otherwise derives HTTP/2 :authority from the Unix-socket
+         * pathname. Tonic rejects that percent-encoded pathname with
+         * PROTOCOL_ERROR before dispatching a request. The block-device
+         * service does not route by authority, so localhost is valid for
+         * every call on this channel.
+         */
+        arguments.SetString(GRPC_ARG_DEFAULT_AUTHORITY, "localhost");
         arguments.SetMaxReceiveMessageSize(kUnlimitedGrpcMessageSize);
         stub_ = proxmox::backup::BlockDevice::NewStub(
             grpc::CreateCustomChannel(

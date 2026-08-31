@@ -90,7 +90,7 @@ auto main(const int argc, char *const argv[]) -> int {
         auto builder = grpc::ServerBuilder{};
         builder.AddListeningPort(std::format("unix:{}", argv[1]),
             grpc::InsecureServerCredentials());
-        builder.RegisterService(&service);
+        builder.RegisterService("localhost", &service);
         auto server = builder.BuildAndStart();
         if (!server) {
             throw std::runtime_error{"could not start the gRPC server"};

@@ -16,6 +16,27 @@ set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD
 
 project(devicefs-samba-rpc LANGUAGES C CXX)
 
+find_package(Protobuf CONFIG REQUIRED)
+find_package(gRPC CONFIG REQUIRED)
+if(APPLE)
+    # This component uses Homebrew LLVM because Apple Clang cannot compile its
+    # C++23 import-std configuration. The zlib dependency brought in by gRPC
+    # assumes the usual Apple-Clang SDK layout: ZLIB::ZLIB exports the Xcode
+    # SDK's usr/include as its only interface include. With Homebrew Clang that
+    # path becomes an explicit -isystem entry ahead of Homebrew libc++; <cmath>
+    # consequently finds the SDK's math.h instead of libc++'s math.h wrapper
+    # and fails with "<cmath> tried including <math.h> but didn't find libc++'s
+    # <math.h> header."
+    #
+    # Homebrew Clang already obtains C headers from its selected SDK, so remove
+    # only this incorrect usage requirement; ZLIB::ZLIB still supplies libz.
+    # Switching to Apple Clang would lose the required standard-library module
+    # support, while setting CMAKE_OSX_SYSROOT would propagate still more Xcode
+    # SDK paths through every target to compensate for one defective imported
+    # target.
+    set_property(TARGET ZLIB::ZLIB PROPERTY INTERFACE_INCLUDE_DIRECTORIES "")
+endif()
+
 find_program(PIDL_EXECUTABLE NAMES pidl
     DOC "Samba PIDL compiler"
 )
@@ -47,6 +68,42 @@ find_library(NDR_LIBRARY ndr REQUIRED)
 find_library(SAMBA_UTIL_LIBRARY samba-util REQUIRED)
 find_library(TALLOC_LIBRARY talloc REQUIRED)
 
+set(GRPC_PROTO "${CMAKE_CURRENT_SOURCE_DIR}/idl/block-device.proto")
+set(GRPC_PROTO_OUTPUTS
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/block-device.pb.cc"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/block-device.pb.h"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/block-device.grpc.pb.cc"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/block-device.grpc.pb.h"
+)
+add_custom_command(
+    OUTPUT ${GRPC_PROTO_OUTPUTS}
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+        "${CMAKE_CURRENT_BINARY_DIR}/generated"
+    COMMAND protobuf::protoc
+        "--proto_path=${CMAKE_CURRENT_SOURCE_DIR}/idl"
+        "--cpp_out=${CMAKE_CURRENT_BINARY_DIR}/generated"
+        "--grpc_out=${CMAKE_CURRENT_BINARY_DIR}/generated"
+        "--plugin=protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>"
+        "${GRPC_PROTO}"
+    DEPENDS
+        "${GRPC_PROTO}"
+        protobuf::protoc
+        gRPC::grpc_cpp_plugin
+    VERBATIM
+)
+add_library(devicefs-grpc-protocol STATIC ${GRPC_PROTO_OUTPUTS})
+target_compile_features(devicefs-grpc-protocol PRIVATE cxx_std_23)
+set_source_files_properties(${GRPC_PROTO_OUTPUTS}
+    PROPERTIES COMPILE_OPTIONS "-w"
+)
+target_include_directories(devicefs-grpc-protocol SYSTEM PUBLIC
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"
+)
+target_link_libraries(devicefs-grpc-protocol PUBLIC
+    protobuf::libprotobuf
+    gRPC::grpc++
+)
+
 set(PIDL_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(PIDL_OUTPUTS
     "${PIDL_OUTPUT_DIRECTORY}/devicefs_block_device.h"
@@ -70,10 +127,10 @@ add_custom_command(
         --client=ndr_devicefs_block_device_client.c
         --server=ndr_devicefs_block_device_dispatch.c
         --
-        "${CMAKE_CURRENT_SOURCE_DIR}/devicefs_block_device.idl"
+        "${CMAKE_CURRENT_SOURCE_DIR}/idl/devicefs_block_device.idl"
     WORKING_DIRECTORY "${PIDL_OUTPUT_DIRECTORY}"
     DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/devicefs_block_device.idl"
+        "${CMAKE_CURRENT_SOURCE_DIR}/idl/devicefs_block_device.idl"
         "${PIDL_EXECUTABLE}"
     VERBATIM
 )
@@ -84,7 +141,10 @@ add_executable(rpcd_devicefs
     helper.cpp
     "${PIDL_OUTPUT_DIRECTORY}/ndr_devicefs_block_device.c"
 )
-add_dependencies(rpcd_devicefs devicefs-samba-rpc-pidl)
+add_dependencies(rpcd_devicefs
+    devicefs-samba-rpc-pidl
+    devicefs-grpc-protocol
+)
 target_compile_features(rpcd_devicefs PRIVATE cxx_std_23)
 set_property(TARGET rpcd_devicefs PROPERTY CXX_MODULE_STD ON)
 
@@ -111,6 +171,7 @@ set_source_files_properties(
 )
 
 target_link_libraries(rpcd_devicefs PRIVATE
+    devicefs-grpc-protocol
     "${RPC_WORKER_LIBRARY}"
     "${DCERPC_SERVER_CORE_LIBRARY}"
     "${DCERPC_BINDING_LIBRARY}"
@@ -202,6 +263,23 @@ if(BUILD_TESTING)
         "${TEVENT_UTIL_LIBRARY}"
     )
 
+    add_executable(rpcd_devicefs_grpc_test_server
+        tests/grpc_server.cpp
+    )
+    add_dependencies(rpcd_devicefs_grpc_test_server
+        devicefs-grpc-protocol
+    )
+    target_compile_features(rpcd_devicefs_grpc_test_server PRIVATE cxx_std_23)
+    set_property(TARGET rpcd_devicefs_grpc_test_server
+        PROPERTY CXX_MODULE_STD ON
+    )
+    target_compile_options(rpcd_devicefs_grpc_test_server PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Werror;-Wno-reserved-module-identifier;-Wno-reserved-user-defined-literal>
+    )
+    target_link_libraries(rpcd_devicefs_grpc_test_server PRIVATE
+        devicefs-grpc-protocol
+    )
+
     add_test(NAME rpcd_devicefs_authenticated
         COMMAND "${POWERSHELL_EXECUTABLE}"
             -NoLogo -NoProfile -NonInteractive -File
@@ -209,5 +287,17 @@ if(BUILD_TESTING)
             "${CMAKE_BINARY_DIR}/CMakeCache.txt"
             -TestClient
     )
-    set_tests_properties(rpcd_devicefs_authenticated PROPERTIES TIMEOUT 30)
+    add_test(NAME rpcd_devicefs_grpc_authenticated
+        COMMAND "${POWERSHELL_EXECUTABLE}"
+            -NoLogo -NoProfile -NonInteractive -File
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixture.ps1"
+            "${CMAKE_BINARY_DIR}/CMakeCache.txt"
+            -TestClient
+            -GrpcBacking
+    )
+    set_tests_properties(
+        rpcd_devicefs_authenticated
+        rpcd_devicefs_grpc_authenticated
+        PROPERTIES TIMEOUT 30
+    )
 endif()

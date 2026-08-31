@@ -21,7 +21,7 @@ import std;
 
 namespace {
 
-constexpr auto kExpected = std::string_view{"DeviceFs Samba RPC fixture\n"};
+constexpr auto kPrefix = std::string_view{"DeviceFs Samba RPC fixture\n"};
 constexpr auto kBackingLength = std::uint64_t{1024 * 1024};
 
 auto Check(const NTSTATUS status, const std::string_view operation) -> void {
@@ -29,6 +29,33 @@ auto Check(const NTSTATUS status, const std::string_view operation) -> void {
         throw std::runtime_error{
             std::format("{}: {}", operation, nt_errstr(status))};
     }
+}
+
+auto CallRead(dcerpc_pipe &pipe, TALLOC_CTX *const memory,
+    const std::uint64_t offset, const std::uint32_t wanted)
+    -> std::vector<std::uint8_t> {
+    auto buffer = std::vector<std::uint8_t>(wanted);
+    auto transferred = std::uint32_t{};
+    auto result = NTSTATUS{};
+    Check(dcerpc_Read(pipe.binding_handle, memory, "fixture", offset, wanted,
+        &transferred, buffer.data(), &result), "Read transport");
+    Check(result, "Read");
+    buffer.resize(transferred);
+    return buffer;
+}
+
+auto ExpectedPattern(const std::uint64_t offset, const std::size_t length)
+    -> std::vector<std::uint8_t> {
+    auto result = std::vector<std::uint8_t>(length);
+    for (auto index = std::size_t{}; index < length; ++index) {
+        // Masking with uint8_t's maximum proves that the arithmetic result is
+        // representable by the cast's destination type.
+        [[gsl::suppress("26472")]]
+        result[index] = static_cast<std::uint8_t>(
+            ((offset + index) * 37 + 11) &
+            std::numeric_limits<std::uint8_t>::max());
+    }
+    return result;
 }
 
 } // namespace
@@ -79,16 +106,29 @@ auto main(const int argc, char *const argv[]) -> int {
                 kBackingLength)};
         }
 
-        auto buffer = std::array<std::uint8_t, kExpected.size()>{};
-        auto transferred = std::uint32_t{};
-        Check(dcerpc_Read(pipe->binding_handle, memory.get(), "fixture", 0,
-            buffer.size(), &transferred, buffer.data(), &result),
-            "Read transport");
-        Check(result, "Read");
-        if ((transferred != buffer.size()) ||
-            (std::string_view{std::bit_cast<const char *>(buffer.data()),
-                transferred} != kExpected)) {
-            throw std::runtime_error{"Read returned unexpected data"};
+        const auto prefix = CallRead(
+            *pipe, memory.get(), 0, std::uint32_t{kPrefix.size()});
+        if (!std::ranges::equal(prefix, kPrefix,
+                [](const std::uint8_t actual, const char expected) {
+                    return actual == std::bit_cast<std::uint8_t>(expected);
+                })) {
+            throw std::runtime_error{"Read at offset zero returned bad data"};
+        }
+
+        constexpr auto kOffset = std::uint64_t{4093};
+        constexpr auto kCount = std::uint32_t{73};
+        if (CallRead(*pipe, memory.get(), kOffset, kCount) !=
+            ExpectedPattern(kOffset, kCount)) {
+            throw std::runtime_error{
+                "positioned Read returned data from the wrong offset"};
+        }
+
+        constexpr auto kEofCount = std::uint32_t{64};
+        constexpr auto kEofRemaining = std::size_t{7};
+        constexpr auto kEofOffset = kBackingLength - kEofRemaining;
+        if (CallRead(*pipe, memory.get(), kEofOffset, kEofCount) !=
+            ExpectedPattern(kEofOffset, kEofRemaining)) {
+            throw std::runtime_error{"Read did not preserve the EOF short read"};
         }
 
         return 0;

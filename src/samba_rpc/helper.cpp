@@ -15,6 +15,9 @@
 
 #include "compat/rpc_worker.h"
 
+#include <grpcpp/create_channel.h>
+#include "generated/block-device.grpc.pb.h"
+
 extern "C" {
 #include "generated/ndr_devicefs_block_device.h"
 
@@ -36,8 +39,20 @@ namespace {
 constexpr auto kDeviceEnvironmentVariable = "DEVICEFS_SAMBA_RPC_DEVICE";
 constexpr auto kWorkerProcessCount = 1;
 constexpr auto kIdleShutdownDelaySeconds = 1;
+constexpr auto kUnlimitedGrpcMessageSize = -1;
 
-class BackingDevice {
+class AbstractBackingDevice {
+public:
+    virtual ~AbstractBackingDevice() = default;
+
+    [[nodiscard]] virtual auto Length() const noexcept -> std::uint64_t = 0;
+
+    [[nodiscard]] virtual auto Read(
+        std::span<std::uint8_t> buffer,
+        std::uint64_t offset) const noexcept -> ssize_t = 0;
+};
+
+class BackingDevice final : public AbstractBackingDevice {
 public:
     explicit BackingDevice(const std::filesystem::path &path)
         : file_{std::fopen(path.c_str(), "rb")} {
@@ -95,13 +110,13 @@ public:
         }
     }
 
-    [[nodiscard]] auto Length() const noexcept -> std::uint64_t {
+    [[nodiscard]] auto Length() const noexcept -> std::uint64_t override {
         return length_;
     }
 
     [[nodiscard]] auto Read(
         const std::span<std::uint8_t> buffer,
-        const std::uint64_t offset) const noexcept -> ssize_t {
+        const std::uint64_t offset) const noexcept -> ssize_t override {
         auto result = ssize_t{};
         do {
             result = pread(fileno(file_.get()), buffer.data(), buffer.size(),
@@ -118,23 +133,79 @@ private:
     std::uint64_t length_ = 0;
 };
 
+class GrpcBackingDevice final : public AbstractBackingDevice {
+public:
+    explicit GrpcBackingDevice(const std::filesystem::path &path) {
+        auto arguments = grpc::ChannelArguments{};
+        arguments.SetMaxReceiveMessageSize(kUnlimitedGrpcMessageSize);
+        stub_ = proxmox::backup::BlockDevice::NewStub(
+            grpc::CreateCustomChannel(
+                std::format("unix:{}", path.string()),
+                grpc::InsecureChannelCredentials(), arguments));
+
+        auto context = grpc::ClientContext{};
+        auto request = proxmox::backup::GetLengthRequest{};
+        auto response = proxmox::backup::GetLengthResponse{};
+        const auto status = stub_->GetLength(&context, request, &response);
+        if (!status.ok()) {
+            throw std::runtime_error{status.error_message()};
+        }
+        length_ = response.length();
+    }
+
+    [[nodiscard]] auto Length() const noexcept -> std::uint64_t override {
+        return length_;
+    }
+
+    [[nodiscard]] auto Read(
+        const std::span<std::uint8_t> buffer,
+        const std::uint64_t offset) const noexcept -> ssize_t override {
+        try {
+            auto context = grpc::ClientContext{};
+            auto request = proxmox::backup::ReadRequest{};
+            request.set_offset(offset);
+            request.set_count(static_cast<std::uint32_t>(buffer.size()));
+            auto response = proxmox::backup::ReadResponse{};
+            const auto status = stub_->Read(&context, request, &response);
+            if (!status.ok()) {
+                return -1;
+            }
+
+            const auto &data = response.data();
+            if (data.size() > buffer.size()) {
+                return -1;
+            }
+            if (!data.empty()) {
+                std::memcpy(buffer.data(), data.data(), data.size());
+            }
+            return static_cast<ssize_t>(data.size());
+        } catch (...) {
+            return -1;
+        }
+    }
+
+private:
+    std::unique_ptr<proxmox::backup::BlockDevice::Stub> stub_;
+    std::uint64_t length_ = 0;
+};
+
 struct ServiceState {
     // Samba can ask the executable which interfaces it provides without also
     // requesting the endpoint servers that dispatch those interfaces. Keeping
     // the device optional allows interface discovery to remain side-effect
     // free; GetServers opens it only when Samba requests a dispatch server.
-    std::optional<BackingDevice> backing_device;
+    std::unique_ptr<AbstractBackingDevice> backing_device;
     std::array<const dcesrv_endpoint_server *, 1> endpoint_servers{};
 };
 
 /*
  * The generated dispatcher calls GetLength and Read without passing the
- * ServiceState created in main. GetServers publishes its BackingDevice through
- * this read-only pointer after endpoint registration succeeds. rpc_worker_main
- * returns before main destroys the ServiceState, so the device outlives every
- * call that can use this pointer.
+ * ServiceState created in main. GetServers publishes the selected backing
+ * device through this read-only pointer after endpoint registration succeeds.
+ * rpc_worker_main returns before main destroys the ServiceState, so the device
+ * outlives every call that can use this pointer.
  */
-const BackingDevice *active_backing_device = nullptr;
+const AbstractBackingDevice *active_backing_device = nullptr;
 
 auto GetInterfaces(
     const ndr_interface_table ***const interfaces,
@@ -170,10 +241,12 @@ auto GetServers(dcesrv_context *,
         }
         try {
             /*
-             * BackingDevice opens the launcher-supplied pathname, verifies
-             * that it names a block device, and caches the capacity. Storing
-             * it in ServiceState keeps the same open device available to
-             * every GetLength and Read call handled by this worker.
+             * If the launcher-supplied pathname names a Unix socket,
+             * GrpcBackingDevice creates a client for that socket and caches
+             * the service's length. Otherwise, BackingDevice opens the
+             * pathname, verifies that it names a block device, and caches its
+             * capacity. ServiceState owns the selected device for every
+             * GetLength and Read call handled by this worker.
              *
              * This construction is the only C++ operation in the callback
              * that can throw. The catch belongs here because Samba invokes
@@ -181,7 +254,15 @@ auto GetServers(dcesrv_context *,
              * rpc_worker_main in main could not receive an exception without
              * first allowing it to escape this ABI boundary.
              */
-            state.backing_device.emplace(std::filesystem::path{path});
+            struct stat information {};
+            if ((stat(path, &information) == 0) &&
+                S_ISSOCK(information.st_mode)) {
+                state.backing_device =
+                    std::make_unique<GrpcBackingDevice>(path);
+            } else {
+                state.backing_device =
+                    std::make_unique<BackingDevice>(path);
+            }
         } catch (...) {
             return NT_STATUS_UNSUCCESSFUL;
         }
@@ -211,7 +292,7 @@ auto GetServers(dcesrv_context *,
          * there is no second service instance whose state could be confused
          * with this pointer.
          */
-        active_backing_device = &*state.backing_device;
+        active_backing_device = state.backing_device.get();
     }
 
     /*

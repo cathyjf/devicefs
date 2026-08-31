@@ -2,26 +2,45 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # Run DeviceFs against the authenticated helper and a synthetic FAT32 image.
-# -TestClient runs the automated protocol and authentication checks instead.
+# -TestClient runs the automated protocol and authentication checks instead;
+# -GrpcBacking routes those checks through the helper's gRPC backing device.
 #requires -Version 7.4
 
 param(
     [string] $CMakeCachePath = [IO.Path]::GetFullPath(
         '../../../build/samba_rpc/CMakeCache.txt', $PSScriptRoot),
 
-    [switch] $TestClient
+    [switch] $TestClient,
+
+    [switch] $GrpcBacking
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 $CMakeCachePath = [IO.Path]::GetFullPath($CMakeCachePath)
+if ($GrpcBacking -and -not $TestClient) {
+    throw '-GrpcBacking requires -TestClient.'
+}
 function Get-CachedPath([string] $Name) {
     $record = & grep -m 1 "^${Name}:" -- $CMakeCachePath
     if (($LASTEXITCODE -ne 0) -or $record.EndsWith('-NOTFOUND')) {
         throw "CMake cache does not define $Name."
     }
     return ($record -split '=', 2)[1]
+}
+function Write-TestPattern(
+    [IO.Stream] $Stream,
+    [uint64] $Offset,
+    [int] $Count
+) {
+    $bytes = [byte[]]::new($Count)
+    for ($index = 0; $index -lt $Count; ++$index) {
+        $value = (($Offset + [uint64]$index) * 37 + 11) -band 0xff
+        $bytes[$index] = [byte]$value
+    }
+    $Stream.Position = [int64]$Offset
+    $Stream.Write($bytes)
 }
 $MktempPath = Get-CachedPath 'MKTEMP_EXECUTABLE'
 $PdbEditPath = Get-CachedPath 'PDBEDIT_EXECUTABLE'
@@ -30,10 +49,14 @@ $build_directory = [IO.Path]::GetDirectoryName($CMakeCachePath)
 $HelperPath = [IO.Path]::Combine($build_directory, 'rpcd_devicefs')
 $ClientPath = [IO.Path]::Combine(
     $build_directory, 'rpcd_devicefs_test_client')
-if ($IsMacOS) {
-    $HdiutilPath = Get-CachedPath 'HDIUTIL_EXECUTABLE'
-} else {
-    $LosetupPath = Get-CachedPath 'LOSETUP_EXECUTABLE'
+$GrpcServerPath = [IO.Path]::Combine(
+    $build_directory, 'rpcd_devicefs_grpc_test_server')
+if (-not $GrpcBacking) {
+    if ($IsMacOS) {
+        $HdiutilPath = Get-CachedPath 'HDIUTIL_EXECUTABLE'
+    } else {
+        $LosetupPath = Get-CachedPath 'LOSETUP_EXECUTABLE'
+    }
 }
 if (-not $TestClient) {
     if (-not $IsLinux) {
@@ -78,6 +101,8 @@ try {
     $backing_stream.SetLength($backing_length)
     if ($TestClient) {
         $backing_stream.Write($expected)
+        Write-TestPattern $backing_stream 4093 73
+        Write-TestPattern $backing_stream ($backing_length - 7) 7
     }
 } finally {
     $backing_stream.Dispose()
@@ -125,23 +150,8 @@ if ($LASTEXITCODE -ne 0) {
     throw "pdbedit failed with exit code $LASTEXITCODE."
 }
 
-$start_info = [Diagnostics.ProcessStartInfo]::new()
-$start_info.FileName = $SambaDcerpcdPath
-$start_info.WorkingDirectory = $root
-$start_info.UseShellExecute = $false
-$ready_pipe = [IO.Pipes.AnonymousPipeServerStream]::new(
-    [IO.Pipes.PipeDirection]::In,
-    [IO.HandleInheritability]::Inheritable)
-foreach ($argument in @(
-        '--foreground',
-        '--debug-stdout',
-        "--ready-signal-fd=$($ready_pipe.GetClientHandleAsString())",
-        "--log-basename=$root",
-        "--configfile=$configuration",
-        $HelperPath)) {
-    $start_info.ArgumentList.Add($argument)
-}
-
+$grpc_server = $null
+$ready_pipe = $null
 $server = $null
 $device = $null
 $mounted_directory = $null
@@ -168,26 +178,77 @@ try {
         }
         $mounted_directory = $null
     }
-    if ($IsMacOS) {
-        $attachment = @(& $HdiutilPath attach -nomount -readonly `
-            -imagekey diskimage-class=CRawDiskImage $backing 2>&1)
-        if ($LASTEXITCODE -ne 0) {
-            throw "hdiutil attach failed:`n$($attachment | Out-String)"
+    if ($GrpcBacking) {
+        $socket = [IO.Path]::Combine($root, 'grpc.sock')
+        $grpc_start_info = [Diagnostics.ProcessStartInfo]::new()
+        $grpc_start_info.FileName = $GrpcServerPath
+        $grpc_start_info.WorkingDirectory = $root
+        $grpc_start_info.UseShellExecute = $false
+        $grpc_start_info.RedirectStandardOutput = $true
+        $grpc_start_info.ArgumentList.Add($socket)
+        $grpc_start_info.ArgumentList.Add($backing)
+        $grpc_server = [Diagnostics.Process]::Start($grpc_start_info)
+        # The server writes this exact path only after BuildAndStart returns a
+        # running server. A socket node alone is not the readiness contract.
+        $grpc_ready = $grpc_server.StandardOutput.ReadLineAsync()
+        if (-not $grpc_ready.Wait(5000)) {
+            throw 'The gRPC fixture server did not report readiness.'
         }
-        $device = ([string]($attachment | Select-Object -First 1)).Split()[0]
+        if ($grpc_ready.Result -ne $socket) {
+            throw 'The gRPC fixture server returned an invalid readiness record.'
+        }
+        if ($grpc_server.HasExited) {
+            throw 'The gRPC fixture server exited during initialization.'
+        }
+        $helper_backing = $socket
     } else {
-        $attachment = @(& $LosetupPath --find --show --read-only `
-            $backing 2>&1)
-        if ($LASTEXITCODE -ne 0) {
-            throw "losetup failed:`n$($attachment | Out-String)"
+        if ($IsMacOS) {
+            $attachment = @(& $HdiutilPath attach -nomount -readonly `
+                -imagekey diskimage-class=CRawDiskImage $backing 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                throw "hdiutil attach failed:`n$($attachment | Out-String)"
+            }
+            $device =
+                ([string]($attachment | Select-Object -First 1)).Split()[0]
+        } else {
+            $attachment = @(& $LosetupPath --find --show --read-only `
+                $backing 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                throw "losetup failed:`n$($attachment | Out-String)"
+            }
+            $device = ([string]($attachment | Select-Object -First 1)).Trim()
         }
-        $device = ([string]($attachment | Select-Object -First 1)).Trim()
+        $helper_backing = $device
     }
-    $start_info.Environment['DEVICEFS_SAMBA_RPC_DEVICE'] = $device
+
+    # Only samba-dcerpcd should inherit the client end of this pipe. Creating
+    # it after the gRPC process is running prevents that unrelated process from
+    # keeping the readiness channel open if Samba exits without signaling.
+    $ready_pipe = [IO.Pipes.AnonymousPipeServerStream]::new(
+        [IO.Pipes.PipeDirection]::In,
+        [IO.HandleInheritability]::Inheritable)
+    $start_info = [Diagnostics.ProcessStartInfo]::new()
+    $start_info.FileName = $SambaDcerpcdPath
+    $start_info.WorkingDirectory = $root
+    $start_info.UseShellExecute = $false
+    foreach ($argument in @(
+            '--foreground',
+            '--debug-stdout',
+            "--ready-signal-fd=$($ready_pipe.GetClientHandleAsString())",
+            "--log-basename=$root",
+            "--configfile=$configuration",
+            $HelperPath)) {
+        $start_info.ArgumentList.Add($argument)
+    }
+    $start_info.Environment['DEVICEFS_SAMBA_RPC_DEVICE'] = $helper_backing
     $server = [Diagnostics.Process]::Start($start_info)
     $ready_pipe.DisposeLocalCopyOfClientHandle()
-    [void]$ready_pipe.ReadByte()
+    $ready = $ready_pipe.ReadByte()
     $ready_pipe.Dispose()
+    $ready_pipe = $null
+    if ($ready -eq -1) {
+        throw 'samba-dcerpcd closed the readiness pipe without signaling.'
+    }
     if ($server.HasExited) {
         throw 'samba-dcerpcd exited during initialization.'
     }
@@ -231,6 +292,9 @@ try {
 } catch {
     $failure = $_
 } finally {
+    if ($null -ne $ready_pipe) {
+        $ready_pipe.Dispose()
+    }
     try {
         if (($null -ne $server) -and (-not $server.HasExited)) {
             & /bin/kill -TERM $server.Id
@@ -244,6 +308,21 @@ try {
             $failure = $_
         } else {
             Write-Warning "Stopping samba-dcerpcd also failed: $_"
+        }
+    }
+    try {
+        if (($null -ne $grpc_server) -and (-not $grpc_server.HasExited)) {
+            & /bin/kill -TERM $grpc_server.Id
+            if (-not $grpc_server.WaitForExit(5000)) {
+                $grpc_server.Kill($true)
+                $grpc_server.WaitForExit()
+            }
+        }
+    } catch {
+        if ($null -eq $failure) {
+            $failure = $_
+        } else {
+            Write-Warning "Stopping the gRPC fixture server also failed: $_"
         }
     }
     if ($null -ne $mounted_directory) {

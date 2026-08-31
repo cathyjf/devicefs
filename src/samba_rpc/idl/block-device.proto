@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package proxmox.backup;
+
+service BlockDevice {
+    rpc GetLength(GetLengthRequest) returns (GetLengthResponse);
+    rpc Read(ReadRequest) returns (ReadResponse);
+}
+
+message GetLengthRequest {}
+
+message GetLengthResponse {
+    uint64 length = 1;
+}
+
+message ReadRequest {
+    uint64 offset = 1;
+    uint32 count = 2;
+}
+
+message ReadResponse {
+    bytes data = 1;
+}

@@ -14,6 +14,24 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <format>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <system_error>
+#include <utility>
+#include <vector>
+
 #include "compat/rpc_worker.h"
 
 #include <grpcpp/create_channel.h>
@@ -32,8 +50,6 @@ extern "C" {
  */
 auto dcerpc_server_devicefs_block_device_init(TALLOC_CTX *) -> NTSTATUS;
 }
-
-import std;
 
 namespace {
 

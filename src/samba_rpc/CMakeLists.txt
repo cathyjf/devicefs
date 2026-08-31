@@ -10,10 +10,6 @@ if(NOT CMAKE_TOOLCHAIN_FILE)
     )
 endif()
 
-set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD
-    "f35a9ac6-8463-4d38-8eec-5d6008153e7d"
-)
-
 project(devicefs-samba-rpc LANGUAGES C CXX)
 
 find_package(Protobuf CONFIG QUIET)
@@ -22,14 +18,13 @@ if(NOT Protobuf_FOUND)
 endif()
 find_package(gRPC CONFIG REQUIRED)
 if(APPLE)
-    # This component uses Homebrew LLVM because Apple Clang cannot compile its
-    # C++23 import-std configuration. The zlib dependency brought in by gRPC
-    # assumes the usual Apple-Clang SDK layout: ZLIB::ZLIB exports the Xcode
-    # SDK's usr/include as its only interface include. With Homebrew Clang that
-    # path becomes an explicit -isystem entry ahead of Homebrew libc++; <cmath>
-    # consequently finds the SDK's math.h instead of libc++'s math.h wrapper
-    # and fails with "<cmath> tried including <math.h> but didn't find libc++'s
-    # <math.h> header."
+    # This component uses Homebrew LLVM because Apple Clang is dated.
+    # The zlib dependency brought in by gRPC assumes the usual Apple-Clang SDK
+    # layout: ZLIB::ZLIB exports the Xcode SDK's usr/include as its only
+    # interface include. With Homebrew Clang that path becomes an explicit
+    # -isystem entry ahead of Homebrew libc++; <cmath> consequently finds the
+    # SDK's math.h instead of libc++'s math.h wrapper and fails with "<cmath>
+    # tried including <math.h> but didn't find libc++'s <math.h> header."
     #
     # Homebrew Clang already obtains C headers from its selected SDK, so remove
     # only this incorrect usage requirement; ZLIB::ZLIB still supplies libz.
@@ -149,7 +144,6 @@ add_dependencies(rpcd_devicefs
     devicefs-grpc-protocol
 )
 target_compile_features(rpcd_devicefs PRIVATE cxx_std_23)
-set_property(TARGET rpcd_devicefs PROPERTY CXX_MODULE_STD ON)
 
 target_include_directories(rpcd_devicefs PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}"
@@ -245,7 +239,6 @@ if(BUILD_TESTING)
     )
     add_dependencies(rpcd_devicefs_test_client devicefs-samba-rpc-pidl)
     target_compile_features(rpcd_devicefs_test_client PRIVATE cxx_std_23)
-    set_property(TARGET rpcd_devicefs_test_client PROPERTY CXX_MODULE_STD ON)
     target_include_directories(rpcd_devicefs_test_client PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -280,9 +273,6 @@ if(BUILD_TESTING)
         devicefs-grpc-protocol
     )
     target_compile_features(rpcd_devicefs_grpc_test_server PRIVATE cxx_std_23)
-    set_property(TARGET rpcd_devicefs_grpc_test_server
-        PROPERTY CXX_MODULE_STD ON
-    )
     target_compile_options(rpcd_devicefs_grpc_test_server PRIVATE
         $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Werror;-Wno-reserved-module-identifier;-Wno-reserved-user-defined-literal>
     )

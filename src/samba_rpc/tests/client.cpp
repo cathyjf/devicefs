@@ -1,6 +1,20 @@
 // SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
+#include <bit>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <format>
+#include <limits>
+#include <memory>
+#include <new>
+#include <print>
+#include <stdexcept>
+#include <string_view>
+#include <vector>
+
 extern "C" {
 #include <sys/types.h>
 
@@ -16,8 +30,6 @@ extern "C" {
 auto devicefs_test_credentials(TALLOC_CTX *, loadparm_context *, const char *,
     const char *) -> cli_credentials *;
 }
-
-import std;
 
 namespace {
 

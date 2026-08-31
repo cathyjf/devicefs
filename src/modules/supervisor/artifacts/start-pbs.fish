@@ -3,7 +3,9 @@
 
 set vss_mount_point /mnt/vss
 set pbs_manifest_filename devicefs-manifest.conf
-set --export use_map_grpc
+
+# Set this to 1 to enable the experimental `map-grpc` mode.
+set --export use_map_grpc 0
 
 function unmount_vss
     timeout --kill-after=1s 5s fish --no-config -c 'while ! sudo -n umount $argv[1]; sleep 1; end' $vss_mount_point
@@ -137,7 +139,7 @@ function read_view_map_output --argument-names output_path device_path
     while read --local map_line
         printf '%s\n' $map_line 1>&2
         if test -z "$map_ready"
-            if set --query use_map_grpc
+            if test $use_map_grpc -eq 1
                 test "$map_line" = "$device_path.sock" || continue
                 printf '%s\n' $device_path.sock >$device_path
                 set map_ready 1
@@ -238,7 +240,7 @@ function run_view --argument-names snapshot_override archive address port rpc_he
     end
     set -l map_command map --verbose
     set -l map_operands $snapshot $archive
-    if set --query use_map_grpc
+    if test $use_map_grpc -eq 1
         set map_command map-grpc
         set --append map_operands $mapped_device_output.sock
     end

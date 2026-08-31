@@ -61,15 +61,16 @@ constexpr auto kIdleShutdownDelaySeconds = 1;
 constexpr auto kUnlimitedGrpcMessageSize = -1;
 
 template <typename... Arguments>
-void PrintDiagnostic(
-    const std::format_string<Arguments...> format,
-    Arguments &&...arguments) noexcept {
+[[clang::always_inline]] void PrintDiagnostic(
+    [[maybe_unused]] const std::format_string<Arguments...> format,
+    [[maybe_unused]] Arguments &&...arguments) noexcept {
+#if defined(DEVICEFS_SAMBA_RPC_DIAGNOSTICS)
     try {
         std::println(
             stderr, format, std::forward<Arguments>(arguments)...);
         std::fflush(stderr);
-    } catch (...) {
-    }
+    } catch (...) {}
+#endif
 }
 
 #if defined(__linux__)

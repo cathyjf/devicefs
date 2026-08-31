@@ -189,7 +189,6 @@ $server = $null
 $device = $null
 $mounted_directory = $null
 $failure = $null
-$show_logs = $false
 try {
     if (-not $TestClient) {
         $format_output = & $MkfsFatPath -F 32 $backing 2>&1
@@ -320,7 +319,6 @@ try {
             $configuration, $binding, $username, $password) 3000
         if ($client.TimedOut) {
             Write-Host 'The authenticated RPC client was still running after 3 seconds.'
-            $show_logs = $true
         } else {
             if ($client.ExitCode -ne 0) {
                 if ($server.HasExited) {
@@ -408,11 +406,9 @@ try {
             }
         }
     }
-    if (($null -ne $failure) -or $show_logs) {
-        foreach ($log in Get-ChildItem -LiteralPath $root -Filter 'log.*') {
-            Write-Host "Samba log '$($log.Name)':"
-            Get-Content -LiteralPath $log.FullName | Write-Host
-        }
+    foreach ($log in Get-ChildItem -LiteralPath $root -Filter 'log.*') {
+        Write-Host "Samba log '$($log.Name)':"
+        Get-Content -LiteralPath $log.FullName | Write-Host
     }
     Set-Location ([IO.Path]::GetDirectoryName($root))
     Remove-Item -LiteralPath $root -Recurse -Force

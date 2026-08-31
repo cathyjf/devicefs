@@ -176,8 +176,19 @@ target_link_libraries(rpcd_devicefs PRIVATE
     "${TALLOC_LIBRARY}"
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_path(TDB_INCLUDE_DIRECTORY tdb.h REQUIRED)
+    target_sources(rpcd_devicefs PRIVATE compat/tdb_open.cpp)
+    target_include_directories(rpcd_devicefs SYSTEM PRIVATE
+        "${TDB_INCLUDE_DIRECTORY}"
+    )
     target_compile_definitions(rpcd_devicefs PRIVATE
         DEVICEFS_RPC_WORKER_LIBRARY="${RPC_WORKER_LIBRARY}"
+    )
+    # The Samba worker calls tdb_open_ex through ELF symbol lookup. Export
+    # rpcd_devicefs's replacement so lookup selects it before libtdb; the
+    # replacement uses RTLD_NEXT to call libtdb after changing the flags.
+    target_link_options(rpcd_devicefs PRIVATE
+        "LINKER:--export-dynamic-symbol=tdb_open_ex"
     )
     target_link_libraries(rpcd_devicefs PRIVATE ${CMAKE_DL_LIBS})
 else()

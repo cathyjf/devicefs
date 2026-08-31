@@ -26,6 +26,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <print>
 #include <span>
 #include <stdexcept>
 #include <system_error>
@@ -58,6 +59,18 @@ constexpr auto kDeviceEnvironmentVariable = "DEVICEFS_SAMBA_RPC_DEVICE";
 constexpr auto kWorkerProcessCount = 1;
 constexpr auto kIdleShutdownDelaySeconds = 1;
 constexpr auto kUnlimitedGrpcMessageSize = -1;
+
+template <typename... Arguments>
+void PrintDiagnostic(
+    const std::format_string<Arguments...> format,
+    Arguments &&...arguments) noexcept {
+    try {
+        std::println(
+            stderr, format, std::forward<Arguments>(arguments)...);
+        std::fflush(stderr);
+    } catch (...) {
+    }
+}
 
 #if defined(__linux__)
 using RpcWorkerLibrary = std::unique_ptr<void,
@@ -198,6 +211,8 @@ private:
 class GrpcBackingDevice final : public AbstractBackingDevice {
 public:
     explicit GrpcBackingDevice(const std::filesystem::path &path) {
+        PrintDiagnostic(
+            "rpcd_devicefs: creating gRPC channel for '{}'", path.string());
         auto arguments = grpc::ChannelArguments{};
         /*
          * gRPC C++ otherwise derives HTTP/2 :authority from the Unix-socket
@@ -216,11 +231,18 @@ public:
         auto context = grpc::ClientContext{};
         auto request = proxmox::backup::GetLengthRequest{};
         auto response = proxmox::backup::GetLengthResponse{};
+        PrintDiagnostic("rpcd_devicefs: calling gRPC GetLength");
         const auto status = stub_->GetLength(&context, request, &response);
         if (!status.ok()) {
+            PrintDiagnostic(
+                "rpcd_devicefs: gRPC GetLength failed (code {}): {}",
+                std::to_underlying(status.error_code()),
+                status.error_message());
             throw std::runtime_error{status.error_message()};
         }
         length_ = response.length();
+        PrintDiagnostic(
+            "rpcd_devicefs: gRPC GetLength returned {} bytes", length_);
     }
 
     [[nodiscard]] auto Length() const noexcept -> std::uint64_t override {
@@ -231,6 +253,9 @@ public:
         const std::span<std::uint8_t> buffer,
         const std::uint64_t offset) const noexcept -> ssize_t override {
         try {
+            PrintDiagnostic(
+                "rpcd_devicefs: calling gRPC Read(offset={}, count={})",
+                offset, buffer.size());
             auto context = grpc::ClientContext{};
             auto request = proxmox::backup::ReadRequest{};
             request.set_offset(offset);
@@ -238,10 +263,16 @@ public:
             auto response = proxmox::backup::ReadResponse{};
             const auto status = stub_->Read(&context, request, &response);
             if (!status.ok()) {
+                PrintDiagnostic(
+                    "rpcd_devicefs: gRPC Read failed (code {}): {}",
+                    std::to_underlying(status.error_code()),
+                    status.error_message());
                 return -1;
             }
 
             const auto &data = response.data();
+            PrintDiagnostic(
+                "rpcd_devicefs: gRPC Read returned {} bytes", data.size());
             if (data.size() > buffer.size()) {
                 return -1;
             }
@@ -309,6 +340,7 @@ auto GetServers(dcesrv_context *,
         if (path == nullptr) {
             return NT_STATUS_INVALID_PARAMETER;
         }
+        PrintDiagnostic("rpcd_devicefs: inspecting backing path '{}'", path);
         try {
             /*
              * If the launcher-supplied pathname names a Unix socket,
@@ -373,6 +405,7 @@ auto GetServers(dcesrv_context *,
      */
     *servers = state.endpoint_servers.data();
     *server_count = state.endpoint_servers.size();
+    PrintDiagnostic("rpcd_devicefs: Samba worker initialization complete");
     return NT_STATUS_OK;
 }
 
@@ -380,7 +413,10 @@ auto GetServers(dcesrv_context *,
 
 extern "C" NTSTATUS dcesrv_GetLength(dcesrv_call_state *,
     TALLOC_CTX *, GetLength *const request) noexcept {
-    *request->out.length = active_backing_device->Length();
+    const auto length = active_backing_device->Length();
+    *request->out.length = length;
+    PrintDiagnostic(
+        "rpcd_devicefs: serving DCE GetLength ({} bytes)", length);
     return NT_STATUS_OK;
 }
 

@@ -42,6 +42,38 @@ function Write-TestPattern(
     $Stream.Position = [int64]$Offset
     $Stream.Write($bytes)
 }
+function Invoke-TestClient(
+    [string] $Executable,
+    [string[]] $Arguments,
+    [int] $TimeoutMilliseconds
+) {
+    $start_info = [Diagnostics.ProcessStartInfo]::new()
+    $start_info.FileName = $Executable
+    $start_info.UseShellExecute = $false
+    $start_info.RedirectStandardOutput = $true
+    $start_info.RedirectStandardError = $true
+    foreach ($argument in $Arguments) {
+        $start_info.ArgumentList.Add($argument)
+    }
+
+    $process = [Diagnostics.Process]::Start($start_info)
+    try {
+        $standard_output = $process.StandardOutput.ReadToEndAsync()
+        $standard_error = $process.StandardError.ReadToEndAsync()
+        $timed_out = -not $process.WaitForExit($TimeoutMilliseconds)
+        if ($timed_out) {
+            $process.Kill($true)
+            $process.WaitForExit()
+        }
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            Output = $standard_output.Result + $standard_error.Result
+            TimedOut = $timed_out
+        }
+    } finally {
+        $process.Dispose()
+    }
+}
 $MktempPath = Get-CachedPath 'MKTEMP_EXECUTABLE'
 $PdbEditPath = Get-CachedPath 'PDBEDIT_EXECUTABLE'
 $SambaDcerpcdPath = Get-CachedPath 'SAMBA_DCERPCD_EXECUTABLE'
@@ -141,6 +173,7 @@ $configuration = [IO.Path]::Combine($root, 'smb.conf')
     lock directory = lock
     pid directory = pid
     ncalrpc dir = ncalrpc
+    log file = log.%m
 "@)
 
 "$password`n$password" |
@@ -156,6 +189,7 @@ $server = $null
 $device = $null
 $mounted_directory = $null
 $failure = $null
+$show_logs = $false
 try {
     if (-not $TestClient) {
         $format_output = & $MkfsFatPath -F 32 $backing 2>&1
@@ -191,7 +225,7 @@ try {
         # The server writes this exact path only after BuildAndStart returns a
         # running server. A socket node alone is not the readiness contract.
         $grpc_ready = $grpc_server.StandardOutput.ReadLineAsync()
-        if (-not $grpc_ready.Wait(5000)) {
+        if (-not $grpc_ready.Wait(1500)) {
             throw 'The gRPC fixture server did not report readiness.'
         }
         if ($grpc_ready.Result -ne $socket) {
@@ -243,7 +277,12 @@ try {
     $start_info.Environment['DEVICEFS_SAMBA_RPC_DEVICE'] = $helper_backing
     $server = [Diagnostics.Process]::Start($start_info)
     $ready_pipe.DisposeLocalCopyOfClientHandle()
-    $ready = $ready_pipe.ReadByte()
+    $ready_buffer = [byte[]]::new(1)
+    $ready_read = $ready_pipe.ReadAsync($ready_buffer, 0, 1)
+    if (-not $ready_read.Wait(1500)) {
+        throw 'samba-dcerpcd did not report readiness.'
+    }
+    $ready = if ($ready_read.Result -eq 0) { -1 } else { $ready_buffer[0] }
     $ready_pipe.Dispose()
     $ready_pipe = $null
     if ($ready -eq -1) {
@@ -266,27 +305,27 @@ try {
         }
     } else {
         $binding = "ncacn_ip_tcp:127.0.0.1[$port,connect]"
-        for ($attempt = 0; $attempt -lt 50; ++$attempt) {
-            $client_output =
-                & $ClientPath $configuration $binding $username $password 2>&1 |
-                Out-String
-            $client_exit_code = $LASTEXITCODE
-            if ($client_exit_code -eq 0) {
-                break
+        $client = Invoke-TestClient $ClientPath @(
+            $configuration, $binding, $username, $password) 3000
+        if ($client.TimedOut) {
+            Write-Host 'The authenticated RPC client was still running after 3 seconds.'
+            $show_logs = $true
+        } else {
+            if ($client.ExitCode -ne 0) {
+                if ($server.HasExited) {
+                    throw 'samba-dcerpcd exited before accepting the connection.'
+                }
+                throw "The authenticated RPC client failed:`n$($client.Output)"
             }
-            if ($server.HasExited) {
-                throw "samba-dcerpcd exited before accepting the connection."
-            }
-            Start-Sleep -Milliseconds 100
-        }
-        if ($client_exit_code -ne 0) {
-            throw "The authenticated RPC client failed:`n$client_output"
-        }
 
-        & $ClientPath $configuration $binding $username 'wrong-password' 2>&1 |
-            Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            throw 'Samba accepted an incorrect password.'
+            $client = Invoke-TestClient $ClientPath @(
+                $configuration, $binding, $username, 'wrong-password') 1000
+            if ($client.TimedOut) {
+                throw 'The unauthenticated RPC client did not exit within 1 second.'
+            }
+            if ($client.ExitCode -eq 0) {
+                throw 'Samba accepted an incorrect password.'
+            }
         }
     }
 } catch {
@@ -353,6 +392,12 @@ try {
             } else {
                 Write-Warning $detach_failure
             }
+        }
+    }
+    if (($null -ne $failure) -or $show_logs) {
+        foreach ($log in Get-ChildItem -LiteralPath $root -Filter 'log.*') {
+            Write-Host "Samba log '$($log.Name)':"
+            Get-Content -LiteralPath $log.FullName | Write-Host
         }
     }
     Set-Location ([IO.Path]::GetDirectoryName($root))

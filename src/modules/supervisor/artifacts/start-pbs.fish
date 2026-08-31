@@ -3,6 +3,7 @@
 
 set vss_mount_point /mnt/vss
 set pbs_manifest_filename devicefs-manifest.conf
+set --export use_map_grpc
 
 function unmount_vss
     timeout --kill-after=1s 5s fish --no-config -c 'while ! sudo -n umount $argv[1]; sleep 1; end' $vss_mount_point
@@ -16,7 +17,7 @@ function finish_operation --argument-names finalizer
 end
 
 function cancel_before_start --argument-names finalizer
-    if not test -e $stop_file
+    if test ! -e $stop_file
         return 0
     end
     finish_operation $finalizer || exit
@@ -132,21 +133,27 @@ function finish_view
 end
 
 function read_view_map_output --argument-names output_path device_path
-    set -l mapped_device
+    set -l map_ready
     while read --local map_line
         printf '%s\n' $map_line 1>&2
-        if not test -n "$mapped_device"
+        if test -z "$map_ready"
+            if set --query use_map_grpc
+                test "$map_line" = "$device_path.sock" || continue
+                printf '%s\n' $device_path.sock >$device_path
+                set map_ready 1
+                continue
+            end
             for candidate in (
                 string match --regex --all --groups-only \
                     '\s(/dev/loop[0-9]+)(?:\s|$)' $map_line
             )
-                set mapped_device $candidate
-                printf '%s\n' $mapped_device >$device_path
+                printf '%s\n' $candidate >$device_path
+                set map_ready 1
                 break
             end
         end
     end <$output_path
-    if not test -n "$mapped_device"
+    if test -z "$map_ready"
         printf '\n' >$device_path
     end
 end
@@ -229,8 +236,14 @@ function run_view --argument-names snapshot_override archive address port rpc_he
     function record_view_map_output_exit --on-process-exit $view_map_output_pid
         set -g view_map_output_exit_code $argv[3]
     end
-    $DEVICEFS_PBS_CLIENT map --verbose --keyfile /dev/stdin \
-        $snapshot $archive &>$map_output &
+    set -l map_arguments --keyfile /dev/stdin $snapshot $archive
+    if set --query use_map_grpc
+        set --prepend map_arguments map-grpc
+        set --append map_arguments $mapped_device_output.sock
+    else
+        set --prepend map_arguments map --verbose
+    end
+    $DEVICEFS_PBS_CLIENT $map_arguments &>$map_output &
     set -g view_map_pid $last_pid
     set -g view_map_exit_code 1
     function record_view_map_exit --on-process-exit $view_map_pid
@@ -243,7 +256,7 @@ function run_view --argument-names snapshot_override archive address port rpc_he
     if test -n "$mapped_device"
         set -g view_loop_device $mapped_device
     end
-    if not test -n "$mapped_device"
+    if test -z "$mapped_device"
         cancel_before_start finish_view
         printf 'Could not identify the mapped PBS loop device.\n' 1>&2
         finish_operation finish_view
@@ -280,7 +293,7 @@ function run_view --argument-names snapshot_override archive address port rpc_he
     end
     finish_operation finish_view
     set -l finish_exit_code $status
-    if test $stop_requested -eq 0; and test $child_exit_code -ne 0
+    if test '(' $stop_requested -eq 0 ')' -a '(' $child_exit_code -ne 0 ')'
         return $child_exit_code
     end
     return $finish_exit_code

@@ -236,14 +236,14 @@ function run_view --argument-names snapshot_override archive address port rpc_he
     function record_view_map_output_exit --on-process-exit $view_map_output_pid
         set -g view_map_output_exit_code $argv[3]
     end
-    set -l map_arguments --keyfile /dev/stdin $snapshot $archive
+    set -l map_command map --verbose
+    set -l map_operands $snapshot $archive
     if set --query use_map_grpc
-        set --prepend map_arguments map-grpc
-        set --append map_arguments $mapped_device_output.sock
-    else
-        set --prepend map_arguments map --verbose
+        set map_command map-grpc
+        set --append map_operands $mapped_device_output.sock
     end
-    $DEVICEFS_PBS_CLIENT $map_arguments &>$map_output &
+    $DEVICEFS_PBS_CLIENT $map_command --keyfile (psub --file) \
+        $map_operands &>$map_output &
     set -g view_map_pid $last_pid
     set -g view_map_exit_code 1
     function record_view_map_exit --on-process-exit $view_map_pid

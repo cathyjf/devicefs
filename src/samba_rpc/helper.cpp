@@ -3,11 +3,12 @@
 
 #include <errno.h>
 #include <stdio.h>
-#ifdef __APPLE__
+#if defined(__APPLE__)
 #include <sys/disk.h>
-#endif
-#ifdef __linux__
+#elif defined(__linux__)
+#include <dlfcn.h>
 #include <linux/fs.h>
+#include <stdlib.h>
 #endif
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -40,6 +41,50 @@ constexpr auto kDeviceEnvironmentVariable = "DEVICEFS_SAMBA_RPC_DEVICE";
 constexpr auto kWorkerProcessCount = 1;
 constexpr auto kIdleShutdownDelaySeconds = 1;
 constexpr auto kUnlimitedGrpcMessageSize = -1;
+
+#if defined(__linux__)
+using RpcWorkerLibrary = std::unique_ptr<void,
+    decltype([](void *const library) noexcept {
+        dlclose(library);
+    })>;
+
+struct RpcWorker {
+    RpcWorkerLibrary library;
+    decltype(&rpc_worker_main) entry_point;
+};
+
+[[nodiscard]] auto LoadRpcWorker() noexcept -> std::optional<RpcWorker> {
+    auto library = RpcWorkerLibrary{dlopen(
+        DEVICEFS_RPC_WORKER_LIBRARY, RTLD_NOW | RTLD_GLOBAL)};
+    if (!library) {
+        std::fprintf(stderr, "could not load Samba RPC worker library %s: %s\n",
+            DEVICEFS_RPC_WORKER_LIBRARY, dlerror());
+        return std::nullopt;
+    }
+
+    static_cast<void>(dlerror());
+    auto *const address = dlsym(library.get(), "rpc_worker_main");
+    if (const auto *const error = dlerror(); error != nullptr) {
+        std::fprintf(stderr,
+            "could not resolve rpc_worker_main in Samba RPC worker library "
+            "%s: %s\n",
+            DEVICEFS_RPC_WORKER_LIBRARY, error);
+        return std::nullopt;
+    }
+
+    /*
+     * Debian gives every build of this private library a different ELF symbol
+     * version. Looking up the unqualified name selects the installed library's
+     * current default definition instead of recording that build-specific
+     * version in rpcd_devicefs.
+     */
+    return RpcWorker{
+        .library = std::move(library),
+        .entry_point =
+            reinterpret_cast<decltype(&rpc_worker_main)>(address),
+    };
+}
+#endif
 
 class AbstractBackingDevice {
 public:
@@ -76,7 +121,7 @@ public:
          * size and a block count, whose product is the byte capacity.
          */
         length_ = [descriptor] {
-#ifdef __linux__
+#if defined(__linux__)
             auto length = std::uint64_t{};
             if (ioctl(descriptor, BLKGETSIZE64, &length) == -1) {
                 throw std::system_error{errno, std::generic_category()};
@@ -333,9 +378,19 @@ extern "C" NTSTATUS dcesrv_Read(dcesrv_call_state *,
 }
 
 auto main(const int argc, char *const argv[]) -> int {
+#if defined(__linux__)
+    auto worker = LoadRpcWorker();
+    if (!worker) {
+        return EXIT_FAILURE;
+    }
+    const auto worker_main = worker->entry_point;
+#else
+    constexpr auto worker_main = rpc_worker_main;
+#endif
+
     auto arguments = std::vector<const char *>{argv, argv + argc};
     auto state = ServiceState{};
-    return rpc_worker_main(argc, arguments.data(), "rpcd_devicefs",
+    return worker_main(argc, arguments.data(), "rpcd_devicefs",
         kWorkerProcessCount, kIdleShutdownDelaySeconds,
         GetInterfaces, GetServers, &state);
 }

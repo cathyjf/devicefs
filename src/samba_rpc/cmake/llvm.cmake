@@ -31,18 +31,19 @@ else()
     )
 endif()
 
-set(CMAKE_CXX_FLAGS_INIT "-stdlib=libc++")
 set(CMAKE_EXE_LINKER_FLAGS_INIT "-fuse-ld=${CMAKE_LINKER}")
 set(CMAKE_MODULE_LINKER_FLAGS_INIT "-fuse-ld=${CMAKE_LINKER}")
 set(CMAKE_SHARED_LINKER_FLAGS_INIT "-fuse-ld=${CMAKE_LINKER}")
 
-find_file(LIBCXX_MODULES_JSON libc++.modules.json
-    PATHS
-        "${LLVM_DIRECTORY}/lib/c++"
-        "${LLVM_DIRECTORY}/lib"
-    NO_DEFAULT_PATH
-    REQUIRED
-)
-set(CMAKE_CXX_STDLIB_MODULES_JSON "${LIBCXX_MODULES_JSON}"
-    CACHE FILEPATH "libc++ standard-library module metadata"
-)
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    find_file(LIBCXX_MODULES_JSON libc++.modules.json
+        PATHS
+            "${LLVM_DIRECTORY}/lib/c++"
+            "${LLVM_DIRECTORY}/lib"
+        NO_DEFAULT_PATH
+        REQUIRED
+    )
+    set(CMAKE_CXX_STDLIB_MODULES_JSON "${LIBCXX_MODULES_JSON}"
+        CACHE FILEPATH "libc++ standard-library module metadata"
+    )
+endif()

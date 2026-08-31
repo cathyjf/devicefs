@@ -16,7 +16,10 @@ set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD
 
 project(devicefs-samba-rpc LANGUAGES C CXX)
 
-find_package(Protobuf CONFIG REQUIRED)
+find_package(Protobuf CONFIG QUIET)
+if(NOT Protobuf_FOUND)
+    find_package(Protobuf MODULE REQUIRED)
+endif()
 find_package(gRPC CONFIG REQUIRED)
 if(APPLE)
     # This component uses Homebrew LLVM because Apple Clang cannot compile its
@@ -52,9 +55,9 @@ find_path(SAMBA_INCLUDE_DIRECTORY dcesrv_core.h
 find_path(TALLOC_INCLUDE_DIRECTORY talloc.h REQUIRED)
 
 # rpc_worker_main is the common entry point used by Samba's rpcd helper
-# processes. Homebrew supplies an ordinary development link in its private
-# library directory. Debian installs only the versioned runtime DSO in its
-# multiarch samba directory, so the second name is the exact packaged filename.
+# processes. Homebrew supplies an ordinary library name in its private
+# directory. Debian installs only the versioned runtime DSO in its multiarch
+# samba directory, so the second name is the exact packaged filename.
 find_library(RPC_WORKER_LIBRARY
     NAMES
         RPC-WORKER-private-samba
@@ -172,13 +175,20 @@ set_source_files_properties(
 
 target_link_libraries(rpcd_devicefs PRIVATE
     devicefs-grpc-protocol
-    "${RPC_WORKER_LIBRARY}"
     "${DCERPC_SERVER_CORE_LIBRARY}"
     "${DCERPC_BINDING_LIBRARY}"
     "${NDR_LIBRARY}"
     "${SAMBA_UTIL_LIBRARY}"
     "${TALLOC_LIBRARY}"
 )
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(rpcd_devicefs PRIVATE
+        DEVICEFS_RPC_WORKER_LIBRARY="${RPC_WORKER_LIBRARY}"
+    )
+    target_link_libraries(rpcd_devicefs PRIVATE ${CMAKE_DL_LIBS})
+else()
+    target_link_libraries(rpcd_devicefs PRIVATE "${RPC_WORKER_LIBRARY}")
+endif()
 
 include(CTest)
 if(BUILD_TESTING)

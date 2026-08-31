@@ -56,6 +56,7 @@ struct DeviceFsStartRequest {
     std::string mount_target;
     std::optional<std::string> read_user;
     std::optional<std::string> rpc_endpoint;
+    std::optional<std::string_view> rpc_password;
     bool vhdx = false;
 };
 
@@ -126,8 +127,37 @@ struct DeviceFsStartRequest {
         devicefs::stdout, "Setting up virtual filesystem: {}\n", command);
     const auto creation_flags = EXTENDED_STARTUPINFO_PRESENT |
         (request.rpc_endpoint ? CREATE_SUSPENDED : DWORD{});
+    auto password_input = wil::unique_handle{};
+    auto password_output = wil::unique_handle{};
+    if (request.rpc_password) {
+        if (!CreatePipe(password_input.addressof(), password_output.addressof(),
+                nullptr, 0)) {
+            WinError("could not create the devicefs password channel");
+        }
+        const auto write_password = [&](const std::span<const char> value) {
+            if (value.empty()) {
+                return;
+            }
+            const auto size = wil::safe_cast<DWORD>(value.size_bytes());
+            auto written = DWORD{};
+            if (!WriteFile(password_output.get(), value.data(), size,
+                    &written, nullptr)) {
+                WinError("could not write the devicefs RPC password");
+            }
+            if (written != size) {
+                WinError("could not write the complete devicefs RPC password",
+                    ExplicitWin32Error{ERROR_WRITE_FAULT});
+            }
+        };
+        write_password(std::span{
+            request.rpc_password->data(), request.rpc_password->size()});
+        constexpr auto newline = std::array{'\n'};
+        write_password(std::span{newline});
+        password_output.reset();
+    }
     auto process = StartProcessWithHandles(
-        GetStdHandle(STD_INPUT_HANDLE),
+        password_input
+            ? password_input.get() : GetStdHandle(STD_INPUT_HANDLE),
         GetStdHandle(STD_OUTPUT_HANDLE),
         GetStdHandle(STD_ERROR_HANDLE),
         [&](STARTUPINFOA *const startup, PROCESS_INFORMATION *const result) {
@@ -305,8 +335,8 @@ class DeviceFsChild {
         -> DeviceFsChild & = delete;
 
     ~DeviceFsChild() {
-        if (running_) {
-            TryStopDeviceFs(devicefs_);
+        if (stop_required_) {
+            static_cast<void>(TryStop());
         }
     }
 
@@ -316,16 +346,29 @@ class DeviceFsChild {
     }
 
     auto Stop() {
-        if (!running_) {
+        if (!stop_required_) {
             return;
         }
         StopDeviceFs(devicefs_, false);
-        running_ = false;
+        stop_required_ = false;
+    }
+
+    [[nodiscard]] auto TryStop() noexcept {
+        try {
+            Stop();
+            return true;
+        } catch (const std::exception &error) {
+            TryWriteError("devicefs cleanup failed", error);
+            // This method owns the single shutdown attempt. Its caller can use
+            // the false result to retain resources that DeviceFs may still use.
+            stop_required_ = false;
+            return false;
+        }
     }
 
   private:
     DeviceFsProcess devicefs_;
-    bool running_ = true;
+    bool stop_required_ = true;
 };
 
 } // namespace internal

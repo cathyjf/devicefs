@@ -18,8 +18,6 @@ module;
 
 #include <windows.h>
 #include <winioctl.h>
-#include <initguid.h>
-#include <virtdisk.h>
 
 #include <devicefs/strsafe_compat.h>
 
@@ -31,6 +29,7 @@ import <wil/filesystem.h>;
 import :devicefs_process;
 import :internal;
 import :privileges;
+import :vhdx_attachment;
 import devicefs.common;
 import devicefs.stream_writer;
 
@@ -714,181 +713,6 @@ class VerificationState {
     std::vector<OperationComparison> operation_comparison_records_;
 };
 
-[[nodiscard]] auto QueryPhysicalDiskPath(const HANDLE disk) {
-    auto bytes = ULONG{};
-    const auto query = GetVirtualDiskPhysicalPath(
-        disk, &bytes, nullptr);
-    if (query != ERROR_INSUFFICIENT_BUFFER) {
-        WinError("could not size the VHDX physical path",
-            ExplicitWin32Error{query});
-    }
-    [[gsl::suppress("26493",
-        justification:
-            "Braced initialization proves this construction safe at compile time.")]]
-    auto path = std::vector<wchar_t>(
-        (std::size_t{bytes} + sizeof(wchar_t) - 1) /
-            sizeof(wchar_t));
-    const auto status = GetVirtualDiskPhysicalPath(
-        disk, &bytes, path.data());
-    if (status != ERROR_SUCCESS) {
-        WinError("could not obtain the VHDX physical path",
-            ExplicitWin32Error{status});
-    }
-    return std::wstring{path.data()};
-}
-
-[[nodiscard]] auto OpenPhysicalDisk(const std::wstring &path) {
-    auto result = wil::unique_hfile{CreateFileW(
-        path.c_str(), GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
-    if (!result) {
-        WinError("could not open the attached VHDX physical disk");
-    }
-    return result;
-}
-
-[[nodiscard]] auto QueryDiskNumber(const HANDLE disk) {
-    auto number = STORAGE_DEVICE_NUMBER{};
-    auto returned = DWORD{};
-    if (!DeviceIoControl(disk, IOCTL_STORAGE_GET_DEVICE_NUMBER,
-            nullptr, 0, &number, sizeof(number), &returned, nullptr)) {
-        WinError("could not identify the attached VHDX physical disk");
-    }
-    return number.DeviceNumber;
-}
-
-[[nodiscard]] auto QueryVolumeRoot(
-    const DWORD disk_number,
-    const HANDLE cancellation_event) {
-    // VhdxViewer presents exactly one GPT partition. Open that known root and
-    // ask Windows for the volume-GUID path of the filesystem mounted there.
-    const auto partition_root = std::format(
-        LR"(\\?\GLOBALROOT\Device\Harddisk{}\Partition1\)",
-        disk_number);
-    const auto partition_root_name = wil::zwstring_view{partition_root};
-    devicefs::WriteToStream(
-        devicefs::stdout,
-        L"  Partition root: {}\n"
-        L"  Opening its filesystem root.\n",
-        partition_root);
-    auto partition = [&] {
-        constexpr auto retry_interval = 100ms;
-        constexpr auto retry_period = 10s;
-        const auto retry_deadline =
-            std::chrono::steady_clock::now() + retry_period;
-        while (true) {
-            auto result = wil::unique_hfile{CreateFileW(
-                partition_root_name.c_str(), 0,
-                kShareMode, nullptr, OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS, nullptr)};
-            if (result) {
-                return result;
-            }
-            const auto error = GetLastError();
-            if (std::chrono::steady_clock::now() >= retry_deadline) {
-                WinError("could not open attached VHDX Partition1 root {}",
-                    std::filesystem::path{partition_root}.string(),
-                    ExplicitWin32Error{error});
-            }
-            const auto wait = WaitForSingleObject(
-                cancellation_event,
-                wil::safe_cast_failfast<DWORD>(
-                    retry_interval.count()));
-            if (wait == WAIT_FAILED) {
-                WinError("could not wait for the attached filesystem");
-            }
-            if (wait == WAIT_OBJECT_0) {
-                WinError("waiting for the attached filesystem was cancelled",
-                    ExplicitWin32Error{ERROR_CANCELLED});
-            }
-        }
-    }();
-
-    devicefs::WriteToStream(devicefs::stdout,
-        "  Filesystem root opened.\n"
-        "  Querying its volume-GUID name.\n");
-    auto volume_root = wil::unique_cotaskmem_string{};
-    const auto error = wil::GetFinalPathNameByHandleW(
-        partition.get(), volume_root, wil::VolumePrefix::VolumeGuid);
-    if (FAILED(error)) {
-        WinError("could not obtain the attached VHDX volume name",
-            ExplicitWin32Error::FromHresult(error));
-    }
-    return std::wstring{volume_root.get()};
-}
-
-[[nodiscard]] auto AttachVirtualDiskCancellable(
-    const HANDLE disk,
-    const HANDLE cancellation_event) {
-    // Use the virtual-disk API's overlapped form so Ctrl+C can cancel a
-    // pending attachment without waiting for its ordinary completion. The
-    // OVERLAPPED and disk handle must remain alive until cancellation itself
-    // completes, so the completion event is still awaited after CancelIoEx.
-    auto completion_event = wil::unique_event_nothrow{};
-    if (!completion_event.try_create(
-            wil::EventOptions::ManualReset, nullptr)) {
-        WinError("could not create the VHDX attachment event");
-    }
-    auto operation = OVERLAPPED{
-        .hEvent = completion_event.get(),
-    };
-    auto parameters = ATTACH_VIRTUAL_DISK_PARAMETERS{
-        .Version = ATTACH_VIRTUAL_DISK_VERSION_1,
-    };
-    const auto status = AttachVirtualDisk(
-        disk, nullptr,
-        ATTACH_VIRTUAL_DISK_FLAG{
-            ATTACH_VIRTUAL_DISK_FLAG_READ_ONLY |
-            ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER},
-        0, &parameters, &operation);
-    if (status != ERROR_IO_PENDING) {
-        return status;
-    }
-
-    const auto events = std::array{
-        completion_event.get(), cancellation_event,
-    };
-    const auto wait = WaitForMultipleObjects(
-        wil::safe_cast_failfast<DWORD>(events.size()),
-        events.data(), FALSE, INFINITE);
-    if (wait == WAIT_FAILED) {
-        WinError("could not wait for VHDX attachment");
-    }
-    const auto cancelled = wait == (WAIT_OBJECT_0 + 1);
-    if (cancelled) {
-        devicefs::WriteToStream(
-            devicefs::stdout,
-            "Cancellation requested while VHDX attachment was pending; "
-            "requesting cancellation of that attachment.\n");
-        if (!CancelIoEx(disk, &operation)) {
-            const auto error = GetLastError();
-            if (error != ERROR_NOT_FOUND) {
-                devicefs::WriteToStream(devicefs::stdout,
-                    "Could not cancel the pending VHDX attachment "
-                    "(Windows error {}); waiting for it to finish.\n",
-                    error);
-            }
-        }
-        if (WaitForSingleObject(completion_event.get(), INFINITE) ==
-            WAIT_FAILED) {
-            WinError("could not wait for VHDX attachment cancellation");
-        }
-    }
-
-    auto progress = VIRTUAL_DISK_PROGRESS{};
-    const auto progress_status = GetVirtualDiskOperationProgress(
-        disk, &operation, &progress);
-    if (progress_status != ERROR_SUCCESS) {
-        return progress_status;
-    }
-    if (cancelled &&
-        (progress.OperationStatus != ERROR_SUCCESS)) {
-        return DWORD{ERROR_CANCELLED};
-    }
-    return progress.OperationStatus;
-}
-
 class AttachedVhdx {
   public:
     [[nodiscard]] static auto Attach(
@@ -906,89 +730,15 @@ class AttachedVhdx {
             devicefs::WriteToStream(
                 devicefs::stdout,
                 "\nPreparing the {} VHDX attachment:\n", name);
-            devicefs::WriteToStream(
-                devicefs::stdout,
-                L"  File: {}\n"
-                L"  Opening the VHDX.\n",
-                path.native());
-            auto storage_type = VIRTUAL_STORAGE_TYPE{
-                .DeviceId = VIRTUAL_STORAGE_TYPE_DEVICE_VHDX,
-                .VendorId = VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT,
-            };
-            auto parameters = OPEN_VIRTUAL_DISK_PARAMETERS{
-                .Version = OPEN_VIRTUAL_DISK_VERSION_2,
-                .Version2 = {
-                    .ReadOnly = TRUE,
-                },
-            };
-            auto disk = wil::unique_handle{};
             auto registration =
                 io_cancellation.RegisterCurrentThread();
-            const auto open_status = OpenVirtualDisk(
-                &storage_type, path.c_str(), VIRTUAL_DISK_ACCESS_NONE,
-                OPEN_VIRTUAL_DISK_FLAG{
-                    OPEN_VIRTUAL_DISK_FLAG_CACHED_IO |
-                    OPEN_VIRTUAL_DISK_FLAG_SUPPORT_COMPRESSED_VOLUMES |
-                    OPEN_VIRTUAL_DISK_FLAG_SUPPORT_SPARSE_FILES_ANY_FS |
-                    OPEN_VIRTUAL_DISK_FLAG_SUPPORT_ENCRYPTED_FILES},
-                &parameters, disk.addressof());
-            if (open_status != ERROR_SUCCESS) {
-                WinError("could not open filesystem-verification VHDX {}",
-                    path.string(), ExplicitWin32Error{open_status});
-            }
-            devicefs::WriteToStream(
-                devicefs::stdout, "  VHDX opened.\n  Attaching the VHDX.\n");
-            if (internal::CancellationRequested(cancellation_event)) {
-                WinError("VHDX attachment was cancelled",
-                    ExplicitWin32Error{ERROR_CANCELLED});
-            }
-            const auto attach_status = AttachVirtualDiskCancellable(
-                disk.get(), cancellation_event);
-            if (attach_status != ERROR_SUCCESS) {
-                WinError("could not attach a filesystem-verification VHDX",
-                    ExplicitWin32Error{attach_status});
-            }
-            if (internal::CancellationRequested(cancellation_event)) {
-                // Cancellation may interrupt preparation, but must not
-                // interrupt the cleanup it caused.
-                registration.Unregister();
-                const auto detach_status = DetachVirtualDisk(
-                    disk.get(), DETACH_VIRTUAL_DISK_FLAG_NONE, 0);
-                if (detach_status != ERROR_SUCCESS) {
-                    devicefs::WriteToStream(devicefs::stdout,
-                        "  Cancellation arrived as the VHDX attachment "
-                        "completed, but detaching it failed with Windows "
-                        "error {}. Closing its nonpermanent attachment "
-                        "handle.\n",
-                        detach_status);
-                }
-                disk.reset();
-                WinError("VHDX attachment was cancelled",
-                    ExplicitWin32Error{ERROR_CANCELLED});
-            }
-            devicefs::WriteToStream(devicefs::stdout,
-                "  VHDX attached.\n"
-                "  Querying its physical-disk path.\n");
-            const auto physical_path = QueryPhysicalDiskPath(disk.get());
-            devicefs::WriteToStream(devicefs::stdout,
-                L"  Attached physical disk: {}\n"
-                L"  Opening that physical disk.\n",
-                physical_path);
-            auto physical_disk = OpenPhysicalDisk(physical_path);
-            devicefs::WriteToStream(devicefs::stdout,
-                "  Physical disk opened.\n"
-                "  Querying its disk number.\n");
-            const auto disk_number = QueryDiskNumber(physical_disk.get());
-            devicefs::WriteToStream(
-                devicefs::stdout,
-                "  Disk number: {}\n",
-                disk_number);
-            auto root = QueryVolumeRoot(
-                disk_number, cancellation_event);
-            devicefs::WriteToStream(
-                devicefs::stdout, L"  Attached volume: {}\n", root);
             return AttachedVhdx{
-                std::move(disk), std::move(root), virtual_disk_lock};
+                internal::AttachedVhdx::Attach(
+                    path, cancellation_event,
+                    [&registration] noexcept {
+                        registration.Unregister();
+                    }),
+                virtual_disk_lock};
         } catch (const VerificationFailure &error) {
             throw VerificationFailure(std::format(
                 "could not prepare the {} VHDX view: {}",
@@ -1009,45 +759,30 @@ class AttachedVhdx {
     auto operator=(AttachedVhdx &&) -> AttachedVhdx & = delete;
 
     ~AttachedVhdx() {
-        if (disk_) {
+        if (attachment_) {
             const auto lock = virtual_disk_lock_.lock_exclusive();
-            static_cast<void>(DetachLocked());
-            // The attachment does not use PERMANENT_LIFETIME. If this explicit
-            // attempt failed, closing disk_ is the fallback detach and must
-            // remain serialized with every other virtual-disk operation.
-            disk_.reset();
+            static_cast<void>(attachment_.Detach());
         }
     }
 
     [[nodiscard]] auto Root() const noexcept
         -> std::wstring_view {
-        return root_;
+        return attachment_.Root();
     }
 
     [[nodiscard]] auto Detach() noexcept {
         const auto lock = virtual_disk_lock_.lock_exclusive();
-        return DetachLocked();
+        return attachment_.Detach();
     }
 
   private:
-    [[nodiscard]] auto DetachLocked() noexcept -> DWORD {
-        const auto status = DetachVirtualDisk(
-            disk_.get(), DETACH_VIRTUAL_DISK_FLAG_NONE, 0);
-        if (status == ERROR_SUCCESS) {
-            disk_.reset();
-        }
-        return status;
-    }
-
     AttachedVhdx(
-        wil::unique_handle disk,
-        std::wstring root,
+        internal::AttachedVhdx attachment,
         wil::srwlock &virtual_disk_lock) noexcept
-        : disk_{std::move(disk)}, root_{std::move(root)},
+        : attachment_{std::move(attachment)},
           virtual_disk_lock_{virtual_disk_lock} {}
 
-    wil::unique_handle disk_;
-    std::wstring root_;
+    internal::AttachedVhdx attachment_;
     wil::srwlock &virtual_disk_lock_;
 };
 

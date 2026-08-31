@@ -450,6 +450,14 @@ struct ForegroundOptions {
     std::vector<std::string> volume_override;
 };
 
+struct SelectiveViewOptions {
+    std::string archive;
+    std::optional<std::string> snapshot_override;
+    std::optional<std::string> timestamp;
+    std::string address = "127.0.0.1";
+    std::optional<std::u8string> namespace_override;
+};
+
 [[nodiscard]] auto ParseVolumeList(std::string_view source) {
     auto result = std::vector<std::string>{};
     constexpr auto kWhitespace = std::string_view{" \t\r\n\f\v"};
@@ -502,6 +510,42 @@ struct ForegroundOptions {
     }
     if (raw_volume_override) {
         result.volume_override = ParseVolumeList(*raw_volume_override);
+    }
+    return result;
+}
+
+[[nodiscard]] auto ParseSelectiveViewOptions(
+    const std::span<const std::string_view> arguments) {
+    if (arguments.empty()) {
+        throw std::invalid_argument("--view requires ARCHIVE");
+    }
+
+    auto result = SelectiveViewOptions{
+        .archive = std::string{arguments[0]},
+    };
+    for (auto index = 1uz; index < arguments.size(); ++index) {
+        const auto option = arguments[index];
+        if ((option != "--snapshot") &&
+            (option != "--timestamp") &&
+            (option != "--address") &&
+            (option != "--namespace")) {
+            throw std::invalid_argument(
+                "--view received an unknown argument");
+        }
+        if (++index == arguments.size()) {
+            throw std::invalid_argument(std::format(
+                "{} requires a value", option));
+        }
+        if (option == "--snapshot") {
+            result.snapshot_override.emplace(arguments[index]);
+        } else if (option == "--timestamp") {
+            result.timestamp.emplace(arguments[index]);
+        } else if (option == "--address") {
+            result.address = arguments[index];
+        } else if (option == "--namespace") {
+            result.namespace_override.emplace(
+                arguments[index].begin(), arguments[index].end());
+        }
     }
     return result;
 }
@@ -690,6 +734,31 @@ struct ForegroundOptions {
         });
 }
 
+[[nodiscard]] auto RunSelectiveViewMode(
+    SelectiveViewOptions options) {
+    const auto [input, console_mode] = GetForegroundConsoleInput(
+        "--view requires an attached console");
+    return RunForegroundOperation(
+        input, console_mode,
+        [options = std::move(options)](
+            const HANDLE cancellation_event) {
+            const auto snapshot_override = options.snapshot_override
+                ? std::optional<std::string_view>{
+                    *options.snapshot_override}
+                : std::optional<std::string_view>{};
+            const auto timestamp = options.timestamp
+                ? std::optional<std::string_view>{*options.timestamp}
+                : std::optional<std::string_view>{};
+            return RunSelectiveView(
+                cancellation_event,
+                options.archive,
+                snapshot_override,
+                timestamp,
+                options.address,
+                options.namespace_override);
+        });
+}
+
 [[nodiscard]] auto RunIncrementalDiagnosticMode(
     IncrementalDiagnosticOptions options) {
     const auto [input, console_mode] = GetForegroundConsoleInput(
@@ -760,6 +829,11 @@ auto PrintHelp() noexcept {
         "      --namespace and --volumes override configured values.\n"
         "  backup-supervisor.exe --query-manifest "
         "[--namespace NAMESPACE]\n"
+        "  backup-supervisor.exe --view ARCHIVE "
+        "[--snapshot SNAPSHOT] [--timestamp TIMESTAMP] "
+        "[--address ADDRESS] "
+        "[--namespace NAMESPACE]\n"
+        "      ADDRESS defaults to 127.0.0.1.\n"
         "  backup-supervisor.exe --inventory-vhdx DEVICE\n"
         "  backup-supervisor.exe [--incremental-verify] "
         "[--incremental-stats]\n"
@@ -805,6 +879,11 @@ auto BackupSupervisorMain(
             const auto cancellation_event = OpenCancellationEvent();
             return RunNativeBackup(
                 cancellation_event.get(), false, {}, std::nullopt);
+        }
+        if (option == "--view") {
+            return RunSelectiveViewMode(
+                ParseSelectiveViewOptions(
+                    std::span{arguments}.subspan(1)));
         }
         if (option == "--query-manifest") {
             return RunQueryManifest(

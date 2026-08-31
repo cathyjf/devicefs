@@ -39,8 +39,8 @@ export struct WslConfiguration {
 };
 
 export struct WslRestoreConfiguration : WslConfiguration {
-    std::u8string rpc_helper_path;
-    std::u8string samba_dcerpcd_path;
+    std::string rpc_helper_path;
+    std::string samba_dcerpcd_path;
 };
 
 export struct BackupConfiguration {
@@ -685,14 +685,14 @@ struct WslRestoreDefaultFieldReader : WslDefaultFieldReader {
     using WslDefaultFieldReader::operator();
 
     auto operator()(const WslRpcHelperPathDestination &) const {
-        restore_configuration.get().rpc_helper_path = std::u8string{
+        restore_configuration.get().rpc_helper_path = std::string{
             WslRpcHelperPathDestination::DefaultValue().begin(),
             WslRpcHelperPathDestination::DefaultValue().end()};
         return true;
     }
 
     auto operator()(const WslSambaDcerpcdPathDestination &) const {
-        restore_configuration.get().samba_dcerpcd_path = std::u8string{
+        restore_configuration.get().samba_dcerpcd_path = std::string{
             WslSambaDcerpcdPathDestination::DefaultValue().begin(),
             WslSambaDcerpcdPathDestination::DefaultValue().end()};
         return true;
@@ -740,12 +740,12 @@ struct WslRestoreFieldReader : WslFieldReader {
 
     auto operator()(const WslRpcHelperPathDestination &) const -> void {
         restore_configuration.get().rpc_helper_path =
-            ToUtf8<std::u8string>(ReadString(value.get(), member));
+            ToUtf8<std::string>(ReadString(value.get(), member));
     }
 
     auto operator()(const WslSambaDcerpcdPathDestination &) const -> void {
         restore_configuration.get().samba_dcerpcd_path =
-            ToUtf8<std::u8string>(ReadString(value.get(), member));
+            ToUtf8<std::string>(ReadString(value.get(), member));
     }
 
     std::reference_wrapper<WslRestoreConfiguration> restore_configuration;

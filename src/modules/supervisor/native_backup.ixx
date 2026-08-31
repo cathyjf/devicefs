@@ -39,6 +39,14 @@ export [[nodiscard]] auto InventoryVhdx(
     HANDLE cancellation_event,
     std::string_view device) -> int;
 
+export [[nodiscard]] auto RunSelectiveView(
+    const HANDLE cancellation_event,
+    const std::string_view archive,
+    const std::optional<std::string_view> snapshot_override,
+    const std::optional<std::string_view> timestamp,
+    const std::string_view address,
+    const std::optional<std::u8string> &namespace_override) -> int;
+
 namespace internal {
 
 [[nodiscard]] auto RunSnapshotBackup(

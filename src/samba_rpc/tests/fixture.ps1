@@ -224,6 +224,7 @@ try {
         $grpc_server = [Diagnostics.Process]::Start($grpc_start_info)
         # The server writes this exact path only after BuildAndStart returns a
         # running server. A socket node alone is not the readiness contract.
+        Write-Host 'Testing: gRPC backing-server readiness.'
         $grpc_ready = $grpc_server.StandardOutput.ReadLineAsync()
         if (-not $grpc_ready.Wait(1500)) {
             throw 'The gRPC fixture server did not report readiness.'
@@ -234,6 +235,7 @@ try {
         if ($grpc_server.HasExited) {
             throw 'The gRPC fixture server exited during initialization.'
         }
+        Write-Host 'Passed: the gRPC backing server reported its Unix socket ready.'
         $helper_backing = $socket
     } else {
         if ($IsMacOS) {
@@ -278,6 +280,7 @@ try {
     $server = [Diagnostics.Process]::Start($start_info)
     $ready_pipe.DisposeLocalCopyOfClientHandle()
     $ready_buffer = [byte[]]::new(1)
+    Write-Host 'Testing: Samba DCE/RPC endpoint readiness.'
     $ready_read = $ready_pipe.ReadAsync($ready_buffer, 0, 1)
     if (-not $ready_read.Wait(1500)) {
         throw 'samba-dcerpcd did not report readiness.'
@@ -291,7 +294,7 @@ try {
     if ($server.HasExited) {
         throw 'samba-dcerpcd exited during initialization.'
     }
-    Write-Host 'samba-dcerpcd is ready'
+    Write-Host 'Passed: Samba reported that the DCE/RPC endpoint is ready.'
     if (-not $TestClient) {
         Write-Host "Temporary directory: $root"
         Write-Host "Backing device: $device"
@@ -305,6 +308,14 @@ try {
         }
     } else {
         $binding = "ncacn_ip_tcp:127.0.0.1[$port,connect]"
+        $backing_description = if ($GrpcBacking) {
+            'the gRPC backing device'
+        } else {
+            'the local block device'
+        }
+        $authenticated_test = "authenticated GetLength and positioned Read, " +
+            "including a short read at EOF, through $backing_description"
+        Write-Host "Testing: $authenticated_test."
         $client = Invoke-TestClient $ClientPath @(
             $configuration, $binding, $username, $password) 3000
         if ($client.TimedOut) {
@@ -318,6 +329,8 @@ try {
                 throw "The authenticated RPC client failed:`n$($client.Output)"
             }
 
+            Write-Host "Passed: $authenticated_test."
+            Write-Host 'Testing: rejection of an incorrect password.'
             $client = Invoke-TestClient $ClientPath @(
                 $configuration, $binding, $username, 'wrong-password') 1000
             if ($client.TimedOut) {
@@ -326,6 +339,7 @@ try {
             if ($client.ExitCode -eq 0) {
                 throw 'Samba accepted an incorrect password.'
             }
+            Write-Host 'Passed: Samba rejected the incorrect password.'
         }
     }
 } catch {

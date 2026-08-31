@@ -35,9 +35,11 @@
 
 #include "compat/rpc_worker.h"
 
+#if DEVICEFS_ENABLE_GRPC_TRANSPORT
 #include <grpc/grpc.h>
 #include <grpcpp/create_channel.h>
 #include "generated/block-device.grpc.pb.h"
+#endif
 
 extern "C" {
 #include "generated/ndr_devicefs_block_device.h"
@@ -58,7 +60,9 @@ namespace {
 constexpr auto kDeviceEnvironmentVariable = "DEVICEFS_SAMBA_RPC_DEVICE";
 constexpr auto kWorkerProcessCount = 1;
 constexpr auto kIdleShutdownDelaySeconds = 1;
+#if DEVICEFS_ENABLE_GRPC_TRANSPORT
 constexpr auto kUnlimitedGrpcMessageSize = -1;
+#endif
 
 template <typename... Arguments>
 [[clang::always_inline]] void PrintDiagnostic(
@@ -209,6 +213,7 @@ private:
     std::uint64_t length_ = 0;
 };
 
+#if DEVICEFS_ENABLE_GRPC_TRANSPORT
 class GrpcBackingDevice final : public AbstractBackingDevice {
 public:
     explicit GrpcBackingDevice(const std::filesystem::path &path) {
@@ -290,6 +295,7 @@ private:
     std::unique_ptr<proxmox::backup::BlockDevice::Stub> stub_;
     std::uint64_t length_ = 0;
 };
+#endif
 
 struct ServiceState {
     // Samba can ask the executable which interfaces it provides without also
@@ -342,7 +348,15 @@ auto GetServers(dcesrv_context *,
             return NT_STATUS_INVALID_PARAMETER;
         }
         PrintDiagnostic("rpcd_devicefs: inspecting backing path '{}'", path);
+        /*
+         * Constructing the selected device is the only C++ operation in this
+         * callback that can throw. The catch belongs here because Samba
+         * invokes GetServers through a noexcept C callback; a catch around
+         * rpc_worker_main in main could not receive an exception without first
+         * allowing it to escape this ABI boundary.
+         */
         try {
+#if DEVICEFS_ENABLE_GRPC_TRANSPORT
             /*
              * If the launcher-supplied pathname names a Unix socket,
              * GrpcBackingDevice creates a client for that socket and caches
@@ -350,12 +364,6 @@ auto GetServers(dcesrv_context *,
              * pathname, verifies that it names a block device, and caches its
              * capacity. ServiceState owns the selected device for every
              * GetLength and Read call handled by this worker.
-             *
-             * This construction is the only C++ operation in the callback
-             * that can throw. The catch belongs here because Samba invokes
-             * GetServers through a noexcept C callback; a catch surrounding
-             * rpc_worker_main in main could not receive an exception without
-             * first allowing it to escape this ABI boundary.
              */
             struct stat information {};
             if ((stat(path, &information) == 0) &&
@@ -366,6 +374,9 @@ auto GetServers(dcesrv_context *,
                 state.backing_device =
                     std::make_unique<BackingDevice>(path);
             }
+#else
+            state.backing_device = std::make_unique<BackingDevice>(path);
+#endif
         } catch (...) {
             return NT_STATUS_UNSUCCESSFUL;
         }

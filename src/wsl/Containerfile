@@ -1,0 +1,851 @@
+# SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+#
+# This Containerfile produces the Linux filesystem used for both DeviceFs
+# backups and selective restores.
+#
+# The first stages contain source code, compilers, development headers, and
+# generated files. The final stage begins again from a clean Debian Trixie
+# image and copies in only the two stripped executables plus small files that
+# record which source commits were built.
+#
+# When the final stage is exported with Buildah, none of the earlier stages is
+# present in the resulting root-filesystem tarball.
+#
+# https://github.com/containers/common/blob/main/docs/Containerfile.5.md
+# https://github.com/containers/buildah/blob/main/docs/buildah-build.1.md
+#
+
+# DeviceFs currently requires CMake 4.4 or newer. Debian Trixie does not supply
+# a sufficiently recent release, so the Samba-helper stage installs an official
+# CMake binary distribution. Keeping the release number in one build argument
+# makes the unavoidable version selection easy to update.
+#
+# https://github.com/cathyjf/devicefs/blob/main/src/samba_rpc/CMakeLists.txt
+# https://packages.debian.org/trixie/cmake
+# https://cmake.org/download/
+ARG CMAKE_VERSION=4.4.3
+
+# Debian no longer packages PIDL. It also is not available from CPAN. PIDL
+# changes rarely, so using one known Samba tag is simpler and more predictable
+# than making the helper build depend on the current head of Samba development.
+# Only Samba's pidl directory is checked out.
+#
+# https://packages.debian.org/search?keywords=pidl
+# https://metacpan.org/search?q=pidl
+# https://gitlab.com/samba-team/samba/-/tree/samba-4.24.6/pidl
+ARG SAMBA_PIDL_TAG=samba-4.24.6
+
+
+# ---------------------------------------------------------------------------
+# Common shell
+# https://sources.debian.org/src/dash/0.5.12-12/debian/
+# ---------------------------------------------------------------------------
+
+FROM debian:trixie AS bash-base
+
+#
+# A shell-form RUN instruction invokes /bin/sh. Debian initially points that
+# name at Dash, but Bash is the more capable general-purpose shell preferred by
+# this project for build automation. Both the build and runtime stages inherit
+# this base and therefore use Bash consistently.
+#
+# https://github.com/containers/common/blob/main/docs/Containerfile.5.md
+# https://wiki.debian.org/Shell
+# https://manpages.debian.org/trixie/debconf/dpkg-reconfigure.8.en.html
+#
+RUN <<'EOF'
+set -eux
+printf '%s\n' 'dash dash/sh boolean false' | debconf-set-selections
+DEBIAN_FRONTEND=noninteractive dpkg-reconfigure dash
+ln --symbolic --force bash /bin/sh
+EOF
+
+#
+# APT should discard downloaded archives instead of retaining them in
+# /var/cache/apt/archives. Its generated package-information caches are also
+# unnecessary because each transaction refreshes the package lists before
+# resolving dependencies.
+#
+# https://manpages.debian.org/trixie/apt/apt.conf.5.en.html
+#
+COPY <<'EOF' /etc/apt/apt.conf.d/99devicefs-no-package-cache
+APT::Keep-Downloaded-Packages "false";
+Dir::Cache::pkgcache "";
+Dir::Cache::srcpkgcache "";
+EOF
+
+#
+# Dpkg should omit documentation that is not needed in this purpose-built WSL
+# filesystem while retaining each installed package's copyright and licensing
+# notices.
+#
+# https://manpages.debian.org/trixie/dpkg/dpkg.1.en.html
+# https://www.debian.org/doc/debian-policy/ch-docs.html#copyright-information
+#
+COPY <<'EOF' /etc/dpkg/dpkg.cfg.d/01_nodoc
+path-exclude=/usr/share/doc/*
+path-include=/usr/share/doc/*/copyright
+path-exclude=/usr/share/man/*
+path-exclude=/usr/share/info/*
+path-exclude=/usr/share/lintian/*
+EOF
+
+
+# ---------------------------------------------------------------------------
+# Common build tools
+# https://packages.debian.org/trixie/
+# ---------------------------------------------------------------------------
+
+FROM bash-base AS build-base
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+#
+# Nala uses APT's package information and dependency resolver but downloads
+# several packages concurrently. It is installed before the other build tools
+# so that their packages can use its parallel downloader.
+#
+# https://packages.debian.org/trixie/nala
+# https://manpages.debian.org/trixie/nala/nala.8.en.html
+# https://github.com/containers/common/blob/main/docs/Containerfile.5.md
+#
+# These build stages never reinstall packages from an earlier transaction.
+# Nala should therefore delete downloaded .deb archives after each successful
+# installation instead of retaining them in /var/cache/apt/archives.
+#
+# https://manpages.debian.org/trixie/nala/nala-clean.8.en.html
+#
+COPY <<'EOF' /etc/nala/nala.conf
+[Nala]
+simple_summary = true
+EOF
+
+RUN <<'EOF'
+set -eux
+apt-get update
+apt-get \
+    -o Dpkg::Options::=--force-confold \
+    install --yes --no-install-recommends nala
+rm -rf /var/lib/apt/lists/*
+EOF
+
+#
+# These programs are needed to obtain and authenticate the additional package
+# repositories and source trees. All of them remain in the build stages; the
+# final filesystem does not inherit from this stage.
+#
+# https://packages.debian.org/trixie/ca-certificates
+# https://packages.debian.org/trixie/curl
+# https://packages.debian.org/trixie/git
+# https://packages.debian.org/trixie/gnupg
+#
+RUN <<'EOF'
+set -eux
+apt-get update
+nala install -y --no-autoremove --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    gnupg
+rm -rf /var/lib/apt/lists/*
+EOF
+
+
+# ---------------------------------------------------------------------------
+# Proxmox Backup client
+# https://bitbucket.org/cathyjf/proxmox-backup
+# https://pbs.proxmox.com/docs/
+# ---------------------------------------------------------------------------
+
+FROM build-base AS pbs-build
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+#
+# Proxmox Backup normally uses Debian-packaged Rust crates rather than
+# downloading crates from crates.io. Its README also documents using a checkout
+# of the current Proxmox helper-crate repository when those packaged crates are
+# not current enough. The repository's Cargo.toml already contains the complete
+# set of path overrides for this purpose. This build clones both live source
+# repositories and enables all of the overrides that point into the Proxmox
+# checkout, so one build cannot mix packaged and Git versions of those crates.
+#
+# The key is downloaded over HTTPS and checked against the SHA-256 value
+# published for the Trixie Proxmox archive key. A signed APT repository may use
+# HTTP for package transport because APT verifies its signed metadata and every
+# referenced package before installation.
+#
+# https://bitbucket.org/cathyjf/proxmox-backup/src/main/.cargo/config.toml
+# https://bitbucket.org/cathyjf/proxmox-backup/src/main/Cargo.toml
+# https://bitbucket.org/cathyjf/proxmox-backup/src/main/debian/control
+# https://bitbucket.org/cathyjf/proxmox-backup/src/main/README.rst
+# https://git.proxmox.com/?p=proxmox.git
+# http://download.proxmox.com/debian/devel/dists/trixie/
+# https://pbs.proxmox.com/docs/installation.html
+# https://manpages.debian.org/trixie/apt/apt-secure.8.en.html
+#
+RUN <<'EOF'
+set -eux
+curl --fail --location --show-error \
+    --output /usr/share/keyrings/proxmox-archive-keyring.gpg \
+    https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg
+printf '%s  %s\n' \
+    '136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45' \
+    '/usr/share/keyrings/proxmox-archive-keyring.gpg' \
+    | sha256sum --check -
+EOF
+
+COPY <<'EOF' /etc/apt/sources.list.d/proxmox-devel.sources
+Types: deb
+URIs: http://download.proxmox.com/debian/devel
+Suites: trixie
+Components: main
+Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+EOF
+
+#
+# mk-build-deps comes from devscripts and uses equivs to turn debian/control
+# into a temporary dependency package. debcargo is installed explicitly because
+# this repository follows Debian's packaged-crate workflow. LLD performs the
+# final ELF link concurrently instead of leaving that part of the build to the
+# largely serial system linker.
+#
+# The long list of Rust crate packages is deliberately not copied into this
+# Containerfile. debian/control is the existing authoritative list and already
+# contains the prost, tonic, tonic-build, Tokio networking, and protobuf
+# additions required by map-grpc.
+#
+# https://manpages.debian.org/trixie/devscripts/mk-build-deps.1.en.html
+# https://packages.debian.org/trixie/debcargo
+# https://packages.debian.org/trixie/lld
+# https://bitbucket.org/cathyjf/proxmox-backup/src/main/debian/control
+#
+RUN <<'EOF'
+set -eux
+apt-get update
+nala install -y --no-autoremove --no-install-recommends \
+    binutils \
+    clang \
+    debcargo \
+    devscripts \
+    dpkg-dev \
+    equivs \
+    lld
+rm -rf /var/lib/apt/lists/*
+EOF
+
+#
+# These are intentionally ordinary clones of the repositories' current default
+# branches. No tag, branch, or commit is selected here. Their sibling paths
+# match the prepared path overrides in Proxmox Backup's Cargo.toml.
+#
+# https://bitbucket.org/cathyjf/proxmox-backup
+# https://git.proxmox.com/?p=proxmox.git
+# https://bitbucket.org/cathyjf/proxmox-backup/src/main/Cargo.toml
+# https://git-scm.com/docs/git-clone
+#
+RUN git clone \
+    git://git.proxmox.com/git/proxmox \
+    /usr/src/proxmox
+
+RUN git clone \
+    https://bitbucket.org/cathyjf/proxmox-backup \
+    /usr/src/proxmox-backup
+
+WORKDIR /usr/src/proxmox-backup
+
+#
+# The nodoc build profile omits documentation-only dependencies such as TeX,
+# fonts, and Sphinx components. They are unrelated to the command-line client
+# and would make the build stage substantially larger.
+#
+# mk-build-deps installs everything needed by the source tree's current
+# debian/control. That includes the Debian crate registry under
+# /usr/share/cargo/registry and protoc for the checked-in gRPC protocol. The
+# temporary copy omits pbs-api-types because the live Proxmox checkout supplies
+# that crate. The other packaged Proxmox crates may still be installed as build
+# dependencies, but Cargo's path overrides select the live checkout instead.
+#
+# mk-build-deps normally enables APT's dependency-resolver diagnostics. The
+# explicit noninteractive APT command below retains that option so a repository
+# with a missing or outdated build dependency identifies the package and the
+# rejected version before mk-build-deps reports that installation failed.
+#
+# https://wiki.debian.org/BuildProfileSpec
+# https://manpages.debian.org/trixie/devscripts/mk-build-deps.1.en.html
+# https://manpages.debian.org/trixie/apt/apt-get.8.en.html
+# https://bitbucket.org/cathyjf/proxmox-backup/src/main/debian/control
+# https://bitbucket.org/cathyjf/proxmox-backup/src/main/.cargo/config.toml
+# https://bitbucket.org/cathyjf/proxmox-backup/src/main/README.rst
+#
+RUN <<'EOF'
+set -eux
+sed '/librust-pbs-api-types-1+default-dev/d' \
+    debian/control > /tmp/proxmox-backup-control
+apt-get update
+apt_tool='nala install -y --no-install-recommends -o Debug::pkgProblemResolver=yes'
+DEB_BUILD_PROFILES=nodoc \
+    mk-build-deps \
+        --install \
+        --remove \
+        --tool "$apt_tool" \
+        /tmp/proxmox-backup-control
+rm -rf /var/lib/apt/lists/*
+EOF
+
+#
+# Build only the ordinary proxmox-backup-client executable. Invoking the whole
+# workspace or the Debian binary-package target would also compile server,
+# tape, documentation, file-restore, and static-client products that are not
+# used by this WSL distribution.
+#
+# Cargo.toml contains commented path overrides for all crates in the sibling
+# Proxmox checkout, as recommended by the repository's build notes. Enabling
+# those existing entries selects one coherent source for pbs-api-types,
+# proxmox-schema, proxmox-section-config, and the other Proxmox helper crates.
+# Overrides for separately maintained repositories remain commented.
+#
+# Cargo can compile independent crates concurrently, but that does not
+# parallelize the compiler's front-end work within one crate. When the
+# dependency graph narrows to a large crate, this can leave processors idle.
+# -Zthreads=0 tells rustc to use the machine's available parallelism for that
+# work. Debian supplies stable rustc, so RUSTC_BOOTSTRAP is restricted to this
+# one command that needs the experimental compiler option.
+#
+# The repository's release profile generates full debug information for Debian
+# debugging packages. This image does not produce those packages and copies
+# only a stripped executable, so generating that data would increase compile
+# time, link time, and temporary disk use before throwing it away. LLD handles
+# the remaining final ELF link concurrently.
+#
+# https://doc.rust-lang.org/cargo/commands/cargo-build.html
+# https://doc.rust-lang.org/cargo/guide/build-performance.html#reduce-amount-of-generated-debug-information
+# https://doc.rust-lang.org/nightly/cargo/guide/build-performance.html#enable-the-experimental-parallel-frontend
+# https://doc.rust-lang.org/cargo/guide/build-performance.html#use-an-alternative-linker
+# https://doc.rust-lang.org/nightly/unstable-book/compiler-environment-variables/rustc-bootstrap.html
+# https://bitbucket.org/cathyjf/proxmox-backup/src/main/Cargo.toml
+# https://bitbucket.org/cathyjf/proxmox-backup/src/main/README.rst
+#
+RUN <<'EOF'
+set -eux
+sed --in-place \
+    '/^#[a-z0-9-]\+ = {.*path = "\.\.\/proxmox\//s/^#//' \
+    Cargo.toml
+export CARGO_PROFILE_RELEASE_DEBUG=0
+export RUSTC_BOOTSTRAP=1
+export RUSTFLAGS='-Zthreads=0 -C link-arg=-fuse-ld=lld'
+cargo build \
+    --release \
+    --package proxmox-backup-client \
+    --bin proxmox-backup-client
+EOF
+
+#
+# The complete build output remains available in this discarded stage, while
+# only a stripped copy is placed under /out. Stripping also removes symbols and
+# other sections that the runtime executable does not need.
+#
+# dpkg-shlibdeps reads the executable's ELF dependencies and translates them
+# into Debian package relationships. The final stage can therefore install the
+# actual runtime-library set without duplicating a large, easily outdated list
+# of native libraries in this file.
+#
+# Recording the Git commit does not pin the clone. It merely leaves enough
+# information in the finished filesystem to identify what an unpinned build
+# happened to compile.
+#
+# https://bitbucket.org/cathyjf/proxmox-backup/src/main/Cargo.toml
+# https://sourceware.org/binutils/docs/binutils/strip.html
+# https://manpages.debian.org/trixie/dpkg-dev/dpkg-shlibdeps.1.en.html
+# https://git-scm.com/docs/git-rev-parse
+#
+RUN <<'EOF'
+set -eux
+install -D --mode=0755 \
+    target/release/proxmox-backup-client \
+    /out/rootfs/usr/local/bin/proxmox-backup-client
+strip --strip-unneeded \
+    /out/rootfs/usr/local/bin/proxmox-backup-client
+dpkg-shlibdeps \
+    -O \
+    -e/out/rootfs/usr/local/bin/proxmox-backup-client \
+    | sed -n 's/^shlibs:Depends=//p' \
+        > /out/proxmox-backup-client.dependencies
+test -s /out/proxmox-backup-client.dependencies
+install -d --mode=0755 /out/rootfs/usr/share/devicefs-build
+git rev-parse HEAD > /out/rootfs/usr/share/devicefs-build/proxmox-backup.commit
+EOF
+
+
+# ---------------------------------------------------------------------------
+# DeviceFs Samba RPC helper
+# https://github.com/cathyjf/devicefs/tree/main/src/samba_rpc
+# ---------------------------------------------------------------------------
+
+FROM build-base AS samba-helper-build
+
+ARG CMAKE_VERSION
+ARG SAMBA_PIDL_TAG
+ARG DEBIAN_FRONTEND=noninteractive
+
+#
+# DeviceFs requires clang-23. apt.llvm.org publishes clang, LLD, and the LLVM
+# binary utilities for Debian Trixie. The repository key is stored as a normal
+# scoped APT key rather than being added to the global trusted-key collection.
+#
+# https://apt.llvm.org/
+# https://apt.llvm.org/trixie/dists/llvm-toolchain-trixie-23/
+# https://manpages.debian.org/trixie/apt/sources.list.5.en.html
+#
+RUN <<'EOF'
+set -eux
+curl --fail --location --show-error \
+    --output /tmp/llvm-snapshot.gpg.key \
+    https://apt.llvm.org/llvm-snapshot.gpg.key
+gpg --dearmor \
+    --output /usr/share/keyrings/llvm-snapshot.gpg \
+    /tmp/llvm-snapshot.gpg.key
+rm /tmp/llvm-snapshot.gpg.key
+EOF
+
+COPY <<'EOF' /etc/apt/sources.list.d/llvm-23.sources
+Types: deb
+URIs: https://apt.llvm.org/trixie/
+Suites: llvm-toolchain-trixie-23
+Components: main
+Signed-By: /usr/share/keyrings/llvm-snapshot.gpg
+EOF
+
+#
+# samba-dev supplies the public Samba headers and link libraries used by the
+# helper. samba-common-bin supplies the private RPC-worker library whose entry
+# point the Linux helper loads at startup.
+#
+# The four gRPC/protobuf packages supply the C++ libraries, protobuf compiler,
+# and gRPC protoc plugin. None of their headers or generators is copied into the
+# final filesystem; dpkg-shlibdeps later identifies only the shared libraries
+# needed by the finished helper.
+#
+# libparse-yapp-perl is required to turn PIDL's .yp grammar files into Perl
+# parser modules when the standalone PIDL package is built.
+#
+# https://packages.debian.org/trixie/samba-dev
+# https://packages.debian.org/trixie/amd64/samba-common-bin/filelist
+# https://packages.debian.org/trixie/libgrpc%2B%2B-dev
+# https://packages.debian.org/trixie/protobuf-compiler-grpc
+# https://packages.debian.org/trixie/libparse-yapp-perl
+#
+RUN <<'EOF'
+set -eux
+apt-get update
+nala install -y --no-autoremove --no-install-recommends \
+    build-essential \
+    clang-23 \
+    dpkg-dev \
+    libgrpc++-dev \
+    libparse-yapp-perl \
+    libprotobuf-dev \
+    lld-23 \
+    llvm-23 \
+    ninja-build \
+    perl \
+    pkg-config \
+    protobuf-compiler \
+    protobuf-compiler-grpc \
+    samba-common-bin \
+    samba-dev
+rm -rf /var/lib/apt/lists/*
+EOF
+
+#
+# CMake's official Linux archive is used because the component requires CMake
+# 4.4 and Debian Trixie's package is older. The checksum file comes from the
+# same CMake release. It detects an incomplete or corrupted archive before the
+# archive is extracted.
+#
+# Both amd64 and arm64 names are handled here because CMake publishes separate
+# archives for those architectures. Selecting the archive from Debian's target
+# architecture keeps this build usable on either platform.
+#
+# https://github.com/cathyjf/devicefs/blob/main/src/samba_rpc/CMakeLists.txt
+# https://packages.debian.org/trixie/cmake
+# https://cmake.org/download/
+#
+RUN <<'EOF'
+set -eux
+case "$(dpkg --print-architecture)" in
+    amd64) cmake_arch=x86_64 ;;
+    arm64) cmake_arch=aarch64 ;;
+    *)
+        printf \
+            'No CMake binary archive is selected for architecture %s.\n' \
+            "$(dpkg --print-architecture)" >&2
+        exit 1
+        ;;
+esac
+archive="cmake-${CMAKE_VERSION}-linux-${cmake_arch}.tar.gz"
+checksums="cmake-${CMAKE_VERSION}-SHA-256.txt"
+release="https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
+cd /tmp
+for file in "${archive}" "${checksums}"; do
+    curl --fail --location --show-error \
+        --output "${file}" \
+        "${release}/${file}"
+done
+grep -F "  ${archive}" "${checksums}" | sha256sum --check -
+install -d --mode=0755 /opt/cmake
+tar --extract --gzip \
+    --file="${archive}" \
+    --strip-components=1 \
+    --directory=/opt/cmake
+rm "${archive}" "${checksums}"
+EOF
+
+#
+# This PATH change exists only in the build stage. The CMake installation under
+# /opt is not copied into the runtime filesystem.
+#
+# https://github.com/containers/common/blob/main/docs/Containerfile.5.md
+#
+ENV PATH=/opt/cmake/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+#
+# Debian no longer distributes PIDL, so obtain its source directly from Samba.
+# A sparse checkout prevents the rest of Samba's very large source tree from
+# being downloaded. The fixed tag is independent of the Samba runtime package;
+# PIDL is used only to generate the helper's C marshalling code during this
+# stage.
+#
+# PIDL's documented standalone installation is Makefile.PL followed by make
+# and make install. libparse-yapp-perl, installed above, supplies the parser
+# generator invoked by that Makefile.
+#
+# https://gitlab.com/samba-team/samba/-/tree/samba-4.22.10/pidl
+# https://gitlab.com/samba-team/samba/-/blob/master/script/autobuild.py
+# https://git-scm.com/docs/git-clone
+# https://git-scm.com/docs/git-sparse-checkout
+# https://packages.debian.org/trixie/libparse-yapp-perl
+#
+RUN <<'EOF'
+set -eux
+git clone \
+    --branch "${SAMBA_PIDL_TAG}" \
+    --depth=1 \
+    --filter=blob:none \
+    --single-branch \
+    --sparse \
+    https://gitlab.com/samba-team/samba.git \
+    /usr/src/samba-pidl
+git -C /usr/src/samba-pidl sparse-checkout set pidl
+cd /usr/src/samba-pidl/pidl
+perl Makefile.PL
+make -j
+make install
+EOF
+
+#
+# This is also an ordinary clone of the current default branch. The resulting
+# commit is recorded after the build, but no branch, tag, or commit is selected.
+#
+# https://github.com/cathyjf/devicefs
+# https://git-scm.com/docs/git-clone
+#
+RUN git clone \
+    https://github.com/cathyjf/devicefs \
+    /usr/src/devicefs
+
+WORKDIR /usr/src/devicefs/src/samba_rpc
+
+#
+# The release preset selects Ninja, enables optimization, and enables the gRPC
+# transport. BUILD_TESTING is disabled because this image needs the production
+# helper, not the test client, PowerShell fixture, loop-device fixture, or test
+# gRPC server.
+#
+# Naming rpcd_devicefs as the build target also prevents an unrelated future
+# default target from silently becoming part of this deployment build.
+#
+# https://github.com/cathyjf/devicefs/blob/main/src/samba_rpc/CMakePresets.json
+# https://github.com/cathyjf/devicefs/blob/main/src/samba_rpc/CMakeLists.txt
+# https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html
+# https://cmake.org/cmake/help/latest/manual/cmake.1.html
+#
+RUN <<'EOF'
+set -eux
+cmake --preset release -DBUILD_TESTING=OFF
+cmake --build --preset release --parallel --target rpcd_devicefs
+EOF
+
+#
+# As with the Rust client, the copied helper is stripped before it enters the
+# final filesystem. llvm-strip comes from the same LLVM 23 installation that
+# compiled the executable.
+#
+# The helper loads Samba's private RPC-worker library with dlopen, so that
+# library does not appear in its ELF DT_NEEDED list. The final stage therefore
+# installs Samba explicitly. dpkg-shlibdeps still owns the ordinary direct
+# dependencies such as gRPC, protobuf, libstdc++, Samba's public libraries,
+# talloc, tevent, TDB, and libc.
+#
+# dpkg-shlibdeps is part of Debian's package-building machinery and reads a
+# debian/control file even when its result is written to standard output. The
+# helper is not otherwise packaged here, so this minimal source paragraph gives
+# dpkg-shlibdeps the package context it requires while it examines the installed
+# libraries' symbols and shlibs metadata.
+#
+# https://llvm.org/docs/CommandGuide/llvm-strip.html
+# https://man7.org/linux/man-pages/man3/dlopen.3.html
+# https://manpages.debian.org/trixie/dpkg-dev/dpkg-shlibdeps.1.en.html
+# https://packages.debian.org/trixie/amd64/samba-common-bin/filelist
+#
+COPY <<'EOF' /tmp/rpcd-devicefs/debian/control
+Source: rpcd-devicefs
+EOF
+
+RUN <<'EOF'
+set -eux
+install -D --mode=0755 \
+    /usr/src/devicefs/build/samba_rpc/rpcd_devicefs \
+    /out/rootfs/usr/local/bin/rpcd_devicefs
+/usr/lib/llvm-23/bin/llvm-strip \
+    --strip-unneeded \
+    /out/rootfs/usr/local/bin/rpcd_devicefs
+(
+    cd /tmp/rpcd-devicefs
+    dpkg-shlibdeps \
+        -O \
+        -e/out/rootfs/usr/local/bin/rpcd_devicefs
+) \
+    | sed -n 's/^shlibs:Depends=//p' \
+        > /out/rpcd_devicefs.dependencies
+test -s /out/rpcd_devicefs.dependencies
+install -d --mode=0755 /out/rootfs/usr/share/devicefs-build
+git -C /usr/src/devicefs rev-parse HEAD \
+    > /out/rootfs/usr/share/devicefs-build/devicefs.commit
+printf '%s\n' "${SAMBA_PIDL_TAG}" \
+    > /out/rootfs/usr/share/devicefs-build/samba-pidl.tag
+EOF
+
+
+# ---------------------------------------------------------------------------
+# WSL runtime filesystem
+# https://learn.microsoft.com/en-us/windows/wsl/use-custom-distro
+# ---------------------------------------------------------------------------
+
+FROM bash-base AS runtime
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG DEVICEFS_UID=1000
+ARG DEVICEFS_GID=1000
+
+#
+# The final filesystem uses the Proxmox client-only repository rather than the
+# development repository. It can supply any client runtime package that is not
+# part of ordinary Debian, but it does not expose the build-only crate and
+# development-package repository.
+#
+# https://pbs.proxmox.com/docs/installation.html
+#
+COPY --from=pbs-build \
+    /usr/share/keyrings/proxmox-archive-keyring.gpg \
+    /usr/share/keyrings/proxmox-archive-keyring.gpg
+
+COPY <<'EOF' /etc/apt/sources.list.d/pbs-client.sources
+Types: deb
+URIs: http://download.proxmox.com/debian/pbs-client
+Suites: trixie
+Components: main
+Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+EOF
+
+#
+# These two short files were generated from the finished ELF executables. They
+# contain package relationships such as libc, OpenSSL, gRPC, protobuf, and the
+# public Samba libraries. Using Debian's own shlib metadata avoids maintaining
+# a second hand-written runtime-library list here.
+#
+# https://manpages.debian.org/trixie/dpkg-dev/dpkg-shlibdeps.1.en.html
+# https://manpages.debian.org/trixie/apt/apt.8.en.html
+#
+COPY --from=pbs-build \
+    /out/proxmox-backup-client.dependencies \
+    /tmp/proxmox-backup-client.dependencies
+COPY --from=samba-helper-build \
+    /out/rpcd_devicefs.dependencies \
+    /tmp/rpcd_devicefs.dependencies
+
+#
+# The explicitly named packages are programs used at runtime rather than shared
+# libraries discoverable from ELF metadata:
+#
+#   ca-certificates
+#       Allows the PBS client to authenticate HTTPS endpoints.
+#
+#   coreutils
+#       Supplies timeout, mktemp, mkfifo, rm, and the other ordinary Unix tools
+#       used by start-pbs.fish.
+#
+#   fish
+#       Executes the orchestration program supplied by the Windows supervisor.
+#
+#   jq
+#       Formats the backup manifest in a pretty format.
+#
+#   mount
+#       Supplies mount and umount for the temporary /mnt/vss DrvFs mount.
+#
+#   passwd
+#       Supplies useradd and groupadd while this stage creates pbs-vss.
+#
+#   qrencode
+#       Is an upstream-declared runtime dependency of proxmox-backup-client.
+#
+#   samba
+#       Supplies pdbedit. It depends on samba-common-bin, which supplies
+#       samba-dcerpcd and libRPC-WORKER-private-samba.so.0. The normal smbd and
+#       nmbd services are not used by this design.
+#
+#   sudo
+#       Lets the unprivileged restore/backup user perform only the two mount
+#       operations authorized below.
+#
+# https://packages.debian.org/trixie/ca-certificates
+# https://packages.debian.org/trixie/coreutils
+# https://packages.debian.org/trixie/fish
+# https://packages.debian.org/trixie/mount
+# https://packages.debian.org/trixie/passwd
+# https://packages.debian.org/trixie/qrencode
+# https://packages.debian.org/trixie/samba
+# https://packages.debian.org/trixie/sudo
+# https://packages.debian.org/trixie/amd64/samba/filelist
+# https://packages.debian.org/trixie/amd64/samba-common-bin/filelist
+# https://github.com/cathyjf/devicefs/tree/main/src/modules/supervisor/artifacts
+#
+RUN <<'EOF'
+set -eux
+apt-get update
+apt-get install --yes --no-install-recommends \
+    ca-certificates \
+    coreutils \
+    fish \
+    jq \
+    mount \
+    passwd \
+    qrencode \
+    samba \
+    sudo
+apt-get --yes --no-install-recommends satisfy \
+    "$(</tmp/proxmox-backup-client.dependencies)" \
+    "$(</tmp/rpcd_devicefs.dependencies)"
+apt-get clean
+rm -rf \
+    /var/lib/apt/lists/* \
+    /var/cache/apt/archives/* \
+    /tmp/proxmox-backup-client.dependencies \
+    /tmp/rpcd_devicefs.dependencies
+EOF
+
+#
+# Only the stripped executables and source-revision text files cross the stage
+# boundary. No source tree, compiler, development header, Cargo registry,
+# protobuf compiler, PIDL installation, CMake installation, or Ninja build
+# directory is copied.
+#
+# https://github.com/containers/common/blob/main/docs/Containerfile.5.md
+#
+COPY --from=pbs-build /out/rootfs/ /
+COPY --from=samba-helper-build /out/rootfs/ /
+
+#
+# This is a dedicated WSL distribution, so it has one ordinary unprivileged
+# Linux account. The numeric IDs are arguments because DrvFs needs the same IDs
+# in /etc/fstab before the distribution is first started.
+#
+# No password is assigned. The Windows supervisor invokes WSL under the intended
+# Windows account and selects this Linux identity; it does not perform Linux
+# password authentication.
+#
+# https://learn.microsoft.com/en-us/windows/wsl/use-custom-distro
+# https://learn.microsoft.com/en-us/windows/wsl/file-permissions
+# https://manpages.debian.org/trixie/passwd/useradd.8.en.html
+#
+RUN <<'EOF'
+set -eux
+groupadd --gid "${DEVICEFS_GID}" pbs-vss
+useradd \
+    --uid "${DEVICEFS_UID}" \
+    --gid "${DEVICEFS_GID}" \
+    --create-home \
+    --shell /usr/bin/fish \
+    pbs-vss
+install -d --mode=0755 --owner=pbs-vss --group=pbs-vss /mnt/vss
+EOF
+
+#
+# DeviceFs presents the backup image files on Windows drive X:. The backup
+# operation explicitly mounts that drive at /mnt/vss immediately before
+# invoking proxmox-backup-client and unmounts it afterward.
+#
+# noauto is important: X: exists only while the Windows DeviceFs process is
+# serving a backup. WSL startup must not fail merely because no backup is active.
+# ro preserves the read-only nature of the DeviceFs view inside Linux as well.
+#
+# https://learn.microsoft.com/en-us/windows/wsl/wsl-config
+# https://learn.microsoft.com/en-us/windows/wsl/file-permissions
+# https://learn.microsoft.com/en-us/windows/wsl/wsl2-mount-disk
+# https://manpages.debian.org/trixie/mount/fstab.5.en.html
+#
+COPY <<EOF /etc/fstab
+X: /mnt/vss drvfs ro,noauto,uid=${DEVICEFS_UID},gid=${DEVICEFS_GID},umask=022 0 0
+EOF
+
+#
+# start-pbs.fish needs elevated authority only for mounting and unmounting the
+# single configured DrvFs path. The full command lines are named here so that
+# pbs-vss cannot use this rule to mount another filesystem or run another
+# command as root.
+#
+# https://manpages.debian.org/trixie/sudo/sudoers.5.en.html
+# https://github.com/cathyjf/devicefs/tree/main/src/modules/supervisor/artifacts
+#
+COPY --chmod=0440 <<'EOF' /etc/sudoers.d/devicefs-vss
+pbs-vss ALL=(root) NOPASSWD: /usr/bin/mount /mnt/vss, /usr/bin/umount /mnt/vss
+EOF
+
+#
+# wsl --import materializes the filesystem but does not use container-image
+# process metadata to select a Linux user. /etc/wsl.conf is therefore the
+# durable owner of the default identity.
+#
+# Automatic Windows-drive mounting is disabled. The Windows account running
+# this distribution is not required to have access to every drive root, and an
+# automatic scan would report unrelated access failures when WSL starts. The
+# backup operation mounts /mnt/vss explicitly; mount reads the entry in
+# /etc/fstab itself, so no WSL startup-time fstab processing is needed.
+#
+# https://learn.microsoft.com/en-us/windows/wsl/wsl-config
+# https://learn.microsoft.com/en-us/windows/wsl/use-custom-distro
+#
+COPY <<'EOF' /etc/wsl.conf
+[automount]
+enabled=false
+
+[user]
+default=pbs-vss
+EOF
+
+#
+# There is intentionally no CMD, ENTRYPOINT, USER, EXPOSE, or VOLUME instruction.
+# This image is exported as a root filesystem and imported as a WSL distribution;
+# the Windows supervisor supplies each operation at runtime.
+#
+# start-pbs.fish is also not installed here. It is embedded in the Windows
+# supervisor and sent to Fish together with the current repository settings,
+# credentials, encryption key, stop-file path, and operation arguments.
+#
+# https://learn.microsoft.com/en-us/windows/wsl/use-custom-distro
+# https://github.com/containers/common/blob/main/docs/Containerfile.5.md
+# https://github.com/cathyjf/devicefs/tree/main/src/modules/supervisor
+#

@@ -64,9 +64,27 @@ public:
     }
 
     auto Read(grpc::ServerContext *,
-        const proxmox::backup::ReadRequest *const request,
-        proxmox::backup::ReadResponse *const response)
+        grpc::ServerReaderWriter<
+            proxmox::backup::ReadResponse,
+            proxmox::backup::ReadRequest> *const stream)
         -> grpc::Status override {
+        auto request = proxmox::backup::ReadRequest{};
+        while (stream->Read(&request)) {
+            auto response = proxmox::backup::ReadResponse{};
+            const auto status = Read(request, response);
+            if (!status.ok()) {
+                return status;
+            }
+            if (!stream->Write(response)) {
+                return grpc::Status::OK;
+            }
+        }
+        return grpc::Status::OK;
+    }
+
+private:
+    auto Read(const proxmox::backup::ReadRequest &request,
+        proxmox::backup::ReadResponse &response) -> grpc::Status {
         {
             auto lock = std::unique_lock{first_reads_mutex_};
             if (first_read_count_ < 2) {
@@ -80,18 +98,17 @@ public:
             }
         }
 
-        if (request->offset() >= std::uint64_t{data_.size()}) {
+        if (request.offset() >= std::uint64_t{data_.size()}) {
             return grpc::Status::OK;
         }
 
-        const auto offset = static_cast<std::size_t>(request->offset());
+        const auto offset = static_cast<std::size_t>(request.offset());
         const auto count = std::min<std::size_t>(
-            request->count(), data_.size() - offset);
-        response->set_data(data_.data() + offset, count);
+            request.count(), data_.size() - offset);
+        response.set_data(data_.data() + offset, count);
         return grpc::Status::OK;
     }
 
-private:
     const std::string data_;
     std::mutex first_reads_mutex_;
     std::condition_variable first_reads_ready_;

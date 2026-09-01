@@ -4,7 +4,7 @@ package proxmox.backup;
 
 service BlockDevice {
     rpc GetLength(GetLengthRequest) returns (GetLengthResponse);
-    rpc Read(ReadRequest) returns (ReadResponse);
+    rpc Read(stream ReadRequest) returns (stream ReadResponse);
 }
 
 message GetLengthRequest {}

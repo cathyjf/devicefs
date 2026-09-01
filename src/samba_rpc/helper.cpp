@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+
 #if defined(__APPLE__)
 #include <sys/disk.h>
 #elif defined(__linux__)
@@ -10,6 +11,7 @@
 #include <linux/fs.h>
 #include <stdlib.h>
 #endif
+
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -22,10 +24,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <condition_variable>
+#include <concepts>
 #include <deque>
 #include <exception>
 #include <filesystem>
 #include <format>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -40,6 +44,7 @@
 #include <thread>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "compat/rpc_worker.h"
@@ -132,20 +137,23 @@ struct RpcWorker {
 }
 #endif
 
-class AbstractBackingDevice {
-public:
-    virtual ~AbstractBackingDevice() = default;
-
-    [[nodiscard]] virtual auto Length() const noexcept -> std::uint64_t = 0;
-
-    [[nodiscard]] virtual auto Read(
-        std::span<std::uint8_t> buffer,
-        std::uint64_t offset) const noexcept -> ssize_t = 0;
+template <typename Reader>
+concept BlockReader = requires(Reader &reader,
+    std::span<std::uint8_t> buffer,
+    std::uint64_t offset) {
+    { reader.Read(buffer, offset) } -> std::same_as<ssize_t>;
 };
 
-class BackingDevice final : public AbstractBackingDevice {
+template <typename Device>
+concept BackingDevice = requires(const Device &device,
+    std::stop_token stop) {
+    { device.Length() } -> std::same_as<std::uint64_t>;
+    requires BlockReader<decltype(device.CreateReader(stop))>;
+};
+
+class LocalBackingDevice final {
 public:
-    explicit BackingDevice(const std::filesystem::path &path)
+    explicit LocalBackingDevice(const std::filesystem::path &path)
         : file_{std::fopen(path.c_str(), "rb")} {
         if (!file_) {
             throw std::system_error{errno, std::generic_category()};
@@ -201,13 +209,18 @@ public:
         }
     }
 
-    [[nodiscard]] auto Length() const noexcept -> std::uint64_t override {
+    [[nodiscard]] auto Length() const noexcept -> std::uint64_t {
         return length_;
+    }
+
+    [[nodiscard]] auto CreateReader(const std::stop_token &) const noexcept
+        -> const LocalBackingDevice & {
+        return *this;
     }
 
     [[nodiscard]] auto Read(
         const std::span<std::uint8_t> buffer,
-        const std::uint64_t offset) const noexcept -> ssize_t override {
+        const std::uint64_t offset) const noexcept -> ssize_t {
         auto result = ssize_t{};
         do {
             result = pread(fileno(file_.get()), buffer.data(), buffer.size(),
@@ -225,8 +238,94 @@ private:
 };
 
 #if DEVICEFS_ENABLE_GRPC_TRANSPORT
-class GrpcBackingDevice final : public AbstractBackingDevice {
+class GrpcBackingDevice final {
 public:
+    class ReadStream final {
+    public:
+        ReadStream(proxmox::backup::BlockDevice::Stub &stub,
+            std::stop_token stop) noexcept
+            : stub_{stub}, stop_{std::move(stop)} {}
+
+        ReadStream(const ReadStream &) = delete;
+        auto operator=(const ReadStream &) -> ReadStream & = delete;
+
+        [[nodiscard]] auto Read(
+            const std::span<std::uint8_t> buffer,
+            const std::uint64_t offset) noexcept -> ssize_t {
+            try {
+                if (!call_) {
+                    call_.emplace(stub_, stop_);
+                }
+
+                auto request = proxmox::backup::ReadRequest{};
+                request.set_offset(offset);
+                request.set_count(
+                    static_cast<std::uint32_t>(buffer.size()));
+                auto response = proxmox::backup::ReadResponse{};
+                if (!call_->Exchange(request, response)) {
+                    call_.reset();
+                    return -1;
+                }
+
+                const auto &data = response.data();
+                if (data.size() > buffer.size()) {
+                    return -1;
+                }
+                if (!data.empty()) {
+                    std::memcpy(buffer.data(), data.data(), data.size());
+                }
+                return static_cast<ssize_t>(data.size());
+            } catch (...) {
+                call_.reset();
+                return -1;
+            }
+        }
+
+    private:
+        class Call final {
+        public:
+            Call(proxmox::backup::BlockDevice::Stub &stub,
+                const std::stop_token &stop)
+                : cancel_{stop, Cancel{context_}},
+                  stream_{stub.Read(&context_)} {}
+
+            Call(const Call &) = delete;
+            auto operator=(const Call &) -> Call & = delete;
+
+            ~Call() {
+                if (stream_) {
+                    static_cast<void>(stream_->Finish());
+                }
+            }
+
+            [[nodiscard]] auto Exchange(
+                const proxmox::backup::ReadRequest &request,
+                proxmox::backup::ReadResponse &response) -> bool {
+                return stream_ && stream_->Write(request) &&
+                    stream_->Read(&response);
+            }
+
+        private:
+            struct Cancel {
+                grpc::ClientContext &context;
+
+                auto operator()() const noexcept -> void {
+                    context.TryCancel();
+                }
+            };
+
+            grpc::ClientContext context_;
+            std::stop_callback<Cancel> cancel_;
+            std::unique_ptr<grpc::ClientReaderWriter<
+                proxmox::backup::ReadRequest,
+                proxmox::backup::ReadResponse>> stream_;
+        };
+
+        proxmox::backup::BlockDevice::Stub &stub_;
+        std::stop_token stop_;
+        std::optional<Call> call_;
+    };
+
     explicit GrpcBackingDevice(const std::filesystem::path &path) {
         PrintDiagnostic(
             "rpcd_devicefs: creating gRPC channel for '{}'", path.string());
@@ -262,56 +361,17 @@ public:
             "rpcd_devicefs: gRPC GetLength returned {} bytes", length_);
     }
 
-    [[nodiscard]] auto Length() const noexcept -> std::uint64_t override {
+    [[nodiscard]] auto Length() const noexcept -> std::uint64_t {
         return length_;
     }
 
-    auto RequestStop() noexcept -> void {
-        static_cast<void>(stop_source_.request_stop());
-    }
-
-    [[nodiscard]] auto Read(
-        const std::span<std::uint8_t> buffer,
-        const std::uint64_t offset) const noexcept -> ssize_t override {
-        try {
-            PrintDiagnostic(
-                "rpcd_devicefs: calling gRPC Read(offset={}, count={})",
-                offset, buffer.size());
-            auto context = grpc::ClientContext{};
-            const auto cancel = std::stop_callback{
-                stop_source_.get_token(),
-                [&context] noexcept { context.TryCancel(); }};
-            auto request = proxmox::backup::ReadRequest{};
-            request.set_offset(offset);
-            request.set_count(static_cast<std::uint32_t>(buffer.size()));
-            auto response = proxmox::backup::ReadResponse{};
-            const auto status = stub_->Read(&context, request, &response);
-            if (!status.ok()) {
-                PrintDiagnostic(
-                    "rpcd_devicefs: gRPC Read failed (code {}): {}",
-                    std::to_underlying(status.error_code()),
-                    status.error_message());
-                return -1;
-            }
-
-            const auto &data = response.data();
-            PrintDiagnostic(
-                "rpcd_devicefs: gRPC Read returned {} bytes", data.size());
-            if (data.size() > buffer.size()) {
-                return -1;
-            }
-            if (!data.empty()) {
-                std::memcpy(buffer.data(), data.data(), data.size());
-            }
-            return static_cast<ssize_t>(data.size());
-        } catch (...) {
-            return -1;
-        }
+    [[nodiscard]] auto CreateReader(
+        std::stop_token stop) const noexcept -> ReadStream {
+        return ReadStream{*stub_, std::move(stop)};
     }
 
 private:
     std::unique_ptr<proxmox::backup::BlockDevice::Stub> stub_;
-    std::stop_source stop_source_;
     std::uint64_t length_ = 0;
 };
 #endif
@@ -321,11 +381,9 @@ class ReadExecutor;
 class ReadOperation final {
 public:
     ReadOperation(ReadExecutor &executor,
-        const AbstractBackingDevice &device,
         dcesrv_call_state &call,
         Read &request)
         : executor_{executor},
-          device_{device},
           call_{call},
           request_{request},
           buffer_{request.out.buffer, request.in.wanted},
@@ -339,7 +397,8 @@ public:
         }
     }
 
-    auto Run() noexcept -> void;
+    template <BlockReader Reader>
+    auto Run(Reader &reader) noexcept -> void;
 
 private:
     static void Complete(tevent_context *, tevent_immediate *,
@@ -348,7 +407,6 @@ private:
     auto Reply() noexcept -> void;
 
     ReadExecutor &executor_;
-    const AbstractBackingDevice &device_;
     dcesrv_call_state &call_;
     Read &request_;
     const std::span<std::uint8_t> buffer_;
@@ -359,22 +417,38 @@ private:
     std::uint32_t transferred_ = 0;
 };
 
+template <BlockReader Reader>
+auto ReadOperation::Run(Reader &reader) noexcept -> void {
+    const auto transferred = reader.Read(buffer_, offset_);
+    if ((transferred >= 0) &&
+        std::in_range<std::uint32_t>(transferred)) {
+        status_ = NT_STATUS_OK;
+        transferred_ = static_cast<std::uint32_t>(transferred);
+    }
+
+    /*
+     * This function runs on one of the reader threads, but Samba created the
+     * call, the request, and the response buffer on its event-loop thread.
+     * Calling dcesrv_async_reply here would therefore make a reader thread
+     * finish a call that belongs to Samba's event-loop thread.
+     *
+     * tevent_threaded_schedule_immediate asks that event-loop thread to run
+     * Complete. Complete removes this operation from the executor, keeps it
+     * alive while Reply stores the read result in Samba's response, and then
+     * sends the asynchronous reply from the thread on which Samba expects it.
+     */
+    tevent_threaded_schedule_immediate(completion_context_,
+        completion_event_, Complete, this);
+}
+
 class ReadExecutor final {
 public:
-    explicit ReadExecutor(AbstractBackingDevice &device)
-        : device_{device} {
-        // At least two workers are required for reads to overlap. Above that,
-        // use the machine's concurrency instead of imposing another fixed
-        // limit below the RPC client and filesystem dispatcher.
-        const auto worker_count = std::max(
-            2u, std::thread::hardware_concurrency());
-        workers_.reserve(worker_count);
-        for (auto index = 0u; index < worker_count; ++index) {
-            workers_.emplace_back(
-                [this](const std::stop_token stop) noexcept {
-                    Run(stop);
-                });
-        }
+    template <BackingDevice Device>
+    explicit ReadExecutor(const Device &device) {
+        StartWorkers([this, &device](const std::stop_token stop) noexcept {
+            decltype(auto) reader = device.CreateReader(stop);
+            Run(stop, reader);
+        });
     }
 
     ReadExecutor(const ReadExecutor &) = delete;
@@ -384,19 +458,12 @@ public:
         for (auto &worker : workers_) {
             worker.request_stop();
         }
-#if DEVICEFS_ENABLE_GRPC_TRANSPORT
-        if (auto *const grpc_device =
-                dynamic_cast<GrpcBackingDevice *>(&device_);
-            grpc_device != nullptr) {
-            grpc_device->RequestStop();
-        }
-#endif
         ready_.notify_all();
     }
 
     auto Submit(dcesrv_call_state &call, Read &request) -> void {
         auto operation = std::make_shared<ReadOperation>(
-            *this, device_, call, request);
+            *this, call, request);
         {
             auto lock = std::lock_guard{mutex_};
             const auto [active, inserted] = active_.emplace(
@@ -417,7 +484,21 @@ public:
 private:
     friend class ReadOperation;
 
-    auto Run(const std::stop_token stop) noexcept -> void {
+    template <typename Worker>
+    auto StartWorkers(const Worker &worker) -> void {
+        // With one reader thread, every read would wait for the previous read
+        // to finish. Start at least two threads, and use the processor count
+        // when it is larger, so independent reads can run at the same time.
+        const auto worker_count = std::max(
+            2u, std::thread::hardware_concurrency());
+        workers_.reserve(worker_count);
+        for (auto index = 0u; index < worker_count; ++index) {
+            workers_.emplace_back(worker);
+        }
+    }
+
+    template <BlockReader Reader>
+    auto Run(const std::stop_token stop, Reader &reader) noexcept -> void {
         while (!stop.stop_requested()) {
             auto lock = std::unique_lock{mutex_};
             if (!ready_.wait(lock, stop,
@@ -430,7 +511,7 @@ private:
             auto operation = std::move(pending_.front());
             pending_.pop_front();
             lock.unlock();
-            operation->Run();
+            operation->Run(reader);
         }
     }
 
@@ -444,7 +525,6 @@ private:
         return std::move(active.mapped());
     }
 
-    AbstractBackingDevice &device_;
     std::mutex mutex_;
     std::condition_variable_any ready_;
     std::deque<std::shared_ptr<ReadOperation>> pending_;
@@ -454,23 +534,6 @@ private:
     // operation while the queues and backing device are being destroyed.
     std::vector<std::jthread> workers_;
 };
-
-auto ReadOperation::Run() noexcept -> void {
-    const auto transferred = device_.Read(buffer_, offset_);
-    if ((transferred >= 0) &&
-        std::in_range<std::uint32_t>(transferred)) {
-        status_ = NT_STATUS_OK;
-        transferred_ = static_cast<std::uint32_t>(transferred);
-    }
-
-    /*
-     * Samba owns the call and all of its NDR output. Only its event-loop
-     * thread may finish that call. tevent transfers this completion back to
-     * that thread after the blocking read has left the RPC dispatch path.
-     */
-    tevent_threaded_schedule_immediate(completion_context_,
-        completion_event_, Complete, this);
-}
 
 void ReadOperation::Complete(tevent_context *, tevent_immediate *,
     void *const private_data) noexcept {
@@ -485,12 +548,20 @@ auto ReadOperation::Reply() noexcept -> void {
     dcesrv_async_reply(&call_);
 }
 
+#if DEVICEFS_ENABLE_GRPC_TRANSPORT
+using BackingDeviceStorage =
+    std::variant<LocalBackingDevice, GrpcBackingDevice>;
+#else
+using BackingDeviceStorage = std::variant<LocalBackingDevice>;
+#endif
+
 struct ServiceState {
     // Samba can ask the executable which interfaces it provides without also
     // requesting the endpoint servers that dispatch those interfaces. Keeping
     // the device optional allows interface discovery to remain side-effect
     // free; GetServers opens it only when Samba requests a dispatch server.
-    std::unique_ptr<AbstractBackingDevice> backing_device;
+    std::optional<BackingDeviceStorage> backing_device;
+    std::uint64_t backing_length = 0;
     std::optional<ReadExecutor> read_executor;
     std::array<const dcesrv_endpoint_server *, 1> endpoint_servers{};
 };
@@ -498,12 +569,13 @@ struct ServiceState {
 /*
  * The generated dispatcher calls GetLength and Read without passing the
  * ServiceState created in main. GetServers publishes the selected backing
- * device and read executor through read-only pointers after endpoint
- * registration succeeds. rpc_worker_main returns before main destroys the
- * ServiceState, so both objects outlive every call that can use them.
+ * device's length and its read executor after endpoint registration succeeds.
+ * rpc_worker_main returns before main destroys the ServiceState, so both
+ * values remain available for every call that uses them.
  */
-const AbstractBackingDevice *active_backing_device = nullptr;
-ReadExecutor *active_read_executor = nullptr;
+auto active_backing_length = std::uint64_t{};
+auto active_read_executor =
+    std::optional<std::reference_wrapper<ReadExecutor>>{};
 
 auto GetInterfaces(
     const ndr_interface_table ***const interfaces,
@@ -538,13 +610,12 @@ auto GetServers(dcesrv_context *,
             return NT_STATUS_INVALID_PARAMETER;
         }
         PrintDiagnostic("rpcd_devicefs: inspecting backing path '{}'", path);
-        auto backing_device = std::unique_ptr<AbstractBackingDevice>{};
         try {
 #if DEVICEFS_ENABLE_GRPC_TRANSPORT
             /*
              * If the launcher-supplied pathname names a Unix socket,
              * GrpcBackingDevice creates a client for that socket and caches
-             * the service's length. Otherwise, BackingDevice opens the
+             * the service's length. Otherwise, LocalBackingDevice opens the
              * pathname, verifies that it names a block device, and caches its
              * capacity. ServiceState owns the selected device for every
              * GetLength and Read call handled by this worker.
@@ -552,15 +623,20 @@ auto GetServers(dcesrv_context *,
             struct stat information {};
             if ((stat(path, &information) == 0) &&
                 S_ISSOCK(information.st_mode)) {
-                backing_device = std::make_unique<GrpcBackingDevice>(path);
+                state.backing_device.emplace(
+                    std::in_place_type<GrpcBackingDevice>, path);
             } else {
-                backing_device = std::make_unique<BackingDevice>(path);
+                state.backing_device.emplace(
+                    std::in_place_type<LocalBackingDevice>, path);
             }
 #else
-            backing_device = std::make_unique<BackingDevice>(path);
+            state.backing_device.emplace(
+                std::in_place_type<LocalBackingDevice>, path);
 #endif
-            state.backing_device = std::move(backing_device);
-            state.read_executor.emplace(*state.backing_device);
+            std::visit([&state]<BackingDevice Device>(Device &device) {
+                state.backing_length = device.Length();
+                state.read_executor.emplace(device);
+            }, *state.backing_device);
         } catch (...) {
             state.read_executor.reset();
             state.backing_device.reset();
@@ -590,14 +666,14 @@ auto GetServers(dcesrv_context *,
 
         /*
          * The generated dispatcher calls GetLength and Read without passing
-         * rpc_worker_main's private_data. Publish the ServiceState-owned device
-         * after registration succeeds so those two callbacks can reach it.
-         * Each process hosts one DeviceFs endpoint and one backing device, so
-         * there is no second service instance whose state could be confused
-         * with this pointer.
+         * rpc_worker_main's private_data. Publish the cached length and a
+         * reference to the read executor after registration succeeds so those
+         * two callbacks can reach them. Each process hosts one DeviceFs
+         * endpoint and one backing device, so no second service can overwrite
+         * either value.
          */
-        active_backing_device = state.backing_device.get();
-        active_read_executor = &*state.read_executor;
+        active_backing_length = state.backing_length;
+        active_read_executor.emplace(*state.read_executor);
     }
 
     /*
@@ -616,10 +692,10 @@ auto GetServers(dcesrv_context *,
 
 extern "C" NTSTATUS dcesrv_GetLength(dcesrv_call_state *,
     TALLOC_CTX *, GetLength *const request) noexcept {
-    const auto length = active_backing_device->Length();
-    *request->out.length = length;
+    *request->out.length = active_backing_length;
     PrintDiagnostic(
-        "rpcd_devicefs: serving DCE GetLength ({} bytes)", length);
+        "rpcd_devicefs: serving DCE GetLength ({} bytes)",
+        *request->out.length);
     return NT_STATUS_OK;
 }
 
@@ -642,7 +718,7 @@ extern "C" NTSTATUS dcesrv_Read(dcesrv_call_state *const call,
     }
 
     try {
-        active_read_executor->Submit(*call, *request);
+        active_read_executor->get().Submit(*call, *request);
     } catch (...) {
         return NT_STATUS_NO_MEMORY;
     }

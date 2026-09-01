@@ -240,34 +240,41 @@ private:
 #if DEVICEFS_ENABLE_GRPC_TRANSPORT
 class GrpcBackingDevice final {
 public:
-    class ReadStream final {
+    class Reader final {
     public:
-        ReadStream(proxmox::backup::BlockDevice::Stub &stub,
+        Reader(proxmox::backup::BlockDevice::Stub &stub,
             std::stop_token stop) noexcept
             : stub_{stub}, stop_{std::move(stop)} {}
-
-        ReadStream(const ReadStream &) = delete;
-        auto operator=(const ReadStream &) -> ReadStream & = delete;
 
         [[nodiscard]] auto Read(
             const std::span<std::uint8_t> buffer,
             const std::uint64_t offset) noexcept -> ssize_t {
             try {
-                if (!call_) {
-                    call_.emplace(stub_, stop_);
-                }
-
+                PrintDiagnostic(
+                    "rpcd_devicefs: calling gRPC Read(offset={}, count={})",
+                    offset, buffer.size());
+                auto context = grpc::ClientContext{};
+                const auto cancel = std::stop_callback{
+                    stop_, [&context] noexcept { context.TryCancel(); }};
                 auto request = proxmox::backup::ReadRequest{};
                 request.set_offset(offset);
                 request.set_count(
                     static_cast<std::uint32_t>(buffer.size()));
                 auto response = proxmox::backup::ReadResponse{};
-                if (!call_->Exchange(request, response)) {
-                    call_.reset();
+                const auto status =
+                    stub_.Read(&context, request, &response);
+                if (!status.ok()) {
+                    PrintDiagnostic(
+                        "rpcd_devicefs: gRPC Read failed (code {}): {}",
+                        std::to_underlying(status.error_code()),
+                        status.error_message());
                     return -1;
                 }
 
                 const auto &data = response.data();
+                PrintDiagnostic(
+                    "rpcd_devicefs: gRPC Read returned {} bytes",
+                    data.size());
                 if (data.size() > buffer.size()) {
                     return -1;
                 }
@@ -276,54 +283,13 @@ public:
                 }
                 return static_cast<ssize_t>(data.size());
             } catch (...) {
-                call_.reset();
                 return -1;
             }
         }
 
     private:
-        class Call final {
-        public:
-            Call(proxmox::backup::BlockDevice::Stub &stub,
-                const std::stop_token &stop)
-                : cancel_{stop, Cancel{context_}},
-                  stream_{stub.Read(&context_)} {}
-
-            Call(const Call &) = delete;
-            auto operator=(const Call &) -> Call & = delete;
-
-            ~Call() {
-                if (stream_) {
-                    static_cast<void>(stream_->Finish());
-                }
-            }
-
-            [[nodiscard]] auto Exchange(
-                const proxmox::backup::ReadRequest &request,
-                proxmox::backup::ReadResponse &response) -> bool {
-                return stream_ && stream_->Write(request) &&
-                    stream_->Read(&response);
-            }
-
-        private:
-            struct Cancel {
-                grpc::ClientContext &context;
-
-                auto operator()() const noexcept -> void {
-                    context.TryCancel();
-                }
-            };
-
-            grpc::ClientContext context_;
-            std::stop_callback<Cancel> cancel_;
-            std::unique_ptr<grpc::ClientReaderWriter<
-                proxmox::backup::ReadRequest,
-                proxmox::backup::ReadResponse>> stream_;
-        };
-
         proxmox::backup::BlockDevice::Stub &stub_;
         std::stop_token stop_;
-        std::optional<Call> call_;
     };
 
     explicit GrpcBackingDevice(const std::filesystem::path &path) {
@@ -366,8 +332,8 @@ public:
     }
 
     [[nodiscard]] auto CreateReader(
-        std::stop_token stop) const noexcept -> ReadStream {
-        return ReadStream{*stub_, std::move(stop)};
+        std::stop_token stop) const noexcept -> Reader {
+        return Reader{*stub_, std::move(stop)};
     }
 
 private:

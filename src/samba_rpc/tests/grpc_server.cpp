@@ -2,14 +2,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <condition_variable>
 #include <exception>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <print>
 #include <stdexcept>
 #include <string>
@@ -20,6 +23,8 @@
 #include "block-device.grpc.pb.h"
 
 namespace {
+
+using namespace std::chrono_literals;
 
 [[nodiscard]] auto ReadFile(const std::filesystem::path &path) -> std::string {
     const auto length = std::filesystem::file_size(path);
@@ -62,6 +67,19 @@ public:
         const proxmox::backup::ReadRequest *const request,
         proxmox::backup::ReadResponse *const response)
         -> grpc::Status override {
+        {
+            auto lock = std::unique_lock{first_reads_mutex_};
+            if (first_read_count_ < 2) {
+                ++first_read_count_;
+                first_reads_ready_.notify_all();
+                if (!first_reads_ready_.wait_for(lock, 1s,
+                        [this] { return first_read_count_ == 2; })) {
+                    return {grpc::StatusCode::DEADLINE_EXCEEDED,
+                        "the first two reads did not arrive concurrently"};
+                }
+            }
+        }
+
         if (request->offset() >= std::uint64_t{data_.size()}) {
             return grpc::Status::OK;
         }
@@ -75,6 +93,9 @@ public:
 
 private:
     const std::string data_;
+    std::mutex first_reads_mutex_;
+    std::condition_variable first_reads_ready_;
+    std::size_t first_read_count_ = 0;
 };
 
 } // namespace

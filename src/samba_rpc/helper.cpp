@@ -14,22 +14,31 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <condition_variable>
+#include <deque>
+#include <exception>
 #include <filesystem>
 #include <format>
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <mutex>
+#include <new>
 #include <optional>
 #include <print>
 #include <span>
 #include <stdexcept>
+#include <stop_token>
 #include <system_error>
+#include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -42,6 +51,8 @@
 #endif
 
 extern "C" {
+#include <tevent.h>
+
 #include "generated/ndr_devicefs_block_device.h"
 
 /*
@@ -297,23 +308,187 @@ private:
 };
 #endif
 
+class ReadExecutor;
+
+class ReadOperation final {
+public:
+    ReadOperation(ReadExecutor &executor,
+        const AbstractBackingDevice &device,
+        dcesrv_call_state &call,
+        Read &request)
+        : executor_{executor},
+          device_{device},
+          call_{call},
+          request_{request},
+          buffer_{request.out.buffer, request.in.wanted},
+          offset_{request.in.offset},
+          completion_context_{
+              tevent_threaded_context_create(&call, call.event_ctx)},
+          completion_event_{tevent_create_immediate(&call)} {
+        if ((completion_context_ == nullptr) ||
+            (completion_event_ == nullptr)) {
+            throw std::bad_alloc{};
+        }
+    }
+
+    auto Run() noexcept -> void;
+
+private:
+    static void Complete(tevent_context *, tevent_immediate *,
+        void *private_data) noexcept;
+
+    auto Reply() noexcept -> void;
+
+    ReadExecutor &executor_;
+    const AbstractBackingDevice &device_;
+    dcesrv_call_state &call_;
+    Read &request_;
+    const std::span<std::uint8_t> buffer_;
+    const std::uint64_t offset_;
+    tevent_threaded_context *const completion_context_;
+    tevent_immediate *const completion_event_;
+    NTSTATUS status_ = NT_STATUS_IO_DEVICE_ERROR;
+    std::uint32_t transferred_ = 0;
+};
+
+class ReadExecutor final {
+public:
+    explicit ReadExecutor(const AbstractBackingDevice &device)
+        : device_{device} {
+        // At least two workers are required for reads to overlap. Above that,
+        // use the machine's concurrency instead of imposing another fixed
+        // limit below the RPC client and filesystem dispatcher.
+        const auto worker_count = std::max(
+            2u, std::thread::hardware_concurrency());
+        workers_.reserve(worker_count);
+        for (auto index = 0u; index < worker_count; ++index) {
+            workers_.emplace_back(
+                [this](const std::stop_token stop) noexcept {
+                    Run(stop);
+                });
+        }
+    }
+
+    ReadExecutor(const ReadExecutor &) = delete;
+    auto operator=(const ReadExecutor &) -> ReadExecutor & = delete;
+
+    ~ReadExecutor() {
+        for (auto &worker : workers_) {
+            worker.request_stop();
+        }
+        ready_.notify_all();
+    }
+
+    auto Submit(dcesrv_call_state &call, Read &request) -> void {
+        auto operation = std::make_shared<ReadOperation>(
+            *this, device_, call, request);
+        {
+            auto lock = std::lock_guard{mutex_};
+            const auto [active, inserted] = active_.emplace(
+                operation.get(), operation);
+            if (!inserted) {
+                std::terminate();
+            }
+            try {
+                pending_.push_back(std::move(operation));
+            } catch (...) {
+                active_.erase(active);
+                throw;
+            }
+        }
+        ready_.notify_one();
+    }
+
+private:
+    friend class ReadOperation;
+
+    auto Run(const std::stop_token stop) noexcept -> void {
+        while (!stop.stop_requested()) {
+            auto lock = std::unique_lock{mutex_};
+            if (!ready_.wait(lock, stop,
+                    [this] { return !pending_.empty(); })) {
+                return;
+            }
+            if (stop.stop_requested()) {
+                return;
+            }
+            auto operation = std::move(pending_.front());
+            pending_.pop_front();
+            lock.unlock();
+            operation->Run();
+        }
+    }
+
+    [[nodiscard]] auto Take(ReadOperation *const operation) noexcept
+        -> std::shared_ptr<ReadOperation> {
+        auto lock = std::lock_guard{mutex_};
+        auto active = active_.extract(operation);
+        if (active.empty()) {
+            std::terminate();
+        }
+        return std::move(active.mapped());
+    }
+
+    const AbstractBackingDevice &device_;
+    std::mutex mutex_;
+    std::condition_variable_any ready_;
+    std::deque<std::shared_ptr<ReadOperation>> pending_;
+    std::unordered_map<ReadOperation *, std::shared_ptr<ReadOperation>>
+        active_;
+    // Destroying the jthreads first ensures that no worker can retain an
+    // operation while the queues and backing device are being destroyed.
+    std::vector<std::jthread> workers_;
+};
+
+auto ReadOperation::Run() noexcept -> void {
+    const auto transferred = device_.Read(buffer_, offset_);
+    if ((transferred >= 0) &&
+        std::in_range<std::uint32_t>(transferred)) {
+        status_ = NT_STATUS_OK;
+        transferred_ = static_cast<std::uint32_t>(transferred);
+    }
+
+    /*
+     * Samba owns the call and all of its NDR output. Only its event-loop
+     * thread may finish that call. tevent transfers this completion back to
+     * that thread after the blocking read has left the RPC dispatch path.
+     */
+    tevent_threaded_schedule_immediate(completion_context_,
+        completion_event_, Complete, this);
+}
+
+void ReadOperation::Complete(tevent_context *, tevent_immediate *,
+    void *const private_data) noexcept {
+    auto *const operation = static_cast<ReadOperation *>(private_data);
+    auto owner = operation->executor_.Take(operation);
+    owner->Reply();
+}
+
+auto ReadOperation::Reply() noexcept -> void {
+    request_.out.result = status_;
+    *request_.out.transferred = transferred_;
+    dcesrv_async_reply(&call_);
+}
+
 struct ServiceState {
     // Samba can ask the executable which interfaces it provides without also
     // requesting the endpoint servers that dispatch those interfaces. Keeping
     // the device optional allows interface discovery to remain side-effect
     // free; GetServers opens it only when Samba requests a dispatch server.
     std::unique_ptr<AbstractBackingDevice> backing_device;
+    std::optional<ReadExecutor> read_executor;
     std::array<const dcesrv_endpoint_server *, 1> endpoint_servers{};
 };
 
 /*
  * The generated dispatcher calls GetLength and Read without passing the
  * ServiceState created in main. GetServers publishes the selected backing
- * device through this read-only pointer after endpoint registration succeeds.
- * rpc_worker_main returns before main destroys the ServiceState, so the device
- * outlives every call that can use this pointer.
+ * device and read executor through read-only pointers after endpoint
+ * registration succeeds. rpc_worker_main returns before main destroys the
+ * ServiceState, so both objects outlive every call that can use them.
  */
 const AbstractBackingDevice *active_backing_device = nullptr;
+ReadExecutor *active_read_executor = nullptr;
 
 auto GetInterfaces(
     const ndr_interface_table ***const interfaces,
@@ -348,13 +523,7 @@ auto GetServers(dcesrv_context *,
             return NT_STATUS_INVALID_PARAMETER;
         }
         PrintDiagnostic("rpcd_devicefs: inspecting backing path '{}'", path);
-        /*
-         * Constructing the selected device is the only C++ operation in this
-         * callback that can throw. The catch belongs here because Samba
-         * invokes GetServers through a noexcept C callback; a catch around
-         * rpc_worker_main in main could not receive an exception without first
-         * allowing it to escape this ABI boundary.
-         */
+        auto backing_device = std::unique_ptr<AbstractBackingDevice>{};
         try {
 #if DEVICEFS_ENABLE_GRPC_TRANSPORT
             /*
@@ -368,16 +537,18 @@ auto GetServers(dcesrv_context *,
             struct stat information {};
             if ((stat(path, &information) == 0) &&
                 S_ISSOCK(information.st_mode)) {
-                state.backing_device =
-                    std::make_unique<GrpcBackingDevice>(path);
+                backing_device = std::make_unique<GrpcBackingDevice>(path);
             } else {
-                state.backing_device =
-                    std::make_unique<BackingDevice>(path);
+                backing_device = std::make_unique<BackingDevice>(path);
             }
 #else
-            state.backing_device = std::make_unique<BackingDevice>(path);
+            backing_device = std::make_unique<BackingDevice>(path);
 #endif
+            state.backing_device = std::move(backing_device);
+            state.read_executor.emplace(*state.backing_device);
         } catch (...) {
+            state.read_executor.reset();
+            state.backing_device.reset();
             return NT_STATUS_UNSUCCESSFUL;
         }
 
@@ -390,11 +561,15 @@ auto GetServers(dcesrv_context *,
         const auto status =
             dcerpc_server_devicefs_block_device_init(nullptr);
         if (!NT_STATUS_IS_OK(status)) {
+            state.read_executor.reset();
+            state.backing_device.reset();
             return status;
         }
         state.endpoint_servers.front() =
             dcesrv_ep_server_byname(NDR_DEVICEFS_BLOCK_DEVICE_NAME);
         if (state.endpoint_servers.front() == nullptr) {
+            state.read_executor.reset();
+            state.backing_device.reset();
             return NT_STATUS_NOT_FOUND;
         }
 
@@ -407,6 +582,7 @@ auto GetServers(dcesrv_context *,
          * with this pointer.
          */
         active_backing_device = state.backing_device.get();
+        active_read_executor = &*state.read_executor;
     }
 
     /*
@@ -432,8 +608,12 @@ extern "C" NTSTATUS dcesrv_GetLength(dcesrv_call_state *,
     return NT_STATUS_OK;
 }
 
-extern "C" NTSTATUS dcesrv_Read(dcesrv_call_state *,
+extern "C" NTSTATUS dcesrv_Read(dcesrv_call_state *const call,
     TALLOC_CTX *const memory, Read *const request) noexcept {
+    if (!(call->state_flags & DCESRV_CALL_STATE_FLAG_MAY_ASYNC)) {
+        return NT_STATUS_NOT_SUPPORTED;
+    }
+
     request->out.buffer = request->in.wanted == 0
         ? nullptr
         : talloc_array(memory, std::uint8_t, request->in.wanted);
@@ -441,12 +621,17 @@ extern "C" NTSTATUS dcesrv_Read(dcesrv_call_state *,
         return NT_STATUS_NO_MEMORY;
     }
 
-    const auto transferred = active_backing_device->Read(
-        {request->out.buffer, request->in.wanted}, request->in.offset);
-    if (transferred == -1) {
-        return NT_STATUS_IO_DEVICE_ERROR;
+    if (request->in.wanted == 0) {
+        *request->out.transferred = 0;
+        return NT_STATUS_OK;
     }
-    *request->out.transferred = static_cast<std::uint32_t>(transferred);
+
+    try {
+        active_read_executor->Submit(*call, *request);
+    } catch (...) {
+        return NT_STATUS_NO_MEMORY;
+    }
+    call->state_flags |= DCESRV_CALL_STATE_FLAG_ASYNC;
     return NT_STATUS_OK;
 }
 

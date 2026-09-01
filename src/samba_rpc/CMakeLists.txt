@@ -72,6 +72,8 @@ find_library(DCERPC_BINDING_LIBRARY dcerpc-binding REQUIRED)
 find_library(NDR_LIBRARY ndr REQUIRED)
 find_library(SAMBA_UTIL_LIBRARY samba-util REQUIRED)
 find_library(TALLOC_LIBRARY talloc REQUIRED)
+find_library(TEVENT_LIBRARY tevent REQUIRED)
+find_package(Threads REQUIRED)
 
 if(DEVICEFS_ENABLE_GRPC_TRANSPORT)
     set(GRPC_PROTO "${CMAKE_CURRENT_SOURCE_DIR}/idl/block-device.proto")
@@ -185,6 +187,8 @@ target_link_libraries(rpcd_devicefs PRIVATE
     "${NDR_LIBRARY}"
     "${SAMBA_UTIL_LIBRARY}"
     "${TALLOC_LIBRARY}"
+    "${TEVENT_LIBRARY}"
+    Threads::Threads
 )
 if(DEVICEFS_ENABLE_GRPC_TRANSPORT)
     target_link_libraries(rpcd_devicefs PRIVATE devicefs-grpc-protocol)
@@ -215,7 +219,6 @@ if(BUILD_TESTING)
     find_library(SAMBA_CREDENTIALS_LIBRARY samba-credentials REQUIRED)
     find_library(SAMBA_ERRORS_LIBRARY samba-errors REQUIRED)
     find_library(SAMBA_HOSTCONFIG_LIBRARY samba-hostconfig REQUIRED)
-    find_library(TEVENT_LIBRARY tevent REQUIRED)
     find_library(TEVENT_UTIL_LIBRARY tevent-util REQUIRED)
     find_program(MKTEMP_EXECUTABLE NAMES gmktemp mktemp REQUIRED)
     find_program(PDBEDIT_EXECUTABLE NAMES pdbedit REQUIRED)

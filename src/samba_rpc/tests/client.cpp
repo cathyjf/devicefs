@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -35,6 +36,14 @@ namespace {
 
 constexpr auto kPrefix = std::string_view{"DeviceFs Samba RPC fixture\n"};
 constexpr auto kBackingLength = std::uint64_t{1024 * 1024};
+constexpr auto kConcurrentReadCount = std::uint32_t{64};
+constexpr auto kConcurrentReadOffsets = std::to_array<std::uint64_t>(
+    {8192, 16384});
+
+using TallocRequest = std::unique_ptr<tevent_req,
+    decltype([](tevent_req *const request) noexcept {
+        static_cast<void>(talloc_free(request));
+    })>;
 
 auto Check(const NTSTATUS status, const std::string_view operation) -> void {
     if (!NT_STATUS_IS_OK(status)) {
@@ -70,6 +79,52 @@ auto ExpectedPattern(const std::uint64_t offset, const std::size_t length)
     return result;
 }
 
+auto VerifyConcurrentReads(dcerpc_pipe &pipe, TALLOC_CTX *const memory,
+    tevent_context &events) -> void {
+    struct PendingRead {
+        std::uint64_t offset;
+        std::vector<std::uint8_t> buffer;
+        std::uint32_t transferred = 0;
+        TallocRequest request{};
+    };
+
+    auto reads = std::array{
+        PendingRead{
+            .offset = kConcurrentReadOffsets.at(0),
+            .buffer = std::vector<std::uint8_t>(kConcurrentReadCount),
+        },
+        PendingRead{
+            .offset = kConcurrentReadOffsets.at(1),
+            .buffer = std::vector<std::uint8_t>(kConcurrentReadCount),
+        },
+    };
+
+    for (auto &read : reads) {
+        read.request.reset(dcerpc_Read_send(memory, &events,
+            pipe.binding_handle, "fixture", read.offset,
+            kConcurrentReadCount, &read.transferred, read.buffer.data()));
+        if (!read.request) {
+            throw std::bad_alloc{};
+        }
+    }
+
+    for (auto &read : reads) {
+        if (!tevent_req_poll(read.request.get(), &events)) {
+            throw std::runtime_error{"concurrent Read transport failed"};
+        }
+        auto result = NTSTATUS{};
+        Check(dcerpc_Read_recv(read.request.get(), memory, &result),
+            "concurrent Read transport");
+        Check(result, "concurrent Read");
+        read.buffer.resize(read.transferred);
+        if (read.buffer != ExpectedPattern(
+                read.offset, kConcurrentReadCount)) {
+            throw std::runtime_error{
+                "concurrent Read returned data from the wrong offset"};
+        }
+    }
+}
+
 } // namespace
 
 auto main(const int argc, char *const argv[]) -> int {
@@ -102,8 +157,14 @@ auto main(const int argc, char *const argv[]) -> int {
         if (credentials == nullptr) {
             throw std::runtime_error{"could not configure credentials"};
         }
+        dcerpc_binding *binding = nullptr;
+        Check(dcerpc_parse_binding(memory.get(), argv[2], &binding),
+            "parse binding");
+        Check(dcerpc_binding_set_flags(
+            binding, DCERPC_CONCURRENT_MULTIPLEX, 0),
+            "enable concurrent multiplexing");
         dcerpc_pipe *pipe = nullptr;
-        Check(dcerpc_pipe_connect(memory.get(), &pipe, argv[2],
+        Check(dcerpc_pipe_connect_b(memory.get(), &pipe, binding,
             &ndr_table_devicefs_block_device, credentials, events,
             configuration), "connect");
 
@@ -117,6 +178,8 @@ auto main(const int argc, char *const argv[]) -> int {
                 "GetLength returned {}, expected {}", length,
                 kBackingLength)};
         }
+
+        VerifyConcurrentReads(*pipe, memory.get(), *events);
 
         const auto prefix = CallRead(
             *pipe, memory.get(), 0, std::uint32_t{kPrefix.size()});

@@ -134,6 +134,8 @@ try {
     if ($TestClient) {
         $backing_stream.Write($expected)
         Write-TestPattern $backing_stream 4093 73
+        Write-TestPattern $backing_stream 8192 64
+        Write-TestPattern $backing_stream 16384 64
         Write-TestPattern $backing_stream ($backing_length - 7) 7
     }
 } finally {
@@ -312,8 +314,9 @@ try {
         } else {
             'the local block device'
         }
-        $authenticated_test = "authenticated GetLength and positioned Read, " +
-            "including a short read at EOF, through $backing_description"
+        $authenticated_test = "authenticated GetLength and concurrent " +
+            "positioned Read, including a short read at EOF, through " +
+            $backing_description
         Write-Host "Testing: $authenticated_test."
         $client = Invoke-TestClient $ClientPath @(
             $configuration, $binding, $username, $password) 3000

@@ -266,6 +266,10 @@ public:
         return length_;
     }
 
+    auto RequestStop() noexcept -> void {
+        static_cast<void>(stop_source_.request_stop());
+    }
+
     [[nodiscard]] auto Read(
         const std::span<std::uint8_t> buffer,
         const std::uint64_t offset) const noexcept -> ssize_t override {
@@ -274,6 +278,9 @@ public:
                 "rpcd_devicefs: calling gRPC Read(offset={}, count={})",
                 offset, buffer.size());
             auto context = grpc::ClientContext{};
+            const auto cancel = std::stop_callback{
+                stop_source_.get_token(),
+                [&context] noexcept { context.TryCancel(); }};
             auto request = proxmox::backup::ReadRequest{};
             request.set_offset(offset);
             request.set_count(static_cast<std::uint32_t>(buffer.size()));
@@ -304,6 +311,7 @@ public:
 
 private:
     std::unique_ptr<proxmox::backup::BlockDevice::Stub> stub_;
+    std::stop_source stop_source_;
     std::uint64_t length_ = 0;
 };
 #endif
@@ -353,7 +361,7 @@ private:
 
 class ReadExecutor final {
 public:
-    explicit ReadExecutor(const AbstractBackingDevice &device)
+    explicit ReadExecutor(AbstractBackingDevice &device)
         : device_{device} {
         // At least two workers are required for reads to overlap. Above that,
         // use the machine's concurrency instead of imposing another fixed
@@ -376,6 +384,13 @@ public:
         for (auto &worker : workers_) {
             worker.request_stop();
         }
+#if DEVICEFS_ENABLE_GRPC_TRANSPORT
+        if (auto *const grpc_device =
+                dynamic_cast<GrpcBackingDevice *>(&device_);
+            grpc_device != nullptr) {
+            grpc_device->RequestStop();
+        }
+#endif
         ready_.notify_all();
     }
 
@@ -429,7 +444,7 @@ private:
         return std::move(active.mapped());
     }
 
-    const AbstractBackingDevice &device_;
+    AbstractBackingDevice &device_;
     std::mutex mutex_;
     std::condition_variable_any ready_;
     std::deque<std::shared_ptr<ReadOperation>> pending_;

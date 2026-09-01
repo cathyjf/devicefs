@@ -3,9 +3,7 @@
 
 set vss_mount_point /mnt/vss
 set pbs_manifest_filename devicefs-manifest.conf
-
-# Set this to 1 to enable the experimental `map-grpc` mode.
-set --export use_map_grpc 0
+set --export use_map_grpc 1
 
 function unmount_vss
     timeout --kill-after=1s 5s fish --no-config -c 'while ! sudo -n umount $argv[1]; sleep 1; end' $vss_mount_point

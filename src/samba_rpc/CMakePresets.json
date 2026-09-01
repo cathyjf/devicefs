@@ -14,7 +14,8 @@
       "binaryDir": "${sourceDir}/../../build/samba_rpc",
       "cacheVariables": {
         "BUILD_TESTING": true,
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_BUILD_TYPE": "Release",
+        "DEVICEFS_ENABLE_GRPC_TRANSPORT": true
       },
       "warnings": {
         "experimental": false

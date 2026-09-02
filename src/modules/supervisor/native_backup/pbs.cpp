@@ -23,6 +23,7 @@ module devicefs.supervisor.native_backup:pbs;
 import std;
 import <devicefs/windows_imports.h>;
 import :internal;
+import :password_reset;
 import :privileges;
 import :s4u_logon;
 import devicefs.common;
@@ -405,7 +406,7 @@ struct WslProcess {
         auto result = WslProcess{};
         result.process = StartWslWithLogon(
             windows_username,
-            configuration.windows_password,
+            ResetBackupAccountPassword(windows_username),
             wsl_path, command, wsl_directory,
             standard_input, standard_output, standard_error);
         return result;

@@ -191,7 +191,7 @@ template <std::size_t Size>
     // byte range passed as `AuthenticationInformation`; neither source
     // documents or demonstrates that layout.
     //
-    // Consequently, for consistency for the Microsoft-endorsed implementation,
+    // Consequently, for consistency with the Microsoft-endorsed implementation,
     // `request_storage` contains the structure followed by both strings; its
     // allocation must remain stable and `request_size` must cover all three
     // objects until `LsaLogonUser` returns.

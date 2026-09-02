@@ -160,11 +160,32 @@ export [[nodiscard]] auto RunBackupConsole() -> int {
     }
     const auto username = std::filesystem::path{ReadBackupConfiguration(
         ResolvePersistentPaths().configuration).windows_username}.wstring();
-    const auto shell = [] {
-        if (const auto powershell = PowerShellPath();
-            powershell && std::filesystem::exists(*powershell)) {
-            return *powershell;
+    const auto try_start_shell = [&username](
+        const std::filesystem::path &shell) {
+        auto startup = STARTUPINFOW{.cb = sizeof(STARTUPINFOW)};
+        auto process = wil::unique_process_information{};
+        // With zero creation flags, `CreateProcessWithLogonW` creates a new
+        // console. A null `STARTUPINFO::lpDesktop` makes the child inherit the
+        // supervisor's window station and desktop. See
+        // <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw>.
+        if (!CreateProcessWithLogonW(
+                username.c_str(), internal::kLocalDomain.c_str(),
+                internal::ResetBackupAccountPassword(username).c_str(),
+                LOGON_WITH_PROFILE, shell.c_str(), nullptr, 0,
+                nullptr, nullptr, &startup, &process)) {
+            return false;
         }
+        constexpr auto kProcessStartWait = std::chrono::milliseconds{300};
+        std::this_thread::sleep_for(kProcessStartWait);
+        auto exit_code = DWORD{};
+        return GetExitCodeProcess(process.hProcess, &exit_code) &&
+            ((exit_code == STILL_ACTIVE) || (exit_code == 0));
+    };
+    if (const auto powershell = PowerShellPath();
+        powershell && try_start_shell(*powershell)) {
+        return 0;
+    }
+    const auto shell = [] {
         auto system_directory = std::wstring{};
         if (const auto error = wil::GetSystemDirectoryW(system_directory);
             FAILED(error)) {
@@ -173,17 +194,7 @@ export [[nodiscard]] auto RunBackupConsole() -> int {
         }
         return std::filesystem::path{system_directory} / L"cmd.exe";
     }();
-    auto startup = STARTUPINFOW{.cb = sizeof(STARTUPINFOW)};
-    auto process = wil::unique_process_information{};
-    // With zero creation flags, `CreateProcessWithLogonW` creates a new
-    // console. A null `STARTUPINFO::lpDesktop` makes the child inherit the
-    // supervisor's window station and desktop. See
-    // <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw>.
-    if (!CreateProcessWithLogonW(
-            username.c_str(), internal::kLocalDomain.c_str(),
-            internal::ResetBackupAccountPassword(username).c_str(),
-            LOGON_WITH_PROFILE, shell.c_str(), nullptr, 0,
-            nullptr, nullptr, &startup, &process)) {
+    if (!try_start_shell(shell)) {
         WinError("could not start a console for the backup user: {}",
             std::wstring_view{username});
     }

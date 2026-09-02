@@ -45,7 +45,6 @@ export struct WslRestoreConfiguration : WslConfiguration {
 
 export struct BackupConfiguration {
     std::string windows_username;
-    wil::secure_wstring windows_password;
     WslConfiguration wsl_backup;
     std::optional<WslRestoreConfiguration> wsl_restore;
     std::u8string pbs_server;
@@ -87,11 +86,6 @@ using winrt::Windows::Data::Json::JsonValueType;
 }
 
 template <typename String>
-[[nodiscard]] auto CopyWide(const winrt::hstring &value) {
-    return String{value.begin(), value.end()};
-}
-
-template <typename String>
 [[nodiscard]] auto ToUtf8(const winrt::hstring &value) {
     const auto size = WideCharToMultiByte(
         CP_UTF8, WC_ERR_INVALID_CHARS, value.c_str(), -1,
@@ -130,19 +124,6 @@ struct MemberDestination {
 
     Value BackupConfiguration::*member;
 };
-
-template <typename String>
-struct WideTextDestination : MemberDestination<String> {
-    using MemberDestination<String>::MemberDestination;
-
-    [[nodiscard]] static constexpr auto TemplateValue() noexcept {
-        return std::string_view{"\"\""};
-    }
-};
-
-template <typename String>
-WideTextDestination(String BackupConfiguration::*)
-    -> WideTextDestination<String>;
 
 template <typename String>
 struct Utf8TextDestination : MemberDestination<String> {
@@ -302,7 +283,6 @@ using ConfigurationFields = std::vector<ConfigurationField>;
 
 using FieldDestination = std::variant<
     Utf8TextDestination<std::string>,
-    WideTextDestination<wil::secure_wstring>,
     Utf8TextDestination<std::u8string>,
     Utf8TextDestination<SecureUtf8String>,
     OptionalStringDestination,
@@ -344,9 +324,6 @@ constexpr ConfigurationField::~ConfigurationField() = default;
             {"username",
                 Utf8TextDestination{
                     &BackupConfiguration::windows_username}},
-            {"password",
-                WideTextDestination{
-                    &BackupConfiguration::windows_password}},
         }},
         {"wsl", ConfigurationFields{
             {"backup", WslConfigurationDestination{
@@ -527,13 +504,6 @@ struct FieldReader {
         const IJsonValue &value,
         const std::string_view member) noexcept
         : configuration(configuration), value(value), member(member) {}
-
-    template <typename String>
-    auto operator()(const WideTextDestination<String> &destination) const
-        -> void {
-        destination.Get(configuration.get()) =
-            CopyWide<String>(ReadString(value.get(), member));
-    }
 
     template <typename String>
     auto operator()(const Utf8TextDestination<String> &destination) const

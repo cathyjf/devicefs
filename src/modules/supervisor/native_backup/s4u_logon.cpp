@@ -131,19 +131,12 @@ template <std::size_t Size>
 
 [[nodiscard]] auto LogOnWindowsAccountWithS4u(
     const wil::zwstring_view username) {
-    constexpr auto kMaximumUsernameCharacters =
-        std::numeric_limits<USHORT>::max() / sizeof(wchar_t);
-    if (username.length() > kMaximumUsernameCharacters) {
-        throw std::runtime_error(
-            "the configured Windows username is too long for S4U logon");
-    }
-
     if (!TryGrantBatchLogonRight(username)) {
-        static_cast<void>(devicefs::WriteToStream(
+        devicefs::WriteToStream(
             devicefs::stderr,
             "backup-supervisor: warning: could not grant "
             "SeBatchLogonRight to the configured WSL account; attempting "
-            "S4U logon in case the account already holds it\n"));
+            "S4U logon in case the account already holds it\n");
     }
 
     constexpr auto privilege_names = std::array{

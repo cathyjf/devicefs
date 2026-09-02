@@ -115,7 +115,7 @@ constexpr auto kShareMode =
             }
             if (std::chrono::steady_clock::now() >= retry_deadline) {
                 WinError("could not open attached VHDX Partition1 root {}",
-                    std::filesystem::path{partition_root}.string());
+                    std::wstring_view{partition_root});
             }
             const auto wait = WaitForSingleObject(
                 cancellation_event,
@@ -407,7 +407,7 @@ class MountedVolume {
         if (!SetVolumeMountPointW(
                 mount_path_.c_str(), volume_name.c_str())) {
             WinError("could not mount the attached volume at {}",
-                directory.string());
+                std::wstring_view{directory.native()});
         }
     }
 
@@ -422,7 +422,7 @@ class MountedVolume {
         try {
             if (!DeleteVolumeMountPointW(mount_path_.c_str())) {
                 WinError("could not remove the attached-volume mount point {}",
-                    std::filesystem::path{mount_path_}.string());
+                    std::wstring_view{mount_path_});
             }
         } catch (const std::exception &error) {
             TryWriteError("attached-volume mount cleanup failed", error);

@@ -37,6 +37,38 @@ export struct ExplicitWin32Error final {
 
 namespace detail {
 
+template <class Argument>
+constexpr auto kIsWideStringView = std::is_same_v<
+    std::remove_cvref_t<Argument>, std::wstring_view>;
+
+template <class Argument>
+using WinErrorFormatArgument = std::conditional_t<
+    kIsWideStringView<Argument>, std::string, Argument>;
+
+template <class Argument>
+[[nodiscard]] decltype(auto) AdaptWinErrorFormatArgument(
+    Argument &&argument) noexcept(!kIsWideStringView<Argument>) {
+    if constexpr (kIsWideStringView<Argument>) {
+        return std::filesystem::path{argument}.string();
+    } else {
+        [[gsl::suppress("26445",
+            justification:
+                "When `Argument` is an lvalue `std::string_view`, "
+                "`decltype(auto)` preserves its reference and triggers "
+                "`C26445`. This helper does not store that reference. "
+                "It preserves the value category of every non-wide format "
+                "argument so `std::format` receives the same argument type "
+                "used for compile-time format checking. The returned reference "
+                "is consumed immediately by `std::format` in the same "
+                "full-expression, while the original `WinError` argument is "
+                "still alive. Returning view types by value only to silence "
+                "the warning would require a second type transformation and "
+                "would make this generic forwarding branch treat views "
+                "differently from other arguments.")]]
+        return std::forward<Argument>(argument);
+    }
+}
+
 template <class... Arguments>
 constexpr auto kHasExplicitWin32Error = [] {
     if constexpr (sizeof...(Arguments) == 0) {
@@ -54,7 +86,8 @@ struct WinErrorFormat;
 
 template <class Arguments, std::size_t... Index>
 struct WinErrorFormat<Arguments, std::index_sequence<Index...>> {
-    using type = std::format_string<std::tuple_element_t<Index, Arguments>...>;
+    using type = std::format_string<WinErrorFormatArgument<
+        std::tuple_element_t<Index, Arguments>>...>;
 };
 
 template <class... Arguments>
@@ -90,7 +123,8 @@ export template <class... Arguments>
     const auto operation = [&]<std::size_t... Index>(
         std::index_sequence<Index...>) {
         return std::format(format,
-            std::get<Index>(std::move(argument_tuple))...);
+            detail::AdaptWinErrorFormatArgument(
+                std::get<Index>(std::move(argument_tuple)))...);
     }(std::make_index_sequence<format_argument_count>{});
     throw std::system_error(
         std::bit_cast<int>(error), std::system_category(),

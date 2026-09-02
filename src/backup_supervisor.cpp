@@ -823,6 +823,7 @@ auto PrintHelp() noexcept {
         devicefs::stdout,
         "Usage:\n"
         "  backup-supervisor.exe --devicefs [devicefs arguments]\n"
+        "  backup-supervisor.exe --backup-console\n"
         "  backup-supervisor.exe --foreground [--no-writers] "
         "[--namespace NAMESPACE] "
         "[--volumes VOLUME[,VOLUME...]]\n"
@@ -861,6 +862,9 @@ auto BackupSupervisorMain(
             return 0;
         }
         const auto option = arguments.front();
+        if (option == "--backup-console") {
+            return RunBackupConsole();
+        }
         if (option == kRunServiceOption) {
             if (arguments.size() != 1) {
                 throw std::invalid_argument(

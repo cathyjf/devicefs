@@ -23,6 +23,7 @@ export module devicefs.supervisor.native_backup;
 import std;
 import <devicefs/windows_imports.h>;
 import :internal;
+import :password_reset;
 import :devicefs_process;
 export import :incremental_diagnostics;
 export import :manifest;
@@ -30,6 +31,7 @@ import :pbs;
 import devicefs.common;
 import devicefs.stream_writer;
 import devicefs.supervisor.configuration;
+import devicefs.supervisor.find_powershell;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.vshadow;
 
@@ -149,4 +151,41 @@ export [[nodiscard]] auto RunNativeBackup(
                 }
             });
     });
+}
+
+export [[nodiscard]] auto RunBackupConsole() -> int {
+    if (internal::RunningAsLocalSystem()) {
+        throw std::runtime_error(
+            "--backup-console cannot be run as LocalSystem");
+    }
+    const auto username = std::filesystem::path{ReadBackupConfiguration(
+        ResolvePersistentPaths().configuration).windows_username}.wstring();
+    const auto shell = [] {
+        if (const auto powershell = PowerShellPath();
+            powershell && std::filesystem::exists(*powershell)) {
+            return *powershell;
+        }
+        auto system_directory = std::wstring{};
+        if (const auto error = wil::GetSystemDirectoryW(system_directory);
+            FAILED(error)) {
+            WinError("could not identify the Windows system directory",
+                ExplicitWin32Error::FromHresult(error));
+        }
+        return std::filesystem::path{system_directory} / L"cmd.exe";
+    }();
+    auto startup = STARTUPINFOW{.cb = sizeof(STARTUPINFOW)};
+    auto process = wil::unique_process_information{};
+    // With zero creation flags, `CreateProcessWithLogonW` creates a new
+    // console. A null `STARTUPINFO::lpDesktop` makes the child inherit the
+    // supervisor's window station and desktop. See
+    // <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw>.
+    if (!CreateProcessWithLogonW(
+            username.c_str(), internal::kLocalDomain.c_str(),
+            internal::ResetBackupAccountPassword(username).c_str(),
+            LOGON_WITH_PROFILE, shell.c_str(), nullptr, 0,
+            nullptr, nullptr, &startup, &process)) {
+        WinError("could not start a console for the backup user: {}",
+            std::wstring_view{username});
+    }
+    return 0;
 }

@@ -228,6 +228,7 @@ target_sources(backup-supervisor PRIVATE "${ARTIFACT_RESOURCE_SCRIPT}")
 target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/configuration.ixx
     src/modules/supervisor/embedded_artifacts.ixx
+    src/modules/supervisor/find_powershell.ixx
     src/modules/supervisor/installation.ixx
     src/modules/supervisor/logging_console.ixx
     src/modules/supervisor/native_backup.ixx

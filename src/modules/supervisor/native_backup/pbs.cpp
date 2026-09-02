@@ -24,6 +24,7 @@ import std;
 import <devicefs/windows_imports.h>;
 import :internal;
 import :privileges;
+import :s4u_logon;
 import devicefs.common;
 import devicefs.stream_writer;
 import devicefs.supervisor.configuration;
@@ -62,18 +63,6 @@ struct PbsFishResult {
 constexpr auto kLocalDomain = wil::zwstring_view(L".");
 constexpr auto kWslCreationFlags = DWORD{
     CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT};
-
-[[nodiscard]] auto LogOnWindowsAccount(
-    const wil::zwstring_view username,
-    const wil::zwstring_view password) {
-    auto token = wil::unique_handle{};
-    if (!LogonUserW(username.c_str(), kLocalDomain.c_str(), password.c_str(),
-            LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT,
-            token.addressof())) {
-        WinError("could not log on the configured WSL account");
-    }
-    return token;
-}
 
 [[nodiscard]] auto RunningAsLocalSystem() {
     auto result = false;
@@ -423,9 +412,7 @@ struct WslProcess {
     }
 
     auto result = WslProcess{};
-    result.token = LogOnWindowsAccount(
-        windows_username,
-        configuration.windows_password);
+    result.token = LogOnWindowsAccountWithS4u(windows_username);
 
     [[gsl::suppress("type.3",
         justification: "LoadUserProfileW retains a mutable historical parameter for an input-only username.")]]

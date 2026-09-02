@@ -241,6 +241,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/native_backup/pbs.cpp
     src/modules/supervisor/native_backup/port_selection.cpp
     src/modules/supervisor/native_backup/privileges.cpp
+    src/modules/supervisor/native_backup/s4u_logon.cpp
     src/modules/supervisor/native_backup/vhdx_attachment.cpp
     src/modules/supervisor/process_diagnostics.ixx
     src/modules/supervisor/vshadow.ixx
@@ -311,7 +312,7 @@ target_compile_definitions(devicefs-filesystem PRIVATE
 
 target_compile_definitions(backup-supervisor PRIVATE _WIN32_WINNT=0x0A00)
 target_link_libraries(backup-supervisor PRIVATE
-    advapi32 bcrypt ntdll ole32 shell32 userenv virtdisk windowsapp ws2_32
+    advapi32 bcrypt ntdll ole32 secur32 shell32 userenv virtdisk windowsapp ws2_32
 )
 
 find_program(POWERSHELL_EXECUTABLE NAMES pwsh REQUIRED)

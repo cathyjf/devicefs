@@ -58,9 +58,14 @@ foreach ($report in $reports) {
             } else {
                 $source_uri.AbsoluteUri
             }
-            $region = $physical_location.region
-            Write-Output ('{0}({1},{2}): error {3}: {4}' -f
-                $source, $region.startLine, $region.startColumn,
+            $location_summary = ''
+            if ($physical_location.PSObject.Properties['Region']) {
+                $region = $physical_location.region
+                $location_summary = ('({0},{1})' -f
+                    $region.startLine, $region.startColumn)
+            }
+            Write-Output ('{0}{1}: error {2}: {3}' -f
+                $source, $location_summary,
                 $result.ruleId, $result.message.text)
         }
     }

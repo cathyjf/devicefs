@@ -24,6 +24,7 @@ module;
 #include <winrt/Windows.Management.Deployment.h>
 #include <winrt/Windows.Storage.h>
 
+#include <wil/registry.h>
 #include <wil/resource.h>
 
 export module devicefs.supervisor.find_powershell;
@@ -33,37 +34,29 @@ import devicefs.common;
 
 namespace {
 
-// Stable x64 PowerShell's Windows Installer registration.
 constexpr auto kPowerShellMsiRegistration =
     L"SOFTWARE\\Microsoft\\PowerShellCore\\InstalledVersions\\"
     L"31ab5147-9a97-4452-8443-d9709f0516e1";
-constexpr auto kPowerShellPackageFamily =
-    L"Microsoft.PowerShell_8wekyb3d8bbwe";
+constexpr auto kPowerShellMsiRegistrationValueName = L"InstallLocation";
+constexpr auto kPowerShellPackageFamily = L"Microsoft.PowerShell_8wekyb3d8bbwe";
 
 [[nodiscard]] auto PowerShellPathMSI()
     -> std::optional<std::filesystem::path> {
-    auto location_bytes = DWORD{};
-    const auto query_error = RegGetValueW(
-        HKEY_LOCAL_MACHINE, kPowerShellMsiRegistration, L"InstallLocation",
-        RRF_RT_REG_SZ, nullptr, nullptr, &location_bytes);
-    if (query_error == ERROR_SUCCESS) {
-        auto location = std::wstring(
-            location_bytes / sizeof(wchar_t), L'\0');
-        const auto read_error = RegGetValueW(
-            HKEY_LOCAL_MACHINE, kPowerShellMsiRegistration,
-            L"InstallLocation", RRF_RT_REG_SZ, nullptr,
-            location.data(), &location_bytes);
-        if (read_error != ERROR_SUCCESS) {
-            WinError("could not read the PowerShell installation path",
-                ExplicitWin32Error{std::bit_cast<DWORD>(read_error)});
-        }
-        return std::filesystem::path(location.c_str()) / L"pwsh.exe";
+    auto location = wil::unique_cotaskmem_string{};
+    const auto result = wil::reg::get_value_string_nothrow(
+        HKEY_LOCAL_MACHINE, kPowerShellMsiRegistration,
+        kPowerShellMsiRegistrationValueName, location);
+    if (wil::reg::is_registry_not_found(result)) {
+        return std::nullopt;
+    } else if (FAILED(result)) {
+        WinError(
+            "error while querying the PowerShell installation path: "
+            "HKLM\\{}\\{}",
+            std::wstring_view{kPowerShellMsiRegistration},
+            std::wstring_view{kPowerShellMsiRegistrationValueName},
+            ExplicitWin32Error::FromHresult(result));
     }
-    if (query_error != ERROR_FILE_NOT_FOUND) {
-        WinError("could not query the PowerShell installation path",
-            ExplicitWin32Error{std::bit_cast<DWORD>(query_error)});
-    }
-    return std::nullopt;
+    return std::filesystem::path(location.get()) / L"pwsh.exe";
 }
 
 [[nodiscard]] auto PowerShellPathMSIX()

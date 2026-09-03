@@ -156,12 +156,16 @@ export [[nodiscard]] auto RunNativeBackup(
 export [[nodiscard]] auto RunBackupConsole() -> int {
     if (internal::RunningAsLocalSystem()) {
         throw std::runtime_error(
-            "--backup-console cannot be run as LocalSystem");
+            "--backup-console does not support invocation as LocalSystem");
     }
     const auto username = std::filesystem::path{ReadBackupConfiguration(
         ResolvePersistentPaths().configuration).windows_username}.wstring();
+    struct ShellError {
+        DWORD win_error;
+        DWORD exit_code;
+    };
     const auto try_start_shell = [&username](
-        const std::filesystem::path &shell) {
+        const std::filesystem::path &shell) -> std::expected<void, ShellError> {
         auto startup = STARTUPINFOW{.cb = sizeof(STARTUPINFOW)};
         auto process = wil::unique_process_information{};
         // With zero creation flags, `CreateProcessWithLogonW` creates a new
@@ -173,13 +177,17 @@ export [[nodiscard]] auto RunBackupConsole() -> int {
                 internal::ResetBackupAccountPassword(username).c_str(),
                 LOGON_WITH_PROFILE, shell.c_str(), nullptr, 0,
                 nullptr, nullptr, &startup, &process)) {
-            return false;
+            return std::unexpected{ShellError{.win_error = GetLastError()}};
         }
         constexpr auto kProcessStartWait = std::chrono::milliseconds{300};
         std::this_thread::sleep_for(kProcessStartWait);
         auto exit_code = DWORD{};
-        return GetExitCodeProcess(process.hProcess, &exit_code) &&
-            ((exit_code == STILL_ACTIVE) || (exit_code == 0));
+        if (!GetExitCodeProcess(process.hProcess, &exit_code)) {
+            return std::unexpected{ShellError{.win_error = GetLastError()}};
+        } else if ((exit_code != STILL_ACTIVE) && (exit_code != 0)) {
+            return std::unexpected{ShellError{.exit_code = exit_code}};
+        }
+        return {};
     };
     if (const auto powershell = PowerShellPath();
         powershell && try_start_shell(*powershell)) {
@@ -194,9 +202,24 @@ export [[nodiscard]] auto RunBackupConsole() -> int {
         }
         return std::filesystem::path{system_directory} / L"cmd.exe";
     }();
-    if (!try_start_shell(shell)) {
-        WinError("could not start a console for the backup user: {}",
-            std::wstring_view{username});
+    if (const auto status = try_start_shell(shell); !status) {
+        const auto error = status.error();
+        if (error.exit_code != 0) {
+            devicefs::WriteToStream(devicefs::stderr,
+                L"Error: backup console '{}' for user '{}' unexpectedly "
+                L"closed quickly with exit code: 0x{:08x}\n",
+                shell.native(), username, error.exit_code);
+            if (!wil::TryGetEnvironmentVariableW<std::wstring>(L"SSH_CONNECTION").empty()) {
+                devicefs::WriteToStream(devicefs::stderr,
+                    "Information: The `--backup-console` feature might not "
+                    "be able to launch a console in an SSH session.\nTry using "
+                    "a normal interactive Windows desktop session.\n");
+            }
+            return error.exit_code;
+        }
+        WinError("could not start console '{}' for backup user '{}'",
+            std::wstring_view{shell.native()}, std::wstring_view{username},
+            ExplicitWin32Error{error.win_error});
     }
     return 0;
 }

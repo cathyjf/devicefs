@@ -150,6 +150,7 @@ inline constexpr auto kBitsPerByte = std::numeric_limits<BYTE>::digits;
 
 struct AllocationBitmap {
     UINT32 cluster_size = 0;
+    int cluster_shift = 0;
     UINT64 cluster_count = 0;
     wil::unique_virtualalloc_ptr<BYTE> storage;
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
@@ -172,10 +173,10 @@ struct AllocationBitmap {
         if (!storage) {
             return true;
         }
-        _Analysis_assume_(cluster_count != 0);
 
-        const auto first_cluster = offset / cluster_size;
-        const auto last_cluster = (offset + (length - 1)) / cluster_size;
+        const auto first_cluster = offset >> cluster_shift;
+        const auto last_cluster =
+            (offset + (length - 1)) >> cluster_shift;
         if (last_cluster >= cluster_count) {
             return true;
         }
@@ -194,17 +195,16 @@ struct AllocationBitmap {
         if (!storage || output.empty()) {
             return;
         }
-        _Analysis_assume_(cluster_count != 0);
 
         const auto end = offset + output.size();
-        const auto first_cluster = offset / cluster_size;
-        const auto last_cluster = (end - 1) / cluster_size;
+        const auto first_cluster = offset >> cluster_shift;
+        const auto last_cluster = (end - 1) >> cluster_shift;
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
         measurement->ObserveRead(output, offset);
 #endif
         auto free_begin = end;
         for (auto cluster = first_cluster; cluster <= last_cluster; ++cluster) {
-            const auto position = std::max(offset, cluster * cluster_size);
+            const auto position = std::max(offset, cluster << cluster_shift);
             if (!IsAllocated(cluster)) {
                 if (free_begin == end) {
                     free_begin = position;
@@ -435,6 +435,7 @@ namespace devicefs::filesystem_internal {
 
     auto result = AllocationBitmap{
         .cluster_size = volume.BytesPerCluster,
+        .cluster_shift = std::countr_zero(volume.BytesPerCluster),
         .cluster_count = cluster_count,
         .storage = std::move(storage),
     };

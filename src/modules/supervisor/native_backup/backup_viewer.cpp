@@ -139,10 +139,8 @@ class ViewDirectory {
 
 [[nodiscard]] auto GenerateRpcPassword() -> wil::secure_string {
     auto random = std::array<unsigned char, 32>{};
-    const auto erase_random = wil::scope_exit([&] noexcept {
-        static_cast<void>(SecureZeroMemory(
-            random.data(), random.size()));
-    });
+    const auto erase_random =
+        wil::SecureZeroMemory_scope_exit(random.data(), random.size());
     const auto status = BCryptGenRandom(
         nullptr, random.data(),
         wil::safe_cast_failfast<ULONG>(random.size()),

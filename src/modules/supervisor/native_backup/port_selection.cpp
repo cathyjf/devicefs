@@ -18,7 +18,6 @@ module;
 
 #include <winsock2.h>
 #include <wil/network.h>
-#include <wil/safecast.h>
 
 module devicefs.supervisor.native_backup:port_selection;
 
@@ -45,33 +44,20 @@ namespace internal {
                 std::bit_cast<DWORD>(WSAGetLastError())});
     }
 
-    auto endpoint = sockaddr_in{};
-    endpoint.sin_family = AF_INET;
-    endpoint.sin_addr.s_addr = htonl(INADDR_ANY);
-    [[gsl::suppress("type.1",
-        justification:
-            "Winsock represents an IPv4 sockaddr_in through its sockaddr "
-            "pointer ABI.")]]
+    auto endpoint = wil::network::socket_address{AF_INET};
     if (bind(socket_handle.get(),
-            reinterpret_cast<const sockaddr *>(&endpoint),
-            wil::safe_cast_failfast<int>(sizeof(endpoint))) == SOCKET_ERROR) {
+            endpoint.sockaddr(), endpoint.size()) == SOCKET_ERROR) {
         WinError("could not select a view TCP port candidate",
             ExplicitWin32Error{
                 std::bit_cast<DWORD>(WSAGetLastError())});
     }
-    auto endpoint_size = wil::safe_cast_failfast<int>(sizeof(endpoint));
-    [[gsl::suppress("type.1",
-        justification:
-            "Winsock represents an IPv4 sockaddr_in through its sockaddr "
-            "pointer ABI.")]]
-    if (getsockname(socket_handle.get(),
-            reinterpret_cast<sockaddr *>(&endpoint),
-            &endpoint_size) == SOCKET_ERROR) {
+    if (const auto result =
+            endpoint.reset_address_nothrow(socket_handle.get());
+        FAILED(result)) {
         WinError("could not obtain the selected view TCP port candidate",
-            ExplicitWin32Error{
-                std::bit_cast<DWORD>(WSAGetLastError())});
+            ExplicitWin32Error::FromHresult(result));
     }
-    return ntohs(endpoint.sin_port);
+    return endpoint.port();
 }
 
 } // namespace internal

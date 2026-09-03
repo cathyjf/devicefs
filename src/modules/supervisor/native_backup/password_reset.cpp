@@ -37,9 +37,8 @@ namespace internal {
 [[nodiscard]] auto ResetBackupAccountPassword(
     const wil::zwstring_view username) -> wil::secure_wstring {
     auto random = std::array<unsigned char, 32>{};
-    const auto erase_random = wil::scope_exit([&] noexcept {
-        std::ignore = SecureZeroMemory(random.data(), random.size());
-    });
+    const auto erase_random =
+        wil::SecureZeroMemory_scope_exit(random.data(), random.size());
     const auto status = BCryptGenRandom(
         nullptr, random.data(),
         wil::safe_cast_failfast<ULONG>(random.size()),

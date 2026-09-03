@@ -118,7 +118,9 @@ constexpr auto kWslCreationFlags = DWORD{
             LOGON_WITH_PROFILE, wsl_path.c_str(), wide_command.data(),
             kWslCreationFlags,
             nullptr, working_directory.c_str(), &startup, &process)) {
-        WinError("could not start WSL as the configured account");
+        WinError("could not start WSL '{}' as configured account '{}'",
+            std::wstring_view{wsl_path.native()},
+            std::wstring_view{username.c_str(), username.size()});
     }
     return process;
 }
@@ -435,7 +437,8 @@ struct WslProcess {
             GetCurrentProcess(), privilege_names,
             std::string_view{"the user-profile privileges"}};
         if (!LoadUserProfileW(result.token.get(), &profile)) {
-            WinError("could not load the configured WSL account profile");
+            WinError("could not load the profile for configured WSL account '{}'",
+                std::wstring_view{windows_username});
         }
         result.profile = LoadedProfile{
             profile.hProfile, ProfileCloser{result.token.get()}};
@@ -445,7 +448,8 @@ struct WslProcess {
     auto environment = wil::unique_environment_block{};
     if (!CreateEnvironmentBlock(
             environment.addressof(), result.token.get(), FALSE)) {
-        WinError("could not create the configured WSL account environment");
+        WinError("could not create the environment for configured WSL account '{}'",
+            std::wstring_view{windows_username});
     }
 
     // CreateProcessWithTokenW has no bInheritHandles parameter, so it cannot

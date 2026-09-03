@@ -119,7 +119,10 @@ namespace {
         const wil::zstring_view error) -> GUID {
         auto result = GUID{};
         if (IIDFromString(value.c_str(), &result) != S_OK) {
-            throw std::runtime_error(error.c_str());
+            throw std::runtime_error(std::format(
+                "{}: '{}'", error,
+                std::filesystem::path{std::wstring_view{
+                    value.c_str(), value.size()}}.string()));
         }
         return result;
     };
@@ -147,8 +150,9 @@ namespace {
         "the backup manifest contains an invalid volume identifier"};
     for (const auto &entry : volumes.GetObject()) {
         if (entry.Value().ValueType() != JsonValueType::Object) {
-            throw std::runtime_error(
-                "a backup-manifest volume is not an object");
+            throw std::runtime_error(std::format(
+                "backup-manifest volume '{}' is not an object",
+                winrt::to_string(entry.Key())));
         }
         const auto snapshot = required_value(
             entry.Value().GetObject(), L"snapshot-id", JsonValueType::String,
@@ -167,7 +171,10 @@ namespace {
                 invalid_volume_identifier),
             parse_identifier(
                 snapshot.GetString().c_str(),
-                "a backup-manifest volume contains an invalid snapshot identifier"));
+                std::format(
+                    "backup-manifest volume '{}' contains an invalid "
+                    "snapshot identifier",
+                    winrt::to_string(entry.Key()))));
     }
     return result;
 }
@@ -178,9 +185,10 @@ auto PreviousBackupManifestResult::ParseManifest() const
     -> SnapshotManifest {
     try {
         return ParseSnapshotManifest(manifest);
-    } catch (const winrt::hresult_error &) {
-        throw std::runtime_error(
-            "the Windows Runtime failed while parsing the backup manifest");
+    } catch (const winrt::hresult_error &error) {
+        throw std::runtime_error(std::format(
+            "the Windows Runtime failed while parsing the backup manifest: {}",
+            winrt::to_string(error.message())));
     }
 }
 
@@ -302,9 +310,10 @@ namespace internal {
         result.SetNamedValue(L"volumes", volumes);
         const auto encoded = winrt::to_string(result.Stringify());
         return std::u8string{encoded.begin(), encoded.end()};
-    } catch (const winrt::hresult_error &) {
-        throw std::runtime_error(
-            "could not serialize the backup manifest");
+    } catch (const winrt::hresult_error &error) {
+        throw std::runtime_error(std::format(
+            "could not serialize the backup manifest: {}",
+            winrt::to_string(error.message())));
     }
 }
 

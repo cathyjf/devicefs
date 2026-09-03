@@ -129,13 +129,15 @@ auto FurtherHardenProcess() {
     const auto output_size = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
         value.c_str(), -1, nullptr, 0, nullptr, nullptr, 0);
     if (output_size == 0) {
-        WinError("could not lowercase a virtual filename");
+        WinError("could not lowercase virtual filename '{}'",
+            std::wstring_view{value.c_str(), value.size()});
     }
 
     auto result = std::wstring(output_size, L'\0');
     if (!LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
             value.c_str(), -1, result.data(), output_size, nullptr, nullptr, 0)) {
-        WinError("could not lowercase a virtual filename");
+        WinError("could not lowercase virtual filename '{}'",
+            std::wstring_view{value.c_str(), value.size()});
     }
     result.pop_back();
     return result;
@@ -176,8 +178,8 @@ auto Usage(const auto output) noexcept {
     auto result = Options{};
     const auto next = [&](auto &i) {
         if (++i == args.size()) {
-            throw std::invalid_argument(
-                std::format("missing value after argument {}", i - 1));
+            throw std::invalid_argument(std::format(
+                "{} requires a value", args[i - 1]));
         }
         return args[i];
     };
@@ -207,7 +209,8 @@ auto Usage(const auto output) noexcept {
         } else if (arg == "--vhdx") {
             result.vhdx = true;
         } else {
-            throw std::invalid_argument(std::format("unknown option at argument {}", i));
+            throw std::invalid_argument(std::format(
+                "unknown option '{}' at argument {}", arg, i));
         }
     }
 
@@ -226,11 +229,14 @@ auto Usage(const auto output) noexcept {
         if ((name.empty()) || (name == L".") || (name == L"..") ||
             (name.size() > kMaxNameLength) ||
             (name.find_first_of(L"/\\:") != std::wstring_view::npos)) {
-            throw std::invalid_argument(std::format("invalid filename in --map #{}", i + 1));
+            throw std::invalid_argument(std::format(
+                "invalid filename '{}' in --map #{}",
+                std::filesystem::path{name}.string(), i + 1));
         }
         if (!names.emplace(Lowercase(name)).second) {
-            throw std::invalid_argument(
-                std::format("duplicate filename in --map #{}", i + 1));
+            throw std::invalid_argument(std::format(
+                "duplicate filename '{}' in --map #{}",
+                std::filesystem::path{name}.string(), i + 1));
         }
     }
     if (!result.mappings.empty()) {
@@ -255,7 +261,9 @@ auto Usage(const auto output) noexcept {
     }
     if ((result.mount.network) &&
         (result.mount.value.size() > kMaxMountPrefixLength)) {
-        throw std::invalid_argument("UNC mount prefix is too long");
+        throw std::invalid_argument(std::format(
+            "UNC mount prefix has {} characters; the maximum is {}",
+            result.mount.value.size(), kMaxMountPrefixLength));
     }
     return result;
 }
@@ -266,19 +274,19 @@ auto Usage(const auto output) noexcept {
     auto use = SID_NAME_USE{};
     LookupAccountNameA(nullptr, account.c_str(), nullptr, &sid_size, nullptr, &domain_size, &use);
     if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
-        WinError("could not resolve --read-user");
+        WinError("could not resolve --read-user account '{}'", account);
     }
 
     auto sid = std::vector<BYTE>(sid_size);
     auto domain = std::vector<char>(std::max<DWORD>(1, domain_size));
     if (!LookupAccountNameA(nullptr, account.c_str(), sid.data(), &sid_size,
             domain.data(), &domain_size, &use)) {
-        WinError("could not resolve --read-user");
+        WinError("could not resolve --read-user account '{}'", account);
     }
 
     auto sid_text = wil::unique_hlocal_ansistring{};
     if (!ConvertSidToStringSidA(sid.data(), sid_text.addressof())) {
-        WinError("could not format --read-user SID");
+        WinError("could not format the SID for --read-user account '{}'", account);
     }
 
     // SYSTEM and Administrators get full access.
@@ -289,7 +297,8 @@ auto Usage(const auto output) noexcept {
                 "O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;{})",
                 sid_text.get()).c_str(),
             SDDL_REVISION_1, descriptor.addressof(), nullptr)) {
-        WinError("could not create the filesystem ACL");
+        WinError("could not create the filesystem ACL for --read-user account '{}'",
+            account);
     }
     return descriptor;
 }
@@ -358,6 +367,10 @@ template <typename Function>
 [[nodiscard]] auto NtCallback(const Function &function) noexcept {
     try {
         return function();
+    } catch (const std::exception &error) {
+        devicefs::WriteToStream(devicefs::stderr,
+            "devicefs: filesystem callback failed: {}\n", error.what());
+        return STATUS_UNEXPECTED_IO_ERROR;
     } catch (...) {
         return STATUS_UNEXPECTED_IO_ERROR;
     }
@@ -727,10 +740,11 @@ auto RunWithDevices(
         nullptr, options.stop_event.c_str(),
         CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS)};
     if (!stop_event) {
-        WinError("could not create shutdown event");
+        WinError("could not create shutdown event '{}'", options.stop_event);
     }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        throw std::runtime_error("--stop-event already exists");
+        throw std::runtime_error(std::format(
+            "--stop-event '{}' already exists", options.stop_event));
     }
     auto stopped_event = wil::unique_event_nothrow{};
     if (!stopped_event.try_create(wil::EventOptions::ManualReset, nullptr)) {

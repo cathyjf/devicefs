@@ -71,7 +71,8 @@ namespace internal {
         nullptr, username.c_str(), 1003,
         reinterpret_cast<BYTE *>(&account), nullptr);
     if (error != NERR_Success) {
-        WinError("could not reset the configured backup account password",
+        WinError("could not reset the password for backup account '{}'",
+            std::wstring_view{username.c_str(), username.size()},
             ExplicitWin32Error{error});
     }
     return password;

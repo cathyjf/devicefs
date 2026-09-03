@@ -121,7 +121,9 @@ struct DeviceFsStartRequest {
         !SetEnvironmentVariableA(
             devicefs::rpc::kEndpointEnvironmentVariable.data(),
             request.rpc_endpoint->c_str())) {
-        WinError("could not set the RPC block-device endpoint");
+        WinError("could not set environment variable '{}' to RPC endpoint '{}'",
+            devicefs::rpc::kEndpointEnvironmentVariable,
+            *request.rpc_endpoint);
     }
     devicefs::WriteToStream(
         devicefs::stdout, "Setting up virtual filesystem: {}\n", command);
@@ -209,8 +211,9 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
         if (WaitForProcess(devicefs.process.hProcess,
                 DeviceFsProcess::kPollInterval)) {
             throw std::runtime_error(std::format(
-                "devicefs exited during startup with code {}.",
-                ProcessExitCode(devicefs.process.hProcess)));
+                "devicefs exited with code {} before creating readiness path '{}'",
+                ProcessExitCode(devicefs.process.hProcess),
+                devicefs.readiness_path.string()));
         }
         const auto cancelled = WaitForSingleObject(cancellation_event, 0);
         if (cancelled == WAIT_FAILED) {
@@ -225,8 +228,11 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
             return true;
         }
         if (std::chrono::steady_clock::now() >= deadline) {
-            throw std::runtime_error(
-                "devicefs did not mount before the startup timeout elapsed");
+            throw std::runtime_error(std::format(
+                "devicefs did not create readiness path '{}' within {} seconds",
+                devicefs.readiness_path.string(),
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    DeviceFsProcess::kStartTimeout).count()));
         }
     }
 }
@@ -278,13 +284,15 @@ auto StopDeviceFs(
                 devicefs.stop_event_name.c_str())};
             if (stop_event) {
                 if (!SetEvent(stop_event.get())) {
-                    WinError("could not request devicefs shutdown");
+                    WinError("could not signal devicefs shutdown event '{}'",
+                        devicefs.stop_event_name);
                 }
                 stop_requested = true;
             } else {
                 const auto error = GetLastError();
                 if (error != ERROR_FILE_NOT_FOUND) {
-                    WinError("could not open the devicefs shutdown event",
+                    WinError("could not open devicefs shutdown event '{}'",
+                        devicefs.stop_event_name,
                         ExplicitWin32Error{error});
                 }
             }
@@ -295,8 +303,10 @@ auto StopDeviceFs(
             break;
         }
         if (std::chrono::steady_clock::now() >= deadline) {
-            throw std::runtime_error(
-                "devicefs did not exit before the shutdown timeout elapsed");
+            throw std::runtime_error(std::format(
+                "devicefs did not exit within {} seconds after shutdown was requested",
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    DeviceFsProcess::kShutdownTimeout).count()));
         }
     }
     if (!backup_succeeded) {

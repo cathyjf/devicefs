@@ -25,7 +25,7 @@ if ($GrpcBacking -and -not $TestClient) {
 function Get-CachedPath([string] $Name) {
     $record = & grep -m 1 "^${Name}:" -- $CMakeCachePath
     if (($LASTEXITCODE -ne 0) -or $record.EndsWith('-NOTFOUND')) {
-        throw "CMake cache does not define $Name."
+        throw "CMake cache '$CMakeCachePath' does not define $Name."
     }
     return ($record -split '=', 2)[1]
 }
@@ -103,7 +103,8 @@ if (-not $TestClient) {
     $used_drive_letters = [char[]](& $WindowsPowerShellPath -NoProfile -Command `
         '[Console]::Write(((Get-Volume).DriveLetter) -join [string]::Empty)')
     if ($LASTEXITCODE -ne 0) {
-        throw 'Could not obtain the mounted Windows drive letters.'
+        throw "'$WindowsPowerShellPath' could not obtain the mounted Windows " +
+            "drive letters; exit code: $LASTEXITCODE."
     }
     Write-Host "Mounted Windows drive letters: $($used_drive_letters -join ', ')"
     $mount_drive = 'D'..'Z' |
@@ -119,7 +120,8 @@ $backing_length = if ($TestClient) { 1024 * 1024 } else { 64 * 1024 * 1024 }
 $password = 'devicefs-fixture-password'
 $root = ([string](& $MktempPath --directory)).Trim()
 if (($LASTEXITCODE -ne 0) -or ($root.Length -eq 0)) {
-    throw 'mktemp could not create the test directory.'
+    throw "'$MktempPath' could not create the test directory; exit code: " +
+        "$LASTEXITCODE; output: '$root'."
 }
 foreach ($directory in 'private', 'state', 'cache', 'lock', 'pid', 'ncalrpc') {
     [void][IO.Directory]::CreateDirectory(
@@ -228,13 +230,16 @@ try {
         Write-Host 'Testing: gRPC backing-server readiness.'
         $grpc_ready = $grpc_server.StandardOutput.ReadLineAsync()
         if (-not $grpc_ready.Wait(1500)) {
-            throw 'The gRPC fixture server did not report readiness.'
+            throw "The gRPC fixture server process $($grpc_server.Id) did not " +
+                "report readiness within 1500 ms."
         }
         if ($grpc_ready.Result -ne $socket) {
-            throw 'The gRPC fixture server returned an invalid readiness record.'
+            throw "The gRPC fixture server process $($grpc_server.Id) returned " +
+                "readiness record '$($grpc_ready.Result)' instead of '$socket'."
         }
         if ($grpc_server.HasExited) {
-            throw 'The gRPC fixture server exited during initialization.'
+            throw "The gRPC fixture server process $($grpc_server.Id) exited " +
+                "during initialization with code $($grpc_server.ExitCode)."
         }
         Write-Host 'Passed: the gRPC backing server reported its Unix socket ready.'
         $helper_backing = $socket
@@ -284,16 +289,19 @@ try {
     Write-Host 'Testing: Samba DCE/RPC endpoint readiness.'
     $ready_read = $ready_pipe.ReadAsync($ready_buffer, 0, 1)
     if (-not $ready_read.Wait(1500)) {
-        throw 'samba-dcerpcd did not report readiness.'
+        throw "samba-dcerpcd process $($server.Id) did not report readiness " +
+            "within 1500 ms."
     }
     $ready = if ($ready_read.Result -eq 0) { -1 } else { $ready_buffer[0] }
     $ready_pipe.Dispose()
     $ready_pipe = $null
     if ($ready -eq -1) {
-        throw 'samba-dcerpcd closed the readiness pipe without signaling.'
+        throw "samba-dcerpcd process $($server.Id) closed the readiness pipe " +
+            "without signaling."
     }
     if ($server.HasExited) {
-        throw 'samba-dcerpcd exited during initialization.'
+        throw "samba-dcerpcd process $($server.Id) exited during " +
+            "initialization with code $($server.ExitCode)."
     }
     Write-Host 'Passed: Samba reported that the DCE/RPC endpoint is ready.'
     if (-not $TestClient) {

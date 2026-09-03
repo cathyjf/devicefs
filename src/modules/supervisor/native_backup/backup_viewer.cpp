@@ -51,7 +51,8 @@ auto GrantUserFullControl(
         nullptr, nullptr, &current_dacl, nullptr, &raw_descriptor);
     auto descriptor = wil::unique_hlocal_security_descriptor{raw_descriptor};
     if (query != ERROR_SUCCESS) {
-        WinError("could not read the view-directory ACL",
+        WinError("could not read the ACL for view directory '{}'",
+            std::wstring_view{path.native()},
             ExplicitWin32Error{query});
     }
     if (current_dacl == nullptr) {
@@ -71,7 +72,8 @@ auto GrantUserFullControl(
         1, &access, current_dacl, &raw_acl);
     auto merged_acl = wil::unique_hlocal_ptr<ACL>{raw_acl};
     if (merge != ERROR_SUCCESS) {
-        WinError("could not add the view user to the directory ACL",
+        WinError("could not add the view user to the ACL for directory '{}'",
+            std::wstring_view{path.native()},
             ExplicitWin32Error{merge});
     }
 
@@ -81,7 +83,8 @@ auto GrantUserFullControl(
         path_text.data(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
         nullptr, nullptr, merged_acl.get(), nullptr);
     if (update != ERROR_SUCCESS) {
-        WinError("could not grant the view user directory access",
+        WinError("could not grant the view user access to directory '{}'",
+            std::wstring_view{path.native()},
             ExplicitWin32Error{update});
     }
 }
@@ -103,7 +106,8 @@ class ViewDirectory {
         const PSID user)
         : path_{TemporarySystemDirectoryPath(prefix)} {
         if (!CreateDirectoryW(path_.c_str(), nullptr)) {
-            WinError("could not create a view directory");
+            WinError("could not create view directory '{}'",
+                std::wstring_view{path_.native()});
         }
         try {
             GrantUserFullControl(path_, user);

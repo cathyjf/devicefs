@@ -540,12 +540,15 @@ struct VhdxLayout {
 [[nodiscard]] auto MakeLayout(const std::uint64_t source_length) {
     if ((source_length < kLogicalSectorSize) ||
         ((source_length % kLogicalSectorSize) != 0)) {
-        throw std::runtime_error(
-            "a VHDX source must contain at least one complete 512-byte sector");
+        throw std::runtime_error(std::format(
+            "a VHDX source must contain at least one complete {}-byte sector; "
+            "the source contains {} bytes",
+            kLogicalSectorSize, source_length));
     }
     if (source_length > kMaximumVirtualDiskSize - kGptEnvelopeLength) {
-        throw std::runtime_error(
-            "the source volume is too large for a VHDX view");
+        throw std::runtime_error(std::format(
+            "the {}-byte source volume exceeds the {}-byte maximum for a VHDX view",
+            source_length, kMaximumVirtualDiskSize - kGptEnvelopeLength));
     }
 
     auto gpt = MakeGpt(source_length);
@@ -607,7 +610,9 @@ auto ReadExact(
     }
     if (transferred != output.size()) {
         throw std::runtime_error(std::format(
-            "could not read {} completely", description));
+            "could not read {} completely: requested {} bytes at offset 0x{:x}, "
+            "received {} bytes",
+            description, output.size(), offset, transferred));
     }
 }
 

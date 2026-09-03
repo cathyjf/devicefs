@@ -140,9 +140,10 @@ template <std::size_t Size>
     if (!TryGrantBatchLogonRight(username)) {
         devicefs::WriteToStream(
             devicefs::stderr,
-            "backup-supervisor: warning: could not grant "
-            "SeBatchLogonRight to the configured WSL account; attempting "
-            "S4U logon in case the account already holds it\n");
+            L"backup-supervisor: warning: could not grant "
+            L"SeBatchLogonRight to configured WSL account '{}'; attempting "
+            L"S4U logon in case the account already holds it\n",
+            std::wstring_view{username.c_str(), username.size()});
     }
 
     constexpr auto privilege_names = std::array{
@@ -285,7 +286,8 @@ template <std::size_t Size>
         nullptr, &source, wil::out_param(profile), &profile_size,
         &logon_id, token.addressof(), &quotas, &substatus);
     if (logon != 0) {
-        WinError("could not log on the configured WSL account through S4U",
+        WinError("could not log on configured WSL account '{}' through S4U",
+            std::wstring_view{username.c_str(), username.size()},
             LsaWin32Error((substatus != 0) ? substatus : logon));
     }
 

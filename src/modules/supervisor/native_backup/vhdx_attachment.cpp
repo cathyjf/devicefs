@@ -71,17 +71,20 @@ constexpr auto kShareMode =
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
     if (!result) {
-        WinError("could not open the attached VHDX physical disk");
+        WinError("could not open attached VHDX physical disk '{}'",
+            std::wstring_view{path});
     }
     return result;
 }
 
-[[nodiscard]] auto QueryDiskNumber(const HANDLE disk) {
+[[nodiscard]] auto QueryDiskNumber(
+    const HANDLE disk,
+    const std::wstring_view path) {
     auto number = STORAGE_DEVICE_NUMBER{};
     auto returned = DWORD{};
     if (!DeviceIoControl(disk, IOCTL_STORAGE_GET_DEVICE_NUMBER,
             nullptr, 0, &number, sizeof(number), &returned, nullptr)) {
-        WinError("could not identify the attached VHDX physical disk");
+        WinError("could not identify attached VHDX physical disk '{}'", path);
     }
     return number.DeviceNumber;
 }
@@ -122,7 +125,8 @@ constexpr auto kShareMode =
                 wil::safe_cast_failfast<DWORD>(
                     retry_interval.count()));
             if (wait == WAIT_FAILED) {
-                WinError("could not wait for the attached filesystem");
+                WinError("could not wait for attached filesystem root '{}'",
+                    std::wstring_view{partition_root});
             }
             if (wait == WAIT_OBJECT_0) {
                 WinError("waiting for the attached filesystem was cancelled",
@@ -138,7 +142,8 @@ constexpr auto kShareMode =
     const auto error = wil::GetFinalPathNameByHandleW(
         partition.get(), volume_root, wil::VolumePrefix::VolumeGuid);
     if (FAILED(error)) {
-        WinError("could not obtain the attached VHDX volume name",
+        WinError("could not obtain the volume name for attached root '{}'",
+            std::wstring_view{partition_root},
             ExplicitWin32Error::FromHresult(error));
     }
     return std::wstring{volume_root.get()};
@@ -262,7 +267,8 @@ namespace internal {
     devicefs::WriteToStream(devicefs::stdout,
         "  Physical disk opened.\n"
         "  Querying its disk number.\n");
-    const auto disk_number = QueryDiskNumber(physical_disk.get());
+    const auto disk_number = QueryDiskNumber(
+        physical_disk.get(), std::wstring_view{physical_path});
     devicefs::WriteToStream(
         devicefs::stdout,
         "  Disk number: {}\n",
@@ -299,8 +305,9 @@ class AttachedVhdx {
             path.native());
         auto disk = OpenVhdx(path);
         if (!disk) {
-            WinError("could not open VHDX {}",
-                path.string(), ExplicitWin32Error{disk.error()});
+            WinError("could not open VHDX '{}'",
+                std::wstring_view{path.native()},
+                ExplicitWin32Error{disk.error()});
         }
         devicefs::WriteToStream(
             devicefs::stdout, "  VHDX opened.\n  Attaching the VHDX.\n");
@@ -311,7 +318,8 @@ class AttachedVhdx {
         const auto attach_status = AttachVhdx(
             disk->get(), cancellation_event);
         if (attach_status != ERROR_SUCCESS) {
-            WinError("could not attach VHDX",
+            WinError("could not attach VHDX '{}'",
+                std::wstring_view{path.native()},
                 ExplicitWin32Error{attach_status});
         }
         auto cleanup_failed_attachment = wil::scope_exit([&] noexcept {
@@ -356,7 +364,8 @@ class AttachedVhdx {
         const auto status = Detach();
         if (status != ERROR_SUCCESS) {
             try {
-                WinError("could not detach VHDX",
+                WinError("could not detach VHDX mounted as '{}'",
+                    std::wstring_view{root_},
                     ExplicitWin32Error{status});
             } catch (const std::exception &error) {
                 TryWriteError("VHDX cleanup failed", error);

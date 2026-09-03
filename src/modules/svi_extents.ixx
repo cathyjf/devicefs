@@ -41,17 +41,21 @@ constexpr auto kShareMode =
             FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
         nullptr)};
     if (!result) {
-        WinError("could not open a System Volume Information object");
+        WinError("could not open System Volume Information object '{}'",
+            std::wstring_view{path.native()});
     }
     return result;
 }
 
-[[nodiscard]] auto QueryClusterSize(const HANDLE device) {
+[[nodiscard]] auto QueryClusterSize(
+    const HANDLE device,
+    const std::filesystem::path &path) {
     auto ntfs = NTFS_VOLUME_DATA_BUFFER{};
     auto returned = DWORD{};
     if (!DeviceIoControl(device, FSCTL_GET_NTFS_VOLUME_DATA, nullptr, 0,
             &ntfs, sizeof(ntfs), &returned, nullptr)) {
-        WinError("FSCTL_GET_NTFS_VOLUME_DATA failed");
+        WinError("FSCTL_GET_NTFS_VOLUME_DATA failed for '{}'",
+            std::wstring_view{path.native()});
     }
     [[gsl::suppress("26493",
         justification:
@@ -61,11 +65,13 @@ constexpr auto kShareMode =
 
 auto ThrowIfFileInfoFailed(
     const HRESULT error,
-    const std::string_view operation) -> void {
+    const std::string_view operation,
+    const std::filesystem::path &path) -> void {
     if (SUCCEEDED(error)) {
         return;
     }
-    WinError("{}", operation, ExplicitWin32Error::FromHresult(error));
+    WinError("{} for '{}'", operation, std::wstring_view{path.native()},
+        ExplicitWin32Error::FromHresult(error));
 }
 
 class SviExtentReader {
@@ -81,7 +87,7 @@ class SviExtentReader {
         ThrowIfFileInfoFailed(
             wil::GetFileInfoNoThrow<FileAttributeTagInfo>(
                 root_handle.get(), &attributes),
-            "could not query System Volume Information attributes");
+            "could not query System Volume Information attributes", root);
         ReadObject(root, attributes.FileAttributes, root_handle.get());
     }
 
@@ -102,7 +108,9 @@ class SviExtentReader {
             }));
     }
 
-    auto ReadExtents(const HANDLE object) -> void {
+    auto ReadExtents(
+        const std::filesystem::path &path,
+        const HANDLE object) -> void {
         auto starting_vcn = LARGE_INTEGER{};
         while (true) {
             auto input = STARTING_VCN_INPUT_BUFFER{
@@ -120,7 +128,8 @@ class SviExtentReader {
             }
             if (!completed && (error != ERROR_MORE_DATA)) {
                 WinError(
-                    "could not retrieve System Volume Information extents",
+                    "could not retrieve System Volume Information extents for '{}'",
+                    std::wstring_view{path.native()},
                     ExplicitWin32Error{error});
             }
             const auto current_vcn = output.StartingVcn.QuadPart;
@@ -146,7 +155,7 @@ class SviExtentReader {
         auto streams = wistd::unique_ptr<FILE_STREAM_INFO>{};
         ThrowIfFileInfoFailed(
             wil::GetFileInfoNoThrow<FileStreamInfo>(object, streams),
-            "could not enumerate System Volume Information streams");
+            "could not enumerate System Volume Information streams", path);
         for (const auto &stream :
             wil::create_next_entry_offset_iterator(streams.get())) {
             const auto name = std::wstring_view{
@@ -160,8 +169,9 @@ class SviExtentReader {
                 continue;
             }
 
-            ReadExtents(OpenObject(
-                std::format(L"{}{}", path.native(), name)).get());
+            const auto stream_path = std::filesystem::path{
+                std::format(L"{}{}", path.native(), name)};
+            ReadExtents(stream_path, OpenObject(stream_path).get());
         }
     }
 
@@ -173,7 +183,7 @@ class SviExtentReader {
             ThrowIfFileInfoFailed(
                 wil::GetFileInfoNoThrow<FileFullDirectoryInfo>(
                     directory, entries),
-                "could not enumerate System Volume Information");
+                "could not enumerate System Volume Information", path);
             if (!entries) {
                 return;
             }
@@ -200,7 +210,7 @@ class SviExtentReader {
         const std::filesystem::path &path,
         const DWORD attributes,
         const HANDLE object) -> void {
-        ReadExtents(object);
+        ReadExtents(path, object);
         ReadNamedDataStreams(path, object);
         if (((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) &&
             ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0)) {
@@ -225,10 +235,11 @@ export namespace devicefs::svi {
         device_path.c_str(), GENERIC_READ, kShareMode, nullptr, OPEN_EXISTING,
         SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr)};
     if (!device) {
-        WinError("could not open the SVI snapshot volume");
+        WinError("could not open SVI snapshot volume '{}'",
+            std::wstring_view{device_path.native()});
     }
 
-    const auto cluster_size = QueryClusterSize(device.get());
+    const auto cluster_size = QueryClusterSize(device.get(), device_path);
     const auto root = device_path / L"System Volume Information";
     auto block_offsets = std::set<std::uint64_t>{};
     SviExtentReader{cluster_size, block_offsets}.ReadTreeBlockOffsets(root);

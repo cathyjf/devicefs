@@ -146,7 +146,8 @@ auto EnsureDirectory(
     if (error == ERROR_ALREADY_EXISTS) {
         return;
     }
-    WinError("could not create the {}", description,
+    WinError("could not create the {} '{}'", description,
+        std::wstring_view{path.native()},
         ExplicitWin32Error{error});
 }
 
@@ -160,9 +161,11 @@ auto EnsureDirectory(
     if (!file) {
         const auto error = GetLastError();
         if (error == ERROR_SHARING_VIOLATION) {
-            throw std::runtime_error("a backup is already running");
+            throw std::runtime_error(std::format(
+                "a backup is already running; lock file: '{}'", path.string()));
         }
-        WinError("could not open or create the backup lock file",
+        WinError("could not open or create the backup lock file '{}'",
+            std::wstring_view{path.native()},
             ExplicitWin32Error{error});
     }
     return file;
@@ -180,7 +183,8 @@ auto CreateConfigurationTemplate(
         if (error == ERROR_FILE_EXISTS) {
             return;
         }
-        WinError("could not create the backup configuration",
+        WinError("could not create the backup configuration '{}'",
+            std::wstring_view{path.native()},
             ExplicitWin32Error{error});
     }
     auto remove_incomplete_file = wil::scope_exit([&] {
@@ -194,10 +198,12 @@ auto CreateConfigurationTemplate(
     auto written = DWORD{};
     if (!WriteFile(file.get(), configuration_template.data(), size,
             &written, nullptr)) {
-        WinError("could not write the backup configuration template");
+        WinError("could not write the backup configuration template '{}'",
+            std::wstring_view{path.native()});
     }
     if (written != size) {
-        WinError("could not write the complete backup configuration template",
+        WinError("could not write the complete backup configuration template '{}'",
+            std::wstring_view{path.native()},
             ExplicitWin32Error{ERROR_WRITE_FAULT});
     }
     remove_incomplete_file.release();
@@ -219,11 +225,14 @@ auto InstallExecutable(
             destination.string().c_str(), 0, 0, &attributes,
             CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
         if (!destination_file) {
-            WinError("could not create the installed backup supervisor");
+            WinError("could not create the installed backup supervisor '{}'",
+                std::wstring_view{destination.native()});
         }
     }
     if (!CopyFileA(source.string().c_str(), destination.string().c_str(), FALSE)) {
-        WinError("could not copy the backup supervisor into Program Files");
+        WinError("could not copy backup supervisor '{}' to '{}'",
+            std::wstring_view{source.native()},
+            std::wstring_view{destination.native()});
     }
 }
 
@@ -236,7 +245,9 @@ auto ConfigurePreshutdownTimeout(
     };
     if (!ChangeServiceConfig2W(service,
             SERVICE_CONFIG_PRESHUTDOWN_INFO, &configuration)) {
-        WinError("could not configure the backup service preshutdown timeout");
+        WinError(
+            "could not configure service '{}' with a {} ms preshutdown timeout",
+            kServiceName, preshutdown_timeout.count());
     }
 }
 
@@ -279,13 +290,13 @@ export auto InstallService(
     auto service = wil::unique_schandle(OpenServiceA(
         manager.get(), kServiceName.data(), SERVICE_CHANGE_CONFIG));
     if (service && (mode == InstallMode::CreateOnly)) {
-        WinError("the backup service is already installed",
+        WinError("service '{}' is already installed", kServiceName,
             ExplicitWin32Error{ERROR_SERVICE_EXISTS});
     }
     if (!service) {
         const auto error = GetLastError();
         if (error != ERROR_SERVICE_DOES_NOT_EXIST) {
-            WinError("could not open the backup service",
+            WinError("could not open service '{}'", kServiceName,
                 ExplicitWin32Error{error});
         }
     }
@@ -343,7 +354,8 @@ export auto InstallService(
                 binary_path.c_str(), "", nullptr, kNoDependencies.data(),
                 kLocalSystemAccount.data(), "",
                 kServiceDisplayName.data())) {
-            WinError("could not update the backup service");
+            WinError("could not update service '{}' with binary path '{}'",
+                kServiceName, binary_path);
         }
         ConfigurePreshutdownTimeout(service.get(), preshutdown_timeout);
         devicefs::WriteToStream(
@@ -359,7 +371,8 @@ export auto InstallService(
         binary_path.c_str(), nullptr, nullptr, nullptr,
         kLocalSystemAccount.data(), ""));
     if (!service) {
-        WinError("could not install the backup service");
+        WinError("could not install service '{}' with binary path '{}'",
+            kServiceName, binary_path);
     }
     auto remove_incomplete_service = wil::scope_exit([&] {
         static_cast<void>(DeleteService(service.get()));

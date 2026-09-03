@@ -51,7 +51,7 @@ auto Usage(const auto output) noexcept {
     const auto next = [&](auto &index) {
         if (++index == arguments.size()) {
             throw std::invalid_argument(std::format(
-                "missing value after argument {}", index));
+                "{} requires a value", arguments[index - 1]));
         }
         return arguments[index];
     };
@@ -68,7 +68,7 @@ auto Usage(const auto output) noexcept {
             result.svi_extents = true;
         } else {
             throw std::invalid_argument(std::format(
-                "unknown option at argument {}", index + 1));
+                "unknown option '{}' at argument {}", argument, index + 1));
         }
     }
     if (result.help) {
@@ -95,7 +95,8 @@ auto Usage(const auto output) noexcept {
     }
     auto result = GUID{};
     if (FAILED(CLSIDFromString(text.c_str(), &result))) {
-        throw std::invalid_argument("--snapshot-id is not a GUID");
+        throw std::invalid_argument(std::format(
+            "--snapshot-id is not a GUID: {}", value));
     }
     return result;
 }

@@ -709,8 +709,8 @@ struct VerificationJob {
         SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
         nullptr)};
     if (!result) {
-        WinError("could not open {} for incremental verification",
-            description);
+        WinError("could not open {} '{}' for incremental verification",
+            description, source);
     }
 
     // Exact reads remain authoritative. This request only permits access to
@@ -729,8 +729,11 @@ struct VerificationJob {
     auto payload = devicefs::LoadSnapshotAllocationBitmap(
         volume.payload_device, kPayloadDescription);
     if (baseline.VolumeSize() != payload.VolumeSize()) {
-        throw std::runtime_error(
-            "the retained and new snapshot volume sizes do not match");
+        throw std::runtime_error(std::format(
+            "the retained snapshot '{}' is {} bytes, but the new snapshot '{}' "
+            "is {} bytes",
+            volume.baseline_device, baseline.VolumeSize(),
+            volume.payload_device, payload.VolumeSize()));
     }
     return VerificationAllocation{
         .baseline = std::move(baseline),
@@ -752,13 +755,14 @@ struct VerificationJob {
 auto SeekVerificationSnapshot(
     const HANDLE snapshot,
     const std::uint64_t offset,
-    const std::string_view description) -> void {
+    const std::string_view description,
+    const std::string_view source) -> void {
     const auto position = LARGE_INTEGER{
         .QuadPart = wil::safe_cast_failfast<LONGLONG>(offset),
     };
     if (!SetFilePointerEx(snapshot, position, nullptr, FILE_BEGIN)) {
-        WinError("could not seek {} for incremental verification",
-            description);
+        WinError("could not seek {} '{}' to offset 0x{:x} for incremental verification",
+            description, source, offset);
     }
 }
 
@@ -766,14 +770,15 @@ auto ReadVerificationChunk(
     const HANDLE snapshot,
     const std::span<unsigned char> destination,
     const std::uint64_t offset,
-    const std::string_view description) -> void {
+    const std::string_view description,
+    const std::string_view source) -> void {
     const auto requested =
         wil::safe_cast_failfast<DWORD>(destination.size());
     auto completed = DWORD{};
     if (!ReadFile(snapshot, destination.data(), requested,
             &completed, nullptr)) {
-        WinError("could not read {} at offset 0x{:x} "
-            "during incremental verification", description, offset);
+        WinError("could not read {} '{}' at offset 0x{:x} "
+            "during incremental verification", description, source, offset);
     }
     if (completed != requested) {
         throw std::runtime_error(std::format(
@@ -898,9 +903,11 @@ auto VerifySnapshotRange(
         auto baseline_storage = AllocateComparisonBuffer();
         auto payload_storage = AllocateComparisonBuffer();
         SeekVerificationSnapshot(
-            baseline.get(), range_start, kBaselineDescription);
+            baseline.get(), range_start, kBaselineDescription,
+            volume.baseline_device);
         SeekVerificationSnapshot(
-            payload.get(), range_start, kPayloadDescription);
+            payload.get(), range_start, kPayloadDescription,
+            volume.payload_device);
 
         const auto dirty_blocks = volume.map
             ? std::span<const std::uint64_t>{
@@ -926,10 +933,10 @@ auto VerifySnapshotRange(
                     .first(size);
             ReadVerificationChunk(
                 baseline.get(), baseline_chunk,
-                offset, kBaselineDescription);
+                offset, kBaselineDescription, volume.baseline_device);
             ReadVerificationChunk(
                 payload.get(), payload_chunk,
-                offset, kPayloadDescription);
+                offset, kPayloadDescription, volume.payload_device);
             // Raw free-cluster contents are not stable across snapshot
             // devices. Compare the synthetic views that DeviceFs backs up.
             allocation.baseline.SynthesizeFreeClusters(

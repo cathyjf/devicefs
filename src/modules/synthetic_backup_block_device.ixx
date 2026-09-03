@@ -35,8 +35,9 @@ class SyntheticBackupBlockDevice {
         const std::uint64_t block_size,
         std::vector<std::uint64_t> payload_block_offsets) {
         if (baseline.length != payload.length) {
-            throw std::runtime_error(
-                "the synthetic backup block devices have different lengths");
+            throw std::runtime_error(std::format(
+                "the synthetic backup baseline is {} bytes, but the payload is {} bytes",
+                baseline.length, payload.length));
         }
         return SyntheticBackupBlockDevice{
             std::move(baseline), std::move(payload), block_size,

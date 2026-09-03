@@ -31,8 +31,9 @@ export class WinrtApartment {
         : uninitialize_([initialization_error] {
             try {
                 return wil::RoInitialize(RO_INIT_SINGLETHREADED);
-            } catch (const wil::ResultException &) {
-                throw std::runtime_error(initialization_error);
+            } catch (const wil::ResultException &error) {
+                throw std::runtime_error(std::format(
+                    "{}: {}", initialization_error, error.what()));
             }
         }()) {}
 

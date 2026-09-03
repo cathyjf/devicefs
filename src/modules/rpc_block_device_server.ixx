@@ -90,7 +90,9 @@ class RpcBlockDeviceServer {
             endpoint.data(), nullptr);
         if (protocol_status != RPC_S_OK) {
             active_.reset();
-            WinError("could not create the RPC block-device endpoint",
+            WinError("could not create RPC block-device endpoint '{}' with protocol '{}'",
+                std::wstring_view{endpoint},
+                std::wstring_view{protocol_sequence},
                 ExplicitWin32Error{
                     std::bit_cast<DWORD>(protocol_status)});
         }

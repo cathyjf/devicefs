@@ -89,16 +89,23 @@ auto ReadAllocationChangeBlocks(
     const auto previous_size = previous.length;
     const auto current_size = current.length;
     if (previous_size != current_size) {
-        throw std::runtime_error(
-            "the previous and current snapshot volume sizes do not match");
+        throw std::runtime_error(std::format(
+            "the previous snapshot '{}' is {} bytes, but the current snapshot "
+            "'{}' is {} bytes",
+            previous_snapshot, previous_size,
+            current_snapshot, current_size));
     }
     const auto &previous_bitmap = previous.allocation_bitmap;
     const auto &current_bitmap = current.allocation_bitmap;
     if ((previous_bitmap.cluster_size != current_bitmap.cluster_size) ||
         (previous_bitmap.cluster_count != current_bitmap.cluster_count)) {
-        throw std::runtime_error(
-            "the previous and current snapshot allocation geometry does not "
-            "match");
+        throw std::runtime_error(std::format(
+            "the previous snapshot '{}' has {} allocation clusters of {} bytes, "
+            "but the current snapshot '{}' has {} clusters of {} bytes",
+            previous_snapshot,
+            previous_bitmap.cluster_count, previous_bitmap.cluster_size,
+            current_snapshot,
+            current_bitmap.cluster_count, current_bitmap.cluster_size));
     }
 
     const auto bitmap_byte_count =

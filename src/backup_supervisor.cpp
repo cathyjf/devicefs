@@ -53,7 +53,8 @@ constexpr auto kOrchestrateOption = std::string_view("--orchestrate");
     auto event = wil::unique_event_nothrow{OpenEventA(
         SYNCHRONIZE, FALSE, kCancellationEventName.c_str())};
     if (!event) {
-        WinError("could not open the backup cancellation event");
+        WinError("could not open backup cancellation event '{}'",
+            std::string_view{kCancellationEventName});
     }
     return event;
 }
@@ -66,9 +67,11 @@ constexpr auto kOrchestrateOption = std::string_view("--orchestrate");
     if (!lock) {
         const auto error = GetLastError();
         if (error == ERROR_SHARING_VIOLATION) {
-            throw std::runtime_error("a backup is already running");
+            throw std::runtime_error(std::format(
+                "a backup is already running; lock file: '{}'", path.string()));
         }
-        WinError("could not open the backup lock file",
+        WinError("could not open the backup lock file '{}'",
+            std::wstring_view{path.native()},
             ExplicitWin32Error{error});
     }
     return lock;
@@ -500,8 +503,8 @@ struct SelectiveViewOptions {
             }
             raw_volume_override = arguments[index];
         } else {
-            throw std::invalid_argument(
-                "--foreground received an unknown argument");
+            throw std::invalid_argument(std::format(
+                "--foreground received an unknown argument: {}", argument));
         }
     }
     if (raw_namespace_override) {
@@ -529,8 +532,8 @@ struct SelectiveViewOptions {
             (option != "--timestamp") &&
             (option != "--address") &&
             (option != "--namespace")) {
-            throw std::invalid_argument(
-                "--view received an unknown argument");
+            throw std::invalid_argument(std::format(
+                "--view received an unknown argument: {}", option));
         }
         if (++index == arguments.size()) {
             throw std::invalid_argument(std::format(
@@ -587,22 +590,22 @@ struct SelectiveViewOptions {
                 result.filesystem_verification_percentage =
                     std::stod(text, &consumed);
             } catch (const std::invalid_argument &) {
-                throw std::invalid_argument(
+                throw std::invalid_argument(std::format(
                     "--verify-percentage requires a number greater than "
-                    "zero and no greater than 100");
+                    "zero and no greater than 100; received '{}'", text));
             } catch (const std::out_of_range &) {
-                throw std::invalid_argument(
+                throw std::invalid_argument(std::format(
                     "--verify-percentage requires a number greater than "
-                    "zero and no greater than 100");
+                    "zero and no greater than 100; received '{}'", text));
             }
             if ((consumed != text.size()) ||
                 !std::isfinite(
                     result.filesystem_verification_percentage) ||
                 (result.filesystem_verification_percentage <= 0.0) ||
                 (result.filesystem_verification_percentage > 100.0)) {
-                throw std::invalid_argument(
+                throw std::invalid_argument(std::format(
                     "--verify-percentage requires a number greater than "
-                    "zero and no greater than 100");
+                    "zero and no greater than 100; received '{}'", text));
             }
             verification_percentage_supplied = true;
         } else if (argument == "--namespace") {
@@ -623,11 +626,18 @@ struct SelectiveViewOptions {
                 throw std::invalid_argument(
                     "--baseline requires a value");
             }
-            result.baseline_snapshot_identifier =
-                winrt::guid{arguments[index]};
+            try {
+                result.baseline_snapshot_identifier =
+                    winrt::guid{arguments[index]};
+            } catch (const std::invalid_argument &) {
+                throw std::invalid_argument(std::format(
+                    "--baseline requires a snapshot GUID; received '{}'",
+                    arguments[index]));
+            }
         } else {
-            throw std::invalid_argument(
-                "incremental diagnostics received an unknown argument");
+            throw std::invalid_argument(std::format(
+                "incremental diagnostics received an unknown argument: {}",
+                argument));
         }
     }
     if (raw_namespace_override) {
@@ -813,7 +823,8 @@ auto RunServiceDispatcher() {
         SERVICE_TABLE_ENTRYA{},
     };
     if (!StartServiceCtrlDispatcherA(entries.data())) {
-        WinError("could not connect to the Service Control Manager");
+        WinError("could not connect service '{}' to the Service Control Manager",
+            kServiceName);
     }
     return 0;
 }
@@ -927,7 +938,8 @@ auto BackupSupervisorMain(
             return RunForeground(
                 ParseForegroundOptions(std::span{arguments}.subspan(1)));
         }
-        throw std::invalid_argument("unknown backup-supervisor argument");
+        throw std::invalid_argument(std::format(
+            "unknown backup-supervisor argument: {}", option));
     } catch (const std::invalid_argument &error) {
         devicefs::WriteToStream(
             devicefs::stderr, "backup-supervisor: {}\n", error.what());

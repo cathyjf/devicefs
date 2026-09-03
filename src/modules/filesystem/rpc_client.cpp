@@ -69,7 +69,7 @@ constexpr auto kTcpUsername = std::string_view{"devicefs"};
     const auto error = RpcBindingFromStringBindingW(
         string_binding.data(), result.put());
     if (error != RPC_S_OK) {
-        WinError("could not create the RPC block-device binding",
+        WinError("could not create RPC block-device binding '{}'", binding,
             ExplicitWin32Error{std::bit_cast<DWORD>(error)});
     }
     return wil::shared_rpc_binding{std::move(result)};
@@ -83,12 +83,14 @@ constexpr auto kTcpUsername = std::string_view{"devicefs"};
                 devicefs::rpc::kEndpointEnvironmentVariable}.c_str(),
             endpoint);
         if (FAILED(error)) {
-            WinError("could not obtain the RPC block-device endpoint",
+            WinError("could not obtain RPC block-device endpoint from environment variable '{}'",
+                devicefs::rpc::kEndpointEnvironmentVariable,
                 ExplicitWin32Error::FromHresult(error));
         }
         if (endpoint.empty()) {
-            throw std::runtime_error(
-                "the RPC block-device endpoint is empty");
+            throw std::runtime_error(std::format(
+                "environment variable '{}' contains an empty RPC block-device endpoint",
+                devicefs::rpc::kEndpointEnvironmentVariable));
         }
         return MakeRpcBinding(std::format(
             "{}:[{}]", devicefs::rpc::kProtocolSequence,
@@ -106,7 +108,8 @@ constexpr auto kTcpUsername = std::string_view{"devicefs"};
     auto position = fields.begin();
     const auto next = [&]() {
         if (position == fields.end()) {
-            throw std::runtime_error{"invalid TCP RPC source"};
+            throw std::runtime_error{std::format(
+                "invalid TCP RPC source '{}'", source)};
         }
         const auto field = *position;
         ++position;
@@ -115,7 +118,8 @@ constexpr auto kTcpUsername = std::string_view{"devicefs"};
     const auto address = next();
     const auto port = next();
     if (address.empty() || port.empty() || (position != fields.end())) {
-        throw std::runtime_error{"invalid TCP RPC source"};
+        throw std::runtime_error{std::format(
+            "invalid TCP RPC source '{}'", source)};
     }
 
     auto result = MakeRpcBinding(
@@ -139,7 +143,8 @@ constexpr auto kTcpUsername = std::string_view{"devicefs"};
         result.get(), nullptr, RPC_C_AUTHN_LEVEL_CONNECT,
         RPC_C_AUTHN_WINNT, &identity, RPC_C_AUTHZ_NONE);
     if (error != RPC_S_OK) {
-        WinError("could not authenticate the RPC block-device binding",
+        WinError("could not authenticate RPC block-device binding to '{}:{}'",
+            address, port,
             ExplicitWin32Error{std::bit_cast<DWORD>(error)});
     }
     return result;
@@ -160,7 +165,8 @@ struct RPCBlockDevice {
                 status, DeviceFsRpcClient_GetLength,
                 binding.get(), stored_symbol.c_str(), &result);
             if (FAILED(error)) {
-                WinError("could not query the RPC block-device length",
+                WinError("could not query the length of RPC block device '{}'",
+                    symbol,
                     ExplicitWin32Error::FromHresult(error));
             }
             internal::CheckNt(status, "could not query the RPC block-device length");
@@ -189,11 +195,12 @@ struct RPCBlockDevice {
             const auto win32_error =
                 ExplicitWin32Error::FromHresult(error).value;
             devicefs::WriteToStream(devicefs::stderr,
-                "devicefs: RPC read failed for '{:s}': Windows error {}\n",
+                "devicefs: RPC read failed for '{:s}' at offset 0x{:x} "
+                "for {} bytes: Windows error {}\n",
                 symbol_ | std::views::transform(
                     [](const unsigned char byte) noexcept {
                         return std::bit_cast<char>(byte);
-                    }), win32_error);
+                    }), offset, wanted, win32_error);
             return FspNtStatusFromWin32(win32_error);
         }
         transferred = rpc_transferred;

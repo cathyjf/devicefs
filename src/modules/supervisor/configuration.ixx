@@ -86,13 +86,15 @@ using winrt::Windows::Data::Json::JsonValueType;
 }
 
 template <typename String>
-[[nodiscard]] auto ToUtf8(const winrt::hstring &value) {
+[[nodiscard]] auto ToUtf8(
+    const winrt::hstring &value,
+    const std::string_view member) {
     const auto size = WideCharToMultiByte(
         CP_UTF8, WC_ERR_INVALID_CHARS, value.c_str(), -1,
         nullptr, 0, nullptr, nullptr);
     if (size == 0) {
-        throw std::runtime_error(
-            "could not convert a backup configuration value to UTF-8");
+        throw std::runtime_error(std::format(
+            "could not convert configuration member '{}' to UTF-8", member));
     }
     static_assert(std::in_range<typename String::size_type>(
         std::numeric_limits<int>::max()));
@@ -105,8 +107,8 @@ template <typename String>
         static_cast<char *>(output),
         size, nullptr, nullptr);
     if (converted != size) {
-        throw std::runtime_error(
-            "could not convert a backup configuration value to UTF-8");
+        throw std::runtime_error(std::format(
+            "could not convert configuration member '{}' to UTF-8", member));
     }
     result.pop_back();
     return result;
@@ -509,19 +511,19 @@ struct FieldReader {
     auto operator()(const Utf8TextDestination<String> &destination) const
         -> void {
         destination.Get(configuration.get()) =
-            ToUtf8<String>(ReadString(value.get(), member));
+            ToUtf8<String>(ReadString(value.get(), member), member);
     }
 
     auto operator()(
         const OptionalStringDestination &destination) const -> void {
         destination.Get(configuration.get()) = ToUtf8<std::string>(
-            ReadString(value.get(), member));
+            ReadString(value.get(), member), member);
     }
 
     auto operator()(
         const OptionalUtf8StringDestination &destination) const -> void {
         destination.Get(configuration.get()) = ToUtf8<std::u8string>(
-            ReadString(value.get(), member));
+            ReadString(value.get(), member), member);
     }
 
     auto operator()(
@@ -561,7 +563,7 @@ struct FieldReader {
             ConfigurationError(member, "must be an object");
         }
         destination.Get(configuration.get()) = ToUtf8<SecureUtf8String>(
-            json_value.GetObject().Stringify());
+            json_value.GetObject().Stringify(), member);
     }
 
     auto operator()(
@@ -581,7 +583,7 @@ struct FieldReader {
                     "must not contain an empty string");
             }
             destination.Get(configuration.get()).emplace_back(
-                ToUtf8<std::string>(text));
+                ToUtf8<std::string>(text, member));
         }
     }
 
@@ -680,17 +682,17 @@ struct WslFieldReader {
 
     auto operator()(const WslDistributionDestination &) const -> void {
         configuration.get().distribution = ToUtf8<std::string>(
-            ReadString(value.get(), member));
+            ReadString(value.get(), member), member);
     }
 
     auto operator()(const WslLinuxUserDestination &) const -> void {
         configuration.get().linux_user = ToUtf8<std::string>(
-            ReadString(value.get(), member));
+            ReadString(value.get(), member), member);
     }
 
     auto operator()(const WslClientPathDestination &) const -> void {
         configuration.get().client_path = ToUtf8<std::u8string>(
-            ReadString(value.get(), member));
+            ReadString(value.get(), member), member);
     }
 
     std::reference_wrapper<WslConfiguration> configuration;
@@ -710,12 +712,12 @@ struct WslRestoreFieldReader : WslFieldReader {
 
     auto operator()(const WslRpcHelperPathDestination &) const -> void {
         restore_configuration.get().rpc_helper_path =
-            ToUtf8<std::string>(ReadString(value.get(), member));
+            ToUtf8<std::string>(ReadString(value.get(), member), member);
     }
 
     auto operator()(const WslSambaDcerpcdPathDestination &) const -> void {
         restore_configuration.get().samba_dcerpcd_path =
-            ToUtf8<std::string>(ReadString(value.get(), member));
+            ToUtf8<std::string>(ReadString(value.get(), member), member);
     }
 
     std::reference_wrapper<WslRestoreConfiguration> restore_configuration;
@@ -791,14 +793,14 @@ auto ReadFields(
         "the backup configuration"};
     auto file = std::ifstream(path, std::ios::binary);
     if (!file.is_open()) {
-        throw std::runtime_error(
-            "could not open the backup configuration");
+        throw std::runtime_error(std::format(
+            "could not open the backup configuration '{}'", path.string()));
     }
     const auto source = wil::secure_string(
         std::istreambuf_iterator<char>{file}, {});
     if (file.bad()) {
-        throw std::runtime_error(
-            "could not read the backup configuration");
+        throw std::runtime_error(std::format(
+            "could not read the backup configuration '{}'", path.string()));
     }
     const auto document = winrt::to_hstring(
         std::string_view{source.data(), source.size()});
@@ -831,8 +833,9 @@ export [[nodiscard]] auto ReadBackupConfiguration(
     const std::filesystem::path &path) {
     try {
         return ReadBackupConfigurationImpl(path);
-    } catch (const winrt::hresult_error &) {
-        throw std::runtime_error(
-            "could not parse the backup configuration");
+    } catch (const winrt::hresult_error &error) {
+        throw std::runtime_error(std::format(
+            "could not parse the backup configuration '{}': {}",
+            path.string(), winrt::to_string(error.message())));
     }
 }

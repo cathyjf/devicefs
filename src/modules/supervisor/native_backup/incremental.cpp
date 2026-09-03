@@ -78,8 +78,11 @@ export [[nodiscard]] auto BuildDirtyBlockMap(
     auto allocation_blocks = devicefs::ReadAllocationChangeBlocks(
         baseline_device, payload_device, devicefs::vss::kBlockSize);
     if (descriptors.volume_size != allocation_blocks.volume_size) {
-        throw std::runtime_error(
-            "the descriptor and allocation-bitmap volume sizes do not match");
+        throw std::runtime_error(std::format(
+            "the VSS descriptors for '{}' report a {}-byte volume, but the "
+            "allocation bitmaps report {} bytes",
+            payload_device,
+            descriptors.volume_size, allocation_blocks.volume_size));
     }
 
     constexpr auto privilege_names =

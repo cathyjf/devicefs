@@ -163,28 +163,33 @@ public:
             GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
             nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
         if (!file_) {
-            WinError("could not open the backup supervisor log");
+            WinError("could not open backup supervisor log '{}'",
+                std::wstring_view{path.native()});
         }
 
         auto size = LARGE_INTEGER{};
         if (!GetFileSizeEx(file_.get(), &size)) {
-            WinError("could not obtain the backup supervisor log size");
+            WinError("could not obtain the size of backup supervisor log '{}'",
+                std::wstring_view{path.native()});
         }
         if (size.QuadPart != 0) {
             const auto offset = LARGE_INTEGER{.QuadPart = -1};
             if (!SetFilePointerEx(
                     file_.get(), offset, nullptr, FILE_END)) {
-                WinError("could not seek in the backup supervisor log");
+                WinError("could not seek in backup supervisor log '{}'",
+                    std::wstring_view{path.native()});
             }
             auto last = char{};
             auto read = DWORD{};
             if (!ReadFile(file_.get(), &last, DWORD{sizeof(last)},
                     &read, nullptr)) {
-                WinError("could not inspect the backup supervisor log");
+                WinError("could not inspect backup supervisor log '{}'",
+                    std::wstring_view{path.native()});
             }
             if (read != DWORD{sizeof(last)}) {
-                throw std::runtime_error(
-                    "the backup supervisor log read was incomplete");
+                throw std::runtime_error(std::format(
+                    "the read from backup supervisor log '{}' was incomplete",
+                    path.string()));
             }
             if (last != '\n') {
                 WriteRaw(last == '\r'
@@ -439,7 +444,8 @@ public:
                 CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
                 nullptr, nullptr,
                 &startup.StartupInfo, &process)) {
-            WinError("could not start the backup orchestrator");
+            WinError("could not start backup orchestrator '{}'",
+                std::string_view{application});
         }
         input_read_.reset();
         output_write_.reset();

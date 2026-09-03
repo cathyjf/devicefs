@@ -221,7 +221,8 @@ class RawSource {
                   SECURITY_IDENTIFICATION,
               nullptr));
         if (!handle_) {
-            WinError("could not open the VSS descriptor source");
+            WinError("could not open VSS descriptor source '{}'",
+                std::wstring_view{normalized_path});
         }
 
         // A successful disk-length query identifies a live raw device, whose
@@ -236,12 +237,14 @@ class RawSource {
             if (returned < sizeof(device_length)) {
                 throw std::runtime_error(std::format(
                     "IOCTL_DISK_GET_LENGTH_INFO returned {} byte(s); "
-                    "{} were required",
-                    returned, sizeof(device_length)));
+                    "{} were required for VSS descriptor source '{}'",
+                    returned, sizeof(device_length),
+                    std::filesystem::path{normalized_path}.string()));
             }
             if (device_length.Length.QuadPart < 0) {
-                throw std::runtime_error(
-                    "the VSS descriptor source reported a negative length");
+                throw std::runtime_error(std::format(
+                    "VSS descriptor source '{}' reported a negative length",
+                    std::filesystem::path{normalized_path}.string()));
             }
             size_ = wil::safe_cast_failfast<std::uint64_t>(
                 device_length.Length.QuadPart);
@@ -255,19 +258,22 @@ class RawSource {
             if (!DeviceIoControl(handle_.get(), IOCTL_DISK_GET_DRIVE_GEOMETRY,
                     nullptr, 0, &geometry, sizeof(geometry),
                     &returned, nullptr)) {
-                WinError("could not obtain the VSS descriptor source geometry");
+                WinError("could not obtain geometry for VSS descriptor source '{}'",
+                    std::wstring_view{normalized_path});
             }
             if (returned < sizeof(geometry)) {
                 throw std::runtime_error(std::format(
                     "IOCTL_DISK_GET_DRIVE_GEOMETRY returned {} byte(s); "
-                    "{} were required",
-                    returned, sizeof(geometry)));
+                    "{} were required for VSS descriptor source '{}'",
+                    returned, sizeof(geometry),
+                    std::filesystem::path{normalized_path}.string()));
             }
             sector_size_ = geometry.BytesPerSector;
             if ((sector_size_ == 0) || ((size_ % sector_size_) != 0)) {
                 throw std::runtime_error(std::format(
-                    "the VSS descriptor source had invalid sector geometry "
+                    "VSS descriptor source '{}' had invalid sector geometry "
                     "(length {}, bytes per sector {})",
+                    std::filesystem::path{normalized_path}.string(),
                     size_, sector_size_));
             }
 
@@ -287,23 +293,28 @@ class RawSource {
                 ((device_error != ERROR_INVALID_FUNCTION) &&
                 (device_error != ERROR_NOT_SUPPORTED) &&
                 (device_error != ERROR_INVALID_PARAMETER))) {
-                WinError("could not obtain the VSS descriptor source length",
+                WinError("could not obtain the length of VSS descriptor source '{}'",
+                    std::wstring_view{normalized_path},
                     ExplicitWin32Error{device_error});
             }
 
             auto file_size = LARGE_INTEGER{};
             if (!GetFileSizeEx(handle_.get(), &file_size)) {
-                WinError("could not obtain the VSS descriptor image length");
+                WinError("could not obtain the length of VSS descriptor image '{}'",
+                    std::wstring_view{normalized_path});
             }
             if (file_size.QuadPart < 0) {
-                throw std::runtime_error(
-                    "the VSS descriptor image reported a negative length");
+                throw std::runtime_error(std::format(
+                    "VSS descriptor image '{}' reported a negative length",
+                    std::filesystem::path{normalized_path}.string()));
             }
             size_ = wil::safe_cast_failfast<std::uint64_t>(file_size.QuadPart);
         }
 
         if (size_ == 0) {
-            throw std::runtime_error("the VSS descriptor source is empty");
+            throw std::runtime_error(std::format(
+                "VSS descriptor source '{}' is empty",
+                std::filesystem::path{normalized_path}.string()));
         }
     }
 
@@ -984,7 +995,8 @@ auto ReadBlockDescriptors(
     // https://github.com/libyal/libvshadow/blob/f5a7362/vshadowtools/info_handle.c#L485-L506
     // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_support.c#L324-L418
     if (!HasIdentifier(signature, kVssIdentifier.size())) {
-        throw std::runtime_error("the VSS volume signature was not present");
+        throw std::runtime_error(std::format(
+            "the VSS volume signature was not present in '{}'", source_path));
     }
     ValidateNtfsVolume(source);
 
@@ -1009,14 +1021,18 @@ auto ReadBlockDescriptors(
         if (selected != nullptr) {
             // This is the caller's fail-closed selection policy, not a VSS
             // format uniqueness assertion made by libvshadow.
-            throw std::runtime_error(
-                "the requested VSS snapshot ID matched multiple stores");
+            throw std::runtime_error(std::format(
+                "VSS snapshot ID '{}' matched multiple stores in '{}'",
+                winrt::to_string(winrt::to_hstring(snapshot_identifier)),
+                source_path));
         }
         selected = &store;
     }
     if (selected == nullptr) {
-        throw std::runtime_error(
-            "the requested VSS snapshot ID was not found in the catalog");
+        throw std::runtime_error(std::format(
+            "VSS snapshot ID '{}' was not found in the catalog for '{}'",
+            winrt::to_string(winrt::to_hstring(snapshot_identifier)),
+            source_path));
     }
     return ReadDescriptorList(source, *selected);
 }

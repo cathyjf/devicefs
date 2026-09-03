@@ -74,21 +74,27 @@ template <std::size_t Size>
 // create the required batch logon.
 [[nodiscard]] auto TryGrantBatchLogonRight(
     const wil::zwstring_view username) -> bool {
-    auto sid_size = DWORD{};
-    auto domain_size = DWORD{};
-    auto use = SID_NAME_USE{};
-    static_cast<void>(LookupAccountNameW(
-        nullptr, username.c_str(), nullptr, &sid_size,
-        nullptr, &domain_size, &use));
-    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
-        return false;
-    }
+    auto sid = [username] -> std::optional<std::vector<BYTE>> {
+        auto sid_size = DWORD{};
+        auto domain_size = DWORD{};
+        auto use = SID_NAME_USE{};
+        std::ignore = LookupAccountNameW(
+            nullptr, username.c_str(), nullptr, &sid_size,
+            nullptr, &domain_size, &use);
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+            return std::nullopt;
+        }
 
-    auto sid = std::vector<BYTE>(sid_size);
-    auto domain = std::vector<wchar_t>(std::max<DWORD>(1, domain_size));
-    if (!LookupAccountNameW(
+        auto sid = std::vector<BYTE>(sid_size);
+        auto domain = std::vector<wchar_t>(std::max<DWORD>(1, domain_size));
+        if (!LookupAccountNameW(
             nullptr, username.c_str(), sid.data(), &sid_size,
             domain.data(), &domain_size, &use)) {
+            return std::nullopt;
+        }
+        return sid;
+    }();
+    if (!sid) {
         return false;
     }
 
@@ -126,7 +132,7 @@ template <std::size_t Size>
         };
     }();
     return LsaAddAccountRights(
-        policy.get(), sid.data(), &right, 1) == 0;
+        policy.get(), sid->data(), &right, 1) == 0;
 }
 
 [[nodiscard]] auto LogOnWindowsAccountWithS4u(
@@ -193,22 +199,18 @@ template <std::size_t Size>
     //
     // Consequently, for consistency with the Microsoft-endorsed implementation,
     // `request_storage` contains the structure followed by both strings; its
-    // allocation must remain stable and `request_size` must cover all three
+    // allocation must remain stable and its storage must include all three
     // objects until `LsaLogonUser` returns.
-    const auto request_size = sizeof(MSV1_0_S4U_LOGON) +
+    auto request_storage = std::vector<std::byte>(
+        sizeof(MSV1_0_S4U_LOGON) +
         (username_text.size() + 1) * sizeof(wchar_t) +
-        (domain_text.size() + 1) * sizeof(wchar_t);
-    auto request_storage = std::vector<std::byte>(request_size);
-    [[gsl::suppress("26403",
-        justification: "`request` is not an owning pointer.")]]
-    auto *const request = ::new (request_storage.data()) MSV1_0_S4U_LOGON{
+        (domain_text.size() + 1) * sizeof(wchar_t));
+    auto &request = *::new (request_storage.data()) MSV1_0_S4U_LOGON{
         .MessageType = MsV1_0S4ULogon,
         .Flags = 0,
     };
-    static_assert(std::is_trivially_destructible_v<
-        std::remove_pointer_t<decltype(request)>>);
 
-    std::tie(request->UserPrincipalName, request->DomainName) =
+    std::tie(request.UserPrincipalName, request.DomainName) =
         [&request_storage, username_text, domain_text] {
             auto next_string_storage =
                 request_storage.data() + sizeof(MSV1_0_S4U_LOGON);
@@ -279,12 +281,12 @@ template <std::size_t Size>
     // <https://learn.microsoft.com/en-us/windows/win32/api/ntsecapi/nf-ntsecapi-lsaaddaccountrights>
     const auto logon = LsaLogonUser(
         lsa.get(), &lsa_name, Batch, authentication_package,
-        request, wil::safe_cast_failfast<ULONG>(request_storage.size()),
+        &request, wil::safe_cast_failfast<ULONG>(request_storage.size()),
         nullptr, &source, wil::out_param(profile), &profile_size,
         &logon_id, token.addressof(), &quotas, &substatus);
     if (logon != 0) {
         WinError("could not log on the configured WSL account through S4U",
-            LsaWin32Error(substatus != 0 ? substatus : logon));
+            LsaWin32Error((substatus != 0) ? substatus : logon));
     }
 
     privileges.Restore();

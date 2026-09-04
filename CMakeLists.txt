@@ -18,8 +18,12 @@ if(MSVC_VERSION LESS 1951)
     message(FATAL_ERROR "devicefs requires MSVC Build Tools 14.51 or newer")
 endif()
 
-if(NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
-    message(FATAL_ERROR "devicefs requires an x64 target")
+if(CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
+    set(WINFSP_ARCHITECTURE x64)
+elseif(CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "ARM64")
+    set(WINFSP_ARCHITECTURE a64)
+else()
+    message(FATAL_ERROR "devicefs requires an x64 or ARM64 target")
 endif()
 
 set(CMAKE_CXX_STANDARD 23)
@@ -59,7 +63,7 @@ if(NOT WINFSP_ROOT)
 endif()
 
 set(WINFSP_INCLUDE_DIR "${WINFSP_ROOT}/inc")
-set(WINFSP_LIBRARY "${WINFSP_ROOT}/lib/winfsp-x64.lib")
+set(WINFSP_LIBRARY "${WINFSP_ROOT}/lib/winfsp-${WINFSP_ARCHITECTURE}.lib")
 set(WIL_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/wil/include")
 
 function(target_module_interfaces target visibility)
@@ -84,6 +88,8 @@ target_sources(devicefs-common PRIVATE
     src/modules/stream_writer.cpp
 )
 
+find_program(POWERSHELL_EXECUTABLE NAMES pwsh REQUIRED)
+
 set(DEVICEFS_RPC_DEFINITION
     "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/filesystem/rpc_block_device.idl"
 )
@@ -107,9 +113,9 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}" -E make_directory
         "${DEVICEFS_RPC_OUTPUT_DIRECTORY}"
     COMMAND midl.exe
-        /env "${CMAKE_CXX_COMPILER_ARCHITECTURE_ID}"
+        /env "$<LOWER_CASE:${CMAKE_CXX_COMPILER_ARCHITECTURE_ID}>"
         /error none
-        /Os
+        "$<IF:$<STREQUAL:${CMAKE_CXX_COMPILER_ARCHITECTURE_ID},x64>,/Os,/Oicf>"
         /sal
         /prefix client DeviceFsRpcClient_
         /no_default_epv
@@ -120,7 +126,13 @@ add_custom_command(
         /cstub rpc_block_device_c.c
         /sstub rpc_block_device_s.c
         "${DEVICEFS_RPC_DEFINITION}"
+    COMMAND "${POWERSHELL_EXECUTABLE}"
+        -NoProfile -NonInteractive -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/misc/Fix-RpcServerStub.ps1"
+        -ServerStub "${DEVICEFS_RPC_SERVER_STUB}"
+        -TargetArchitecture "${CMAKE_CXX_COMPILER_ARCHITECTURE_ID}"
     MAIN_DEPENDENCY "${DEVICEFS_RPC_DEFINITION}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/misc/Fix-RpcServerStub.ps1"
     VERBATIM
 )
 add_library(devicefs-rpc-block-device STATIC
@@ -290,7 +302,8 @@ endforeach()
 foreach(target devicefs vss-descriptor-dump backup-supervisor)
     target_sources(${target} PRIVATE src/resources/devicefs.manifest)
     target_link_options(${target} PRIVATE
-        /GUARD:CF /guard:ehcont /CETCOMPAT
+        /GUARD:CF /guard:ehcont
+        $<$<STREQUAL:${CMAKE_CXX_COMPILER_ARCHITECTURE_ID},x64>:/CETCOMPAT>
     )
 endforeach()
 
@@ -305,7 +318,7 @@ target_link_libraries(devicefs-filesystem INTERFACE
     "${WINFSP_LIBRARY}" advapi32 delayimp
 )
 target_link_options(devicefs-filesystem INTERFACE
-    /DELAYLOAD:winfsp-x64.dll
+    /DELAYLOAD:winfsp-${WINFSP_ARCHITECTURE}.dll
 )
 target_compile_definitions(devicefs-filesystem PRIVATE
     DEVICEFS_MEASURE_FREE_CLUSTER_DATA=$<BOOL:${DEVICEFS_MEASURE_FREE_CLUSTER_DATA}>
@@ -317,10 +330,9 @@ target_link_libraries(backup-supervisor PRIVATE
     advapi32 bcrypt netapi32 ntdll ole32 secur32 shell32 userenv virtdisk windowsapp ws2_32
 )
 
-find_program(POWERSHELL_EXECUTABLE NAMES pwsh REQUIRED)
 add_custom_target(check-native-code-analysis ALL
     COMMAND "${POWERSHELL_EXECUTABLE}"
-        -NoLogo -NoProfile -NonInteractive -File
+        -NoProfile -NonInteractive -File
         "${CMAKE_CURRENT_SOURCE_DIR}/misc/Check-NativeCodeAnalysis.ps1"
         -BuildDirectory "${CMAKE_CURRENT_BINARY_DIR}"
         -Configuration "$<CONFIG>"

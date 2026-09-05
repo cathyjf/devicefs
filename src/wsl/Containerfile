@@ -832,6 +832,13 @@ COPY <<'EOF' /etc/wsl.conf
 [automount]
 enabled=false
 
+[interop]
+enabled=false
+appendWindowsPath=false
+
+[gpu]
+enabled=false
+
 [user]
 default=pbs-vss
 EOF

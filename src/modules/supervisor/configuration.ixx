@@ -36,17 +36,13 @@ export struct WslConfiguration {
     std::string distribution;
     std::optional<std::string> linux_user;
     std::u8string client_path;
-};
-
-export struct WslRestoreConfiguration : WslConfiguration {
     std::string rpc_helper_path;
     std::string samba_dcerpcd_path;
 };
 
 export struct BackupConfiguration {
     std::string windows_username;
-    WslConfiguration wsl_backup;
-    std::optional<WslRestoreConfiguration> wsl_restore;
+    WslConfiguration wsl;
     std::u8string pbs_server;
     std::uint16_t pbs_port = 0;
     std::u8string pbs_datastore;
@@ -140,6 +136,14 @@ template <typename String>
 Utf8TextDestination(String BackupConfiguration::*)
     -> Utf8TextDestination<String>;
 
+struct WindowsUsernameDestination : MemberDestination<std::string> {
+    using MemberDestination<std::string>::MemberDestination;
+
+    [[nodiscard]] static constexpr auto DefaultValue() noexcept {
+        return std::string_view{"devicefs-backup-user"};
+    }
+};
+
 struct OptionalStringDestination :
     MemberDestination<std::optional<std::string>> {
     using MemberDestination<
@@ -162,8 +166,12 @@ struct OptionalUtf8StringDestination :
 struct OptionalBooleanDestination : MemberDestination<bool> {
     using MemberDestination<bool>::MemberDestination;
 
+    [[nodiscard]] static constexpr auto DefaultValue() noexcept {
+        return true;
+    }
+
     [[nodiscard]] static constexpr auto TemplateValue() noexcept {
-        return std::string_view{"false"};
+        return std::string_view{DefaultValue() ? "true" : "false"};
     }
 };
 
@@ -190,8 +198,8 @@ struct NonemptyStringArrayDestination :
     using MemberDestination<
         std::vector<std::string>>::MemberDestination;
 
-    [[nodiscard]] static constexpr auto TemplateValue() noexcept {
-        return std::string_view{"[]"};
+    [[nodiscard]] static constexpr auto DefaultValue() noexcept {
+        return std::array{std::string_view{"C:"}};
     }
 };
 
@@ -200,15 +208,9 @@ struct WslConfigurationDestination :
     using MemberDestination<WslConfiguration>::MemberDestination;
 };
 
-struct OptionalWslRestoreConfigurationDestination :
-    MemberDestination<std::optional<WslRestoreConfiguration>> {
-    using MemberDestination<
-        std::optional<WslRestoreConfiguration>>::MemberDestination;
-};
-
 struct WslDistributionDestination {
-    [[nodiscard]] static constexpr auto TemplateValue() noexcept {
-        return std::string_view{"\"\""};
+    [[nodiscard]] static constexpr auto DefaultValue() noexcept {
+        return std::string_view{"Debian"};
     }
 };
 
@@ -239,44 +241,30 @@ struct WslSambaDcerpcdPathDestination {
 using WslFieldDestination = std::variant<
     WslDistributionDestination,
     WslLinuxUserDestination,
-    WslClientPathDestination>;
-
-using WslRestoreFieldDestination = std::variant<
-    WslDistributionDestination,
-    WslLinuxUserDestination,
     WslClientPathDestination,
     WslRpcHelperPathDestination,
     WslSambaDcerpcdPathDestination>;
 
-template <typename Destination>
-struct WslField {
-    constexpr WslField(
+struct WslConfigurationField {
+    constexpr WslConfigurationField(
         const std::string_view name,
-        Destination destination) noexcept
-        : name(name), destination(std::move(destination)) {}
+        WslFieldDestination destination,
+        const bool materialize_in_template = true) noexcept
+        : name(name), destination(std::move(destination)),
+          materialize_in_template(materialize_in_template) {}
 
     std::string_view name;
-    Destination destination;
+    WslFieldDestination destination;
+    bool materialize_in_template;
 };
-
-using WslConfigurationField = WslField<WslFieldDestination>;
-using WslRestoreConfigurationField = WslField<WslRestoreFieldDestination>;
 
 [[nodiscard]] constexpr auto WslConfigurationDescription() {
     return std::to_array<WslConfigurationField>({
         {"distribution", WslDistributionDestination{}},
-        {"linux_user", WslLinuxUserDestination{}},
-        {"client_path", WslClientPathDestination{}},
-    });
-}
-
-[[nodiscard]] constexpr auto WslRestoreConfigurationDescription() {
-    return std::to_array<WslRestoreConfigurationField>({
-        {"distribution", WslDistributionDestination{}},
-        {"linux_user", WslLinuxUserDestination{}},
-        {"client_path", WslClientPathDestination{}},
-        {"rpc_helper_path", WslRpcHelperPathDestination{}},
-        {"samba_dcerpcd_path", WslSambaDcerpcdPathDestination{}},
+        {"linux_user", WslLinuxUserDestination{}, false},
+        {"client_path", WslClientPathDestination{}, false},
+        {"rpc_helper_path", WslRpcHelperPathDestination{}, false},
+        {"samba_dcerpcd_path", WslSambaDcerpcdPathDestination{}, false},
     });
 }
 
@@ -287,6 +275,7 @@ using FieldDestination = std::variant<
     Utf8TextDestination<std::string>,
     Utf8TextDestination<std::u8string>,
     Utf8TextDestination<SecureUtf8String>,
+    WindowsUsernameDestination,
     OptionalStringDestination,
     OptionalUtf8StringDestination,
     OptionalBooleanDestination,
@@ -294,7 +283,6 @@ using FieldDestination = std::variant<
     SerializedJsonObjectDestination,
     NonemptyStringArrayDestination,
     WslConfigurationDestination,
-    OptionalWslRestoreConfigurationDestination,
     ConfigurationFields>;
 
 struct ConfigurationField {
@@ -322,17 +310,9 @@ constexpr ConfigurationField::~ConfigurationField() = default;
 
 [[nodiscard]] constexpr auto ConfigurationDescription() {
     return ConfigurationFields{
-        {"windows_account", ConfigurationFields{
-            {"username",
-                Utf8TextDestination{
-                    &BackupConfiguration::windows_username}},
-        }},
-        {"wsl", ConfigurationFields{
-            {"backup", WslConfigurationDestination{
-                &BackupConfiguration::wsl_backup}},
-            {"restore", OptionalWslRestoreConfigurationDestination{
-                &BackupConfiguration::wsl_restore}},
-        }},
+        {"volumes",
+            NonemptyStringArrayDestination{
+                &BackupConfiguration::volumes}},
         {"pbs", ConfigurationFields{
             {"server", Utf8TextDestination{
                 &BackupConfiguration::pbs_server}},
@@ -356,9 +336,13 @@ constexpr ConfigurationField::~ConfigurationField() = default;
             {"encryption_key", SerializedJsonObjectDestination{
                 &BackupConfiguration::pbs_encryption_key}},
         }},
-        {"volumes",
-            NonemptyStringArrayDestination{
-                &BackupConfiguration::volumes}},
+        {"internal_windows_account", ConfigurationFields{
+            {"username",
+                WindowsUsernameDestination{
+                    &BackupConfiguration::windows_username}},
+            {"wsl", WslConfigurationDestination{
+                &BackupConfiguration::wsl}},
+        }},
     };
 }
 
@@ -374,8 +358,8 @@ concept FixedTemplateValueDestination = requires {
 };
 
 template <typename Destination>
-concept DefaultWslPathDestination = requires {
-    Destination::DefaultValue();
+concept DefaultTextDestination = requires {
+    { Destination::DefaultValue() } -> std::convertible_to<std::string_view>;
 };
 
 struct TemplateValueWriter {
@@ -403,7 +387,7 @@ struct TemplateValueWriter {
         output.get().append(buffer.data(), converted.ptr);
     }
 
-    template <DefaultWslPathDestination Destination>
+    template <DefaultTextDestination Destination>
     constexpr auto operator()(const Destination &) const -> void {
         output.get().push_back('"');
         output.get().append(Destination::DefaultValue());
@@ -422,8 +406,17 @@ struct TemplateValueWriter {
     }
 
     constexpr auto operator()(
-        const OptionalWslRestoreConfigurationDestination &) const -> void {
-        output.get().append("null");
+        const NonemptyStringArrayDestination &) const -> void {
+        output.get().push_back('[');
+        auto separator = std::string_view{};
+        for (const auto value : NonemptyStringArrayDestination::DefaultValue()) {
+            output.get().append(separator);
+            output.get().push_back('"');
+            output.get().append(value);
+            output.get().push_back('"');
+            separator = ", ";
+        }
+        output.get().push_back(']');
     }
 
     std::reference_wrapper<std::string> output;
@@ -440,6 +433,12 @@ struct DefaultFieldReader {
         return false;
     }
 
+    auto operator()(const WindowsUsernameDestination &destination) const {
+        destination.Get(configuration.get()) =
+            WindowsUsernameDestination::DefaultValue();
+        return true;
+    }
+
     auto operator()(
         const OptionalStringDestination &destination) const noexcept {
         destination.Get(configuration.get()).reset();
@@ -454,7 +453,8 @@ struct DefaultFieldReader {
 
     auto operator()(
         const OptionalBooleanDestination &destination) const noexcept {
-        destination.Get(configuration.get()) = false;
+        destination.Get(configuration.get()) =
+            OptionalBooleanDestination::DefaultValue();
         return true;
     }
 
@@ -463,10 +463,10 @@ struct DefaultFieldReader {
         return true;
     }
 
-    auto operator()(
-        const OptionalWslRestoreConfigurationDestination &destination) const
-        noexcept {
-        destination.Get(configuration.get()).reset();
+    auto operator()(const NonemptyStringArrayDestination &destination) const {
+        constexpr auto defaults = NonemptyStringArrayDestination::DefaultValue();
+        destination.Get(configuration.get()).assign(
+            defaults.begin(), defaults.end());
         return true;
     }
 
@@ -478,17 +478,25 @@ constexpr auto WriteTemplateFields(
     std::string &output,
     const Fields &fields,
     const std::size_t indentation) -> void {
-    output.append("{\n");
-    for (auto index = std::size_t{}; index < fields.size(); ++index) {
-        const auto &field = fields.at(index);
+    output.push_back('{');
+    auto separator = std::string_view{"\n"};
+    for (const auto &field : fields) {
+        if constexpr (std::same_as<
+                typename Fields::value_type, WslConfigurationField>) {
+            if (!field.materialize_in_template) {
+                continue;
+            }
+        }
+        output.append(separator);
         output.append(indentation + 2, ' ');
         output.push_back('"');
         output.append(field.name);
         output.append("\": ");
         std::visit(
             TemplateValueWriter{output, indentation + 2}, field.destination);
-        output.append(index + 1 == fields.size() ? "\n" : ",\n");
+        separator = ",\n";
     }
+    output.push_back('\n');
     output.append(indentation, ' ');
     output.push_back('}');
 }
@@ -512,6 +520,12 @@ struct FieldReader {
         -> void {
         destination.Get(configuration.get()) =
             ToUtf8<String>(ReadString(value.get(), member), member);
+    }
+
+    auto operator()(const WindowsUsernameDestination &destination) const
+        -> void {
+        destination.Get(configuration.get()) = ToUtf8<std::string>(
+            ReadString(value.get(), member), member);
     }
 
     auto operator()(
@@ -598,24 +612,12 @@ struct FieldReader {
 
     auto operator()(const WslConfigurationDestination &destination) const
         -> void {
-        ReadWsl(destination.Get(configuration.get()),
-            WslConfigurationDescription());
-    }
-
-    auto operator()(
-        const OptionalWslRestoreConfigurationDestination &destination) const
-        -> void {
-        ReadWsl(destination.Get(configuration.get()).emplace(),
-            WslRestoreConfigurationDescription());
-    }
-
-    template <typename Configuration, typename Fields>
-    auto ReadWsl(Configuration &result, const Fields &fields) const -> void {
         const auto &json_value = value.get();
         if (json_value.ValueType() != JsonValueType::Object) {
             ConfigurationError(member, "must be an object");
         }
-        ReadFields(result, json_value.GetObject(), fields, member);
+        ReadFields(destination.Get(configuration.get()), json_value.GetObject(),
+            WslConfigurationDescription(), member);
     }
 
     std::reference_wrapper<BackupConfiguration> configuration;
@@ -633,6 +635,12 @@ struct WslDefaultFieldReader {
         return false;
     }
 
+    auto operator()(const WslDistributionDestination &) const {
+        configuration.get().distribution =
+            WslDistributionDestination::DefaultValue();
+        return true;
+    }
+
     auto operator()(const WslLinuxUserDestination &) const noexcept {
         configuration.get().linux_user.reset();
         return true;
@@ -645,32 +653,21 @@ struct WslDefaultFieldReader {
         return true;
     }
 
-    std::reference_wrapper<WslConfiguration> configuration;
-};
-
-struct WslRestoreDefaultFieldReader : WslDefaultFieldReader {
-    explicit WslRestoreDefaultFieldReader(
-        WslRestoreConfiguration &configuration) noexcept
-        : WslDefaultFieldReader(configuration),
-          restore_configuration(configuration) {}
-
-    using WslDefaultFieldReader::operator();
-
     auto operator()(const WslRpcHelperPathDestination &) const {
-        restore_configuration.get().rpc_helper_path = std::string{
+        configuration.get().rpc_helper_path = std::string{
             WslRpcHelperPathDestination::DefaultValue().begin(),
             WslRpcHelperPathDestination::DefaultValue().end()};
         return true;
     }
 
     auto operator()(const WslSambaDcerpcdPathDestination &) const {
-        restore_configuration.get().samba_dcerpcd_path = std::string{
+        configuration.get().samba_dcerpcd_path = std::string{
             WslSambaDcerpcdPathDestination::DefaultValue().begin(),
             WslSambaDcerpcdPathDestination::DefaultValue().end()};
         return true;
     }
 
-    std::reference_wrapper<WslRestoreConfiguration> restore_configuration;
+    std::reference_wrapper<WslConfiguration> configuration;
 };
 
 struct WslFieldReader {
@@ -695,32 +692,19 @@ struct WslFieldReader {
             ReadString(value.get(), member), member);
     }
 
-    std::reference_wrapper<WslConfiguration> configuration;
-    std::reference_wrapper<const IJsonValue> value;
-    std::string_view member;
-};
-
-struct WslRestoreFieldReader : WslFieldReader {
-    WslRestoreFieldReader(
-        WslRestoreConfiguration &configuration,
-        const IJsonValue &value,
-        const std::string_view member) noexcept
-        : WslFieldReader(configuration, value, member),
-          restore_configuration(configuration) {}
-
-    using WslFieldReader::operator();
-
     auto operator()(const WslRpcHelperPathDestination &) const -> void {
-        restore_configuration.get().rpc_helper_path =
+        configuration.get().rpc_helper_path =
             ToUtf8<std::string>(ReadString(value.get(), member), member);
     }
 
     auto operator()(const WslSambaDcerpcdPathDestination &) const -> void {
-        restore_configuration.get().samba_dcerpcd_path =
+        configuration.get().samba_dcerpcd_path =
             ToUtf8<std::string>(ReadString(value.get(), member), member);
     }
 
-    std::reference_wrapper<WslRestoreConfiguration> restore_configuration;
+    std::reference_wrapper<WslConfiguration> configuration;
+    std::reference_wrapper<const IJsonValue> value;
+    std::string_view member;
 };
 
 template <typename Configuration, typename Fields>
@@ -751,10 +735,6 @@ auto ReadFields(
                     Configuration, BackupConfiguration>) {
                 return std::visit(
                     DefaultFieldReader{configuration}, field.destination);
-            } else if constexpr (std::same_as<
-                    Configuration, WslRestoreConfiguration>) {
-                return std::visit(WslRestoreDefaultFieldReader{configuration},
-                    field.destination);
             } else {
                 return std::visit(
                     WslDefaultFieldReader{configuration}, field.destination);
@@ -775,10 +755,6 @@ auto ReadFields(
                 Configuration, BackupConfiguration>) {
             std::visit(
                 FieldReader{configuration, value, member}, field.destination);
-        } else if constexpr (std::same_as<
-                Configuration, WslRestoreConfiguration>) {
-            std::visit(WslRestoreFieldReader{configuration, value, member},
-                field.destination);
         } else {
             std::visit(WslFieldReader{configuration, value, member},
                 field.destination);

@@ -42,11 +42,6 @@ enum class PbsStandardOutput {
     Readiness,
 };
 
-enum class WslEnvironment {
-    Backup,
-    Restore,
-};
-
 struct PbsFishRequest {
     std::span<const std::string_view> additional_arguments{};
     std::optional<std::u8string_view> snapshot_manifest;
@@ -478,30 +473,8 @@ struct StartedWslFish {
     WslProcess process;
 };
 
-[[nodiscard]] auto SelectRestoreWslConfiguration(
-    const BackupConfiguration &configuration)
-    -> const WslRestoreConfiguration & {
-    if (!configuration.wsl_restore) {
-        throw std::runtime_error("wsl.restore is not configured");
-    }
-    return *configuration.wsl_restore;
-}
-
-[[nodiscard]] auto SelectWslConfiguration(
-    const BackupConfiguration &configuration,
-    const WslEnvironment environment) -> const WslConfiguration & {
-    switch (environment) {
-    case WslEnvironment::Backup:
-        return configuration.wsl_backup;
-    case WslEnvironment::Restore:
-        return SelectRestoreWslConfiguration(configuration);
-    }
-    std::unreachable();
-}
-
 [[nodiscard]] auto StartWslFishProcess(
     const BackupConfiguration &configuration,
-    const WslConfiguration &wsl_configuration,
     const std::span<const std::string_view> arguments) -> StartedWslFish {
     auto input_read = wil::unique_handle{};
     auto input_write = wil::unique_handle{};
@@ -523,11 +496,11 @@ struct StartedWslFish {
     }
 
     auto wsl_arguments = std::vector<std::string_view>{
-        "--distribution", wsl_configuration.distribution,
+        "--distribution", configuration.wsl.distribution,
     };
-    if (wsl_configuration.linux_user) {
+    if (configuration.wsl.linux_user) {
         wsl_arguments.push_back("--user");
-        wsl_arguments.push_back(*wsl_configuration.linux_user);
+        wsl_arguments.push_back(*configuration.wsl.linux_user);
     }
     wsl_arguments.append_range(std::to_array<std::string_view>({
         "--exec", "/usr/bin/fish", "--no-config", "-c",
@@ -554,13 +527,12 @@ struct StartedWslFish {
 
 [[nodiscard]] auto StartWslFish(
     const BackupConfiguration &configuration,
-    const WslConfiguration &wsl_configuration,
     const std::span<const std::string_view> arguments,
     const std::span<const char> program,
     const std::span<const char8_t> standard_input,
     const PbsStandardOutput standard_output = PbsStandardOutput::Forward) {
     auto started = StartWslFishProcess(
-        configuration, wsl_configuration, arguments);
+        configuration, arguments);
     if (standard_output == PbsStandardOutput::Forward) {
         started.process.standard_output.emplace(
             std::move(started.standard_output),
@@ -629,7 +601,6 @@ enum class PbsFishSignal {
 auto SendPbsFishSignal(
     const std::string_view pid_file,
     const std::string_view stop_file,
-    const WslEnvironment environment,
     const PbsFishSignal signal) {
     constexpr auto kControlTimeout = 15s;
     constexpr auto program = std::string_view(
@@ -642,11 +613,8 @@ auto SendPbsFishSignal(
         const auto persistent = ResolvePersistentPaths();
         const auto configuration =
             ReadBackupConfiguration(persistent.configuration);
-        const auto &wsl_configuration =
-            SelectWslConfiguration(configuration, environment);
         return StartWslFish(
             configuration,
-            wsl_configuration,
             arguments,
             std::span<const char>{program},
             std::span<const char8_t>{});
@@ -668,10 +636,9 @@ auto SendPbsFishSignal(
 auto TrySendPbsFishSignal(
     const std::string_view pid_file,
     const std::string_view stop_file,
-    const WslEnvironment environment,
     const PbsFishSignal signal) noexcept {
     try {
-        SendPbsFishSignal(pid_file, stop_file, environment, signal);
+        SendPbsFishSignal(pid_file, stop_file, signal);
     } catch (const std::exception &error) {
         TryWriteError("could not signal the PBS operation", error);
     }
@@ -685,7 +652,6 @@ struct PbsFishOperation {
     WslProcess process;
     std::string pid_file;
     std::string stop_file;
-    WslEnvironment environment;
     std::chrono::milliseconds term_grace;
     std::chrono::milliseconds kill_grace;
 };
@@ -733,12 +699,12 @@ struct PbsFishOperation {
     if (!WaitForProcess(operation.Process(), 0ms)) {
         TrySendPbsFishSignal(
             operation.pid_file, operation.stop_file,
-            operation.environment, PbsFishSignal::Term);
+            PbsFishSignal::Term);
         if (!WaitForProcess(
                 operation.Process(), operation.term_grace)) {
             TrySendPbsFishSignal(
                 operation.pid_file, operation.stop_file,
-                operation.environment, PbsFishSignal::Kill);
+                PbsFishSignal::Kill);
             if (!WaitForProcess(
                     operation.Process(), operation.kill_grace)) {
                 throw std::runtime_error(
@@ -766,8 +732,6 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
 
 [[nodiscard]] auto StartPbsFish(
     const BackupConfiguration &configuration,
-    const WslConfiguration &wsl_configuration,
-    const WslEnvironment environment,
     const std::optional<std::u8string> &namespace_override,
     const PbsFishRequest &request,
     const bool parallel_images) {
@@ -792,7 +756,7 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
         input.append(value);
         input.push_back(u8'\0');
     };
-    append_record(wsl_configuration.client_path);
+    append_record(configuration.wsl.client_path);
     append_record(configuration.pbs_server);
     const auto port = std::to_string(configuration.pbs_port);
     append_record(std::u8string{port.begin(), port.end()});
@@ -810,7 +774,6 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
     input.append(configuration.pbs_encryption_key);
     auto process = StartWslFish(
         configuration,
-        wsl_configuration,
         arguments,
         StartPbsProgram(),
         std::span<const char8_t>{input.data(), input.size()},
@@ -819,7 +782,6 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
         .process = std::move(process),
         .pid_file = std::move(pid_file),
         .stop_file = std::move(stop_file),
-        .environment = environment,
         .term_grace = request.term_grace,
         .kill_grace = request.kill_grace,
     };
@@ -836,21 +798,18 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
     const auto persistent = ResolvePersistentPaths();
     const auto configuration =
         ReadBackupConfiguration(persistent.configuration);
-    const auto &restore_configuration =
-        SelectRestoreWslConfiguration(configuration);
     const auto snapshot_override_argument =
         snapshot_override.value_or(std::string_view{});
     auto arguments = std::vector<std::string_view>{
         "--view", "--", snapshot_override_argument, archive, address, port,
-        restore_configuration.rpc_helper_path,
-        restore_configuration.samba_dcerpcd_path,
+        configuration.wsl.rpc_helper_path,
+        configuration.wsl.samba_dcerpcd_path,
     };
     if (timestamp) {
         arguments.push_back(*timestamp);
     }
     return StartPbsFish(
-        configuration, restore_configuration,
-        WslEnvironment::Restore, namespace_override,
+        configuration, namespace_override,
         PbsFishRequest{
             .additional_arguments = arguments,
             .rpc_password = rpc_password,
@@ -869,9 +828,7 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
         const auto configuration =
             ReadBackupConfiguration(persistent.configuration);
         return StartPbsFish(
-            configuration, configuration.wsl_backup,
-            WslEnvironment::Backup,
-            namespace_override, request,
+            configuration, namespace_override, request,
             configuration.pbs_parallelize_image_upload);
     }();
 

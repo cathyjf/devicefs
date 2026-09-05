@@ -26,6 +26,7 @@ module;
 #include <wil/resource.h>
 #include <wil/safecast.h>
 #include <wil/stl.h>
+#include <wil/win32_helpers.h>
 
 #undef stderr
 #undef stdout
@@ -35,6 +36,9 @@ export module devicefs.supervisor.account_management;
 import std;
 import devicefs.common;
 import devicefs.stream_writer;
+import devicefs.supervisor.process_launch;
+
+export constexpr auto kMaterializeOciOption = std::string_view("--materialize-oci");
 
 [[nodiscard]] auto InstallWslPackage() -> bool;
 
@@ -234,32 +238,6 @@ export [[nodiscard]] auto WslExecutablePath() {
     return std::filesystem::path{location.get()} / L"wsl.exe";
 }
 
-export auto EnsureInternalWindowsAccount(const wil::zwstring_view username) {
-    if (CreateAccountIfMissing(username)) {
-        devicefs::WriteToStream(
-            devicefs::stdout,
-            L"backup-supervisor: created internal Windows account '{}'\n",
-            std::wstring_view{username.c_str(), username.size()});
-    }
-    HideAccountFromLogonScreen(username);
-    const auto package_restart_needed = [] {
-        if (IsSuitableWslPackageInstalled()) {
-            devicefs::WriteToStream(
-                devicefs::stdout,
-                "backup-supervisor: a suitable version of `wsl.exe` is installed\n");
-            return false;
-        }
-        return InstallWslPackage();
-    }();
-    if (EnsureWsl1Component() || package_restart_needed) {
-        devicefs::WriteToStream(
-            devicefs::stdout,
-            "The installation is not complete. After restarting the computer, "
-            "please run `backup-supervisor.exe --install` again to complete "
-            "the installation.\n");
-    }
-}
-
 export [[nodiscard]] auto ResetBackupAccountPassword(
     const wil::zwstring_view username) -> wil::secure_wstring {
     auto information = std::unique_ptr<USER_INFO_1,
@@ -297,4 +275,120 @@ export [[nodiscard]] auto ResetBackupAccountPassword(
             ExplicitWin32Error{error});
     }
     return password;
+}
+
+namespace {
+
+auto EnsureMaterializedWslDistribution(
+    const wil::zwstring_view username,
+    const std::string_view distribution,
+    const std::filesystem::path &installed_executable) {
+    const auto arguments = std::to_array<std::string>({
+        installed_executable.string(), std::string{kMaterializeOciOption},
+        std::string{distribution},
+    });
+    auto command = std::filesystem::path{wil::ArgvToCommandLine(arguments)}.wstring();
+    const auto working_directory = installed_executable.parent_path();
+    // `CreateProcessWithLogonW` creates a separate console, so passing console
+    // handles would leave the caller unable to see the child's output. Both
+    // output streams use one pipe that the installer drains while the child
+    // runs, allowing progress to reach the caller without forwarding threads.
+    auto output_read = wil::unique_handle{};
+    auto output_write = wil::unique_handle{};
+    auto attributes = SECURITY_ATTRIBUTES{
+        .nLength = sizeof(SECURITY_ATTRIBUTES),
+        .bInheritHandle = TRUE,
+    };
+    if (!CreatePipe(output_read.addressof(), output_write.addressof(),
+            &attributes, 0)) {
+        WinError("could not create the output pipe for WSL materialization");
+    }
+    const auto input = wil::unique_hfile{CreateFileA(
+        "NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        &attributes, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    if (!input) {
+        WinError("could not open NUL for WSL materialization input");
+    }
+    auto startup = STARTUPINFOW{
+        .cb = sizeof(STARTUPINFOW),
+        .dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES,
+        .wShowWindow = SW_HIDE,
+        .hStdInput = input.get(),
+        .hStdOutput = output_write.get(),
+        .hStdError = output_write.get(),
+    };
+    auto process = wil::unique_process_information{};
+    devicefs::WriteToStream(devicefs::stdout,
+        L"backup-supervisor: preparing WSL distribution '{}' as internal Windows account '{}'\n",
+        std::filesystem::path{distribution}.native(),
+        std::wstring_view{username.c_str(), username.size()});
+    // Loading the profile and leaving the environment null gives the child the
+    // backup account's registry hive and temporary directory. WSL registration
+    // and rootfs extraction must belong to that account, not the installer.
+    if (!CreateProcessWithLogonW(
+            username.c_str(), L".", ResetBackupAccountPassword(username).c_str(),
+            LOGON_WITH_PROFILE, installed_executable.c_str(), command.data(),
+            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+            nullptr, working_directory.c_str(), &startup, &process)) {
+        WinError("could not start installed supervisor '{}' as internal Windows account '{}'",
+            std::wstring_view{installed_executable.native()},
+            std::wstring_view{username.c_str(), username.size()});
+    }
+    output_write.reset();
+    auto forward = ForwardPipeOutput{GetStdHandle(STD_OUTPUT_HANDLE)};
+    const auto output_result = ReadPipeOutput(output_read.get(), forward);
+    output_read.reset();
+    if (WaitForSingleObject(process.hProcess, INFINITE) == WAIT_FAILED) {
+        WinError("could not wait for installed supervisor '{}' to prepare WSL distribution '{}'",
+            std::wstring_view{installed_executable.native()}, distribution);
+    }
+    auto exit_code = DWORD{};
+    if (!GetExitCodeProcess(process.hProcess, &exit_code)) {
+        WinError("could not obtain the exit code for installed supervisor '{}'",
+            std::wstring_view{installed_executable.native()});
+    }
+    if (exit_code != 0) {
+        throw std::runtime_error(std::format(
+            "installed backup supervisor failed to materialize WSL distribution '{}' "
+            "(exit code 0x{:08x})", distribution, exit_code));
+    }
+    if (output_result != ERROR_SUCCESS) {
+        WinError("could not forward the output for WSL distribution '{}'",
+            distribution, ExplicitWin32Error{output_result});
+    }
+}
+
+} // namespace
+
+export auto EnsureInternalWindowsAccount(
+    const wil::zwstring_view username,
+    const std::string_view distribution,
+    const std::filesystem::path &installed_executable) {
+    if (CreateAccountIfMissing(username)) {
+        devicefs::WriteToStream(
+            devicefs::stdout,
+            L"backup-supervisor: created internal Windows account '{}'\n",
+            std::wstring_view{username.c_str(), username.size()});
+    }
+    HideAccountFromLogonScreen(username);
+    const auto package_restart_needed = [] {
+        if (IsSuitableWslPackageInstalled()) {
+            devicefs::WriteToStream(
+                devicefs::stdout,
+                "backup-supervisor: a suitable version of 'wsl.exe' is "
+                "installed\n");
+            return false;
+        }
+        return InstallWslPackage();
+    }();
+    if (EnsureWsl1Component() || package_restart_needed) {
+        devicefs::WriteToStream(
+            devicefs::stdout,
+            "The installation is not complete. After restarting the computer, "
+            "please run `backup-supervisor.exe --install` again to complete "
+            "the installation.\n");
+        return;
+    }
+    EnsureMaterializedWslDistribution(username, distribution,
+        installed_executable);
 }

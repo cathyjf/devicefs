@@ -340,9 +340,10 @@ export auto InstallService(
 
     InstallExecutable(
         CurrentExecutablePath(), installed_executable, executable_security);
-    EnsureInternalWindowsAccount(std::filesystem::path{
-        ReadBackupConfiguration(persistent.configuration).windows_username
-    }.wstring());
+    const auto configuration = ReadBackupConfiguration(persistent.configuration);
+    EnsureInternalWindowsAccount(
+        std::filesystem::path{configuration.windows_username}.wstring(),
+        configuration.wsl.distribution, installed_executable);
     const auto installed_executable_text = installed_executable.string();
     const auto binary_path = wil::ArgvToCommandLine(std::array{
         std::string_view(installed_executable_text),

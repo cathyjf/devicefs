@@ -22,6 +22,7 @@ import <sal.h>;
 import devicefs.common;
 import devicefs.filesystem;
 import devicefs.stream_writer;
+import devicefs.supervisor.account_management;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.logging_console;
 import devicefs.supervisor.materialize_oci;
@@ -928,14 +929,15 @@ auto BackupSupervisorMain(
             InstallService(ServiceContext::kMinimumPreshutdownTimeout);
             return 0;
         }
-        if (option == "--materialize-oci") {
+        if (option == kMaterializeOciOption) {
             if (arguments.size() < 2) {
-                throw std::invalid_argument("--materialize-oci requires DISTRIBUTION");
+                throw std::invalid_argument(std::format(
+                    "{} requires DISTRIBUTION", kMaterializeOciOption));
             }
             if ((arguments.size() != 2) &&
                 ((arguments.size() != 4) || (arguments[2] != "--oci"))) {
-                throw std::invalid_argument(
-                    "expected --materialize-oci DISTRIBUTION [--oci FILENAME]");
+                throw std::invalid_argument(std::format(
+                    "expected {} DISTRIBUTION [--oci FILENAME]", kMaterializeOciOption));
             }
             const auto oci = (arguments.size() == 4) ?
                 std::optional{std::filesystem::path{arguments[3]}} : std::nullopt;

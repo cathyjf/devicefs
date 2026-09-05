@@ -855,7 +855,7 @@ auto PrintHelp() noexcept {
         "      Omit MOUNT-POINT to use a temporary SystemTemp directory.\n"
         "      [--namespace NAMESPACE] [--baseline SNAPSHOT-ID]\n"
         "      [--volumes VOLUME[,VOLUME...]]\n"
-        "  backup-supervisor.exe --install-service [--update]\n"
+        "  backup-supervisor.exe --install\n"
         "  backup-supervisor.exe --run-service\n");
 }
 
@@ -919,20 +919,13 @@ auto BackupSupervisorMain(
             return RunIncrementalDiagnosticMode(
                 ParseIncrementalDiagnosticOptions(arguments));
         }
-        if (option == "--install-service") {
-            if (arguments.size() == 1) {
-                InstallService(InstallMode::CreateOnly,
-                    ServiceContext::kMinimumPreshutdownTimeout);
-                return 0;
+        if (option == "--install") {
+            if (arguments.size() != 1) {
+                throw std::invalid_argument(
+                    "--install does not accept arguments");
             }
-            if ((arguments.size() == 2) &&
-                (arguments[1] == "--update")) {
-                InstallService(InstallMode::CreateOrUpdate,
-                    ServiceContext::kMinimumPreshutdownTimeout);
-                return 0;
-            }
-            throw std::invalid_argument(
-                "--install-service accepts only the optional --update argument");
+            InstallService(ServiceContext::kMinimumPreshutdownTimeout);
+            return 0;
         }
         if (option == "--foreground") {
             return RunForeground(

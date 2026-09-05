@@ -28,12 +28,8 @@ import std;
 import <devicefs/windows_imports.h>;
 import devicefs.common;
 import devicefs.stream_writer;
+import devicefs.supervisor.account_management;
 import devicefs.supervisor.configuration;
-
-export enum class InstallMode {
-    CreateOnly,
-    CreateOrUpdate,
-};
 
 export struct PersistentPaths {
     std::filesystem::path root;
@@ -279,7 +275,6 @@ export [[nodiscard]] auto ResolvePersistentPaths() {
 }
 
 export auto InstallService(
-    const InstallMode mode,
     const std::chrono::milliseconds preshutdown_timeout) {
     auto manager = wil::unique_schandle(OpenSCManagerW(
         nullptr, nullptr,
@@ -289,10 +284,6 @@ export auto InstallService(
     }
     auto service = wil::unique_schandle(OpenServiceA(
         manager.get(), kServiceName.data(), SERVICE_CHANGE_CONFIG));
-    if (service && (mode == InstallMode::CreateOnly)) {
-        WinError("service '{}' is already installed", kServiceName,
-            ExplicitWin32Error{ERROR_SERVICE_EXISTS});
-    }
     if (!service) {
         const auto error = GetLastError();
         if (error != ERROR_SERVICE_DOES_NOT_EXIST) {
@@ -340,6 +331,9 @@ export auto InstallService(
 
     InstallExecutable(
         CurrentExecutablePath(), installed_executable, executable_security);
+    EnsureInternalWindowsAccount(std::filesystem::path{
+        ReadBackupConfiguration(persistent.configuration).windows_username
+    }.wstring());
     const auto installed_executable_text = installed_executable.string();
     const auto binary_path = wil::ArgvToCommandLine(std::array{
         std::string_view(installed_executable_text),

@@ -23,13 +23,13 @@ export module devicefs.supervisor.native_backup;
 import std;
 import <devicefs/windows_imports.h>;
 import :internal;
-import :password_reset;
 import :devicefs_process;
 export import :incremental_diagnostics;
 export import :manifest;
 import :pbs;
 import devicefs.common;
 import devicefs.stream_writer;
+import devicefs.supervisor.account_management;
 import devicefs.supervisor.configuration;
 import devicefs.supervisor.find_powershell;
 import devicefs.supervisor.installation;
@@ -174,7 +174,7 @@ export [[nodiscard]] auto RunBackupConsole() -> int {
         // <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw>.
         if (!CreateProcessWithLogonW(
                 username.c_str(), internal::kLocalDomain.c_str(),
-                internal::ResetBackupAccountPassword(username).c_str(),
+                ResetBackupAccountPassword(username).c_str(),
                 LOGON_WITH_PROFILE, shell.c_str(), nullptr, 0,
                 nullptr, nullptr, &startup, &process)) {
             return std::unexpected{ShellError{.win_error = GetLastError()}};

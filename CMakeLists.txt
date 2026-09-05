@@ -238,6 +238,7 @@ file(GENERATE OUTPUT "${ARTIFACT_RESOURCE_SCRIPT}" CONTENT
 )
 target_sources(backup-supervisor PRIVATE "${ARTIFACT_RESOURCE_SCRIPT}")
 target_module_interfaces(backup-supervisor PRIVATE
+    src/modules/supervisor/account_management.ixx
     src/modules/supervisor/configuration.ixx
     src/modules/supervisor/embedded_artifacts.ixx
     src/modules/supervisor/find_powershell.ixx
@@ -252,7 +253,6 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/native_backup/internal.cpp
     src/modules/supervisor/native_backup/manifest.cpp
     src/modules/supervisor/native_backup/pbs.cpp
-    src/modules/supervisor/native_backup/password_reset.cpp
     src/modules/supervisor/native_backup/port_selection.cpp
     src/modules/supervisor/native_backup/privileges.cpp
     src/modules/supervisor/native_backup/s4u_logon.cpp

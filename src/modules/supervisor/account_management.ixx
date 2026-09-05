@@ -20,6 +20,7 @@ module;
 #include <bcrypt.h>
 #include <DismApi.h>
 #include <lm.h>
+#include <objbase.h>
 
 #include <wil/registry.h>
 #include <wil/resource.h>
@@ -103,6 +104,34 @@ auto HideAccountFromLogonScreen(const wil::zwstring_view username) {
             std::wstring_view{username.c_str(), username.size()},
             ExplicitWin32Error::FromHresult(result).value);
     }
+}
+
+[[nodiscard]] auto IsSuitableWslPackageInstalled() -> bool {
+    constexpr auto registration = wil::zwstring_view{
+        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss\\MSI"};
+    // The package version check compares numeric components and treats omitted
+    // trailing components as zero, so `2.7.12` meets a minimum of `2.7.12.0`.
+    // However, `std::ranges::lexicographical_compare` considers a matching
+    // shorter sequence smaller. Omitting trailing zeros from `minimum_version`
+    // prevents that comparison from rejecting an equivalent shorter version.
+    constexpr auto minimum_version = std::array{2u, 7u, 12u};
+    auto version = wil::unique_cotaskmem_string{};
+    if (const auto result = wil::reg::get_value_string_nothrow(
+            HKEY_LOCAL_MACHINE, registration.c_str(), L"Version", version);
+        wil::reg::is_registry_not_found(result)) {
+        return false;
+    } else if (FAILED(result)) {
+        WinError("could not read the WSL package version from 'HKLM\\{}'",
+            std::wstring_view{registration},
+            ExplicitWin32Error::FromHresult(result));
+    }
+
+    return !std::ranges::lexicographical_compare(
+        std::wstring_view{version.get()} | std::views::split(L'.') |
+            std::views::transform([](const auto component) {
+                return std::stoul(std::wstring{component.begin(), component.end()});
+            }),
+        minimum_version);
 }
 
 [[nodiscard]] auto EnsureWsl1Component() -> bool {
@@ -189,6 +218,23 @@ export auto EnsureInternalWindowsAccount(const wil::zwstring_view username) {
             std::wstring_view{username.c_str(), username.size()});
     }
     HideAccountFromLogonScreen(username);
+    if (IsSuitableWslPackageInstalled()) {
+        devicefs::WriteToStream(
+            devicefs::stdout,
+            "backup-supervisor: a suitable version of `wsl.exe` is installed\n");
+    } else {
+        // TODO: Install suitable version.
+        // Use the C++/WinRT HTTPS client API to query the WSL GitHub releases
+        // API for the latest version, and then download the cross-arch
+        // .msixbundle file from that release using ordinary certificate-
+        // validated HTTPS. Then install the .msixbundle using the appropriate
+        // C++/WinRT API for such installations. The msixbundle automatically
+        // chooses the correct architecture and then installs a system-wide MSI
+        // package. The msixbundle automatically refrains from downgrading the
+        // installed version of `wsl.exe`. Installation of the msixbundle will
+        // be successful only if it was properly signed, so the MSIX
+        // installation process already provides additional validation.
+    }
     if (EnsureWsl1Component()) {
         devicefs::WriteToStream(
             devicefs::stdout,

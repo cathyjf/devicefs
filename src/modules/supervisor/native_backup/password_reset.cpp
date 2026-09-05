@@ -36,6 +36,22 @@ namespace internal {
 
 [[nodiscard]] auto ResetBackupAccountPassword(
     const wil::zwstring_view username) -> wil::secure_wstring {
+    auto information = std::unique_ptr<USER_INFO_1,
+        wil::function_deleter<decltype(&NetApiBufferFree), NetApiBufferFree>>{};
+    const auto query_error = NetUserGetInfo(
+        nullptr, username.c_str(), 1, wil::out_param_ptr<BYTE **>(information));
+    if (query_error != NERR_Success) {
+        WinError("could not query privileges for backup account '{}'",
+            std::wstring_view{username.c_str(), username.size()},
+            ExplicitWin32Error{query_error});
+    }
+    if (information->usri1_priv == USER_PRIV_ADMIN) {
+        throw std::runtime_error(std::format(
+            "refusing to reset the password for backup account '{}' "
+            "because it is an administrator",
+            std::filesystem::path{username.c_str()}.string()));
+    }
+
     auto random = std::array<unsigned char, 32>{};
     const auto erase_random =
         wil::SecureZeroMemory_scope_exit(random.data(), random.size());

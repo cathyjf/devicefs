@@ -24,8 +24,13 @@ module;
 #include <wil/stl.h>
 #include <wil/win32_helpers.h>
 
+#undef GetObject
+
 #include <winrt/Windows.Data.Json.h>
+#include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Web.Http.h>
+#include <winrt/Windows.Web.Http.Headers.h>
 
 export module devicefs.supervisor.materialize_oci;
 
@@ -33,12 +38,12 @@ import std;
 import devicefs.common;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
+import devicefs.supervisor.https_download;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.temporary_paths;
 import devicefs.supervisor.winrt_apartment;
 
-#undef GetObject
 #undef stderr
 #undef stdout
 
@@ -115,10 +120,23 @@ auto ExtractArchiveMember(
     }), file.get());
 }
 
-[[nodiscard]] auto BlobMember(const winrt::Windows::Data::Json::JsonObject &descriptor) {
-    auto digest = winrt::to_string(descriptor.GetNamedString(L"digest"));
-    std::ranges::replace(digest, ':', '/');
-    return std::format("blobs/{}", digest);
+[[nodiscard]] auto BlobMember(const winrt::hstring &digest) {
+    auto member = winrt::to_string(digest);
+    std::ranges::replace(member, ':', '/');
+    return std::format("blobs/{}", member);
+}
+
+[[nodiscard]] auto OciLayerDigest(
+    const winrt::Windows::Data::Json::JsonObject &manifest,
+    const std::string_view image) -> std::optional<winrt::hstring> {
+    const auto layers = manifest.GetNamedArray(L"layers");
+    if (layers.Size() != 1) {
+        devicefs::WriteToStream(devicefs::stdout,
+            "backup-supervisor: OCI image '{}' has {} layers; skipping import\n",
+            image, layers.Size());
+        return std::nullopt;
+    }
+    return layers.GetObjectAt(0).GetNamedString(L"digest");
 }
 
 [[nodiscard]] auto ReadOciLayerMember(
@@ -144,15 +162,9 @@ auto ExtractArchiveMember(
     };
     try {
         const auto manifests = read_metadata("index.json").GetNamedArray(L"manifests");
-        const auto layers = read_metadata(BlobMember(manifests.GetObjectAt(0)))
-            .GetNamedArray(L"layers");
-        if (layers.Size() != 1) {
-            devicefs::WriteToStream(devicefs::stdout,
-                "backup-supervisor: OCI image '{}' has {} layers; skipping import\n",
-                archive.string(), layers.Size());
-            return std::nullopt;
-        }
-        return BlobMember(layers.GetObjectAt(0));
+        const auto digest = OciLayerDigest(read_metadata(BlobMember(
+            manifests.GetObjectAt(0).GetNamedString(L"digest"))), archive.string());
+        return digest ? std::optional{BlobMember(*digest)} : std::nullopt;
     } catch (const winrt::hresult_error &error) {
         WinError("could not read OCI image metadata from '{}': {}",
             std::wstring_view{archive.native()}, std::wstring_view{error.message()},
@@ -160,42 +172,148 @@ auto ExtractArchiveMember(
     }
 }
 
+[[nodiscard]] auto ReadRegistryJson(
+    const winrt::Windows::Web::Http::HttpClient &client,
+    const winrt::Windows::Foundation::Uri &url) {
+    try {
+        const auto response = client.GetAsync(url).get();
+        response.EnsureSuccessStatusCode();
+        return winrt::Windows::Data::Json::JsonObject::Parse(
+            response.Content().ReadAsStringAsync().get());
+    } catch (const winrt::hresult_error &error) {
+        WinError("could not read OCI registry response from '{}': {}",
+            std::wstring_view{url.AbsoluteUri()}, std::wstring_view{error.message()},
+            ExplicitWin32Error::FromHresult(error.code()));
+    }
+}
+
+[[nodiscard]] auto DownloadGhcrRootfs(const std::filesystem::path &rootfs) -> bool {
+    using namespace winrt::Windows::Foundation;
+    using namespace winrt::Windows::Web::Http;
+    using namespace winrt::Windows::Web::Http::Headers;
+
+    constexpr auto registry_host = std::wstring_view{L"ghcr.io"};
+    constexpr auto github_username = std::wstring_view{L"cathyjf"};
+    constexpr auto image_name = std::wstring_view{L"devicefs-wsl"};
+    constexpr auto image_tag = std::wstring_view{L"latest"};
+    const auto repository = std::format(L"{}/{}", github_username, image_name);
+    const auto repository_url = std::format(L"https://{}/v2/{}", registry_host, repository);
+    const auto image = winrt::to_string(std::format(
+        L"{}/{}:{}", registry_host, repository, image_tag));
+    const auto architecture = NativeMachineArchitecture() == IMAGE_FILE_MACHINE_ARM64
+        ? std::wstring_view{L"arm64"} : std::wstring_view{L"amd64"};
+    const auto apartment = WinrtApartment{
+        "could not initialize WinRT to download the WSL root filesystem",
+        RO_INIT_MULTITHREADED};
+    devicefs::WriteToStream(devicefs::stdout,
+        "backup-supervisor: querying OCI image '{}' for linux/{}\n",
+        image, winrt::to_string(architecture));
+    const auto client = [&] {
+        try {
+            const auto client = HttpClient{};
+            client.DefaultRequestHeaders().UserAgent().ParseAdd(L"backup-supervisor");
+            // Public GHCR images still require a pull token. This exchange is
+            // anonymous; the resulting token authorizes the registry requests.
+            const auto token = ReadRegistryJson(client, Uri{std::format(
+                L"https://{}/token?service={}&scope=repository:{}:pull",
+                registry_host, registry_host, repository)}).GetNamedString(L"token");
+            client.DefaultRequestHeaders().Authorization(
+                HttpCredentialsHeaderValue{L"Bearer", token});
+            client.DefaultRequestHeaders().Accept().ParseAdd(
+                L"application/vnd.oci.image.index.v1+json, "
+                L"application/vnd.oci.image.manifest.v1+json");
+            return client;
+        } catch (const winrt::hresult_error &error) {
+            WinError("could not obtain anonymous pull authorization for '{}': {}",
+                image, std::wstring_view{error.message()},
+                ExplicitWin32Error::FromHresult(error.code()));
+        }
+    }();
+    const auto layer_url = [&]() -> std::optional<Uri> {
+        try {
+            const auto index = ReadRegistryJson(client, Uri{std::format(
+                L"{}/manifests/{}", repository_url, image_tag)});
+            for (const auto &value : index.GetNamedArray(L"manifests")) {
+                const auto descriptor = value.GetObject();
+                const auto platform = descriptor.GetNamedObject(L"platform");
+                if ((platform.GetNamedString(L"os") != L"linux") ||
+                    (platform.GetNamedString(L"architecture") != architecture)) {
+                    continue;
+                }
+                const auto manifest_url = Uri{std::format(
+                    L"{}/manifests/{}", repository_url,
+                    std::wstring_view{descriptor.GetNamedString(L"digest")})};
+                const auto digest = OciLayerDigest(
+                    ReadRegistryJson(client, manifest_url), image);
+                if (!digest) {
+                    return std::nullopt;
+                }
+                return Uri{std::format(
+                    L"{}/blobs/{}", repository_url,
+                    std::wstring_view{*digest})};
+            }
+            throw std::runtime_error(std::format(
+                "OCI image '{}' has no suitable linux/{} manifest",
+                image, winrt::to_string(architecture)));
+        } catch (const winrt::hresult_error &error) {
+            WinError("could not read OCI image metadata for '{}': {}",
+                image, std::wstring_view{error.message()},
+                ExplicitWin32Error::FromHresult(error.code()));
+        }
+    }();
+    if (!layer_url) {
+        return false;
+    }
+    devicefs::WriteToStream(devicefs::stdout,
+        "backup-supervisor: downloading the linux/{} root filesystem from '{}'\n",
+        winrt::to_string(architecture), image);
+    const auto bytes = DownloadFile(client, *layer_url, rootfs);
+    devicefs::WriteToStream(devicefs::stdout,
+        "backup-supervisor: downloaded the root filesystem from '{}' ({} bytes)\n",
+        image, bytes);
+    return true;
+}
+
 } // namespace
 
-export auto MaterializeOci(
+export [[nodiscard]] auto MaterializeOci(
     const std::string_view distribution,
-    const std::filesystem::path &oci) -> void {
+    const std::optional<std::filesystem::path> &oci) -> bool {
     if (IsDistributionRegistered(distribution)) {
         devicefs::WriteToStream(devicefs::stdout,
             "backup-supervisor: WSL distribution '{}' is already registered\n",
             distribution);
-        return;
+        return true;
     }
 
-    const auto tar = [] {
-        auto directory = std::wstring{};
-        if (const auto result = wil::GetSystemDirectoryW(directory); FAILED(result)) {
-            WinError("could not find the Windows directory containing tar.exe",
-                ExplicitWin32Error::FromHresult(result));
-        }
-        return std::filesystem::path{directory} / "tar.exe";
-    }();
     const auto temporary = TemporaryDirectory{
         std::filesystem::temp_directory_path() /
             std::format("devicefs-oci-{}", UniqueName())};
-    const auto archive = std::filesystem::absolute(oci);
-    devicefs::WriteToStream(devicefs::stdout,
-        "backup-supervisor: reading OCI image '{}' for WSL distribution '{}'\n",
-        archive.string(), distribution);
-    const auto layer = ReadOciLayerMember(tar, archive, temporary.Path());
-    if (!layer) {
-        return;
-    }
     const auto rootfs = temporary.Path() / "rootfs.tar";
-    devicefs::WriteToStream(devicefs::stdout,
-        "backup-supervisor: extracting the root filesystem from '{}'\n",
-        archive.string());
-    ExtractArchiveMember(tar, archive, *layer, rootfs);
+    if (oci) {
+        const auto tar = [] {
+            auto directory = std::wstring{};
+            if (const auto result = wil::GetSystemDirectoryW(directory); FAILED(result)) {
+                WinError("could not find the Windows directory containing tar.exe",
+                    ExplicitWin32Error::FromHresult(result));
+            }
+            return std::filesystem::path{directory} / "tar.exe";
+        }();
+        const auto archive = std::filesystem::absolute(*oci);
+        devicefs::WriteToStream(devicefs::stdout,
+            "backup-supervisor: reading OCI image '{}' for WSL distribution '{}'\n",
+            archive.string(), distribution);
+        const auto layer = ReadOciLayerMember(tar, archive, temporary.Path());
+        if (!layer) {
+            return false;
+        }
+        devicefs::WriteToStream(devicefs::stdout,
+            "backup-supervisor: extracting the root filesystem from '{}'\n",
+            archive.string());
+        ExtractArchiveMember(tar, archive, *layer, rootfs);
+    } else if (!DownloadGhcrRootfs(rootfs)) {
+        return false;
+    }
 
     const auto executable = WslExecutablePath();
     // Each import gets a separate directory so an upgrade can materialize a
@@ -230,4 +348,5 @@ export auto MaterializeOci(
     }), GetStdHandle(STD_OUTPUT_HANDLE));
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: imported WSL1 distribution '{}'\n", distribution);
+    return true;
 }

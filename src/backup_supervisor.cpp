@@ -932,15 +932,14 @@ auto BackupSupervisorMain(
             if (arguments.size() < 2) {
                 throw std::invalid_argument("--materialize-oci requires DISTRIBUTION");
             }
-            if (arguments.size() == 2) {
-                throw std::invalid_argument("--materialize-oci currently requires --oci FILENAME");
-            }
-            if ((arguments.size() != 4) || (arguments[2] != "--oci")) {
+            if ((arguments.size() != 2) &&
+                ((arguments.size() != 4) || (arguments[2] != "--oci"))) {
                 throw std::invalid_argument(
-                    "expected --materialize-oci DISTRIBUTION --oci FILENAME");
+                    "expected --materialize-oci DISTRIBUTION [--oci FILENAME]");
             }
-            MaterializeOci(arguments[1], std::filesystem::path{arguments[3]});
-            return 0;
+            const auto oci = (arguments.size() == 4) ?
+                std::optional{std::filesystem::path{arguments[3]}} : std::nullopt;
+            return MaterializeOci(arguments[1], oci) ? 0 : 1;
         }
         if (option == "--foreground") {
             return RunForeground(

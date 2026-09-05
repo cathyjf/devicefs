@@ -25,6 +25,12 @@ export struct ExplicitWin32Error final {
     DWORD value;
 
     [[nodiscard]] static constexpr auto FromHresult(const HRESULT hr) {
+        // An HRESULT's facility identifies the source of its error code.
+        // Only `FACILITY_WIN32` wraps a Win32 error number; stripping any
+        // other facility could report an unrelated Win32 failure.
+        if (HRESULT_FACILITY(hr) != FACILITY_WIN32) {
+            return ExplicitWin32Error{std::bit_cast<DWORD>(hr)};
+        }
         [[gsl::suppress("26472",
             justification:
                 "The definition of HRESULT_CODE ensures that the result will "

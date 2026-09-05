@@ -213,6 +213,15 @@ auto HideAccountFromLogonScreen(const wil::zwstring_view username) {
 
 } // namespace
 
+export [[nodiscard]] auto NativeMachineArchitecture() {
+    auto process_machine = USHORT{};
+    auto native_machine = USHORT{};
+    if (!IsWow64Process2(GetCurrentProcess(), &process_machine, &native_machine)) {
+        WinError("could not determine the native machine architecture");
+    }
+    return native_machine;
+}
+
 export [[nodiscard]] auto WslExecutablePath() {
     auto location = wil::unique_cotaskmem_string{};
     if (const auto result = wil::reg::get_value_string_nothrow(

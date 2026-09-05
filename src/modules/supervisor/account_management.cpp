@@ -27,12 +27,11 @@ import <devicefs/windows_imports.h>;
 import <winrt/Windows.Data.Json.h>;
 import <winrt/Windows.Foundation.h>;
 import <winrt/Windows.Foundation.Collections.h>;
-import <winrt/Windows.Storage.h>;
-import <winrt/Windows.Storage.Streams.h>;
 import <winrt/Windows.Web.Http.h>;
 import <winrt/Windows.Web.Http.Headers.h>;
 import devicefs.common;
 import devicefs.stream_writer;
+import devicefs.supervisor.https_download;
 import devicefs.supervisor.temporary_paths;
 import devicefs.supervisor.winrt_apartment;
 
@@ -43,8 +42,6 @@ import devicefs.supervisor.winrt_apartment;
 auto InstallWslPackage() -> bool {
     using namespace winrt::Windows::Data::Json;
     using namespace winrt::Windows::Foundation;
-    using namespace winrt::Windows::Storage;
-    using namespace winrt::Windows::Storage::Streams;
     using namespace winrt::Windows::Web::Http;
 
     // Installation must also work when the existing `wsl.exe` is too old to
@@ -68,16 +65,9 @@ auto InstallWslPackage() -> bool {
         response.EnsureSuccessStatusCode();
         const auto release = JsonObject::Parse(
             response.Content().ReadAsStringAsync().get());
-        const auto suffix = [] {
-            auto process_machine = USHORT{};
-            auto native_machine = USHORT{};
-            if (!IsWow64Process2(GetCurrentProcess(), &process_machine, &native_machine)) {
-                WinError("could not determine the machine architecture for the WSL MSI");
-            }
-            return native_machine == IMAGE_FILE_MACHINE_ARM64
-                ? std::wstring_view{L".arm64.msi"}
-                : std::wstring_view{L".x64.msi"};
-        }();
+        const auto suffix = NativeMachineArchitecture() == IMAGE_FILE_MACHINE_ARM64
+            ? std::wstring_view{L".arm64.msi"}
+            : std::wstring_view{L".x64.msi"};
         const auto package = [&] {
             for (const auto &value : release.GetNamedArray(L"assets")) {
                 const auto asset = value.GetObject();
@@ -105,14 +95,8 @@ auto InstallWslPackage() -> bool {
             L"backup-supervisor: downloading WSL release '{}' MSI '{}' from '{}'\n",
             std::wstring_view{release.GetNamedString(L"tag_name")},
             std::wstring_view{name}, std::wstring_view{download_url.AbsoluteUri()});
-        const auto folder = StorageFolder::GetFolderFromPathAsync(directory.Path().native()).get();
-        const auto file = folder.CreateFileAsync(L"wsl.msi").get();
-        const auto download = client.GetAsync(
-            download_url, HttpCompletionOption::ResponseHeadersRead).get();
-        download.EnsureSuccessStatusCode();
-        const auto bytes = RandomAccessStream::CopyAndCloseAsync(
-            download.Content().ReadAsInputStreamAsync().get(),
-            file.OpenAsync(FileAccessMode::ReadWrite).get()).get();
+        const auto destination = directory.Path() / "wsl.msi";
+        const auto bytes = DownloadFile(client, download_url, destination);
         devicefs::WriteToStream(devicefs::stdout,
             L"backup-supervisor: downloaded '{}' ({} bytes)\n",
             std::wstring_view{name}, bytes);
@@ -127,7 +111,7 @@ auto InstallWslPackage() -> bool {
         // Windows Installer can restart the machine during a silent install.
         // `REBOOT=ReallySuppress` prevents that restart and leaves the caller
         // responsible for reporting any restart requirement after installation.
-        const auto error = MsiInstallProductW(file.Path().c_str(), L"REBOOT=ReallySuppress");
+        const auto error = MsiInstallProductW(destination.c_str(), L"REBOOT=ReallySuppress");
         if ((error != ERROR_SUCCESS) && (error != ERROR_SUCCESS_REBOOT_REQUIRED)) {
             WinError("could not install WSL MSI '{}'",
                 std::wstring_view{name}, ExplicitWin32Error{error});

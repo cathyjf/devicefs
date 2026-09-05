@@ -40,6 +40,9 @@ import devicefs.stream_writer;
 
 namespace {
 
+constexpr auto kWslRegistration = wil::zwstring_view{
+    L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss\\MSI"};
+
 [[nodiscard]] auto GenerateAccountPassword() -> wil::secure_wstring {
     auto random = std::array<unsigned char, 32>{};
     const auto erase_random =
@@ -109,8 +112,6 @@ auto HideAccountFromLogonScreen(const wil::zwstring_view username) {
 }
 
 [[nodiscard]] auto IsSuitableWslPackageInstalled() -> bool {
-    constexpr auto registration = wil::zwstring_view{
-        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss\\MSI"};
     // The package version check compares numeric components and treats omitted
     // trailing components as zero, so `2.7.12` meets a minimum of `2.7.12.0`.
     // However, `std::ranges::lexicographical_compare` considers a matching
@@ -119,12 +120,12 @@ auto HideAccountFromLogonScreen(const wil::zwstring_view username) {
     constexpr auto minimum_version = std::array{2u, 7u, 13u};
     auto version = wil::unique_cotaskmem_string{};
     if (const auto result = wil::reg::get_value_string_nothrow(
-            HKEY_LOCAL_MACHINE, registration.c_str(), L"Version", version);
+            HKEY_LOCAL_MACHINE, kWslRegistration.c_str(), L"Version", version);
         wil::reg::is_registry_not_found(result)) {
         return false;
     } else if (FAILED(result)) {
         WinError("could not read the WSL package version from 'HKLM\\{}'",
-            std::wstring_view{registration},
+            std::wstring_view{kWslRegistration},
             ExplicitWin32Error::FromHresult(result));
     }
 
@@ -211,6 +212,18 @@ auto HideAccountFromLogonScreen(const wil::zwstring_view username) {
 }
 
 } // namespace
+
+export [[nodiscard]] auto WslExecutablePath() {
+    auto location = wil::unique_cotaskmem_string{};
+    if (const auto result = wil::reg::get_value_string_nothrow(
+            HKEY_LOCAL_MACHINE, kWslRegistration.c_str(), L"InstallLocation", location);
+        FAILED(result)) {
+        WinError("could not read the WSL installation location from 'HKLM\\{}'",
+            std::wstring_view{kWslRegistration},
+            ExplicitWin32Error::FromHresult(result));
+    }
+    return std::filesystem::path{location.get()} / L"wsl.exe";
+}
 
 export auto EnsureInternalWindowsAccount(const wil::zwstring_view username) {
     if (CreateAccountIfMissing(username)) {

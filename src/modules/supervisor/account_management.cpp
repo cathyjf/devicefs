@@ -24,7 +24,6 @@ module devicefs.supervisor.account_management;
 
 import std;
 import <devicefs/windows_imports.h>;
-import <wil/filesystem.h>;
 import <winrt/Windows.Data.Json.h>;
 import <winrt/Windows.Foundation.h>;
 import <winrt/Windows.Foundation.Collections.h>;
@@ -99,28 +98,14 @@ auto InstallWslPackage() -> bool {
                 winrt::to_string(name), winrt::to_string(download_url.AbsoluteUri())));
         }
 
-        const auto directory = TemporarySystemDirectoryPath("devicefs-wsl-package");
-        if (!CreateDirectoryW(directory.c_str(), nullptr)) {
-            WinError("could not create the WSL package temporary directory '{}'",
-                std::wstring_view{directory.native()});
-        }
-        const auto remove_directory = wil::scope_exit([&] {
-            if (const auto result =
-                    wil::RemoveDirectoryRecursiveNoThrow(directory.c_str());
-                FAILED(result)) {
-                devicefs::WriteToStream(devicefs::stderr,
-                    L"backup-supervisor: could not remove WSL package temporary "
-                    L"directory '{}' (Windows error 0x{:08x})\n",
-                    std::wstring_view{directory.native()},
-                    ExplicitWin32Error::FromHresult(result).value);
-            }
-        });
+        const auto directory = TemporaryDirectory{
+            TemporarySystemDirectoryPath("devicefs-wsl-package")};
 
         devicefs::WriteToStream(devicefs::stdout,
             L"backup-supervisor: downloading WSL release '{}' MSI '{}' from '{}'\n",
             std::wstring_view{release.GetNamedString(L"tag_name")},
             std::wstring_view{name}, std::wstring_view{download_url.AbsoluteUri()});
-        const auto folder = StorageFolder::GetFolderFromPathAsync(directory.native()).get();
+        const auto folder = StorageFolder::GetFolderFromPathAsync(directory.Path().native()).get();
         const auto file = folder.CreateFileAsync(L"wsl.msi").get();
         const auto download = client.GetAsync(
             download_url, HttpCompletionOption::ResponseHeadersRead).get();

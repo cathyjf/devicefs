@@ -264,6 +264,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/find_powershell.ixx
     src/modules/supervisor/installation.ixx
     src/modules/supervisor/logging_console.ixx
+    src/modules/supervisor/materialize_oci.ixx
     src/modules/supervisor/native_backup.ixx
     src/modules/supervisor/native_backup/backup_viewer.cpp
     src/modules/supervisor/native_backup/devicefs_process.cpp
@@ -278,6 +279,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/native_backup/s4u_logon.cpp
     src/modules/supervisor/native_backup/vhdx_attachment.cpp
     src/modules/supervisor/process_diagnostics.ixx
+    src/modules/supervisor/process_launch.ixx
     src/modules/supervisor/temporary_paths.ixx
     src/modules/supervisor/vshadow.ixx
     src/modules/supervisor/winrt_apartment.ixx

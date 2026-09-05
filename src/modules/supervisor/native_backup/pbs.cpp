@@ -31,6 +31,7 @@ import devicefs.supervisor.account_management;
 import devicefs.supervisor.configuration;
 import devicefs.supervisor.embedded_artifacts;
 import devicefs.supervisor.installation;
+import devicefs.supervisor.process_launch;
 import devicefs.supervisor.temporary_paths;
 
 namespace internal {
@@ -391,7 +392,7 @@ struct WslProcess {
     const HANDLE standard_input,
     const HANDLE standard_output,
     const HANDLE standard_error) {
-    const auto wsl_path = ProgramFilesDirectory() / L"WSL" / L"wsl.exe";
+    const auto wsl_path = WslExecutablePath();
     const auto wsl_path_text = wsl_path.string();
     auto argument_views = std::vector<std::string_view>{wsl_path_text};
     argument_views.append_range(arguments);

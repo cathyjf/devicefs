@@ -22,7 +22,12 @@ export module devicefs.supervisor.temporary_paths;
 
 import std;
 import <devicefs/windows_imports.h>;
+import <wil/filesystem.h>;
 import devicefs.common;
+import devicefs.stream_writer;
+
+#undef stderr
+#undef stdout
 
 export [[nodiscard]] auto UniqueName() {
     auto id = GUID{};
@@ -53,3 +58,37 @@ export [[nodiscard]] auto TemporarySystemDirectoryPath(
         "SystemTemp" /
         std::format("{}-{}", prefix, UniqueName());
 }
+
+export class TemporaryDirectory {
+  public:
+    explicit TemporaryDirectory(std::filesystem::path path)
+        : path_{std::move(path)} {
+        if (!CreateDirectoryW(path_.c_str(), nullptr)) {
+            WinError("could not create temporary directory '{}'",
+                std::wstring_view{path_.native()});
+        }
+    }
+
+    TemporaryDirectory(const TemporaryDirectory &) = delete;
+    auto operator=(const TemporaryDirectory &) -> TemporaryDirectory & = delete;
+    TemporaryDirectory(TemporaryDirectory &&) = delete;
+    auto operator=(TemporaryDirectory &&) -> TemporaryDirectory & = delete;
+
+    ~TemporaryDirectory() noexcept {
+        if (const auto result = wil::RemoveDirectoryRecursiveNoThrow(path_.c_str());
+            FAILED(result)) {
+            devicefs::WriteToStream(devicefs::stderr,
+                L"backup-supervisor: could not remove temporary directory '{}' "
+                L"(Windows error 0x{:08x})\n",
+                std::wstring_view{path_.native()},
+                ExplicitWin32Error::FromHresult(result).value);
+        }
+    }
+
+    [[nodiscard]] auto Path() const noexcept -> const std::filesystem::path & {
+        return path_;
+    }
+
+  private:
+    std::filesystem::path path_;
+};

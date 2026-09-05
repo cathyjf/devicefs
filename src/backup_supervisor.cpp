@@ -24,6 +24,7 @@ import devicefs.filesystem;
 import devicefs.stream_writer;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.logging_console;
+import devicefs.supervisor.materialize_oci;
 import devicefs.supervisor.native_backup;
 import devicefs.supervisor.process_diagnostics;
 import devicefs.supervisor.vshadow;
@@ -925,6 +926,20 @@ auto BackupSupervisorMain(
                     "--install does not accept arguments");
             }
             InstallService(ServiceContext::kMinimumPreshutdownTimeout);
+            return 0;
+        }
+        if (option == "--materialize-oci") {
+            if (arguments.size() < 2) {
+                throw std::invalid_argument("--materialize-oci requires DISTRIBUTION");
+            }
+            if (arguments.size() == 2) {
+                throw std::invalid_argument("--materialize-oci currently requires --oci FILENAME");
+            }
+            if ((arguments.size() != 4) || (arguments[2] != "--oci")) {
+                throw std::invalid_argument(
+                    "expected --materialize-oci DISTRIBUTION --oci FILENAME");
+            }
+            MaterializeOci(arguments[1], std::filesystem::path{arguments[3]});
             return 0;
         }
         if (option == "--foreground") {

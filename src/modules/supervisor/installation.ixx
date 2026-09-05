@@ -263,6 +263,11 @@ export [[nodiscard]] auto ProgramFilesDirectory() {
     return KnownFolderPath(FOLDERID_ProgramFiles, "Program Files");
 }
 
+export [[nodiscard]] auto WslDistributionDirectory() {
+    return KnownFolderPath(FOLDERID_LocalAppData, "LocalAppData") /
+        kProductDirectoryName / L"wsl";
+}
+
 export [[nodiscard]] auto ResolvePersistentPaths() {
     auto result = PersistentPaths{};
     result.root = KnownFolderPath(FOLDERID_ProgramData, "ProgramData") /

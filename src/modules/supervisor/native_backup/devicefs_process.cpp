@@ -27,6 +27,7 @@ import devicefs.common;
 import devicefs.rpc_constants;
 import devicefs.stream_writer;
 import devicefs.supervisor.installation;
+import devicefs.supervisor.process_launch;
 import devicefs.supervisor.temporary_paths;
 import devicefs.supervisor.vshadow;
 

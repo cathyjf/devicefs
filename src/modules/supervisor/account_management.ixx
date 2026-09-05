@@ -36,6 +36,8 @@ import std;
 import devicefs.common;
 import devicefs.stream_writer;
 
+[[nodiscard]] auto InstallWslPackage() -> bool;
+
 namespace {
 
 [[nodiscard]] auto GenerateAccountPassword() -> wil::secure_wstring {
@@ -114,7 +116,7 @@ auto HideAccountFromLogonScreen(const wil::zwstring_view username) {
     // However, `std::ranges::lexicographical_compare` considers a matching
     // shorter sequence smaller. Omitting trailing zeros from `minimum_version`
     // prevents that comparison from rejecting an equivalent shorter version.
-    constexpr auto minimum_version = std::array{2u, 7u, 12u};
+    constexpr auto minimum_version = std::array{2u, 7u, 13u};
     auto version = wil::unique_cotaskmem_string{};
     if (const auto result = wil::reg::get_value_string_nothrow(
             HKEY_LOCAL_MACHINE, registration.c_str(), L"Version", version);
@@ -218,24 +220,16 @@ export auto EnsureInternalWindowsAccount(const wil::zwstring_view username) {
             std::wstring_view{username.c_str(), username.size()});
     }
     HideAccountFromLogonScreen(username);
-    if (IsSuitableWslPackageInstalled()) {
-        devicefs::WriteToStream(
-            devicefs::stdout,
-            "backup-supervisor: a suitable version of `wsl.exe` is installed\n");
-    } else {
-        // TODO: Install suitable version.
-        // Use the C++/WinRT HTTPS client API to query the WSL GitHub releases
-        // API for the latest version, and then download the cross-arch
-        // .msixbundle file from that release using ordinary certificate-
-        // validated HTTPS. Then install the .msixbundle using the appropriate
-        // C++/WinRT API for such installations. The msixbundle automatically
-        // chooses the correct architecture and then installs a system-wide MSI
-        // package. The msixbundle automatically refrains from downgrading the
-        // installed version of `wsl.exe`. Installation of the msixbundle will
-        // be successful only if it was properly signed, so the MSIX
-        // installation process already provides additional validation.
-    }
-    if (EnsureWsl1Component()) {
+    const auto package_restart_needed = [] {
+        if (IsSuitableWslPackageInstalled()) {
+            devicefs::WriteToStream(
+                devicefs::stdout,
+                "backup-supervisor: a suitable version of `wsl.exe` is installed\n");
+            return false;
+        }
+        return InstallWslPackage();
+    }();
+    if (EnsureWsl1Component() || package_restart_needed) {
         devicefs::WriteToStream(
             devicefs::stdout,
             "The installation is not complete. After restarting the computer, "

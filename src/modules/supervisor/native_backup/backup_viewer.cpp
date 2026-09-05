@@ -37,6 +37,7 @@ import :privileges;
 import :vhdx_attachment;
 import devicefs.common;
 import devicefs.stream_writer;
+import devicefs.supervisor.temporary_paths;
 
 namespace internal {
 

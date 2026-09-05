@@ -27,10 +27,11 @@ import <sal.h>;
 export class WinrtApartment {
   public:
     explicit WinrtApartment(
-        _In_z_ const char *const initialization_error)
-        : uninitialize_([initialization_error] {
+        _In_z_ const char *const initialization_error,
+        const RO_INIT_TYPE apartment_type = RO_INIT_SINGLETHREADED)
+        : uninitialize_([initialization_error, apartment_type] {
             try {
-                return wil::RoInitialize(RO_INIT_SINGLETHREADED);
+                return wil::RoInitialize(apartment_type);
             } catch (const wil::ResultException &error) {
                 throw std::runtime_error(std::format(
                     "{}: {}", initialization_error, error.what()));

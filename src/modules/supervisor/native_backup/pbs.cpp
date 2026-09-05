@@ -31,6 +31,7 @@ import devicefs.supervisor.account_management;
 import devicefs.supervisor.configuration;
 import devicefs.supervisor.embedded_artifacts;
 import devicefs.supervisor.installation;
+import devicefs.supervisor.temporary_paths;
 
 namespace internal {
 

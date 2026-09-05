@@ -178,18 +178,4 @@ auto TryWriteError(
         devicefs::stderr, "backup-supervisor: {}: {}\n", context, error.what());
 }
 
-[[nodiscard]] auto UniqueName() {
-    auto id = GUID{};
-    const auto error = CoCreateGuid(&id);
-    if (FAILED(error)) {
-        WinError("could not create a unique backup identifier",
-            ExplicitWin32Error::FromHresult(error));
-    }
-    return std::format(
-        "{:08x}{:04x}{:04x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        id.Data1, id.Data2, id.Data3,
-        id.Data4[0], id.Data4[1], id.Data4[2], id.Data4[3],
-        id.Data4[4], id.Data4[5], id.Data4[6], id.Data4[7]);
-}
-
 } // namespace internal

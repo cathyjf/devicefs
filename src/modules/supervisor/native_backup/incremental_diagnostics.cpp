@@ -37,6 +37,7 @@ import devicefs.filesystem;
 import devicefs.rpc_block_device_server;
 import devicefs.stream_writer;
 import devicefs.synthetic_backup_block_device;
+import devicefs.supervisor.temporary_paths;
 import devicefs.supervisor.vshadow;
 import devicefs.vss_block_descriptors;
 
@@ -496,7 +497,7 @@ enum class BackupViewPreparation {
     const auto synthetic_mount_text = synthetic_mount.string();
     const auto real_mount_text = real_mount.string();
     auto endpoint = std::format(
-        "devicefs-block-device-{}", internal::UniqueName());
+        "devicefs-block-device-{}", UniqueName());
     auto suspended_synthetic = internal::StartDeviceFs(
         internal::DeviceFsStartRequest{
             .sources = synthetic_sources,

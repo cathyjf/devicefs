@@ -27,6 +27,7 @@ import devicefs.common;
 import devicefs.rpc_constants;
 import devicefs.stream_writer;
 import devicefs.supervisor.installation;
+import devicefs.supervisor.temporary_paths;
 import devicefs.supervisor.vshadow;
 
 namespace internal {
@@ -59,22 +60,6 @@ struct DeviceFsStartRequest {
     std::optional<std::string_view> rpc_password;
     bool vhdx = false;
 };
-
-[[nodiscard]] auto TemporarySystemDirectoryPath(
-    const std::string_view prefix) {
-    const auto windows_directory = [] {
-        auto result = std::wstring{};
-        const auto status = wil::GetWindowsDirectoryW(result);
-        if (FAILED(status)) {
-            WinError("could not obtain the Windows directory",
-                ExplicitWin32Error::FromHresult(status));
-        }
-        return result;
-    }();
-    return std::filesystem::path{windows_directory} /
-        "SystemTemp" /
-        std::format("{}-{}", prefix, UniqueName());
-}
 
 [[nodiscard]] auto TemporaryDeviceFsViewPath() {
     return TemporarySystemDirectoryPath("devicefs-view");

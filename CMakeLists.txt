@@ -240,6 +240,7 @@ target_link_libraries(vss-descriptor-dump PRIVATE
 add_executable(backup-supervisor
     src/main.cpp
     src/backup_supervisor.cpp
+    src/modules/supervisor/account_management.cpp
 )
 target_link_libraries(backup-supervisor PRIVATE
     devicefs-common devicefs-filesystem devicefs-rpc-block-device
@@ -277,6 +278,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/native_backup/s4u_logon.cpp
     src/modules/supervisor/native_backup/vhdx_attachment.cpp
     src/modules/supervisor/process_diagnostics.ixx
+    src/modules/supervisor/temporary_paths.ixx
     src/modules/supervisor/vshadow.ixx
     src/modules/supervisor/winrt_apartment.ixx
 )
@@ -348,7 +350,7 @@ target_compile_definitions(backup-supervisor PRIVATE _WIN32_WINNT=0x0A00)
 target_include_directories(backup-supervisor SYSTEM PRIVATE "${DISM_INCLUDE_DIR}")
 target_link_libraries(backup-supervisor PRIVATE
     "${DISM_LIBRARY}"
-    advapi32 bcrypt netapi32 ntdll ole32 secur32 shell32 userenv virtdisk windowsapp ws2_32
+    advapi32 bcrypt msi netapi32 ntdll ole32 pathcch secur32 shell32 userenv virtdisk windowsapp ws2_32
 )
 
 add_custom_target(check-native-code-analysis ALL

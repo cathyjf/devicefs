@@ -18,6 +18,7 @@ module;
 
 #include <windows.h>
 #include <bcrypt.h>
+#include <DismApi.h>
 #include <lm.h>
 
 #include <wil/registry.h>
@@ -104,6 +105,80 @@ auto HideAccountFromLogonScreen(const wil::zwstring_view username) {
     }
 }
 
+[[nodiscard]] auto EnsureWsl1Component() -> bool {
+    constexpr auto feature =
+        wil::zwstring_view{L"Microsoft-Windows-Subsystem-Linux"};
+    if (const auto result =
+            DismInitialize(DismLogErrorsWarnings, nullptr, nullptr);
+        FAILED(result)) {
+        WinError("could not initialize DISM to prepare Windows component '{}'",
+            std::wstring_view{feature},
+            ExplicitWin32Error::FromHresult(result));
+    }
+    const auto shutdown =
+        wil::unique_call<decltype(&DismShutdown), DismShutdown>{};
+    auto session = wil::unique_any<
+        DismSession, decltype(&DismCloseSession), DismCloseSession>{};
+    if (const auto result = DismOpenSession(
+            DISM_ONLINE_IMAGE, nullptr, nullptr, session.addressof());
+        FAILED(result)) {
+        WinError("could not open the running Windows installation in DISM",
+            ExplicitWin32Error::FromHresult(result));
+    }
+
+    auto information = std::unique_ptr<DismFeatureInfo,
+        wil::function_deleter<decltype(&DismDelete), DismDelete>>{};
+    if (const auto result = DismGetFeatureInfo(
+            session.get(), feature.c_str(), nullptr,
+            DismPackageNone, wil::out_param(information));
+        FAILED(result)) {
+        WinError("could not query Windows component '{}'",
+            std::wstring_view{feature},
+            ExplicitWin32Error::FromHresult(result));
+    }
+    if (information->FeatureState == DismStateInstalled) {
+        devicefs::WriteToStream(
+            devicefs::stdout,
+            L"backup-supervisor: Windows component '{}' is already installed\n",
+            std::wstring_view{feature});
+        return false;
+    }
+    if (information->FeatureState == DismStateInstallPending) {
+        devicefs::WriteToStream(
+            devicefs::stdout,
+            L"backup-supervisor: Windows component '{}' is awaiting a restart "
+            L"to complete installation\n",
+            std::wstring_view{feature});
+        return true;
+    }
+
+    devicefs::WriteToStream(
+        devicefs::stdout,
+        L"backup-supervisor: installing Windows component '{}'\n",
+        std::wstring_view{feature});
+    const auto result = DismEnableFeature(
+        session.get(), feature.c_str(), nullptr, DismPackageNone, FALSE,
+        nullptr, 0, TRUE, nullptr, nullptr, nullptr);
+    if (FAILED(result)) {
+        WinError("could not install Windows component '{}'",
+            std::wstring_view{feature},
+            ExplicitWin32Error::FromHresult(result));
+    }
+    devicefs::WriteToStream(
+        devicefs::stdout,
+        L"backup-supervisor: installed Windows component '{}'\n",
+        std::wstring_view{feature});
+    if (result == ERROR_SUCCESS_REBOOT_REQUIRED) {
+        devicefs::WriteToStream(
+            devicefs::stdout,
+            L"backup-supervisor: Windows must be restarted to complete "
+            L"installation of '{}'\n",
+            std::wstring_view{feature});
+        return true;
+    }
+    return false;
+}
+
 } // namespace
 
 export auto EnsureInternalWindowsAccount(const wil::zwstring_view username) {
@@ -114,6 +189,13 @@ export auto EnsureInternalWindowsAccount(const wil::zwstring_view username) {
             std::wstring_view{username.c_str(), username.size()});
     }
     HideAccountFromLogonScreen(username);
+    if (EnsureWsl1Component()) {
+        devicefs::WriteToStream(
+            devicefs::stdout,
+            "The installation is not complete. After restarting the computer, "
+            "please run `backup-supervisor.exe --install` again to complete "
+            "the installation.\n");
+    }
 }
 
 export [[nodiscard]] auto ResetBackupAccountPassword(

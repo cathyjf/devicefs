@@ -20,8 +20,10 @@ endif()
 
 if(CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
     set(WINFSP_ARCHITECTURE x64)
+    set(DISM_ARCHITECTURE amd64)
 elseif(CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "ARM64")
     set(WINFSP_ARCHITECTURE a64)
+    set(DISM_ARCHITECTURE arm64)
 else()
     message(FATAL_ERROR "devicefs requires an x64 or ARM64 target")
 endif()
@@ -76,6 +78,23 @@ endfunction()
 if(NOT EXISTS "${WINFSP_INCLUDE_DIR}/winfsp/winfsp.h" OR NOT EXISTS "${WINFSP_LIBRARY}")
     message(FATAL_ERROR
         "WinFsp developer files were not found; reinstall WinFsp with the Developer feature"
+    )
+endif()
+
+cmake_host_system_information(
+    RESULT WINDOWS_KITS_ROOT
+    QUERY WINDOWS_REGISTRY "HKLM/SOFTWARE/Microsoft/Windows Kits/Installed Roots"
+    VALUE KitsRoot10
+    VIEW 32
+)
+set(DISM_SDK_ROOT
+    "${WINDOWS_KITS_ROOT}/Assessment and Deployment Kit/Deployment Tools/SDKs/DismApi"
+)
+set(DISM_INCLUDE_DIR "${DISM_SDK_ROOT}/Include")
+set(DISM_LIBRARY "${DISM_SDK_ROOT}/Lib/${DISM_ARCHITECTURE}/DismApi.lib")
+if(NOT EXISTS "${DISM_INCLUDE_DIR}/DismApi.h" OR NOT EXISTS "${DISM_LIBRARY}")
+    message(FATAL_ERROR
+        "DISM developer files were not found; install the Windows ADK Deployment Tools"
     )
 endif()
 
@@ -326,7 +345,9 @@ target_compile_definitions(devicefs-filesystem PRIVATE
 )
 
 target_compile_definitions(backup-supervisor PRIVATE _WIN32_WINNT=0x0A00)
+target_include_directories(backup-supervisor SYSTEM PRIVATE "${DISM_INCLUDE_DIR}")
 target_link_libraries(backup-supervisor PRIVATE
+    "${DISM_LIBRARY}"
     advapi32 bcrypt netapi32 ntdll ole32 secur32 shell32 userenv virtdisk windowsapp ws2_32
 )
 

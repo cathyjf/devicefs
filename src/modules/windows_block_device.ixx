@@ -87,14 +87,6 @@ struct AllocationChangeBlocks {
 
 } // namespace devicefs
 
-#if defined(__INTELLISENSE__) && !defined(__cpp_lib_start_lifetime_as)
-// IntelliSense uses EDG, which does not yet expose `std::start_lifetime_as`.
-// Tracked by <https://github.com/microsoft/STL/issues/6169>.
-namespace std {
-template <class T> auto start_lifetime_as(void *) noexcept -> T *;
-} // namespace std
-#endif
-
 namespace devicefs::filesystem_internal {
 
 _Success_(return == ERROR_SUCCESS)

@@ -26,15 +26,6 @@ import std;
 import <devicefs/windows_imports.h>;
 import devicefs.common;
 
-#if defined(__INTELLISENSE__) && !defined(__cpp_lib_start_lifetime_as)
-// IntelliSense uses EDG, which does not yet expose these C++23 functions.
-// Tracked by <https://github.com/microsoft/STL/issues/6169>.
-namespace std {
-template <class T> auto start_lifetime_as(void *) noexcept -> T *;
-template <class T> auto start_lifetime_as_array(void *, size_t) noexcept -> T *;
-} // namespace std
-#endif
-
 namespace internal {
 
 class ProcessPrivilegeEnabler {

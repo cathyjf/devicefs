@@ -212,6 +212,10 @@ auto InstallExecutable(
     const auto destination_exists = std::filesystem::exists(destination);
     if (destination_exists &&
         (std::filesystem::equivalent(source, destination))) {
+        devicefs::WriteToStream(devicefs::stdout,
+            L"backup-supervisor: already running the installed supervisor '{}'; "
+            L"skipping binary copy\n",
+            std::wstring_view{destination.native()});
         return;
     }
 
@@ -358,7 +362,7 @@ export auto InstallService(
         }
         ConfigurePreshutdownTimeout(service.get(), preshutdown_timeout);
         devicefs::WriteToStream(
-            devicefs::stdout, "backup-supervisor: updated {} at {}\n",
+            devicefs::stdout, "backup-supervisor: updated service {} to use {}\n",
             kServiceName, installed_executable_text);
         return;
     }
@@ -379,6 +383,6 @@ export auto InstallService(
     ConfigurePreshutdownTimeout(service.get(), preshutdown_timeout);
     remove_incomplete_service.release();
     devicefs::WriteToStream(
-        devicefs::stdout, "backup-supervisor: installed {} at {}\n",
+        devicefs::stdout, "backup-supervisor: installed service {} to use {}\n",
         kServiceName, installed_executable_text);
 }

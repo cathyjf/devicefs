@@ -17,10 +17,12 @@
 module;
 
 #include <windows.h>
+#include <aclapi.h>
 #include <bcrypt.h>
 #include <DismApi.h>
 #include <lm.h>
 #include <objbase.h>
+#include <sddl.h>
 
 #include <wil/registry.h>
 #include <wil/resource.h>
@@ -112,6 +114,78 @@ auto HideAccountFromLogonScreen(const wil::zwstring_view username) {
             L"from the logon screen (Windows error 0x{:08x})\n",
             std::wstring_view{username.c_str(), username.size()},
             ExplicitWin32Error::FromHresult(result).value);
+    }
+}
+
+auto EnsureWslDistributionDirectory(
+    const wil::zwstring_view username,
+    const std::filesystem::path &directory) {
+    auto information = std::unique_ptr<USER_INFO_23,
+        wil::function_deleter<decltype(&NetApiBufferFree), NetApiBufferFree>>{};
+    const auto error = NetUserGetInfo(
+        nullptr, username.c_str(), 23, wil::out_param_ptr<BYTE **>(information));
+    if (error != NERR_Success) {
+        WinError("could not query the SID for internal Windows account '{}'",
+            std::wstring_view{username.c_str(), username.size()},
+            ExplicitWin32Error{error});
+    }
+    auto sid = wil::unique_hlocal_ansistring{};
+    if (!ConvertSidToStringSidA(information->usri23_user_sid, sid.addressof())) {
+        WinError("could not format the SID for internal Windows account '{}'",
+            std::wstring_view{username.c_str(), username.size()});
+    }
+
+    // A newly created directory is owned by the built-in Administrators group.
+    // SYSTEM and that group have full control; the internal backup account can
+    // read and write the directory. It does not inherit permissions from
+    // ProgramData, and none of these grants pass down to files or subdirectories.
+    // This lets the backup account create distributions while leaving WSL
+    // import to set their ACLs. For an existing directory, only the access
+    // grants are replaced; its owner remains unchanged.
+    auto descriptor = wil::unique_hlocal_security_descriptor{};
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
+            std::format("O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGW;;;{})",
+                sid.get()).c_str(),
+            SDDL_REVISION_1, descriptor.addressof(), nullptr)) {
+        WinError("could not create the security descriptor for WSL directory '{}'",
+            std::wstring_view{directory.native()});
+    }
+    auto attributes = SECURITY_ATTRIBUTES{
+        .nLength = sizeof(SECURITY_ATTRIBUTES),
+        .lpSecurityDescriptor = descriptor.get(),
+    };
+    if (CreateDirectoryW(directory.c_str(), &attributes)) {
+        return;
+    }
+    const auto directory_error = GetLastError();
+    if (directory_error != ERROR_ALREADY_EXISTS) {
+        WinError("could not create WSL directory '{}'",
+            std::wstring_view{directory.native()},
+            ExplicitWin32Error{directory_error});
+    }
+
+    // The configured account can change between installations. Replace the
+    // parent's grants so the new account can create distributions; their own
+    // ACLs remain separate because none of these grants are inheritable.
+    auto dacl = PACL{};
+    auto present = BOOL{};
+    auto defaulted = BOOL{};
+    if (!GetSecurityDescriptorDacl(
+            descriptor.get(), &present, &dacl, &defaulted)) {
+        WinError(
+            "could not extract the DACL from the new security descriptor for "
+            "WSL directory '{}'",
+            std::wstring_view{directory.native()});
+    }
+    auto directory_text = directory.wstring();
+    const auto update_error = SetNamedSecurityInfoW(
+        directory_text.data(), SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr, nullptr, dacl, nullptr);
+    if (update_error != ERROR_SUCCESS) {
+        WinError("could not update the access grants for WSL directory '{}'",
+            std::wstring_view{directory.native()},
+            ExplicitWin32Error{update_error});
     }
 }
 
@@ -360,17 +434,19 @@ auto EnsureMaterializedWslDistribution(
 
 } // namespace
 
-export auto EnsureInternalWindowsAccount(
+export auto EnsureInternalWindowsAccountAndEnvironment(
     const wil::zwstring_view username,
     const std::string_view distribution,
-    const std::filesystem::path &installed_executable) {
+    const std::filesystem::path &installed_executable,
+    const std::filesystem::path &wsl_directory) {
     if (CreateAccountIfMissing(username)) {
         devicefs::WriteToStream(
             devicefs::stdout,
             L"backup-supervisor: created internal Windows account '{}'\n",
             std::wstring_view{username.c_str(), username.size()});
+        HideAccountFromLogonScreen(username);
     }
-    HideAccountFromLogonScreen(username);
+    EnsureWslDistributionDirectory(username, wsl_directory);
     const auto package_restart_needed = [] {
         if (IsSuitableWslPackageInstalled()) {
             devicefs::WriteToStream(

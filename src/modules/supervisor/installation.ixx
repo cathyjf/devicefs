@@ -33,6 +33,7 @@ import devicefs.supervisor.configuration;
 
 export struct PersistentPaths {
     std::filesystem::path root;
+    std::filesystem::path wsl;
     std::filesystem::path logs;
     std::filesystem::path credentials;
     std::filesystem::path configuration;
@@ -267,15 +268,11 @@ export [[nodiscard]] auto ProgramFilesDirectory() {
     return KnownFolderPath(FOLDERID_ProgramFiles, "Program Files");
 }
 
-export [[nodiscard]] auto WslDistributionDirectory() {
-    return KnownFolderPath(FOLDERID_LocalAppData, "LocalAppData") /
-        kProductDirectoryName / L"wsl";
-}
-
 export [[nodiscard]] auto ResolvePersistentPaths() {
     auto result = PersistentPaths{};
     result.root = KnownFolderPath(FOLDERID_ProgramData, "ProgramData") /
         kProductDirectoryName;
+    result.wsl = result.root / L"wsl";
     result.logs = result.root / kLogDirectoryName;
     result.credentials = result.root / kCredentialsDirectoryName;
     result.configuration = result.credentials / kConfigurationName;
@@ -341,9 +338,9 @@ export auto InstallService(
     InstallExecutable(
         CurrentExecutablePath(), installed_executable, executable_security);
     const auto configuration = ReadBackupConfiguration(persistent.configuration);
-    EnsureInternalWindowsAccount(
+    EnsureInternalWindowsAccountAndEnvironment(
         std::filesystem::path{configuration.windows_username}.wstring(),
-        configuration.wsl.distribution, installed_executable);
+        configuration.wsl.distribution, installed_executable, persistent.wsl);
     const auto installed_executable_text = installed_executable.string();
     const auto binary_path = wil::ArgvToCommandLine(std::array{
         std::string_view(installed_executable_text),

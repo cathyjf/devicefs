@@ -319,9 +319,8 @@ export [[nodiscard]] auto MaterializeOci(
     // Each import gets a separate directory so an upgrade can materialize a
     // replacement alongside the existing distribution. Including the
     // distribution name keeps these directories recognizable to administrators.
-    const auto installation = WslDistributionDirectory() /
+    const auto installation = ResolvePersistentPaths().wsl /
         std::format("{}-{}", distribution, UniqueName());
-    std::filesystem::create_directories(installation.parent_path());
 
     // WSL opens its welcome window after importing a Windows user's first
     // distribution. Marking that user's welcome experience complete before

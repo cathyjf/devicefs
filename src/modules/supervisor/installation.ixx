@@ -234,6 +234,10 @@ auto InstallExecutable(
             std::wstring_view{source.native()},
             std::wstring_view{destination.native()});
     }
+    devicefs::WriteToStream(devicefs::stdout,
+        L"backup-supervisor: copied '{}' to '{}'\n",
+        std::wstring_view{source.filename().native()},
+        std::wstring_view{destination.native()});
 }
 
 auto ConfigurePreshutdownTimeout(

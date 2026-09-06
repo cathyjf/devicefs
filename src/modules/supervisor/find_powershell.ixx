@@ -34,17 +34,24 @@ import devicefs.common;
 
 namespace {
 
-constexpr auto kPowerShellMsiRegistration =
-    L"SOFTWARE\\Microsoft\\PowerShellCore\\InstalledVersions\\"
-    L"31ab5147-9a97-4452-8443-d9709f0516e1";
+using namespace std::string_view_literals;
+
+constexpr auto kPowerShellMsiRegistrationPrefix =
+    L"SOFTWARE\\Microsoft\\PowerShellCore\\InstalledVersions\\"sv;
+constexpr auto kPowerShellVersionGuids = std::array{
+    L"31ab5147-9a97-4452-8443-d9709f0516e1"sv, // x64
+    L"1d00683b-0f84-4db8-a64f-2f98ad42fe06"sv, // arm64
+};
 constexpr auto kPowerShellMsiRegistrationValueName = L"InstallLocation";
 constexpr auto kPowerShellPackageFamily = L"Microsoft.PowerShell_8wekyb3d8bbwe";
 
-[[nodiscard]] auto PowerShellPathMSI()
+[[nodiscard]] auto PowerShellPathMSI(const auto version_guid)
     -> std::optional<std::filesystem::path> {
+    const auto subkey_name = std::format(L"{}{}",
+        kPowerShellMsiRegistrationPrefix, version_guid);
     auto location = wil::unique_cotaskmem_string{};
     const auto result = wil::reg::get_value_string_nothrow(
-        HKEY_LOCAL_MACHINE, kPowerShellMsiRegistration,
+        HKEY_LOCAL_MACHINE, subkey_name.c_str(),
         kPowerShellMsiRegistrationValueName, location);
     if (wil::reg::is_registry_not_found(result)) {
         return std::nullopt;
@@ -52,7 +59,7 @@ constexpr auto kPowerShellPackageFamily = L"Microsoft.PowerShell_8wekyb3d8bbwe";
         WinError(
             "error while querying the PowerShell installation path: "
             "HKLM\\{}\\{}",
-            std::wstring_view{kPowerShellMsiRegistration},
+            std::wstring_view{subkey_name},
             std::wstring_view{kPowerShellMsiRegistrationValueName},
             ExplicitWin32Error::FromHresult(result));
     }
@@ -110,8 +117,10 @@ constexpr auto kPowerShellPackageFamily = L"Microsoft.PowerShell_8wekyb3d8bbwe";
 
 export [[nodiscard]] auto PowerShellPath()
     -> std::optional<std::filesystem::path> {
-    if (const auto path = PowerShellPathMSI()) {
-        return path;
+    for (const auto guid : kPowerShellVersionGuids) {
+        if (const auto path = PowerShellPathMSI(guid)) {
+            return path;
+        }
     }
     return PowerShellPathMSIX();
 }

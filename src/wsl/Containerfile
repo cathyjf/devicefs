@@ -55,8 +55,8 @@ FROM debian:trixie AS bash-base
 # https://wiki.debian.org/Shell
 # https://manpages.debian.org/trixie/debconf/dpkg-reconfigure.8.en.html
 #
-RUN <<'EOF'
-set -eux
+RUN bash <<'EOF'
+shopt -s inherit_errexit; set -efux -o pipefail
 printf '%s\n' 'dash dash/sh boolean false' | debconf-set-selections
 DEBIAN_FRONTEND=noninteractive dpkg-reconfigure dash
 ln --symbolic --force bash /bin/sh
@@ -123,12 +123,12 @@ simple_summary = true
 EOF
 
 RUN <<'EOF'
-set -eux
+shopt -s inherit_errexit; set -efux -o pipefail
 apt-get update
 apt-get \
     -o Dpkg::Options::=--force-confold \
     install --yes --no-install-recommends nala
-rm -rf /var/lib/apt/lists/*
+rm -rf /var/lib/apt/lists
 EOF
 
 #
@@ -142,14 +142,36 @@ EOF
 # https://packages.debian.org/trixie/gnupg
 #
 RUN <<'EOF'
-set -eux
+shopt -s inherit_errexit; set -efux -o pipefail
 apt-get update
 nala install -y --no-autoremove --no-install-recommends \
     ca-certificates \
     curl \
     git \
     gnupg
-rm -rf /var/lib/apt/lists/*
+rm -rf /var/lib/apt/lists
+EOF
+
+#
+# The backup program needs a newer Fish than Debian Trixie supplies, so the
+# runtime installs Fish from the Fish 4 release repository. Its signing key is
+# downloaded here because curl is already available in this build stage.
+# The runtime copies the key and uses it only for that repository.
+# The SHA-256 check records the key accepted here, so a later build cannot
+# silently trust a replacement served from the same URI.
+#
+# https://software.opensuse.org/download.html?project=shells%3Afish%3Arelease%3A4&package=fish
+# https://manpages.debian.org/trixie/apt/apt-secure.8.en.html
+#
+RUN <<'EOF'
+shopt -s inherit_errexit; set -efux -o pipefail
+curl --fail --location --show-error \
+    --output /usr/share/keyrings/fish-release-4.asc \
+    https://download.opensuse.org/repositories/shells:/fish:/release:/4/Debian_13/Release.key
+printf '%s  %s\n' \
+    'b69c208011dc5923edac16347df77d04d0f0f280c491b6de82d3a72289d45a18' \
+    '/usr/share/keyrings/fish-release-4.asc' \
+    | sha256sum --check -
 EOF
 
 
@@ -187,7 +209,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # https://manpages.debian.org/trixie/apt/apt-secure.8.en.html
 #
 RUN <<'EOF'
-set -eux
+shopt -s inherit_errexit; set -efux -o pipefail
 curl --fail --location --show-error \
     --output /usr/share/keyrings/proxmox-archive-keyring.gpg \
     https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg
@@ -223,7 +245,7 @@ EOF
 # https://bitbucket.org/cathyjf/proxmox-backup/src/main/debian/control
 #
 RUN <<'EOF'
-set -eux
+shopt -s inherit_errexit; set -efux -o pipefail
 apt-get update
 nala install -y --no-autoremove --no-install-recommends \
     binutils \
@@ -233,7 +255,7 @@ nala install -y --no-autoremove --no-install-recommends \
     dpkg-dev \
     equivs \
     lld
-rm -rf /var/lib/apt/lists/*
+rm -rf /var/lib/apt/lists
 EOF
 
 #
@@ -281,7 +303,7 @@ WORKDIR /usr/src/proxmox-backup
 # https://bitbucket.org/cathyjf/proxmox-backup/src/main/README.rst
 #
 RUN <<'EOF'
-set -eux
+shopt -s inherit_errexit; set -efux -o pipefail
 sed '/librust-pbs-api-types-1+default-dev/d' \
     debian/control > /tmp/proxmox-backup-control
 apt-get update
@@ -292,7 +314,7 @@ DEB_BUILD_PROFILES=nodoc \
         --remove \
         --tool "$apt_tool" \
         /tmp/proxmox-backup-control
-rm -rf /var/lib/apt/lists/*
+rm -rf /var/lib/apt/lists
 EOF
 
 #
@@ -329,7 +351,7 @@ EOF
 # https://bitbucket.org/cathyjf/proxmox-backup/src/main/README.rst
 #
 RUN <<'EOF'
-set -eux
+shopt -s inherit_errexit; set -efux -o pipefail
 sed --in-place \
     '/^#[a-z0-9-]\+ = {.*path = "\.\.\/proxmox\//s/^#//' \
     Cargo.toml
@@ -362,7 +384,7 @@ EOF
 # https://git-scm.com/docs/git-rev-parse
 #
 RUN <<'EOF'
-set -eux
+shopt -s inherit_errexit; set -efux -o pipefail
 install -D --mode=0755 \
     target/release/proxmox-backup-client \
     /out/rootfs/usr/local/bin/proxmox-backup-client
@@ -400,7 +422,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # https://manpages.debian.org/trixie/apt/sources.list.5.en.html
 #
 RUN <<'EOF'
-set -eux
+shopt -s inherit_errexit; set -efux -o pipefail
 curl --fail --location --show-error \
     --output /tmp/llvm-snapshot.gpg.key \
     https://apt.llvm.org/llvm-snapshot.gpg.key
@@ -438,7 +460,7 @@ EOF
 # https://packages.debian.org/trixie/libparse-yapp-perl
 #
 RUN <<'EOF'
-set -eux
+shopt -s inherit_errexit; set -efux -o pipefail
 apt-get update
 nala install -y --no-autoremove --no-install-recommends \
     build-essential \
@@ -456,7 +478,7 @@ nala install -y --no-autoremove --no-install-recommends \
     protobuf-compiler-grpc \
     samba-common-bin \
     samba-dev
-rm -rf /var/lib/apt/lists/*
+rm -rf /var/lib/apt/lists
 EOF
 
 #
@@ -474,7 +496,7 @@ EOF
 # https://cmake.org/download/
 #
 RUN <<'EOF'
-set -eux
+shopt -s inherit_errexit; set -efux -o pipefail
 case "$(dpkg --print-architecture)" in
     amd64) cmake_arch=x86_64 ;;
     arm64) cmake_arch=aarch64 ;;
@@ -529,7 +551,7 @@ ENV PATH=/opt/cmake/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:
 # https://packages.debian.org/trixie/libparse-yapp-perl
 #
 RUN <<'EOF'
-set -eux
+shopt -s inherit_errexit; set -efux -o pipefail
 git clone \
     --branch "${SAMBA_PIDL_TAG}" \
     --depth=1 \
@@ -573,7 +595,7 @@ WORKDIR /usr/src/devicefs/src/samba_rpc
 # https://cmake.org/cmake/help/latest/manual/cmake.1.html
 #
 RUN <<'EOF'
-set -eux
+shopt -s inherit_errexit; set -efux -o pipefail
 cmake --preset release -DBUILD_TESTING=OFF
 cmake --build --preset release --parallel --target rpcd_devicefs
 EOF
@@ -605,7 +627,7 @@ Source: rpcd-devicefs
 EOF
 
 RUN <<'EOF'
-set -eux
+shopt -s inherit_errexit; set -efux -o pipefail
 install -D --mode=0755 \
     /usr/src/devicefs/build/samba_rpc/rpcd_devicefs \
     /out/rootfs/usr/local/bin/rpcd_devicefs
@@ -658,6 +680,17 @@ URIs: http://download.proxmox.com/debian/pbs-client
 Suites: trixie
 Components: main
 Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+EOF
+
+COPY --from=build-base \
+    /usr/share/keyrings/fish-release-4.asc \
+    /usr/share/keyrings/fish-release-4.asc
+
+COPY <<'EOF' /etc/apt/sources.list.d/fish-release-4.sources
+Types: deb
+URIs: http://download.opensuse.org/repositories/shells:/fish:/release:/4/Debian_13/
+Suites: /
+Signed-By: /usr/share/keyrings/fish-release-4.asc
 EOF
 
 #
@@ -713,7 +746,7 @@ COPY --from=samba-helper-build \
 #
 # https://packages.debian.org/trixie/ca-certificates
 # https://packages.debian.org/trixie/coreutils
-# https://packages.debian.org/trixie/fish
+# https://software.opensuse.org/download.html?project=shells%3Afish%3Arelease%3A4&package=fish
 # https://packages.debian.org/trixie/mount
 # https://packages.debian.org/trixie/passwd
 # https://packages.debian.org/trixie/qrencode
@@ -724,7 +757,7 @@ COPY --from=samba-helper-build \
 # https://github.com/cathyjf/devicefs/tree/main/src/modules/supervisor/artifacts
 #
 RUN <<'EOF'
-set -eux
+shopt -s inherit_errexit; set -efux -o pipefail
 apt-get update
 apt-get install --yes --no-install-recommends \
     ca-certificates \
@@ -741,8 +774,8 @@ apt-get --yes --no-install-recommends satisfy \
     "$(</tmp/rpcd_devicefs.dependencies)"
 apt-get clean
 rm -rf \
-    /var/lib/apt/lists/* \
-    /var/cache/apt/archives/* \
+    /var/lib/apt/lists \
+    /var/cache/apt/archives \
     /tmp/proxmox-backup-client.dependencies \
     /tmp/rpcd_devicefs.dependencies
 EOF
@@ -772,7 +805,7 @@ COPY --from=samba-helper-build /out/rootfs/ /
 # https://manpages.debian.org/trixie/passwd/useradd.8.en.html
 #
 RUN <<'EOF'
-set -eux
+shopt -s inherit_errexit; set -efux -o pipefail
 groupadd --gid "${DEVICEFS_GID}" pbs-vss
 useradd \
     --uid "${DEVICEFS_UID}" \

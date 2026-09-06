@@ -17,12 +17,12 @@
 module;
 
 #include <windows.h>
+#include <objbase.h>
 #include <sddl.h>
-#include <wslapi.h>
 
+#include <wil/stl.h>
 #include <wil/registry.h>
 #include <wil/resource.h>
-#include <wil/stl.h>
 #include <wil/token_helpers.h>
 #include <wil/win32_helpers.h>
 
@@ -50,6 +50,10 @@ import devicefs.supervisor.winrt_apartment;
 #undef stdout
 
 namespace {
+
+constexpr auto kWslRegistration =
+    L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss";
+constexpr auto kOciLayerDigestFile = "oci-layer-digest";
 
 auto SetDefaultTokenAcl() {
     // WSL creates the distribution directory while impersonating its caller,
@@ -109,22 +113,48 @@ auto SetDefaultTokenAcl() {
     }
 }
 
-[[nodiscard]] auto IsDistributionRegistered(const std::string_view distribution) {
-    // The WSL API is loaded explicitly because Windows SDK 10.0.26100.0
-    // supplies `wslapi.h` but not the documented `Wslapi.lib` import library.
-    // Delaying this load until materialization also lets `--install` start
-    // before the WSL component is installed.
-    const auto library = wil::unique_hmodule{LoadLibraryExA(
-        "wslapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
-    if (!library) {
-        WinError("could not load 'wslapi.dll' to query WSL distribution '{}'", distribution);
+[[nodiscard]] auto FindDistribution(const std::string_view distribution)
+    -> wil::shared_hkey {
+    auto registrations = wil::unique_hkey{};
+    if (const auto result = wil::reg::open_unique_key_nothrow(
+            HKEY_CURRENT_USER, kWslRegistration, registrations);
+        wil::reg::is_registry_not_found(result)) {
+        return wil::shared_hkey{};
+    } else if (FAILED(result)) {
+        WinError("could not open WSL registrations to find distribution '{}'",
+            distribution, ExplicitWin32Error::FromHresult(result));
     }
-    const auto is_registered =
-        GetProcAddressByFunctionDeclaration(library.get(), WslIsDistributionRegistered);
-    if (!is_registered) {
-        WinError("could not find WslIsDistributionRegistered in wslapi.dll");
+    const auto requested = std::filesystem::path{distribution}.wstring();
+    auto iterator = wil::reg::key_heap_string_nothrow_iterator{registrations.get()};
+    for (; !iterator.at_end(); ++iterator) {
+        auto name = wil::unique_cotaskmem_string{};
+        if (const auto result = wil::reg::get_value_string_nothrow(
+                registrations.get(), iterator->name.get(), L"DistributionName", name);
+            wil::reg::is_registry_not_found(result)) {
+            continue;
+        } else if (FAILED(result)) {
+            WinError("could not read the WSL distribution name in registration '{}'",
+                std::wstring_view{iterator->name.get()},
+                ExplicitWin32Error::FromHresult(result));
+        }
+        if (CompareStringOrdinal(name.get(), -1, requested.c_str(), -1, TRUE) != CSTR_EQUAL) {
+            continue;
+        }
+        auto registration = wil::shared_hkey{};
+        if (const auto result = wil::reg::open_shared_key_nothrow(
+                registrations.get(), iterator->name.get(), registration,
+                wil::reg::key_access{KEY_QUERY_VALUE | KEY_SET_VALUE});
+            FAILED(result)) {
+            WinError("could not open the registration of WSL distribution '{}'",
+                distribution, ExplicitWin32Error::FromHresult(result));
+        }
+        return registration;
     }
-    return is_registered(std::filesystem::path{distribution}.c_str()) != FALSE;
+    if (const auto result = iterator.last_error(); FAILED(result)) {
+        WinError("could not enumerate WSL registrations to find distribution '{}'",
+            distribution, ExplicitWin32Error::FromHresult(result));
+    }
+    return wil::shared_hkey{};
 }
 
 auto RunCommand(
@@ -245,8 +275,9 @@ auto ExtractArchiveMember(
     }
 }
 
-[[nodiscard]] auto DownloadGhcrRootfs(
-    const std::filesystem::path &rootfs) -> std::optional<std::string> {
+[[nodiscard]] auto DownloadGhcrRootfsIfChanged(
+    const std::filesystem::path &rootfs,
+    const std::optional<std::string> &previous_digest) -> std::optional<std::string> {
     using namespace winrt::Windows::Foundation;
     using namespace winrt::Windows::Web::Http;
     using namespace winrt::Windows::Web::Http::Headers;
@@ -324,6 +355,9 @@ auto ExtractArchiveMember(
         return std::nullopt;
     }
     const auto &[layer_url, digest] = *layer;
+    if (previous_digest && (digest == *previous_digest)) {
+        return digest;
+    }
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: downloading the linux/{} root filesystem from '{}'\n",
         winrt::to_string(architecture), image);
@@ -334,17 +368,103 @@ auto ExtractArchiveMember(
     return digest;
 }
 
+auto ReplaceDistribution(
+    const std::string_view distribution,
+    const std::string_view replacement,
+    const wil::weak_hkey previous,
+    const std::filesystem::path &previous_directory,
+    const std::filesystem::path &executable) {
+    const auto registration = FindDistribution(replacement);
+    if (!registration) {
+        throw std::runtime_error(std::format(
+            "could not find the imported WSL distribution '{}'", replacement));
+    }
+    const auto retired = std::format("devicefs-old-{}", UniqueName());
+    const auto retired_name = std::filesystem::path{retired}.wstring();
+    const auto canonical_name = std::filesystem::path{distribution}.wstring();
+    devicefs::WriteToStream(devicefs::stdout,
+        "backup-supervisor: replacing WSL distribution '{}' with '{}'\n",
+        distribution, replacement);
+
+    // WSL resolves distribution names by reading `DistributionName` from each
+    // registration, so changing that value gives the replacement its canonical
+    // name without changing either registration's GUID or filesystem location:
+    // <https://github.com/microsoft/WSL/blob/556440f392aef150dc2e8d39152b20a4d7d5b83c/src/windows/service/exe/LxssUserSession.cpp#L1262-L1297>.
+    // Both handles and names are ready before the first write to minimize the
+    // interval with no canonical registration. The two writes are not atomic;
+    // interruption can leave temporary distributions for the administrator to
+    // remove. A later install can import afresh if the canonical name is absent.
+    if (const auto result = wil::reg::set_value_string_nothrow(
+            previous.lock().get(), L"DistributionName", retired_name.c_str());
+        FAILED(result)) {
+        WinError("could not rename WSL distribution '{}' to '{}'",
+            distribution, retired, ExplicitWin32Error::FromHresult(result));
+    }
+    if (const auto result = wil::reg::set_value_string_nothrow(
+            registration.get(), L"DistributionName", canonical_name.c_str());
+        FAILED(result)) {
+        WinError("could not rename WSL distribution '{}' to '{}'",
+            replacement, distribution, ExplicitWin32Error::FromHresult(result));
+    }
+
+    devicefs::WriteToStream(devicefs::stdout,
+        "backup-supervisor: unregistering old WSL distribution '{}'\n", retired);
+    try {
+        RunCommand(std::to_array<std::string>({
+            executable.string(), "--unregister", retired,
+        }), GetStdHandle(STD_OUTPUT_HANDLE));
+    } catch (const std::runtime_error &error) {
+        devicefs::WriteToStream(devicefs::stderr,
+            "backup-supervisor: WSL distribution '{}' was replaced, but could not "
+            "unregister old distribution '{}': {}\n", distribution, retired, error.what());
+        return;
+    }
+    // WSL removes its own files during unregistration, but leaves a nonempty
+    // base directory. Remove our digest and then the directory only if empty;
+    // any other files left there remain available for administrator inspection.
+    // <https://github.com/microsoft/WSL/blob/556440f392aef150dc2e8d39152b20a4d7d5b83c/src/windows/service/exe/LxssUserSession.cpp#L3064-L3177>.
+    try {
+        std::filesystem::remove(previous_directory / kOciLayerDigestFile);
+        std::filesystem::remove(previous_directory);
+    } catch (const std::filesystem::filesystem_error &error) {
+        devicefs::WriteToStream(devicefs::stderr,
+            "backup-supervisor: could not remove old WSL distribution directory '{}': {}\n",
+            previous_directory.string(), error.what());
+    }
+}
+
 } // namespace
 
 export [[nodiscard]] auto MaterializeOci(
     const std::string_view distribution,
     const std::optional<std::filesystem::path> &oci) -> bool {
-    if (IsDistributionRegistered(distribution)) {
-        devicefs::WriteToStream(devicefs::stdout,
-            "backup-supervisor: WSL distribution '{}' is already registered\n",
-            distribution);
-        return true;
-    }
+    const auto previous = FindDistribution(distribution);
+    const auto previous_directory = [&]() -> std::filesystem::path {
+        if (!previous) {
+            return {};
+        }
+        auto directory = wil::unique_cotaskmem_string{};
+        if (const auto result = wil::reg::get_value_string_nothrow(
+                previous.get(), L"BasePath", directory);
+            FAILED(result)) {
+            WinError("could not read the directory of WSL distribution '{}'",
+                distribution, ExplicitWin32Error::FromHresult(result));
+        }
+        return directory.get();
+    }();
+    const auto previous_digest = [&]() -> std::optional<std::string> {
+        if (!previous || oci) {
+            return std::nullopt;
+        }
+        // Missing or unreadable metadata does not establish which filesystem
+        // was imported. A fresh import restores both the image and its record.
+        auto file = std::ifstream{previous_directory / kOciLayerDigestFile};
+        auto digest = std::string{};
+        if (!std::getline(file, digest) || digest.empty()) {
+            return std::nullopt;
+        }
+        return digest;
+    }();
 
     SetDefaultTokenAcl();
     const auto temporary = TemporaryDirectory{
@@ -353,7 +473,7 @@ export [[nodiscard]] auto MaterializeOci(
     const auto rootfs = temporary.Path() / "rootfs.tar";
     const auto digest = [&]() -> std::optional<std::string> {
         if (!oci) {
-            return DownloadGhcrRootfs(rootfs);
+            return DownloadGhcrRootfsIfChanged(rootfs, previous_digest);
         }
         const auto tar = [] {
             auto directory = std::wstring{};
@@ -380,8 +500,18 @@ export [[nodiscard]] auto MaterializeOci(
     if (!digest) {
         return false;
     }
+    if (!oci && (digest == previous_digest)) {
+        devicefs::WriteToStream(devicefs::stdout,
+            "backup-supervisor: WSL distribution '{}' already has OCI layer '{}'\n",
+            distribution, *digest);
+        return true;
+    }
 
     const auto executable = WslExecutablePath();
+    // Temporary registration names have a fixed length so upgrading does not
+    // add a suffix that could exceed WSL's limit for a valid canonical name.
+    const auto import_name = previous
+        ? std::format("devicefs-new-{}", UniqueName()) : std::string{distribution};
     // Each import gets a separate directory so an upgrade can materialize a
     // replacement alongside the existing distribution. Including the
     // distribution name keeps these directories recognizable to administrators.
@@ -393,29 +523,27 @@ export [[nodiscard]] auto MaterializeOci(
     // import prevents the window from interrupting unattended installation.
     // Microsoft's developer setup uses the same registry setting:
     // <https://github.com/microsoft/WindowsDeveloperConfig/blob/b5561d14cac689ec5256a99abc99e474e73766b1/windows-dev-config/dev-config.winget#L178-L181>.
-    constexpr auto wsl_registration =
-        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss";
     if (const auto result = wil::reg::set_value_dword_nothrow(
-            HKEY_CURRENT_USER, wsl_registration, L"OOBEComplete", 1);
+            HKEY_CURRENT_USER, kWslRegistration, L"OOBEComplete", 1);
         FAILED(result)) {
         devicefs::WriteToStream(devicefs::stderr,
             L"backup-supervisor: could not suppress the WSL welcome window "
             L"by setting 'HKCU\\{}\\OOBEComplete' (Windows error 0x{:08x})\n",
-            std::wstring_view{wsl_registration},
+            std::wstring_view{kWslRegistration},
             ExplicitWin32Error::FromHresult(result).value);
     }
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: importing WSL1 distribution '{}' into '{}'\n",
-        distribution, installation.string());
+        import_name, installation.string());
     RunCommand(std::to_array<std::string>({
-        executable.string(), "--import", std::string{distribution},
+        executable.string(), "--import", import_name,
         installation.string(), rootfs.string(), "--version", "1",
     }), GetStdHandle(STD_OUTPUT_HANDLE));
-    // The layer digest identifies the imported filesystem for future update
+    // The layer digest identifies the imported filesystem for subsequent update
     // checks. Record it only after WSL reports a successful import. Failure to
     // record this metadata does not invalidate the imported distribution.
     {
-        const auto digest_path = installation / "oci-layer-digest";
+        const auto digest_path = installation / kOciLayerDigestFile;
         auto digest_file = std::ofstream{digest_path, std::ios::binary};
         std::println(digest_file, "{}", *digest);
         digest_file.flush();
@@ -424,6 +552,10 @@ export [[nodiscard]] auto MaterializeOci(
                 "backup-supervisor: could not record OCI layer digest in '{}'\n",
                 digest_path.string());
         }
+    }
+    if (previous) {
+        ReplaceDistribution(distribution, import_name,
+            previous, previous_directory, executable);
     }
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: imported WSL1 distribution '{}'\n", distribution);

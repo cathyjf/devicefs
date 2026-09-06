@@ -20,9 +20,11 @@ module;
 #include <aclapi.h>
 #include <bcrypt.h>
 #include <DismApi.h>
+#include <intrin.h>
 #include <lm.h>
 #include <objbase.h>
 #include <sddl.h>
+#include <wincrypt.h>
 
 #include <wil/registry.h>
 #include <wil/resource.h>
@@ -49,47 +51,131 @@ namespace {
 constexpr auto kWslRegistration = wil::zwstring_view{
     L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss\\MSI"};
 
-[[nodiscard]] auto GenerateAccountPassword() -> wil::secure_wstring {
+// Windows can require passwords to be 128 characters long. Repeating the
+// encoded random block reaches that length without adding independent random
+// substrings that could accidentally contain the account name. The first
+// complete block preserves all 256 bits of entropy from the 32 random bytes;
+// the repetitions increase the length, not the entropy. The documented maximum
+// minimum-password-length setting is 128:
+// https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-devicelock#minimumpasswordlength
+//
+// The inbox Passfilt.dll complexity filter requires three character categories
+// and rejects the account name or full-name tokens of at least three characters,
+// using case-insensitive comparisons. Padded Base64 supplies a special character
+// through its trailing '=' and almost certainly supplies uppercase and lowercase
+// letters as well. A fixed prefix is unnecessary because a fresh candidate can
+// remedy a rare category failure, and a prefix could itself contain a forbidden
+// name that would remain present on every attempt. Windows owns these checks;
+// querying or reproducing its policy here would duplicate that responsibility.
+// https://learn.microsoft.com/en-us/windows/win32/secmgmt/strong-password-enforcement-and-passfilt-dll
+//
+// A three-letter ASCII account name has roughly 41 possible matches in the
+// 43 Base64 content characters. Either letter case matches, so the approximate
+// collision probability is 41 * (2/64)^3 = 0.125%, ignoring overlapping matches
+// and the final character's restricted values. For comparison, a three-character
+// hexadecimal name occurs in 64 random hexadecimal digits with probability
+// approximately 62 / 16^3 = 1.5%. Repeating the padded Base64 block does not add
+// account-name matches: every new boundary contains '=', which local account
+// names cannot contain. Full-name tokens have different character restrictions,
+// so the account-name estimate is not a bound on all possible policy rejections.
+// https://learn.microsoft.com/en-us/windows/win32/api/lmaccess/nf-lmaccess-netuseradd#remarks
+//
+// Each rejected attempt replaces the random bytes and the password in their
+// existing buffers. Encoding directly into the final secure string avoids an
+// intermediate copy of the secret; returning it transfers its allocation. Both
+// buffers are erased when their owners release them, including on failure.
+[[nodiscard]] auto GenerateAccountPassword(const auto &retry) -> wil::secure_wstring {
+    constexpr auto kPasswordLength = DWORD{128};
+    constexpr auto kArbitraryAttemptBound = 10;
     auto random = std::array<unsigned char, 32>{};
+    static_assert((random.size() % 3) != 0,
+        "The entropy must leave a partial three-byte Base64 group for '=' padding.");
+    constexpr auto kEncodedLength = ((random.size() + 2) / 3) * 4;
+    static_assert(kEncodedLength < kPasswordLength,
+        "The password buffer must fit the Base64 block and its terminating NUL.");
     const auto erase_random =
         wil::SecureZeroMemory_scope_exit(random.data(), random.size());
-    const auto status = BCryptGenRandom(
-        nullptr, random.data(),
-        wil::safe_cast_failfast<ULONG>(random.size()),
-        BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-    if (status < 0) {
-        throw std::runtime_error(std::format(
-            "could not generate the backup account password "
-            "(NTSTATUS 0x{:08x})",
-            std::bit_cast<std::uint32_t>(status)));
-    }
+    auto password = wil::secure_wstring(kPasswordLength, L'\0');
+    for (auto attempt = 0; attempt < kArbitraryAttemptBound; ++attempt) {
+        const auto status = BCryptGenRandom(
+            nullptr, random.data(),
+            wil::safe_cast_failfast<ULONG>(random.size()),
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        if (status < 0) {
+            throw std::runtime_error(std::format(
+                "could not generate the backup account password "
+                "(NTSTATUS 0x{:08x})",
+                std::bit_cast<std::uint32_t>(status)));
+        }
 
-    constexpr auto digits = wil::zwstring_view{L"0123456789abcdef"};
-    auto password = wil::secure_wstring(random.size() * 2, L'\0');
-    for (auto index = 0uz; index < random.size(); ++index) {
-        password[index * 2] = digits.at(random.at(index) >> 4);
-        password[index * 2 + 1] = digits.at(random.at(index) & 0x0f);
+        // The 128-character destination also has room for the initial encoding:
+        // 32 bytes produce 44 padded Base64 characters and a terminating NUL.
+        // On success, `encoded_length` excludes that NUL. The wide API writes
+        // directly into the UTF-16 password required by the account APIs.
+        {
+            auto encoded_length = kPasswordLength;
+            [[gsl::suppress("26493",
+                justification:
+                    "Braced initialization proves this construction safe at "
+                    "compile time.")]]
+            if (!CryptBinaryToStringW(
+                random.data(), DWORD{random.size()},
+                CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
+                password.data(), &encoded_length)) {
+                WinError("could not encode the backup account password");
+            }
+            if (encoded_length != kEncodedLength) {
+                __fastfail(FAST_FAIL_FATAL_APP_EXIT);
+            }
+        }
+        // The static assertion ensures that the first encoded block fits in the
+        // password. Every source index is below `kEncodedLength`, and the loop
+        // condition keeps every destination index below `kPasswordLength`.
+        for (auto index = kEncodedLength; index < kPasswordLength; ++index) {
+            password[index] = password[index % kEncodedLength];
+        }
+        // Both NetUser APIs document `NERR_PasswordTooShort` for password-policy
+        // failures beyond length alone. The password-filter contract also names
+        // `ERROR_ILL_FORMED_PASSWORD` for a rejected candidate. The callback
+        // requests a fresh candidate only for these errors and retains the
+        // Windows result for its caller to check, including on the final attempt.
+        // Returning a password here does not imply that Windows accepted it.
+        // https://learn.microsoft.com/en-us/windows/win32/api/lmaccess/nf-lmaccess-netusersetinfo#return-value
+        // https://learn.microsoft.com/en-us/windows/win32/api/ntsecapi/nc-ntsecapi-psam_password_filter_routine#return-value
+        //
+        // Ten independent candidates reduce the approximate account-name risk
+        // above to (0.00125)^10, about 9.3e-30, for all ten to collide. This is
+        // not a guarantee about other filters: a rule that rejects every
+        // candidate cannot be solved by retries, so the final rejection must
+        // reach the caller rather than leaving it in an unbounded loop.
+        if (!retry(std::span{password})) {
+            break;
+        }
     }
     return password;
 }
 
 [[nodiscard]] auto CreateAccountIfMissing(const wil::zwstring_view username) {
     auto name = std::wstring{username.c_str(), username.size()};
-    auto password = GenerateAccountPassword();
-    auto account = USER_INFO_1{
-        .usri1_name = name.data(),
-        .usri1_password = password.data(),
-        .usri1_priv = USER_PRIV_USER,
-        .usri1_flags = UF_SCRIPT | UF_NORMAL_ACCOUNT,
-    };
-    [[gsl::suppress("26490",
-        justification:
-            "`NetUserAdd` receives the structure through its generic "
-            "`BYTE *` buffer parameter. The value 1 tells it to interpret "
-            "that buffer as a `USER_INFO_1` containing the new account's "
-            "name, initial password, and account settings.")]]
-    const auto error = NetUserAdd(
-        nullptr, 1, reinterpret_cast<BYTE *>(&account), nullptr);
+    auto error = NET_API_STATUS{};
+    const auto password = GenerateAccountPassword([&name, &error](const std::span<wchar_t> candidate) {
+        auto account = USER_INFO_1{
+            .usri1_name = name.data(),
+            .usri1_password = candidate.data(),
+            .usri1_priv = USER_PRIV_USER,
+            .usri1_flags = UF_SCRIPT | UF_NORMAL_ACCOUNT,
+        };
+        [[gsl::suppress("26490",
+            justification:
+                "`NetUserAdd` receives the structure through its generic "
+                "`BYTE *` buffer parameter. The value 1 tells it to interpret "
+                "that buffer as a `USER_INFO_1` containing the new account's "
+                "name, initial password, and account settings.")]]
+        error = NetUserAdd(
+            nullptr, 1, reinterpret_cast<BYTE *>(&account), nullptr);
+        return (error == NERR_PasswordTooShort) ||
+            (error == ERROR_ILL_FORMED_PASSWORD);
+    });
     if (error == NERR_UserExists) {
         return false;
     }
@@ -330,19 +416,23 @@ export [[nodiscard]] auto ResetBackupAccountPassword(
             std::filesystem::path{username.c_str()}.string()));
     }
 
-    auto password = GenerateAccountPassword();
-    auto account = USER_INFO_1003{
-        .usri1003_password = password.data(),
-    };
-    [[gsl::suppress("26490",
-        justification:
-            "`NetUserSetInfo` receives the structure through its generic "
-            "`BYTE *` buffer parameter. The value 1003 tells it to interpret "
-            "that buffer as a `USER_INFO_1003` containing the replacement "
-            "password.")]]
-    const auto error = NetUserSetInfo(
-        nullptr, username.c_str(), 1003,
-        reinterpret_cast<BYTE *>(&account), nullptr);
+    auto error = NET_API_STATUS{};
+    auto password = GenerateAccountPassword([username, &error](const std::span<wchar_t> candidate) {
+        auto account = USER_INFO_1003{
+            .usri1003_password = candidate.data(),
+        };
+        [[gsl::suppress("26490",
+            justification:
+                "`NetUserSetInfo` receives the structure through its generic "
+                "`BYTE *` buffer parameter. The value 1003 tells it to interpret "
+                "that buffer as a `USER_INFO_1003` containing the replacement "
+                "password.")]]
+        error = NetUserSetInfo(
+            nullptr, username.c_str(), 1003,
+            reinterpret_cast<BYTE *>(&account), nullptr);
+        return (error == NERR_PasswordTooShort) ||
+            (error == ERROR_ILL_FORMED_PASSWORD);
+    });
     if (error != NERR_Success) {
         WinError("could not reset the password for backup account '{}'",
             std::wstring_view{username.c_str(), username.size()},

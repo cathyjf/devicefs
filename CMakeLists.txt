@@ -353,7 +353,7 @@ target_compile_definitions(backup-supervisor PRIVATE _WIN32_WINNT=0x0A00)
 target_include_directories(backup-supervisor SYSTEM PRIVATE "${DISM_INCLUDE_DIR}")
 target_link_libraries(backup-supervisor PRIVATE
     "${DISM_LIBRARY}"
-    advapi32 bcrypt msi netapi32 ntdll ole32 pathcch secur32 shell32 userenv virtdisk windowsapp ws2_32
+    advapi32 bcrypt crypt32 msi netapi32 ntdll ole32 pathcch secur32 shell32 userenv virtdisk windowsapp ws2_32
 )
 
 add_custom_target(check-native-code-analysis ALL

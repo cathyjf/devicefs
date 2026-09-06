@@ -17,11 +17,13 @@
 module;
 
 #include <windows.h>
+#include <sddl.h>
 #include <wslapi.h>
 
 #include <wil/registry.h>
 #include <wil/resource.h>
 #include <wil/stl.h>
+#include <wil/token_helpers.h>
 #include <wil/win32_helpers.h>
 
 #undef GetObject
@@ -48,6 +50,64 @@ import devicefs.supervisor.winrt_apartment;
 #undef stdout
 
 namespace {
+
+auto SetDefaultTokenAcl() {
+    // WSL creates the distribution directory while impersonating its caller,
+    // without supplying a security descriptor. Our WSL parent directory has
+    // no inheritable grants, so Windows takes the new directory's permissions
+    // from the caller token's default DACL:
+    // <https://github.com/microsoft/WSL/blob/556440f392aef150dc2e8d39152b20a4d7d5b83c/src/windows/service/exe/LxssUserSession.cpp#L1499-L1505>
+    // <https://learn.microsoft.com/en-us/windows/win32/secauthz/dacl-for-a-new-object>.
+    //
+    // `CreateProcessWithLogonW` uses the installer's logon SID even though the
+    // materializer runs as the backup account. A grant to that session can
+    // therefore let the installing administrator read the distribution without
+    // elevation. Replacing this process's defaults before launching WSL gives
+    // newly created objects the intended permissions without rewriting the
+    // imported filesystem's ACLs.
+    // <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw#remarks>.
+    auto token = wil::unique_handle{};
+    if (!OpenProcessToken(GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, token.addressof())) {
+        WinError("could not open the process token to set its default ACL");
+    }
+    auto user = wil::unique_tokeninfo_ptr<TOKEN_USER>{};
+    if (const auto result = wil::get_token_information_nothrow(user, token.get());
+        FAILED(result)) {
+        WinError("could not identify the current user for the default token ACL",
+            ExplicitWin32Error::FromHresult(result));
+    }
+    auto sid = wil::unique_hlocal_ansistring{};
+    if (!ConvertSidToStringSidA(user->User.Sid, sid.addressof())) {
+        WinError("could not format the current user's SID for the default token ACL");
+    }
+    // The materializer runs as the backup user. Only that user, SYSTEM, and the
+    // built-in Administrators group receive full control. These grants are not
+    // inheritable; the token supplies them separately when each object needs
+    // default permissions. The default owner is a separate token field, which
+    // is also set to the backup user below.
+    auto descriptor = wil::unique_hlocal_security_descriptor{};
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
+            std::format("D:(A;;GA;;;{})(A;;GA;;;SY)(A;;GA;;;BA)", sid.get()).c_str(),
+            SDDL_REVISION_1, descriptor.addressof(), nullptr)) {
+        WinError("could not create the security descriptor for the default token ACL");
+    }
+    auto defaults = TOKEN_DEFAULT_DACL{};
+    auto present = BOOL{};
+    auto defaulted = BOOL{};
+    if (!GetSecurityDescriptorDacl(
+            descriptor.get(), &present, &defaults.DefaultDacl, &defaulted)) {
+        WinError("could not extract the DACL from the new default token security descriptor");
+    }
+    if (!SetTokenInformation(token.get(), TokenDefaultDacl,
+            &defaults, sizeof(defaults))) {
+        WinError("could not set the process token's default DACL");
+    }
+    auto owner = TOKEN_OWNER{.Owner = user->User.Sid};
+    if (!SetTokenInformation(token.get(), TokenOwner, &owner, sizeof(owner))) {
+        WinError("could not set the process token's default owner");
+    }
+}
 
 [[nodiscard]] auto IsDistributionRegistered(const std::string_view distribution) {
     // The WSL API is loaded explicitly because Windows SDK 10.0.26100.0
@@ -286,6 +346,7 @@ export [[nodiscard]] auto MaterializeOci(
         return true;
     }
 
+    SetDefaultTokenAcl();
     const auto temporary = TemporaryDirectory{
         std::filesystem::temp_directory_path() /
             std::format("devicefs-oci-{}", UniqueName())};

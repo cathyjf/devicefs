@@ -51,6 +51,14 @@ namespace {
 constexpr auto kWslRegistration = wil::zwstring_view{
     L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss\\MSI"};
 
+// Ceiling division requires a nonzero divisor. Rounding the quotient up after
+// division avoids the overflow possible when adding `divisor - 1` beforehand.
+template <std::size_t Dividend, std::size_t Divisor>
+    requires (Divisor != 0)
+[[nodiscard]] constexpr auto Ceil() {
+    return (Dividend / Divisor) + ((Dividend % Divisor) != 0);
+}
+
 // Windows can require passwords to be 128 characters long. Repeating the
 // encoded random block reaches that length without adding independent random
 // substrings that could accidentally contain the account name. The first
@@ -90,7 +98,7 @@ constexpr auto kWslRegistration = wil::zwstring_view{
     auto random = std::array<unsigned char, 32>{};
     static_assert((random.size() % 3) != 0,
         "The entropy must leave a partial three-byte Base64 group for '=' padding.");
-    constexpr auto kEncodedLength = ((random.size() + 2) / 3) * 4;
+    constexpr auto kEncodedLength = Ceil<random.size(), 3>() * 4;
     static_assert(kEncodedLength < kPasswordLength,
         "The password buffer must fit the Base64 block and its terminating NUL.");
     const auto erase_random =

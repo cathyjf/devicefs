@@ -347,7 +347,7 @@ class DeviceFsChild {
         stop_required_ = false;
     }
 
-    [[nodiscard]] auto TryStop() noexcept {
+    [[nodiscard]] auto TryStop() noexcept -> bool {
         try {
             Stop();
             return true;

@@ -666,7 +666,7 @@ class VerificationState {
     }
 
     [[nodiscard]] static auto ObserveInventory(
-        const InventoryCounters &inventory) noexcept {
+        const InventoryCounters &inventory) noexcept -> InventoryObservation {
         return InventoryObservation{
             .tasks_discovered = inventory.tasks_discovered.load(
                 std::memory_order_relaxed),

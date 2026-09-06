@@ -466,9 +466,8 @@ private:
                 return total + entry.second.info.FileSize;
             });
         info->FreeSize = 0;
-        [[gsl::suppress("type.4",
-            justification: "Braced initialization checks this constant expression for narrowing.")]]
-        info->VolumeLabelLength = UINT16{kVolumeLabel.size() * sizeof(wchar_t)};
+        info->VolumeLabelLength =
+            CompileTimeCast<UINT16, kVolumeLabel.size() * sizeof(wchar_t)>();
         std::ranges::copy(kVolumeLabel, info->VolumeLabel);
         return STATUS_SUCCESS;
     }

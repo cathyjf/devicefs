@@ -243,10 +243,8 @@ struct DeviceFsExit {
     if (result == WAIT_FAILED) {
         WinError("could not wait for devicefs or cancellation");
     }
-    [[gsl::suppress("type.4",
-        justification: "Braced initialization proves this construction safe at compile time.")]]
     const auto process_index =
-        std::size_t{result - WAIT_OBJECT_0};
+        CompileTimeCast<std::size_t>(result - WAIT_OBJECT_0);
     if (process_index < devicefs_processes.size()) {
         return DeviceFsExit{
             .process_index = process_index,

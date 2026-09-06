@@ -172,3 +172,17 @@ export auto HardenProcess() {
         WinError("could not restrict image loading");
     }
 }
+
+export template <class Target, auto... Constant, class... Source>
+    requires ((sizeof...(Constant) + sizeof...(Source)) == 1)
+[[nodiscard, msvc::forceinline]]
+constexpr decltype(auto) CompileTimeCast(Source &&...input) {
+    [[gsl::suppress("26493",
+        justification:
+            "C26493 misidentifies this braced initialization as a C-style "
+            "cast. The language rejects narrowing conversions here, including "
+            "constant values that do not fit in the target type. This "
+            "centralized helper function allows the suppression to exist in "
+            "only one place.")]]
+    return Target{Constant..., std::forward<Source>(input)...};
+}

@@ -57,10 +57,7 @@ constexpr auto kShareMode =
         WinError("FSCTL_GET_NTFS_VOLUME_DATA failed for '{}'",
             std::wstring_view{path.native()});
     }
-    [[gsl::suppress("26493",
-        justification:
-            "Braced initialization proves this construction safe at compile time.")]]
-    return std::uint64_t{ntfs.BytesPerCluster};
+    return CompileTimeCast<std::uint64_t>(ntfs.BytesPerCluster);
 }
 
 auto ThrowIfFileInfoFailed(

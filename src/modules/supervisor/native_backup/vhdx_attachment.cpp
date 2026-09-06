@@ -50,11 +50,8 @@ constexpr auto kShareMode =
         WinError("could not size the VHDX physical path",
             ExplicitWin32Error{query});
     }
-    [[gsl::suppress("26493",
-        justification:
-            "Braced initialization proves this construction safe at compile time.")]]
     auto path = std::vector<wchar_t>(
-        (std::size_t{bytes} + sizeof(wchar_t) - 1) /
+        (CompileTimeCast<std::size_t>(bytes) + sizeof(wchar_t) - 1) /
             sizeof(wchar_t));
     const auto status = GetVirtualDiskPhysicalPath(
         disk, &bytes, path.data());

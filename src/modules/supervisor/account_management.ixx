@@ -114,12 +114,8 @@ constexpr auto kWslRegistration = wil::zwstring_view{
         // directly into the UTF-16 password required by the account APIs.
         {
             auto encoded_length = kPasswordLength;
-            [[gsl::suppress("26493",
-                justification:
-                    "Braced initialization proves this construction safe at "
-                    "compile time.")]]
             if (!CryptBinaryToStringW(
-                random.data(), DWORD{random.size()},
+                random.data(), CompileTimeCast<DWORD, random.size()>(),
                 CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
                 password.data(), &encoded_length)) {
                 WinError("could not encode the backup account password");

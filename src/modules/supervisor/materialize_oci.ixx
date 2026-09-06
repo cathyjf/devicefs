@@ -180,15 +180,14 @@ auto ExtractArchiveMember(
     }), file.get());
 }
 
-[[nodiscard]] auto BlobMember(const winrt::hstring &digest) {
-    auto member = winrt::to_string(digest);
-    std::ranges::replace(member, ':', '/');
-    return std::format("blobs/{}", member);
+[[nodiscard]] auto BlobMember(std::string digest) {
+    std::ranges::replace(digest, ':', '/');
+    return std::format("blobs/{}", digest);
 }
 
 [[nodiscard]] auto OciLayerDigest(
     const winrt::Windows::Data::Json::JsonObject &manifest,
-    const std::string_view image) -> std::optional<winrt::hstring> {
+    const std::string_view image) -> std::optional<std::string> {
     const auto layers = manifest.GetNamedArray(L"layers");
     if (layers.Size() != 1) {
         devicefs::WriteToStream(devicefs::stdout,
@@ -196,10 +195,10 @@ auto ExtractArchiveMember(
             image, layers.Size());
         return std::nullopt;
     }
-    return layers.GetObjectAt(0).GetNamedString(L"digest");
+    return winrt::to_string(layers.GetObjectAt(0).GetNamedString(L"digest"));
 }
 
-[[nodiscard]] auto ReadOciLayerMember(
+[[nodiscard]] auto ReadOciLayerDigest(
     const std::filesystem::path &tar,
     const std::filesystem::path &archive,
     const std::filesystem::path &directory) -> std::optional<std::string> {
@@ -222,9 +221,8 @@ auto ExtractArchiveMember(
     };
     try {
         const auto manifests = read_metadata("index.json").GetNamedArray(L"manifests");
-        const auto digest = OciLayerDigest(read_metadata(BlobMember(
-            manifests.GetObjectAt(0).GetNamedString(L"digest"))), archive.string());
-        return digest ? std::optional{BlobMember(*digest)} : std::nullopt;
+        return OciLayerDigest(read_metadata(BlobMember(winrt::to_string(
+            manifests.GetObjectAt(0).GetNamedString(L"digest")))), archive.string());
     } catch (const winrt::hresult_error &error) {
         WinError("could not read OCI image metadata from '{}': {}",
             std::wstring_view{archive.native()}, std::wstring_view{error.message()},
@@ -247,7 +245,8 @@ auto ExtractArchiveMember(
     }
 }
 
-[[nodiscard]] auto DownloadGhcrRootfs(const std::filesystem::path &rootfs) -> bool {
+[[nodiscard]] auto DownloadGhcrRootfs(
+    const std::filesystem::path &rootfs) -> std::optional<std::string> {
     using namespace winrt::Windows::Foundation;
     using namespace winrt::Windows::Web::Http;
     using namespace winrt::Windows::Web::Http::Headers;
@@ -289,7 +288,7 @@ auto ExtractArchiveMember(
                 ExplicitWin32Error::FromHresult(error.code()));
         }
     }();
-    const auto layer_url = [&]() -> std::optional<Uri> {
+    const auto layer = [&]() -> std::optional<std::pair<Uri, std::string>> {
         try {
             const auto index = ReadRegistryJson(client, Uri{std::format(
                 L"{}/manifests/{}", repository_url, image_tag)});
@@ -308,9 +307,9 @@ auto ExtractArchiveMember(
                 if (!digest) {
                     return std::nullopt;
                 }
-                return Uri{std::format(
+                return std::pair{Uri{std::format(
                     L"{}/blobs/{}", repository_url,
-                    std::wstring_view{*digest})};
+                    std::wstring_view{winrt::to_hstring(*digest)})}, *digest};
             }
             throw std::runtime_error(std::format(
                 "OCI image '{}' has no suitable linux/{} manifest",
@@ -321,17 +320,18 @@ auto ExtractArchiveMember(
                 ExplicitWin32Error::FromHresult(error.code()));
         }
     }();
-    if (!layer_url) {
-        return false;
+    if (!layer) {
+        return std::nullopt;
     }
+    const auto &[layer_url, digest] = *layer;
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: downloading the linux/{} root filesystem from '{}'\n",
         winrt::to_string(architecture), image);
-    const auto bytes = DownloadFile(client, *layer_url, rootfs);
+    const auto bytes = DownloadFile(client, layer_url, rootfs);
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: downloaded the root filesystem from '{}' ({} bytes)\n",
         image, bytes);
-    return true;
+    return digest;
 }
 
 } // namespace
@@ -351,7 +351,10 @@ export [[nodiscard]] auto MaterializeOci(
         std::filesystem::temp_directory_path() /
             std::format("devicefs-oci-{}", UniqueName())};
     const auto rootfs = temporary.Path() / "rootfs.tar";
-    if (oci) {
+    const auto digest = [&]() -> std::optional<std::string> {
+        if (!oci) {
+            return DownloadGhcrRootfs(rootfs);
+        }
         const auto tar = [] {
             auto directory = std::wstring{};
             if (const auto result = wil::GetSystemDirectoryW(directory); FAILED(result)) {
@@ -364,15 +367,17 @@ export [[nodiscard]] auto MaterializeOci(
         devicefs::WriteToStream(devicefs::stdout,
             "backup-supervisor: reading OCI image '{}' for WSL distribution '{}'\n",
             archive.string(), distribution);
-        const auto layer = ReadOciLayerMember(tar, archive, temporary.Path());
+        const auto layer = ReadOciLayerDigest(tar, archive, temporary.Path());
         if (!layer) {
-            return false;
+            return std::nullopt;
         }
         devicefs::WriteToStream(devicefs::stdout,
             "backup-supervisor: extracting the root filesystem from '{}'\n",
             archive.string());
-        ExtractArchiveMember(tar, archive, *layer, rootfs);
-    } else if (!DownloadGhcrRootfs(rootfs)) {
+        ExtractArchiveMember(tar, archive, BlobMember(*layer), rootfs);
+        return layer;
+    }();
+    if (!digest) {
         return false;
     }
 
@@ -406,6 +411,20 @@ export [[nodiscard]] auto MaterializeOci(
         executable.string(), "--import", std::string{distribution},
         installation.string(), rootfs.string(), "--version", "1",
     }), GetStdHandle(STD_OUTPUT_HANDLE));
+    // The layer digest identifies the imported filesystem for future update
+    // checks. Record it only after WSL reports a successful import. Failure to
+    // record this metadata does not invalidate the imported distribution.
+    {
+        const auto digest_path = installation / "oci-layer-digest";
+        auto digest_file = std::ofstream{digest_path, std::ios::binary};
+        std::println(digest_file, "{}", *digest);
+        digest_file.flush();
+        if (!digest_file) {
+            devicefs::WriteToStream(devicefs::stderr,
+                "backup-supervisor: could not record OCI layer digest in '{}'\n",
+                digest_path.string());
+        }
+    }
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: imported WSL1 distribution '{}'\n", distribution);
     return true;

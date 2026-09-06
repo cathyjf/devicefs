@@ -3,6 +3,7 @@
 
 set vss_mount_point /mnt/vss
 set pbs_manifest_filename devicefs-manifest.conf
+set print_samba_logs 0
 set --export use_map_grpc 1
 
 function unmount_vss
@@ -118,7 +119,27 @@ function finish_view
 
     set -l remove_exit_code 0
     if set --query view_root[1]
-        printf 'Removing view state %s.\n' $view_root 1>&2
+        if test "$print_samba_logs" -eq 1
+            # Samba writes its diagnostics to files in `view_root`. These may
+            # explain why a view failed, but deleting the directory would
+            # discard them without showing them to the administrator.
+            #
+            # Reporting the logs only when Samba exits without a stop request
+            # would miss failures in DeviceFs: the supervisor responds to those
+            # failures by requesting shutdown, just as it does when the user
+            # ends a view. Consequently, we print all nonempty Samba logs
+            # before removing the directory, including after a requested
+            # shutdown.
+            for log in $view_root/log.*
+                if test -s $log
+                    printf "Samba log '%s':\n" $log 1>&2
+                    while read --line --local line
+                        printf '  %s\n' $line 1>&2
+                    end < $log
+                end
+            end
+        end
+        printf 'Removing temporary state: %s.\n' $view_root 1>&2
         rm -rf -- $view_root
         set remove_exit_code $status
     end
@@ -282,7 +303,7 @@ function run_view --argument-names snapshot_override archive address port rpc_he
     $samba_dcerpcd --foreground --ready-signal-fd=1 \
         "--log-basename=$view_root" \
         "--configfile=$view_root/smb.conf" \
-        $rpc_helper </dev/null &
+        (command -v $rpc_helper) </dev/null &
     set --erase DEVICEFS_MANIFEST
     set --erase PBS_PASSWORD
     wait_for_published_child $last_pid

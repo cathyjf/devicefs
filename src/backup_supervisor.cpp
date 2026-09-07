@@ -937,7 +937,7 @@ auto BackupSupervisorMain(
                 throw std::invalid_argument(std::format(
                     "{} requires exactly one PACKAGE_FULL_NAME", kRegisterMsixOption));
             }
-            EnsurePowerShellMsixRegistration(
+            EnsureConsoleMsixRegistration(
                 std::filesystem::path{arguments[1]}.wstring());
             return 0;
         }

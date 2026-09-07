@@ -60,6 +60,7 @@ constexpr auto kPowerShellVersionGuids = std::array{
 };
 constexpr auto kPowerShellMsiRegistrationValueName = L"InstallLocation"_zv;
 constexpr auto kPowerShellPackageFamily = L"Microsoft.PowerShell_8wekyb3d8bbwe"_zv;
+constexpr auto kTerminalPackageFamily = L"Microsoft.WindowsTerminal_8wekyb3d8bbwe"_zv;
 
 [[nodiscard]] auto PowerShellPathMsi(const auto version_guid)
     -> std::optional<std::filesystem::path> {
@@ -82,87 +83,97 @@ constexpr auto kPowerShellPackageFamily = L"Microsoft.PowerShell_8wekyb3d8bbwe"_
     return std::filesystem::path(location.get()) / L"pwsh.exe";
 }
 
-[[nodiscard]] auto FindAndPreparePowerShellMsix(const wil::zwstring_view username)
+[[nodiscard]] auto FindAndPrepareMsixApplication(
+    const wil::zwstring_view username,
+    const wil::zwstring_view package_family,
+    const std::wstring_view executable)
+    -> std::optional<std::filesystem::path> {
+    const auto apartment = WinrtApartment{
+        "could not initialize WinRT to find a console package", RO_INIT_MULTITHREADED};
+    const auto manager =
+        winrt::Windows::Management::Deployment::PackageManager{};
+    // This query returns packages registered by any user. An unprivileged
+    // user can register a package signed by a certificate trusted only by
+    // that user and give it this package family because a family name
+    // incorporates the certificate subject rather than its public key.
+    // However, a package trusted only by such a user is not classified as
+    // Store-signed, so this filter excludes it from the application
+    // installation candidates. See
+    // <https://learn.microsoft.com/en-us/uwp/api/windows.management.deployment.packagemanager.findpackageswithpackagetypes>,
+    // <https://learn.microsoft.com/en-us/windows/apps/desktop/modernize/package-identity-overview>,
+    // and <https://learn.microsoft.com/en-us/uwp/api/windows.applicationmodel.packagesignaturekind>.
+    auto packages = manager.FindPackagesWithPackageTypes(
+        package_family,
+        winrt::Windows::Management::Deployment::PackageTypes::Main) |
+        std::views::filter([](const auto &package) {
+            return package.SignatureKind() ==
+                winrt::Windows::ApplicationModel::PackageSignatureKind::Store;
+        });
+    if (packages.begin() == packages.end()) {
+        return std::nullopt;
+    }
+    const auto sortable_version = [](const auto &package) {
+        const auto version = package.Id().Version();
+        return std::tuple{
+            version.Major, version.Minor, version.Build, version.Revision};
+    };
+    const auto selected =
+        std::ranges::max(packages, {}, sortable_version);
+    const auto location = selected.InstalledLocation().Path();
+    // The package files are shared across users, but Windows requires the
+    // backup account to register the package before it can execute its programs.
+    // Register the exact Store-signed version selected above by running the
+    // installed supervisor as that account, and wait for it to finish before
+    // returning the executable to the interactive-console launcher.
+    const auto supervisor = InstalledExecutablePath();
+    const auto arguments = std::to_array<std::string>({
+        supervisor.string(), std::string{kRegisterMsixOption},
+        winrt::to_string(selected.Id().FullName()),
+    });
+    auto command = std::filesystem::path{wil::ArgvToCommandLine(arguments)}.wstring();
+    try {
+        if (const auto exit_code = RunInternalWindowsAccountProcess(
+                username, supervisor, std::move(command));
+            exit_code != 0) {
+            devicefs::WriteToStream(devicefs::stderr,
+                L"backup-supervisor: MSIX registration of '{}' for user '{}' "
+                L"failed with exit code 0x{:08x}\n",
+                std::wstring_view{package_family}, std::wstring_view{username}, exit_code);
+            return std::nullopt;
+        }
+    } catch (const std::system_error &error) {
+        if (error.code().category() != std::system_category()) {
+            throw;
+        }
+        devicefs::WriteToStream(devicefs::stderr,
+            "backup-supervisor: MSIX registration of '{}' failed "
+            "(error 0x{:08x}): {}\n",
+            winrt::to_string(package_family),
+            std::bit_cast<DWORD>(error.code().value()), error.what());
+        if (error.code().value() == ERROR_FILE_NOT_FOUND) {
+            devicefs::WriteToStream(devicefs::stderr,
+                L"The backup supervisor may not be installed at '{}'.\n"
+                L"Use the `--install` command to install it.\n",
+                supervisor.native());
+        }
+        return std::nullopt;
+    }
+    return std::filesystem::path(location.c_str()) / executable;
+}
+
+[[nodiscard]] auto TryFindAndPrepareApplication(
+    const std::string_view application, const auto &prepare)
     -> std::optional<std::filesystem::path> {
     try {
-        const auto apartment = wil::RoInitialize();
-        const auto manager =
-            winrt::Windows::Management::Deployment::PackageManager{};
-        // This query returns packages registered by any user. An unprivileged
-        // user can register a package signed by a certificate trusted only by
-        // that user and give it this package family because a family name
-        // incorporates the certificate subject rather than its public key.
-        // However, a package trusted only by such a user is not classified as
-        // Store-signed, so this filter excludes it from the PowerShell
-        // installation candidates. See
-        // <https://learn.microsoft.com/en-us/uwp/api/windows.management.deployment.packagemanager.findpackageswithpackagetypes>,
-        // <https://learn.microsoft.com/en-us/windows/apps/desktop/modernize/package-identity-overview>,
-        // and <https://learn.microsoft.com/en-us/uwp/api/windows.applicationmodel.packagesignaturekind>.
-        auto packages = manager.FindPackagesWithPackageTypes(
-            kPowerShellPackageFamily,
-            winrt::Windows::Management::Deployment::PackageTypes::Main) |
-            std::views::filter([](const auto &package) {
-                return package.SignatureKind() ==
-                    winrt::Windows::ApplicationModel::PackageSignatureKind::Store;
-            });
-        if (packages.begin() == packages.end()) {
-            return std::nullopt;
-        }
-        const auto sortable_version = [](const auto &package) {
-            const auto version = package.Id().Version();
-            return std::tuple{
-                version.Major, version.Minor, version.Build, version.Revision};
-        };
-        const auto selected =
-            std::ranges::max(packages, {}, sortable_version);
-        const auto location = selected.InstalledLocation().Path();
-        // The package files are shared across users, but Windows requires the
-        // backup account to register the package before it can execute pwsh.exe.
-        // Register the exact Store-signed version selected above by running the
-        // installed supervisor as that account, and wait for it to finish before
-        // returning the executable to the interactive-console launcher.
-        const auto supervisor = InstalledExecutablePath();
-        const auto arguments = std::to_array<std::string>({
-            supervisor.string(), std::string{kRegisterMsixOption},
-            winrt::to_string(selected.Id().FullName()),
-        });
-        auto command = std::filesystem::path{wil::ArgvToCommandLine(arguments)}.wstring();
-        try {
-            if (const auto exit_code = RunInternalWindowsAccountProcess(
-                    username, supervisor, std::move(command));
-                exit_code != 0) {
-                devicefs::WriteToStream(devicefs::stderr,
-                    L"backup-supervisor: MSIX PowerShell registration for user '{}' "
-                    L"failed with exit code 0x{:08x}; falling back to cmd.exe\n",
-                    std::wstring_view{username}, exit_code);
-                return std::nullopt;
-            }
-        } catch (const std::system_error &error) {
-            if (error.code().category() != std::system_category()) {
-                throw;
-            }
-            devicefs::WriteToStream(devicefs::stderr,
-                "backup-supervisor: MSIX PowerShell registration failed "
-                "(error 0x{:08x}): {}; falling back to cmd.exe\n",
-                std::bit_cast<DWORD>(error.code().value()), error.what());
-            if (error.code().value() == ERROR_FILE_NOT_FOUND) {
-                devicefs::WriteToStream(devicefs::stderr,
-                    L"The backup supervisor may not be installed at '{}'.\n"
-                    L"Use the `--install` command to install it.\n",
-                    supervisor.native());
-            }
-            return std::nullopt;
-        }
-        return std::filesystem::path(location.c_str()) / L"pwsh.exe";
-    } catch (const wil::ResultException &error) {
-        throw std::runtime_error(std::format(
-            "could not initialize the Windows Runtime before finding "
-            "PowerShell: {}",
-            error.what()));
+        return std::invoke(prepare);
     } catch (const winrt::hresult_error &error) {
-        throw std::runtime_error(std::format(
-            "could not query the PowerShell MSIX installation: {}",
-            winrt::to_string(error.message())));
+        devicefs::WriteToStream(devicefs::stderr,
+            "backup-supervisor: could not query the {} MSIX installation "
+            "(error 0x{:08x}): {}; trying the next console option\n",
+            application,
+            ExplicitWin32Error::FromHresult(error.code()).value,
+            winrt::to_string(error.message()));
+        return std::nullopt;
     }
 }
 
@@ -173,12 +184,26 @@ constexpr auto kPowerShellPackageFamily = L"Microsoft.PowerShell_8wekyb3d8bbwe"_
             return path;
         }
     }
-    return FindAndPreparePowerShellMsix(username);
+    return TryFindAndPrepareApplication("PowerShell"sv, [username] {
+        return FindAndPrepareMsixApplication(
+            username, kPowerShellPackageFamily, L"pwsh.exe"sv);
+    });
+}
+
+[[nodiscard]] auto FindAndPrepareWindowsTerminal(const wil::zwstring_view username)
+    -> std::optional<std::filesystem::path> {
+    return TryFindAndPrepareApplication("Windows Terminal"sv, [username] {
+        // Terminal's package manifest declares `wt.exe` as its command-line
+        // entry point, so use that launcher from the selected package. See
+        // <https://github.com/microsoft/terminal/blob/main/src/cascadia/CascadiaPackage/Package.appxmanifest>.
+        return FindAndPrepareMsixApplication(
+            username, kTerminalPackageFamily, L"wt.exe"sv);
+    });
 }
 
 } // namespace
 
-export auto EnsurePowerShellMsixRegistration(const wil::zwstring_view package_full_name) {
+export auto EnsureConsoleMsixRegistration(const wil::zwstring_view package_full_name) {
     const auto family_name = [package_full_name] {
         auto family_name_length = UINT32{};
         if (const auto error = PackageFamilyNameFromFullName(
@@ -201,19 +226,22 @@ export auto EnsurePowerShellMsixRegistration(const wil::zwstring_view package_fu
         return result;
     }();
 
-    // This command registers the caller's chosen PowerShell package for the
-    // current user. The family check limits registration to PowerShell; the
-    // caller remains responsible for selecting a trusted package. Registering
-    // by full name preserves the chosen package's exact version and architecture.
-    if (std::wstring_view{family_name} != kPowerShellPackageFamily) {
+    // This command registers the caller's chosen console package for the current
+    // user. The family check limits registration to PowerShell and Windows
+    // Terminal; the caller remains responsible for selecting a trusted package.
+    // Registering by full name preserves its exact version and architecture.
+    if ((std::wstring_view{family_name} != kPowerShellPackageFamily) &&
+        (std::wstring_view{family_name} != kTerminalPackageFamily)) {
         throw std::invalid_argument(std::format(
-            "MSIX package '{}' does not belong to the allowed PowerShell family '{}'",
+            "MSIX package '{}' does not belong to the allowed PowerShell family '{}' "
+            "or Windows Terminal family '{}'",
             winrt::to_string(package_full_name),
-            winrt::to_string(kPowerShellPackageFamily)));
+            winrt::to_string(kPowerShellPackageFamily),
+            winrt::to_string(kTerminalPackageFamily)));
     }
 
     const auto apartment = WinrtApartment{
-        "could not initialize WinRT to register PowerShell", RO_INIT_MULTITHREADED};
+        "could not initialize WinRT to register a console package", RO_INIT_MULTITHREADED};
     const auto user_name = [] {
         auto buffer = std::array<char, UNLEN + 1>{};
         auto length = CompileTimeCast<DWORD, buffer.size()>();
@@ -249,18 +277,21 @@ export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) ->
         DWORD win_error;
         DWORD exit_code;
     };
-    const auto try_start_shell = [username](
-        const std::filesystem::path &shell) -> std::expected<void, ShellError> {
+    const auto try_shell = [username](
+        const std::filesystem::path &shell,
+        std::wstring command = {}) -> std::expected<void, ShellError> {
         auto startup = STARTUPINFOW{.cb = sizeof(STARTUPINFOW)};
         auto process = wil::unique_process_information{};
         // With zero creation flags, `CreateProcessWithLogonW` creates a new
-        // console. A null `STARTUPINFO::lpDesktop` makes the child inherit the
+        // console for a console application. Windows Terminal creates its own
+        // window. A null `STARTUPINFO::lpDesktop` makes the child inherit the
         // supervisor's window station and desktop. See
         // <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw>.
         if (!CreateProcessWithLogonW(
                 username.c_str(), L".",
                 ResetBackupAccountPassword(username).c_str(),
-                LOGON_WITH_PROFILE, shell.c_str(), nullptr, 0,
+                LOGON_WITH_PROFILE, shell.c_str(),
+                command.empty() ? nullptr : command.data(), 0,
                 nullptr, nullptr, &startup, &process)) {
             return std::unexpected{ShellError{.win_error = GetLastError()}};
         }
@@ -274,9 +305,38 @@ export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) ->
         }
         return {};
     };
-    if (const auto powershell = FindAndPreparePowerShell(username);
-        powershell && try_start_shell(*powershell)) {
-        return 0;
+    if (const auto powershell = FindAndPreparePowerShell(username)) {
+        if (const auto terminal = FindAndPrepareWindowsTerminal(username)) {
+            // Supplying the PowerShell executable explicitly keeps Terminal's
+            // profile selection from substituting another shell. The new-window
+            // option also overrides its preference for reusing a window.
+            // Terminal splits commands at semicolons even within quoted
+            // arguments, so escape any semicolons in a custom PowerShell path
+            // before applying ordinary Windows command-line quoting. See
+            // <https://github.com/microsoft/terminal/blob/main/src/cascadia/TerminalApp/AppCommandlineArgs.cpp>.
+            const auto terminal_shell = powershell->string() |
+                std::views::split(';') | std::views::join_with("\\;"sv) |
+                std::ranges::to<std::string>();
+            const auto arguments = std::to_array<std::string>({
+                terminal->string(), "-w", "new", "new-tab", "--", terminal_shell,
+            });
+            const auto command =
+                std::filesystem::path{wil::ArgvToCommandLine(arguments)}.wstring();
+            const auto status = try_shell(*terminal, command);
+            if (status) {
+                return 0;
+            }
+            devicefs::WriteToStream(devicefs::stderr,
+                L"backup-supervisor: Windows Terminal for user '{}' could not "
+                L"be started with this command line:\n{}\n(Windows error "
+                L"0x{:08x}, exit code 0x{:08x})\nTrying Windows Console Host "
+                L"instead.\n",
+                std::wstring_view{username}, std::wstring_view{command},
+                status.error().win_error, status.error().exit_code);
+        }
+        if (try_shell(*powershell)) {
+            return 0;
+        }
     }
     const auto shell = [] {
         auto system_directory = std::wstring{};
@@ -287,7 +347,7 @@ export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) ->
         }
         return std::filesystem::path{system_directory} / L"cmd.exe";
     }();
-    if (const auto status = try_start_shell(shell); !status) {
+    if (const auto status = try_shell(shell); !status) {
         const auto error = status.error();
         if (error.exit_code != 0) {
             devicefs::WriteToStream(devicefs::stderr,

@@ -850,6 +850,25 @@ pbs-vss ALL=(root) NOPASSWD: /usr/bin/mount /mnt/vss, /usr/bin/umount /mnt/vss
 EOF
 
 #
+# Backup operations need temporary files, but the installed programs and
+# configuration should remain read-only. Binding `/tmp` onto itself gives it
+# a separate mount while retaining its existing disk-backed storage.
+# The subsequent `remount,bind,ro` changes only the `/` mount's permissions,
+# leaving `/tmp` writable. An ordinary `remount,ro` would instead make the
+# shared filesystem read-only through both paths.
+#
+# WSL runs this script as root through the `boot.command` setting below.
+#
+# https://manpages.debian.org/trixie/mount/mount.8.en.html#Read-only_Setting_Notes
+# https://learn.microsoft.com/en-us/windows/wsl/wsl-config#boot-settings
+#
+COPY --chmod=0755 <<'EOF' /usr/local/sbin/devicefs-startup
+#!/usr/bin/env -S fish --no-config
+mount -o bind,nosuid,noexec,nodev /tmp /tmp || exit
+mount -o remount,bind,ro /
+EOF
+
+#
 # wsl --import materializes the filesystem but does not use container-image
 # process metadata to select a Linux user. /etc/wsl.conf is therefore the
 # durable owner of the default identity.
@@ -864,6 +883,9 @@ EOF
 # https://learn.microsoft.com/en-us/windows/wsl/use-custom-distro
 #
 COPY <<'EOF' /etc/wsl.conf
+[boot]
+command=/usr/local/sbin/devicefs-startup
+
 [automount]
 enabled=false
 

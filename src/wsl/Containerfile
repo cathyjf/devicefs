@@ -817,12 +817,14 @@ install -d --mode=0755 --owner=pbs-vss --group=pbs-vss /mnt/vss
 EOF
 
 #
-# DeviceFs presents the backup image files on Windows drive X:. The backup
-# operation explicitly mounts that drive at /mnt/vss immediately before
-# invoking proxmox-backup-client and unmounts it afterward.
+# DeviceFs presents the backup image files through its Windows directory mount
+# at `C:\ProgramData\devicefs\backup-mount`. The backup operation explicitly
+# mounts that filesystem at `/mnt/vss` immediately before invoking
+# proxmox-backup-client and unmounts it afterward.
 #
-# noauto is important: X: exists only while the Windows DeviceFs process is
-# serving a backup. WSL startup must not fail merely because no backup is active.
+# The DeviceFs filesystem is available only while its Windows process is
+# serving a backup, so `noauto` declares that it should be mounted explicitly
+# by the backup operation.
 # ro preserves the read-only nature of the DeviceFs view inside Linux as well.
 #
 # https://learn.microsoft.com/en-us/windows/wsl/wsl-config
@@ -831,7 +833,7 @@ EOF
 # https://manpages.debian.org/trixie/mount/fstab.5.en.html
 #
 COPY <<EOF /etc/fstab
-X: /mnt/vss drvfs ro,noauto,uid=${DEVICEFS_UID},gid=${DEVICEFS_GID},umask=022 0 0
+C:/ProgramData/devicefs/backup-mount /mnt/vss drvfs ro,noauto,nosuid,nodev,noexec,uid=${DEVICEFS_UID},gid=${DEVICEFS_GID},umask=022 0 0
 EOF
 
 #

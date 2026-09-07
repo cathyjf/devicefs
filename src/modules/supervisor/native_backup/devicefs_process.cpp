@@ -40,9 +40,8 @@ struct DeviceFsProcess {
     static constexpr auto kPollInterval = 100ms;
     static constexpr auto kStartTimeout = 30s;
     static constexpr auto kShutdownTimeout = 60s;
-    static constexpr auto kMountTarget = "X:"sv;
-    static constexpr auto kMountDriveMask =
-        DWORD{1} << (kMountTarget.front() - 'A');
+    static constexpr auto kMountTarget =
+        "C:\\ProgramData\\devicefs\\backup-mount"sv;
 
     wil::unique_process_information process;
     std::filesystem::path readiness_path;

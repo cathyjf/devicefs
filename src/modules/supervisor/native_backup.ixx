@@ -63,12 +63,30 @@ namespace internal {
         return kCancelledExitCode;
     }
 
-    const auto logical_drives = GetLogicalDrives();
-    if (logical_drives == 0) {
-        WinError("could not enumerate drive letters");
-    }
-    if ((logical_drives & DeviceFsProcess::kMountDriveMask) != 0) {
-        throw std::runtime_error("mount target is already present: X:");
+    // WinFsp creates and removes the mount directory itself. An empty directory
+    // left behind by an interrupted backup would prevent the next mount, so
+    // remove it before starting the new DeviceFs child.
+    const auto mount_target = std::filesystem::path{DeviceFsProcess::kMountTarget};
+    if (const auto status = std::filesystem::status(mount_target);
+        std::filesystem::exists(status)) {
+        if (!std::filesystem::is_directory(status) ||
+            !std::filesystem::is_empty(mount_target)) {
+            throw std::runtime_error(std::format(
+                "cannot start the backup because its mount path '{}' already "
+                "exists and is not an empty directory.\n"
+                "WinFsp needs this path to be absent so it can create the "
+                "DeviceFs mount point. The supervisor removes empty leftover "
+                "directories, but will not delete existing contents to make "
+                "room for a backup.\n"
+                "This path may still expose a DeviceFs filesystem from an "
+                "earlier backup, or it may contain files placed there manually. "
+                "Inspect the path before retrying. If an earlier DeviceFs "
+                "process is still serving it, stop that process. Otherwise, "
+                "inspect and move the existing file or directory aside. "
+                "Then retry the backup with this path absent or empty.",
+                mount_target.string()));
+        }
+        std::filesystem::remove(mount_target);
     }
 
     const auto snapshot_manifest = SerializeSnapshotManifest(snapshot_set);

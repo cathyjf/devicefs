@@ -817,6 +817,14 @@ install -d --mode=0755 --owner=pbs-vss --group=pbs-vss /mnt/vss
 EOF
 
 #
+# Set root's shell to Fish.
+#
+RUN <<'EOF'
+shopt -s inherit_errexit; set -efux -o pipefail
+chsh --shell /usr/bin/fish root
+EOF
+
+#
 # DeviceFs presents the backup image files through its Windows directory mount
 # at `C:\ProgramData\devicefs\backup-mount`. The backup operation explicitly
 # mounts that filesystem at `/mnt/vss` immediately before invoking
@@ -878,9 +886,11 @@ mount -o bind,nosuid,nodev /tmp /tmp || exit
 mount -o remount,bind,ro /
 EOF
 
+#
 # Fish normally writes every interactive command to a history file. When the
 # root filesystem is read-only, this causes an error messaage to be printed
 # after every command. We disable the history file to avoid this.
+#
 COPY <<'EOF' /etc/fish/conf.d/disable-history.fish
 set -g fish_history ''
 EOF

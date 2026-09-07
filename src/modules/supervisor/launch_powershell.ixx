@@ -305,8 +305,12 @@ export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) ->
         }
         return {};
     };
+    // Package discovery and registration can overlap. `ResetBackupAccountPassword`
+    // serializes each password reset with the logon that uses it.
+    auto terminal_preparation = std::async(
+        std::launch::async, FindAndPrepareWindowsTerminal, username);
     if (const auto powershell = FindAndPreparePowerShell(username)) {
-        if (const auto terminal = FindAndPrepareWindowsTerminal(username)) {
+        if (const auto terminal = terminal_preparation.get()) {
             // Supplying the PowerShell executable explicitly keeps Terminal's
             // profile selection from substituting another shell. The new-window
             // option also overrides its preference for reusing a window.

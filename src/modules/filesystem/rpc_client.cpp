@@ -50,8 +50,10 @@ auto CheckNt(NTSTATUS, wil::zstring_view) -> void;
 
 namespace rpc_client {
 
-constexpr auto kTcpPrefix = std::string_view{"tcp:"};
-constexpr auto kTcpUsername = std::string_view{"devicefs"};
+using namespace std::string_view_literals;
+
+constexpr auto kTcpPrefix = "tcp:"sv;
+constexpr auto kTcpUsername = "devicefs"sv;
 
 [[nodiscard]] auto IsRpcDevice(const internal::Mapping &mapping) noexcept {
     return mapping.device.starts_with(internal::kRpcDevicePrefix);

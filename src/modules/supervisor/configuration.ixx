@@ -26,6 +26,8 @@ import <winrt/Windows.Data.Json.h>;
 import <winrt/Windows.Foundation.Collections.h>;
 import devicefs.supervisor.winrt_apartment;
 
+using namespace std::string_view_literals;
+
 // The Windows GetObject macro conflicts with C++/WinRT IJsonValue::GetObject.
 #undef GetObject
 
@@ -128,7 +130,7 @@ struct Utf8TextDestination : MemberDestination<String> {
     using MemberDestination<String>::MemberDestination;
 
     [[nodiscard]] static constexpr auto TemplateValue() noexcept {
-        return std::string_view{"\"\""};
+        return "\"\""sv;
     }
 };
 
@@ -140,7 +142,7 @@ struct WindowsUsernameDestination : MemberDestination<std::string> {
     using MemberDestination<std::string>::MemberDestination;
 
     [[nodiscard]] static constexpr auto DefaultValue() noexcept {
-        return std::string_view{"devicefs-backup-user"};
+        return "devicefs-backup-user"sv;
     }
 };
 
@@ -150,7 +152,7 @@ struct OptionalStringDestination :
         std::optional<std::string>>::MemberDestination;
 
     [[nodiscard]] static constexpr auto TemplateValue() noexcept {
-        return std::string_view{"null"};
+        return "null"sv;
     }
 };
 
@@ -159,7 +161,7 @@ struct OptionalUtf8StringDestination :
     using MemberDestination<std::u8string>::MemberDestination;
 
     [[nodiscard]] static constexpr auto TemplateValue() noexcept {
-        return std::string_view{"\"\""};
+        return "\"\""sv;
     }
 };
 
@@ -171,7 +173,7 @@ struct OptionalBooleanDestination : MemberDestination<bool> {
     }
 
     [[nodiscard]] static constexpr auto TemplateValue() noexcept {
-        return std::string_view{DefaultValue() ? "true" : "false"};
+        return DefaultValue() ? "true"sv : "false"sv;
     }
 };
 
@@ -189,7 +191,7 @@ struct SerializedJsonObjectDestination :
     using MemberDestination<SecureUtf8String>::MemberDestination;
 
     [[nodiscard]] static constexpr auto TemplateValue() noexcept {
-        return std::string_view{"{}"};
+        return "{}"sv;
     }
 };
 
@@ -199,7 +201,7 @@ struct NonemptyStringArrayDestination :
         std::vector<std::string>>::MemberDestination;
 
     [[nodiscard]] static constexpr auto DefaultValue() noexcept {
-        return std::array{std::string_view{"C:"}};
+        return std::array{"C:"sv};
     }
 };
 
@@ -210,31 +212,31 @@ struct WslConfigurationDestination :
 
 struct WslDistributionDestination {
     [[nodiscard]] static constexpr auto DefaultValue() noexcept {
-        return std::string_view{"Debian"};
+        return "Debian"sv;
     }
 };
 
 struct WslLinuxUserDestination {
     [[nodiscard]] static constexpr auto TemplateValue() noexcept {
-        return std::string_view{"null"};
+        return "null"sv;
     }
 };
 
 struct WslClientPathDestination {
     [[nodiscard]] static constexpr auto DefaultValue() noexcept {
-        return std::string_view{"proxmox-backup-client"};
+        return "proxmox-backup-client"sv;
     }
 };
 
 struct WslRpcHelperPathDestination {
     [[nodiscard]] static constexpr auto DefaultValue() noexcept {
-        return std::string_view{"rpcd_devicefs"};
+        return "rpcd_devicefs"sv;
     }
 };
 
 struct WslSambaDcerpcdPathDestination {
     [[nodiscard]] static constexpr auto DefaultValue() noexcept {
-        return std::string_view{"/usr/libexec/samba/samba-dcerpcd"};
+        return "/usr/libexec/samba/samba-dcerpcd"sv;
     }
 };
 
@@ -479,7 +481,7 @@ constexpr auto WriteTemplateFields(
     const Fields &fields,
     const std::size_t indentation) -> void {
     output.push_back('{');
-    auto separator = std::string_view{"\n"};
+    auto separator = "\n"sv;
     for (const auto &field : fields) {
         if constexpr (std::same_as<
                 typename Fields::value_type, WslConfigurationField>) {

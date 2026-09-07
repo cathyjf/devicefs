@@ -37,6 +37,8 @@ import devicefs.supervisor.temporary_paths;
 namespace internal {
 
 using namespace std::chrono_literals;
+using namespace std::string_view_literals;
+using namespace wil::literals;
 
 enum class PbsStandardOutput {
     Forward,
@@ -58,7 +60,7 @@ struct PbsFishResult {
     std::optional<std::u8string> standard_output;
 };
 
-constexpr auto kLocalDomain = wil::zwstring_view(L".");
+constexpr auto kLocalDomain = L"."_zv;
 constexpr auto kWslCreationFlags = DWORD{
     CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT};
 
@@ -364,7 +366,7 @@ struct WslProcess {
         };
         auto privileges = ProcessPrivilegeEnabler{
             GetCurrentProcess(), privilege_names,
-            std::string_view{"the user-profile privileges"}};
+            "the user-profile privileges"sv};
         if (!LoadUserProfileW(result.token.get(), &profile)) {
             WinError("could not load the profile for configured WSL account '{}'",
                 std::wstring_view{windows_username});
@@ -525,9 +527,9 @@ enum class PbsFishSignal {
     const PbsFishSignal signal) noexcept -> std::string_view {
     switch (signal) {
     case PbsFishSignal::Term:
-        return "TERM";
+        return "TERM"sv;
     case PbsFishSignal::Kill:
-        return "KILL";
+        return "KILL"sv;
     }
     std::unreachable();
 }
@@ -537,9 +539,9 @@ auto SendPbsFishSignal(
     const std::string_view stop_file,
     const PbsFishSignal signal) {
     constexpr auto kControlTimeout = 15s;
-    constexpr auto program = std::string_view(
+    constexpr auto program =
         "touch $argv[2]; "
-        "if test -s $argv[1]; kill -s $argv[3] (cat $argv[1]); end");
+        "if test -s $argv[1]; kill -s $argv[3] (cat $argv[1]); end"sv;
     const auto text = SignalText(signal);
     const auto arguments = std::array{
         pid_file, stop_file, text};

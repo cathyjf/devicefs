@@ -24,6 +24,8 @@ import std;
 import <devicefs/windows_imports.h>;
 import devicefs.common;
 
+using namespace std::string_view_literals;
+
 using unique_pseudoconsole = wil::unique_any<
     HPCON, decltype(&::ClosePseudoConsole), ::ClosePseudoConsole>;
 
@@ -193,8 +195,8 @@ public:
             }
             if (last != '\n') {
                 WriteRaw(last == '\r'
-                    ? std::string_view{"\n"}
-                    : std::string_view{"\r\n"});
+                    ? "\n"sv
+                    : "\r\n"sv);
             }
         }
     }
@@ -319,7 +321,7 @@ private:
             }
             WriteRaw(output.substr(0, line_end));
             if (output[line_end] == Character{'\n'}) {
-                WriteRaw(std::string_view{"\r\n"});
+                WriteRaw("\r\n"sv);
                 at_line_start_ = true;
             }
             output.remove_prefix(line_end + 1);
@@ -329,12 +331,12 @@ private:
     auto WriteLine(const std::string_view message) -> void {
         const auto lock = lock_.lock_exclusive();
         if (!at_line_start_) {
-            WriteRaw(std::string_view{"\r\n"});
+            WriteRaw("\r\n"sv);
             at_line_start_ = true;
         }
         WriteText(message);
         if (message.empty() || (message.back() != '\n')) {
-            WriteText(std::string_view{"\n"});
+            WriteText("\n"sv);
         }
     }
 

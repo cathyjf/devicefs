@@ -33,10 +33,12 @@ import devicefs.supervisor.vshadow;
 namespace {
 
 using namespace std::chrono_literals;
+using namespace std::string_view_literals;
+using namespace wil::literals;
 
 constexpr auto kCancellationEventName =
-    wil::zstring_view("Local\\devicefs-backup-stop");
-constexpr auto kOrchestrateOption = std::string_view("--orchestrate");
+    "Local\\devicefs-backup-stop"_zv;
+constexpr auto kOrchestrateOption = "--orchestrate"sv;
 
 [[nodiscard]] auto CreateCancellationEvent(
     _In_opt_z_ const char *const name) {
@@ -465,7 +467,7 @@ struct SelectiveViewOptions {
 
 [[nodiscard]] auto ParseVolumeList(std::string_view source) {
     auto result = std::vector<std::string>{};
-    constexpr auto kWhitespace = std::string_view{" \t\r\n\f\v"};
+    constexpr auto kWhitespace = " \t\r\n\f\v"sv;
     while (true) {
         const auto separator = source.find(',');
         const auto field = source.substr(0, separator);

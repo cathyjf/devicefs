@@ -42,7 +42,10 @@ import devicefs.common;
 import devicefs.stream_writer;
 import devicefs.supervisor.process_launch;
 
-export constexpr auto kMaterializeOciOption = std::string_view("--materialize-oci");
+using namespace std::string_view_literals;
+using namespace wil::literals;
+
+export constexpr auto kMaterializeOciOption = "--materialize-oci"sv;
 
 [[nodiscard]] auto InstallWslPackage() -> bool;
 [[nodiscard]] auto EnsureWinFsp() -> bool;
@@ -76,8 +79,8 @@ export constexpr auto kMaterializeOciOption = std::string_view("--materialize-oc
 
 namespace {
 
-constexpr auto kWslRegistration = wil::zwstring_view{
-    L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss\\MSI"};
+constexpr auto kWslRegistration =
+    L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss\\MSI"_zv;
 
 // Ceiling division requires a nonzero divisor. Rounding the quotient up after
 // division avoids the overflow possible when adding `divisor - 1` beforehand.
@@ -309,7 +312,7 @@ auto EnsureWslDistributionDirectory(
 
 [[nodiscard]] auto EnsureWsl1Component() -> bool {
     constexpr auto feature =
-        wil::zwstring_view{L"Microsoft-Windows-Subsystem-Linux"};
+        L"Microsoft-Windows-Subsystem-Linux"_zv;
     if (const auto result =
             DismInitialize(DismLogErrorsWarnings, nullptr, nullptr);
         FAILED(result)) {

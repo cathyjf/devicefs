@@ -51,6 +51,8 @@ import devicefs.supervisor.winrt_apartment;
 
 namespace {
 
+using namespace std::string_view_literals;
+
 constexpr auto kWslRegistration =
     L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss";
 constexpr auto kOciLayerDigestFile = "oci-layer-digest";
@@ -282,16 +284,16 @@ auto ExtractArchiveMember(
     using namespace winrt::Windows::Web::Http;
     using namespace winrt::Windows::Web::Http::Headers;
 
-    constexpr auto registry_host = std::wstring_view{L"ghcr.io"};
-    constexpr auto github_username = std::wstring_view{L"cathyjf"};
-    constexpr auto image_name = std::wstring_view{L"devicefs-wsl"};
-    constexpr auto image_tag = std::wstring_view{L"latest"};
+    constexpr auto registry_host = L"ghcr.io"sv;
+    constexpr auto github_username = L"cathyjf"sv;
+    constexpr auto image_name = L"devicefs-wsl"sv;
+    constexpr auto image_tag = L"latest"sv;
     const auto repository = std::format(L"{}/{}", github_username, image_name);
     const auto repository_url = std::format(L"https://{}/v2/{}", registry_host, repository);
     const auto image = winrt::to_string(std::format(
         L"{}/{}:{}", registry_host, repository, image_tag));
     const auto architecture = NativeMachineArchitecture() == IMAGE_FILE_MACHINE_ARM64
-        ? std::wstring_view{L"arm64"} : std::wstring_view{L"amd64"};
+        ? L"arm64"sv : L"amd64"sv;
     const auto apartment = WinrtApartment{
         "could not initialize WinRT to download the WSL root filesystem",
         RO_INIT_MULTITHREADED};

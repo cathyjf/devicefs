@@ -39,6 +39,8 @@ import devicefs.common;
 import devicefs.stream_writer;
 import devicefs.supervisor.temporary_paths;
 
+using namespace std::string_view_literals;
+
 namespace internal {
 
 auto GrantUserFullControl(
@@ -154,7 +156,7 @@ class ViewDirectory {
             std::bit_cast<std::uint32_t>(status)));
     }
 
-    constexpr auto digits = std::string_view{"0123456789abcdef"};
+    constexpr auto digits = "0123456789abcdef"sv;
     auto result = wil::secure_string(random.size() * 2, '\0');
     for (auto index = 0uz; index < random.size(); ++index) {
         result[index * 2] = digits.at(random.at(index) >> 4);
@@ -301,7 +303,7 @@ auto WaitForViewSession(
     };
     auto privileges = internal::ProcessPrivilegeEnabler{
         GetCurrentProcess(), privilege_names,
-        std::string_view{"the backup-view privileges"}};
+        "the backup-view privileges"sv};
     devicefs::WriteToStream(
         devicefs::stdout,
         "\nPreparing the backup-view VHDX attachment:\n");

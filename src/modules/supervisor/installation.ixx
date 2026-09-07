@@ -31,6 +31,9 @@ import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
 import devicefs.supervisor.configuration;
 
+using namespace std::string_view_literals;
+using namespace wil::literals;
+
 export struct PersistentPaths {
     std::filesystem::path root;
     std::filesystem::path wsl;
@@ -41,50 +44,50 @@ export struct PersistentPaths {
 };
 
 export constexpr auto kServiceName =
-    std::string_view("DeviceFsBackup");
+    "DeviceFsBackup"sv;
 export constexpr auto kRunServiceOption =
-    std::string_view("--run-service");
+    "--run-service"sv;
 
 namespace {
 
-constexpr auto kProductDirectoryName = std::string_view("devicefs");
-constexpr auto kExecutableName = std::string_view("backup-supervisor.exe");
-constexpr auto kLogDirectoryName = std::string_view("logs");
-constexpr auto kCredentialsDirectoryName = std::string_view("credentials");
-constexpr auto kConfigurationName = std::string_view("backup.json");
+constexpr auto kProductDirectoryName = "devicefs"sv;
+constexpr auto kExecutableName = "backup-supervisor.exe"sv;
+constexpr auto kLogDirectoryName = "logs"sv;
+constexpr auto kCredentialsDirectoryName = "credentials"sv;
+constexpr auto kConfigurationName = "backup.json"sv;
 constexpr auto kBackupLockName =
-    std::string_view("pbs-vss-backup.lock");
-constexpr auto kServiceDisplayName = std::string_view("DeviceFs Backup");
-constexpr auto kLocalSystemAccount = std::string_view(".\\LocalSystem");
+    "pbs-vss-backup.lock"sv;
+constexpr auto kServiceDisplayName = "DeviceFs Backup"sv;
+constexpr auto kLocalSystemAccount = ".\\LocalSystem"sv;
 constexpr auto kNoDependencies = std::array{'\0', '\0'};
 
 // Newly created public directories are readable and traversable by ordinary
 // users, but only LocalSystem and the built-in Administrators group may modify
 // them. Protecting the DACL prevents permissive parent ACEs from being inherited.
-constexpr auto kPublicDirectorySecurity = wil::zstring_view(
+constexpr auto kPublicDirectorySecurity =
     "O:BA"                          // Owner: built-in Administrators.
     "D:P"                           // Protected DACL.
     "(A;OICI;FA;;;SY)"              // LocalSystem: full control.
     "(A;OICI;FA;;;BA)"              // Administrators: full control.
-    "(A;OICI;GRGX;;;BU)");          // Users: read and execute.
-constexpr auto kExecutableSecurity = wil::zstring_view(
+    "(A;OICI;GRGX;;;BU)"_zv;        // Users: read and execute.
+constexpr auto kExecutableSecurity =
     "O:BA"
     "D:P"
     "(A;;FA;;;SY)"
     "(A;;FA;;;BA)"
-    "(A;;GRGX;;;BU)");
+    "(A;;GRGX;;;BU)"_zv;
 
 // Newly created credentials objects are not readable by ordinary users.
-constexpr auto kPrivateDirectorySecurity = wil::zstring_view(
+constexpr auto kPrivateDirectorySecurity =
     "O:BA"
     "D:P"
     "(A;OICI;FA;;;SY)"
-    "(A;OICI;FA;;;BA)");
-constexpr auto kPrivateFileSecurity = wil::zstring_view(
+    "(A;OICI;FA;;;BA)"_zv;
+constexpr auto kPrivateFileSecurity =
     "O:BA"
     "D:P"
     "(A;;FA;;;SY)"
-    "(A;;FA;;;BA)");
+    "(A;;FA;;;BA)"_zv;
 
 [[nodiscard]] auto KnownFolderPath(
     const KNOWNFOLDERID &identifier,

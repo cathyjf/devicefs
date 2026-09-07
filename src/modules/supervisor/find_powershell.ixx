@@ -26,6 +26,7 @@ module;
 
 #include <wil/registry.h>
 #include <wil/resource.h>
+#include <wil/stl.h>
 
 export module devicefs.supervisor.find_powershell;
 
@@ -35,6 +36,7 @@ import devicefs.common;
 namespace {
 
 using namespace std::string_view_literals;
+using namespace wil::literals;
 
 constexpr auto kPowerShellMsiRegistrationPrefix =
     L"SOFTWARE\\Microsoft\\PowerShellCore\\InstalledVersions\\"sv;
@@ -42,8 +44,8 @@ constexpr auto kPowerShellVersionGuids = std::array{
     L"31ab5147-9a97-4452-8443-d9709f0516e1"sv, // x64
     L"1d00683b-0f84-4db8-a64f-2f98ad42fe06"sv, // arm64
 };
-constexpr auto kPowerShellMsiRegistrationValueName = L"InstallLocation";
-constexpr auto kPowerShellPackageFamily = L"Microsoft.PowerShell_8wekyb3d8bbwe";
+constexpr auto kPowerShellMsiRegistrationValueName = L"InstallLocation"_zv;
+constexpr auto kPowerShellPackageFamily = L"Microsoft.PowerShell_8wekyb3d8bbwe"_zv;
 
 [[nodiscard]] auto PowerShellPathMSI(const auto version_guid)
     -> std::optional<std::filesystem::path> {
@@ -52,7 +54,7 @@ constexpr auto kPowerShellPackageFamily = L"Microsoft.PowerShell_8wekyb3d8bbwe";
     auto location = wil::unique_cotaskmem_string{};
     const auto result = wil::reg::get_value_string_nothrow(
         HKEY_LOCAL_MACHINE, subkey_name.c_str(),
-        kPowerShellMsiRegistrationValueName, location);
+        kPowerShellMsiRegistrationValueName.c_str(), location);
     if (wil::reg::is_registry_not_found(result)) {
         return std::nullopt;
     } else if (FAILED(result)) {

@@ -38,6 +38,8 @@ import devicefs.stream_writer;
 
 namespace internal {
 
+using namespace std::string_view_literals;
+
 using UniqueLsaLogonProcess = wil::unique_any<
     LSA_HANDLE,
     decltype(&::LsaDeregisterLogonProcess),
@@ -142,7 +144,7 @@ template <std::size_t Size>
     };
     auto privileges = ProcessPrivilegeEnabler{
         GetCurrentProcess(), privilege_names,
-        std::string_view{"the S4U logon privilege"}};
+        "the S4U logon privilege"sv};
 
     auto lsa_name_text = std::to_array("DeviceFs");
     auto lsa_name = MakeLsaString(lsa_name_text);
@@ -167,7 +169,7 @@ template <std::size_t Size>
 
     const auto username_text = std::wstring_view{
         username.c_str(), username.length()};
-    const auto domain_text = std::wstring_view{L"."};
+    const auto domain_text = L"."sv;
     // `LsaLogonUser` accepts one `AuthenticationInformation` address and byte
     // count. For `MSV1_0_INTERACTIVE_LOGON` and `KERB_S4U_LOGON`, Microsoft
     // requires each `UNICODE_STRING::Buffer` to point to characters stored
@@ -232,7 +234,7 @@ template <std::size_t Size>
 
     auto source = [] {
         auto result = TOKEN_SOURCE{};
-        constexpr auto source_name = std::string_view{"DeviceFs"};
+        constexpr auto source_name = "DeviceFs"sv;
         static_assert(source_name.size() == TOKEN_SOURCE_LENGTH);
         std::ranges::copy(source_name, std::begin(result.SourceName));
         if (!AllocateLocallyUniqueId(&result.SourceIdentifier)) {

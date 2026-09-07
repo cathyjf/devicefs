@@ -20,11 +20,13 @@ import std;
 
 namespace internal {
 
+using namespace std::string_view_literals;
+
 struct Mapping {
     std::wstring name;
     std::string device;
 };
 
-constexpr auto kRpcDevicePrefix = std::string_view{R"(\\\)"};
+constexpr auto kRpcDevicePrefix = R"(\\\)"sv;
 
 } // namespace internal

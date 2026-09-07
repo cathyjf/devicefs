@@ -39,6 +39,8 @@ export struct DirtyBlockMap {
 
 namespace {
 
+using namespace std::string_view_literals;
+
 auto SortAndDeduplicate(
     std::vector<std::uint64_t> &offsets) -> void {
     std::ranges::sort(offsets);
@@ -88,7 +90,7 @@ export [[nodiscard]] auto BuildDirtyBlockMap(
     constexpr auto privilege_names =
         std::array{wil::zwstring_view{SE_BACKUP_NAME}};
     constexpr auto privilege_description =
-        std::string_view{"the backup privilege"};
+        "the backup privilege"sv;
     auto privileges = internal::ProcessPrivilegeEnabler{
         GetCurrentProcess(), privilege_names,
         privilege_description};

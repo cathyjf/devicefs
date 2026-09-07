@@ -56,6 +56,7 @@ export struct IncrementalDiagnosticOptions {
 namespace {
 
 using namespace std::chrono_literals;
+using namespace std::string_view_literals;
 
 // Each volume owns its worker pool, so work assigned to another volume cannot
 // consume its workers. The two 4-MiB buffers per worker bound storage to
@@ -67,9 +68,9 @@ constexpr auto kProgressReportInterval = 1min;
 // noticeable final-report delay without busy-waiting.
 constexpr auto kWorkerPollInterval = 100ms;
 constexpr auto kBaselineDescription =
-    std::string_view{"the retained snapshot"};
+    "the retained snapshot"sv;
 constexpr auto kPayloadDescription =
-    std::string_view{"the new snapshot"};
+    "the new snapshot"sv;
 static_assert(devicefs::vss::kBlockSize <=
     std::numeric_limits<std::size_t>::max());
 constexpr auto kMapBlockSize =

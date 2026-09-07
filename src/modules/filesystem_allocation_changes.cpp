@@ -25,6 +25,8 @@ import <devicefs/windows_imports.h>;
 
 namespace devicefs {
 
+using namespace std::string_view_literals;
+
 struct SnapshotAllocationBitmap::State {
     std::uint64_t volume_size;
     filesystem_internal::AllocationBitmap bitmap;
@@ -77,9 +79,9 @@ auto ReadAllocationChangeBlocks(
     const std::string_view current_snapshot,
     const std::uint64_t block_size) -> AllocationChangeBlocks {
     constexpr auto previous_description =
-        std::string_view{"the previous snapshot"};
+        "the previous snapshot"sv;
     constexpr auto current_description =
-        std::string_view{"the current snapshot"};
+        "the current snapshot"sv;
     const auto previous = WindowsBlockDevice::FromFilename(
         std::filesystem::path{previous_snapshot},
         false, false, true, previous_description);

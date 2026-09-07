@@ -111,6 +111,8 @@ struct StoreBlockDescriptors {
 
 namespace {
 
+using namespace std::string_view_literals;
+
 // This module reproduces the VSS-descriptor behavior of libvshadow release
 // 20260714, commit f5a7362713a04491ee78d36ebdcc1781950f3a75. Each source
 // function-level cross-reference explains the behavior being preserved or the
@@ -184,7 +186,7 @@ class RawSource {
     explicit RawSource(const std::string_view path) {
         auto normalized_path = std::filesystem::path{path}.wstring();
         constexpr auto volume_guid_prefix =
-            std::wstring_view{LR"(\\?\Volume{)"};
+            LR"(\\?\Volume{)"sv;
         const auto volume_guid_end =
             normalized_path.find(L'}', volume_guid_prefix.size());
         const auto volume_guid_path = StartsWithOrdinalIgnoreCase(
@@ -199,8 +201,8 @@ class RawSource {
             normalized_path.pop_back();
         }
         constexpr auto global_root_device_prefix =
-            std::wstring_view{LR"(\\?\GLOBALROOT\Device\)"};
-        constexpr auto win32_device_prefix = std::wstring_view{LR"(\\.\)"};
+            LR"(\\?\GLOBALROOT\Device\)"sv;
+        constexpr auto win32_device_prefix = LR"(\\.\)"sv;
         // A child below one of these namespaces can be an ordinary flat image.
         // Treat only the namespace object itself as a raw device so an
         // unsupported disk-length control code can still fall back to the

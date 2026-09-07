@@ -70,8 +70,10 @@ auto internal::CheckNt(
 
 namespace {
 
-constexpr auto kDefaultStopEvent = std::string_view("Local\\devicefs-stop");
-constexpr auto kFileSystemName = std::wstring_view(L"DEVICEFS");
+using namespace std::string_view_literals;
+
+constexpr auto kDefaultStopEvent = "Local\\devicefs-stop"sv;
+constexpr auto kFileSystemName = L"DEVICEFS"sv;
 static_assert(kFileSystemName.size() + 1 <=
     std::size(FSP_FSCTL_VOLUME_PARAMS{}.FileSystemName),
     "The filesystem name and its terminator must fit the WinFsp volume parameters.");
@@ -81,7 +83,7 @@ constexpr auto kMaxDirectoryInfoSize =
 static_assert(std::in_range<decltype(FSP_FSCTL_DIR_INFO::Size)>(kMaxDirectoryInfoSize),
     "The largest directory record must fit in the FSP_FSCTL_DIR_INFO::Size field.");
 constexpr auto kMaxMountPrefixLength = std::size(FSP_FSCTL_VOLUME_PARAMS{}.Prefix) - 1;
-constexpr auto kVolumeLabel = std::wstring_view(L"DEVICEFS");
+constexpr auto kVolumeLabel = L"DEVICEFS"sv;
 static_assert(kVolumeLabel.size() <= std::size(FSP_FSCTL_VOLUME_INFO{}.VolumeLabel),
     "The volume label must fit the WinFsp volume information buffer.");
 constexpr auto kRootInfo = FSP_FSCTL_FILE_INFO{

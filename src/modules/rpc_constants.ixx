@@ -18,10 +18,12 @@ export module devicefs.rpc_constants;
 
 import std;
 
+using namespace std::string_view_literals;
+
 export namespace devicefs::rpc {
 
 constexpr auto kEndpointEnvironmentVariable =
-    std::string_view{"DEVICEFS_RPC_ENDPOINT"};
-constexpr auto kProtocolSequence = std::string_view{"ncalrpc"};
+    "DEVICEFS_RPC_ENDPOINT"sv;
+constexpr auto kProtocolSequence = "ncalrpc"sv;
 
 } // namespace devicefs::rpc

@@ -43,6 +43,9 @@ import devicefs.supervisor.winrt_apartment;
 #undef stderr
 #undef stdout
 
+using namespace std::string_view_literals;
+using namespace wil::literals;
+
 namespace {
 
 // Installing WinFsp executes its MSI with administrator privileges. We select
@@ -55,10 +58,10 @@ namespace {
 // The WinFsp release page publishes the version and SHA-256 recorded here:
 // https://github.com/winfsp/winfsp/releases/tag/v2.2B4
 constexpr auto kWinFspVersion = std::array{2u, 2u, 26215u};
-constexpr auto kWinFspRelease = std::string_view{
-    "https://github.com/winfsp/winfsp/releases/download/v2.2B4"};
-constexpr auto kWinFspSha256 = std::string_view{
-    "2ECB5C89405488A95BBD8A01875E02C48534FD37BBDFD84488F7590464D65944"};
+constexpr auto kWinFspRelease =
+    "https://github.com/winfsp/winfsp/releases/download/v2.2B4"sv;
+constexpr auto kWinFspSha256 =
+    "2ECB5C89405488A95BBD8A01875E02C48534FD37BBDFD84488F7590464D65944"sv;
 
 [[nodiscard]] auto InstallMsi(
     const std::filesystem::path &path,
@@ -128,8 +131,8 @@ auto EnsureWinFsp() -> bool {
     // WinFsp's installer source enables this version record through its
     // `<dep:Provides>` declaration:
     // https://github.com/winfsp/winfsp/blob/v2.2B4/build/VStudio/installer/Product.wxs#L94-L103
-    constexpr auto registration = wil::zwstring_view{
-        L"SOFTWARE\\Classes\\Installer\\Dependencies\\WinFsp"};
+    constexpr auto registration =
+        L"SOFTWARE\\Classes\\Installer\\Dependencies\\WinFsp"_zv;
     const auto version = std::format("{}.{}.{}",
         kWinFspVersion[0], kWinFspVersion[1], kWinFspVersion[2]);
     if (IsSuitablePackageInstalled(registration, kWinFspVersion)) {
@@ -175,8 +178,8 @@ auto InstallWslPackage() -> bool {
     // Installation must also work when the existing `wsl.exe` is too old to
     // support `wsl --update`. The release MSI supplies the new executable
     // independently of that command and of the optional WSL Windows component.
-    constexpr auto releases_url = std::wstring_view{
-        L"https://api.github.com/repos/microsoft/WSL/releases/latest"};
+    constexpr auto releases_url =
+        L"https://api.github.com/repos/microsoft/WSL/releases/latest"sv;
     // The HTTP and storage operations below wait synchronously.
     // C++/WinRT permits these waits only in a multithreaded apartment, so this
     // operation selects that apartment through the shared WinRT lifetime owner.
@@ -194,8 +197,8 @@ auto InstallWslPackage() -> bool {
         const auto release = JsonObject::Parse(
             response.Content().ReadAsStringAsync().get());
         const auto suffix = NativeMachineArchitecture() == IMAGE_FILE_MACHINE_ARM64
-            ? std::wstring_view{L".arm64.msi"}
-            : std::wstring_view{L".x64.msi"};
+            ? L".arm64.msi"sv
+            : L".x64.msi"sv;
         const auto package = [&] {
             for (const auto &value : release.GetNamedArray(L"assets")) {
                 const auto asset = value.GetObject();

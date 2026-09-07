@@ -34,12 +34,13 @@ import devicefs.supervisor.vshadow;
 namespace internal {
 
 using namespace std::chrono_literals;
+using namespace std::string_view_literals;
 
 struct DeviceFsProcess {
     static constexpr auto kPollInterval = 100ms;
     static constexpr auto kStartTimeout = 30s;
     static constexpr auto kShutdownTimeout = 60s;
-    static constexpr auto kMountTarget = std::string_view("X:");
+    static constexpr auto kMountTarget = "X:"sv;
     static constexpr auto kMountDriveMask =
         DWORD{1} << (kMountTarget.front() - 'A');
 

@@ -45,6 +45,7 @@ export struct FilesystemVerificationVolume {
 namespace {
 
 using namespace std::chrono_literals;
+using namespace std::string_view_literals;
 
 // Each volume owns its worker pools. Four workers keep independent operations
 // in flight without allowing one volume to consume another drive's workers.
@@ -99,7 +100,7 @@ enum class FilesystemOperation {
 [[nodiscard]] constexpr auto IsVssExcludedPath(
     const std::wstring_view path) noexcept {
     constexpr auto directory =
-        std::wstring_view{L"System Volume Information"};
+        L"System Volume Information"sv;
     return (path == directory) ||
         (path.starts_with(L"System Volume Information\\"));
 }
@@ -262,7 +263,7 @@ struct InventoryObservation {
 [[nodiscard]] constexpr auto SaturationPrefix(
     const std::uint64_t value) noexcept {
     return value == std::numeric_limits<std::uint64_t>::max()
-        ? std::string_view{"at least "}
+        ? "at least "sv
         : std::string_view{};
 }
 
@@ -2122,7 +2123,7 @@ auto CompareAttachedFilesystems(
             observation.synthetic.streams,
             observation.synthetic.stream_bytes ==
                 std::numeric_limits<std::uint64_t>::max()
-                ? std::wstring_view{L"at least "}
+                ? L"at least "sv
                 : std::wstring_view{},
             observation.synthetic.stream_bytes,
             observation.synthetic.failures,
@@ -2131,7 +2132,7 @@ auto CompareAttachedFilesystems(
             observation.real.streams,
             observation.real.stream_bytes ==
                 std::numeric_limits<std::uint64_t>::max()
-                ? std::wstring_view{L"at least "}
+                ? L"at least "sv
                 : std::wstring_view{},
             observation.real.stream_bytes,
             observation.real.failures);
@@ -2235,19 +2236,19 @@ struct VolumeJob {
     const VerificationPhase phase) noexcept -> std::string_view {
     switch (phase) {
     case VerificationPhase::AttachingSynthetic:
-        return "attaching the synthetic VHDX";
+        return "attaching the synthetic VHDX"sv;
     case VerificationPhase::AttachingReal:
-        return "attaching the real-B VHDX";
+        return "attaching the real-B VHDX"sv;
     case VerificationPhase::Traversing:
-        return "traversing both filesystems";
+        return "traversing both filesystems"sv;
     case VerificationPhase::Planning:
-        return "preparing content comparisons";
+        return "preparing content comparisons"sv;
     case VerificationPhase::Comparing:
-        return "comparing stream contents";
+        return "comparing stream contents"sv;
     case VerificationPhase::Detaching:
-        return "detaching the VHDX views";
+        return "detaching the VHDX views"sv;
     case VerificationPhase::Complete:
-        return "complete";
+        return "complete"sv;
     }
     std::unreachable();
 }
@@ -2256,37 +2257,37 @@ struct VolumeJob {
     const ObjectKind kind) noexcept -> std::string_view {
     switch (kind) {
     case ObjectKind::File:
-        return "file";
+        return "file"sv;
     case ObjectKind::Directory:
-        return "directory";
+        return "directory"sv;
     case ObjectKind::FileReparsePoint:
-        return "file reparse point";
+        return "file reparse point"sv;
     case ObjectKind::DirectoryReparsePoint:
-        return "directory reparse point";
+        return "directory reparse point"sv;
     }
     std::unreachable();
 }
 
 [[nodiscard]] auto DisplayPath(
     const std::wstring &path) noexcept -> std::wstring_view {
-    return path.empty() ? std::wstring_view{L"\\"} : path;
+    return path.empty() ? L"\\"sv : path;
 }
 
 [[nodiscard]] auto OperationName(
     const FilesystemOperation operation) noexcept -> std::string_view {
     switch (operation) {
     case FilesystemOperation::QueryDirectory:
-        return "enumerate directory";
+        return "enumerate directory"sv;
     case FilesystemOperation::OpenObject:
-        return "open object";
+        return "open object"sv;
     case FilesystemOperation::QueryStreams:
-        return "enumerate object streams";
+        return "enumerate object streams"sv;
     case FilesystemOperation::OpenStream:
-        return "open stream";
+        return "open stream"sv;
     case FilesystemOperation::SeekStream:
-        return "seek stream";
+        return "seek stream"sv;
     case FilesystemOperation::ReadStream:
-        return "read stream";
+        return "read stream"sv;
     }
     std::unreachable();
 }
@@ -2345,7 +2346,7 @@ auto PrintOperationComparison(
         devicefs::WriteToStream(output,
             L"  Stream: {}\n",
             comparison.key.stream.empty()
-                ? std::wstring_view{L"(unnamed data stream)"}
+                ? L"(unnamed data stream)"sv
                 : std::wstring_view{comparison.key.stream});
     }
     devicefs::WriteToStream(output,
@@ -2390,7 +2391,7 @@ auto PrintMismatch(
         devicefs::WriteToStream(output,
             L"  Stream: {}\n",
             mismatch.stream.empty()
-                ? std::wstring_view{L"(unnamed data stream)"}
+                ? L"(unnamed data stream)"sv
                 : std::wstring_view{mismatch.stream});
     }
     switch (mismatch.kind) {
@@ -2837,8 +2838,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
         };
         auto privileges = internal::ProcessPrivilegeEnabler{
             GetCurrentProcess(), privilege_names,
-            std::string_view{
-                "the backup and volume-management privileges"}};
+            "the backup and volume-management privileges"sv};
         auto operation = std::async(std::launch::async,
             [&state, &io_cancellation, &virtual_disk_lock,
                 vhdx_path, device, cancellation_event] {
@@ -2991,8 +2991,7 @@ export [[nodiscard]] auto VerifyFilesystemViews(
     };
     auto privileges = internal::ProcessPrivilegeEnabler{
         GetCurrentProcess(), privilege_names,
-        std::string_view{
-            "the backup and volume-management privileges"}};
+        "the backup and volume-management privileges"sv};
 
     auto io_cancellation = SynchronousIoCancellation{};
     // Every volume job borrows this one lock, so attach, discovery, and detach

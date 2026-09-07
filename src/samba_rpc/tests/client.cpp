@@ -34,7 +34,9 @@ auto devicefs_test_credentials(TALLOC_CTX *, loadparm_context *, const char *,
 
 namespace {
 
-constexpr auto kPrefix = std::string_view{"DeviceFs Samba RPC fixture\n"};
+using namespace std::string_view_literals;
+
+constexpr auto kPrefix = "DeviceFs Samba RPC fixture\n"sv;
 constexpr auto kBackingLength = std::uint64_t{1024 * 1024};
 constexpr auto kConcurrentReadCount = std::uint32_t{64};
 constexpr auto kConcurrentReadOffsets = std::to_array<std::uint64_t>(

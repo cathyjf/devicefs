@@ -60,6 +60,9 @@ export struct PreviousBackupManifestResult {
 
 namespace {
 
+using namespace std::string_view_literals;
+using namespace wil::literals;
+
 [[nodiscard]] auto VolumeMountPoints(const std::wstring &volume)
     -> std::vector<std::wstring> {
     auto required = DWORD{};
@@ -145,9 +148,9 @@ namespace {
             snapshot_set.GetString().c_str(),
             "the backup manifest contains an invalid snapshot-set identifier"),
     };
-    constexpr auto volume_prefix = std::wstring_view{L"volume-"};
-    constexpr auto invalid_volume_identifier = wil::zstring_view{
-        "the backup manifest contains an invalid volume identifier"};
+    constexpr auto volume_prefix = L"volume-"sv;
+    constexpr auto invalid_volume_identifier =
+        "the backup manifest contains an invalid volume identifier"_zv;
     for (const auto &entry : volumes.GetObject()) {
         if (entry.Value().ValueType() != JsonValueType::Object) {
             throw std::runtime_error(std::format(
@@ -201,7 +204,7 @@ auto PreviousBackupManifestResult::SnapshotManifest::QuerySnapshotVolumes() cons
         devicefs::vshadow::QuerySnapshotProperties(snapshot_identifiers);
     const auto parse_volume_identifier = [](
         const std::string_view volume) -> std::optional<GUID> {
-        constexpr auto prefix = std::string_view{R"(\\?\Volume)"};
+        constexpr auto prefix = R"(\\?\Volume)"sv;
         if (!volume.starts_with(prefix) || !volume.ends_with('\\')) {
             return std::nullopt;
         }
@@ -247,7 +250,7 @@ export [[nodiscard]] auto RetrievePreviousBackupManifest(
     -> std::optional<PreviousBackupManifestResult> {
     try {
         constexpr auto arguments =
-            std::array{std::string_view{"--print-manifest"}};
+            std::array{"--print-manifest"sv};
         auto result = internal::RunPbsFish(
             cancellation_event,
             namespace_override,

@@ -138,13 +138,12 @@ auto FurtherHardenProcess() {
 }
 
 [[nodiscard]] auto CurrentUserName() {
-    auto length = DWORD{UNLEN + 1};
-    auto result = std::wstring(length, L'\0');
-    if (!GetUserNameW(result.data(), &length)) {
+    auto buffer = std::array<char, UNLEN + 1>{};
+    auto length = CompileTimeCast<DWORD, buffer.size()>();
+    if (!GetUserNameA(buffer.data(), &length)) {
         WinError("could not obtain the current user name");
     }
-    return std::filesystem::path{
-        std::wstring_view{result.data(), length - 1}}.string();
+    return std::string{buffer.data(), length - 1};
 }
 
 auto Usage(const auto output) noexcept {

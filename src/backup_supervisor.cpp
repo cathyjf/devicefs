@@ -23,6 +23,7 @@ import devicefs.common;
 import devicefs.filesystem;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
+import devicefs.supervisor.find_powershell;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.logging_console;
 import devicefs.supervisor.materialize_oci;
@@ -929,6 +930,15 @@ auto BackupSupervisorMain(
                     "--install does not accept arguments");
             }
             InstallService(ServiceContext::kMinimumPreshutdownTimeout);
+            return 0;
+        }
+        if (option == kRegisterMsixOption) {
+            if (arguments.size() != 2) {
+                throw std::invalid_argument(std::format(
+                    "{} requires exactly one PACKAGE_FULL_NAME", kRegisterMsixOption));
+            }
+            EnsurePowerShellMsixRegistration(
+                std::filesystem::path{arguments[1]}.wstring());
             return 0;
         }
         if (option == kMaterializeOciOption) {

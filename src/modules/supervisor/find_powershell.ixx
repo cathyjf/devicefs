@@ -17,9 +17,12 @@
 module;
 
 #include <windows.h>
+#include <appmodel.h>
+#include <lmcons.h>
 #include <roapi.h>
 
 #include <winrt/Windows.ApplicationModel.h>
+#include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Management.Deployment.h>
 #include <winrt/Windows.Storage.h>
@@ -32,6 +35,10 @@ export module devicefs.supervisor.find_powershell;
 
 import std;
 import devicefs.common;
+import devicefs.stream_writer;
+import devicefs.supervisor.winrt_apartment;
+
+#undef stdout
 
 namespace {
 
@@ -47,7 +54,7 @@ constexpr auto kPowerShellVersionGuids = std::array{
 constexpr auto kPowerShellMsiRegistrationValueName = L"InstallLocation"_zv;
 constexpr auto kPowerShellPackageFamily = L"Microsoft.PowerShell_8wekyb3d8bbwe"_zv;
 
-[[nodiscard]] auto PowerShellPathMSI(const auto version_guid)
+[[nodiscard]] auto PowerShellPathMsi(const auto version_guid)
     -> std::optional<std::filesystem::path> {
     const auto subkey_name = std::format(L"{}{}",
         kPowerShellMsiRegistrationPrefix, version_guid);
@@ -68,7 +75,7 @@ constexpr auto kPowerShellPackageFamily = L"Microsoft.PowerShell_8wekyb3d8bbwe"_
     return std::filesystem::path(location.get()) / L"pwsh.exe";
 }
 
-[[nodiscard]] auto PowerShellPathMSIX()
+[[nodiscard]] auto PowerShellPathMsix()
     -> std::optional<std::filesystem::path> {
     try {
         const auto apartment = wil::RoInitialize();
@@ -117,12 +124,80 @@ constexpr auto kPowerShellPackageFamily = L"Microsoft.PowerShell_8wekyb3d8bbwe"_
 
 } // namespace
 
+export constexpr auto kRegisterMsixOption = "--internal-register-msix"sv;
+
+export auto EnsurePowerShellMsixRegistration(const wil::zwstring_view package_full_name) {
+    const auto family_name = [package_full_name] {
+        auto family_name_length = UINT32{};
+        if (const auto error = PackageFamilyNameFromFullName(
+                package_full_name.c_str(), &family_name_length, nullptr);
+            error != ERROR_INSUFFICIENT_BUFFER) {
+            WinError("could not determine the package family name length for '{}'",
+                std::wstring_view{package_full_name},
+                ExplicitWin32Error{std::bit_cast<DWORD>(error)});
+        }
+        // The reported length includes the terminator, which `std::wstring`
+        // supplies in addition to its characters.
+        auto result = std::wstring(family_name_length - 1, L'\0');
+        if (const auto error = PackageFamilyNameFromFullName(
+                package_full_name.c_str(), &family_name_length, result.data());
+            error != ERROR_SUCCESS) {
+            WinError("could not determine the package family name for '{}'",
+                std::wstring_view{package_full_name},
+                ExplicitWin32Error{std::bit_cast<DWORD>(error)});
+        }
+        return result;
+    }();
+
+    // This command registers the caller's chosen PowerShell package for the
+    // current user. The family check limits registration to PowerShell; the
+    // caller remains responsible for selecting a trusted package. Registering
+    // by full name preserves the chosen package's exact version and architecture.
+    if (std::wstring_view{family_name} != kPowerShellPackageFamily) {
+        throw std::invalid_argument(std::format(
+            "MSIX package '{}' does not belong to the allowed PowerShell family '{}'",
+            winrt::to_string(package_full_name),
+            winrt::to_string(kPowerShellPackageFamily)));
+    }
+
+    const auto apartment = WinrtApartment{
+        "could not initialize WinRT to register PowerShell", RO_INIT_MULTITHREADED};
+    const auto user_name = [] {
+        auto buffer = std::array<char, UNLEN + 1>{};
+        auto length = CompileTimeCast<DWORD, buffer.size()>();
+        if (!GetUserNameA(buffer.data(), &length)) {
+            WinError("could not obtain the current user name");
+        }
+        return std::string{buffer.data(), length - 1};
+    }();
+    devicefs::WriteToStream(devicefs::stdout,
+        "backup-supervisor: ensuring MSIX package '{}' is registered for user '{}'\n",
+        winrt::to_string(package_full_name), user_name);
+    try {
+        const auto manager =
+            winrt::Windows::Management::Deployment::PackageManager{};
+        const auto deployment = manager.RegisterPackageByFullNameAsync(
+            package_full_name, nullptr,
+            winrt::Windows::Management::Deployment::DeploymentOptions::None).get();
+        if (const auto result = deployment.ExtendedErrorCode(); FAILED(result)) {
+            throw winrt::hresult_error{result, deployment.ErrorText()};
+        }
+    } catch (const winrt::hresult_error &error) {
+        WinError("could not register MSIX package '{}': {}",
+            std::wstring_view{package_full_name}, std::wstring_view{error.message()},
+            ExplicitWin32Error::FromHresult(error.code()));
+    }
+    devicefs::WriteToStream(devicefs::stdout,
+        "backup-supervisor: MSIX package '{}' is registered for user '{}'\n",
+        winrt::to_string(package_full_name), user_name);
+}
+
 export [[nodiscard]] auto PowerShellPath()
     -> std::optional<std::filesystem::path> {
     for (const auto guid : kPowerShellVersionGuids) {
-        if (const auto path = PowerShellPathMSI(guid)) {
+        if (const auto path = PowerShellPathMsi(guid)) {
             return path;
         }
     }
-    return PowerShellPathMSIX();
+    return PowerShellPathMsix();
 }

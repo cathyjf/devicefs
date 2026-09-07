@@ -339,7 +339,7 @@ struct WslProcess {
         auto result = WslProcess{};
         result.process = StartWslWithLogon(
             windows_username,
-            ResetBackupAccountPassword(windows_username),
+            ResetBackupAccountPassword(windows_username).c_str(),
             wsl_path, command, wsl_directory,
             standard_input, standard_output, standard_error);
         return result;

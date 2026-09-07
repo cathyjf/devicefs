@@ -407,8 +407,46 @@ export [[nodiscard]] auto WslExecutablePath() {
     return std::filesystem::path{location.get()} / L"wsl.exe";
 }
 
+// A password must remain unchanged between its reset and the logon that uses
+// it. Keeping the mutex ownership in this result extends the lock through an
+// inline `CreateProcessWithLogonW` call, until the full expression destroys the
+// temporary. Windows mutex ownership belongs to the acquiring thread, so the
+// result cannot be copied or moved to another thread.
+class BackupAccountPassword : private wil::secure_wstring {
+  public:
+    using wil::secure_wstring::c_str;
+
+    BackupAccountPassword(
+        wil::unique_mutex_nothrow mutex,
+        wil::mutex_release_scope_exit lock,
+        wil::secure_wstring password) noexcept
+        : wil::secure_wstring(std::move(password)),
+          mutex_(std::move(mutex)), lock_(std::move(lock)) {}
+
+    [[gsl::suppress("26432",
+        justification:
+            "The mutex members prevent copying, and this user-declared "
+            "destructor prevents implicit move operations. All four operations "
+            "are therefore already unavailable without explicit declarations.")]]
+    ~BackupAccountPassword() {
+        // The caller reads a failed logon's last error after this temporary
+        // dies. Move the secure allocation into this scope so its erasure and
+        // deallocation, as well as mutex cleanup, finish before the error is
+        // restored. Moving the string transfers its allocation without copying
+        // the password.
+        const auto preserve_error = wil::last_error_context{};
+        const auto password = wil::secure_wstring{std::move(*this)};
+        lock_.reset();
+        mutex_.reset();
+    }
+
+  private:
+    wil::unique_mutex_nothrow mutex_;
+    wil::mutex_release_scope_exit lock_;
+};
+
 export [[nodiscard]] auto ResetBackupAccountPassword(
-    const wil::zwstring_view username) -> wil::secure_wstring {
+    const wil::zwstring_view username) -> BackupAccountPassword {
     auto information = std::unique_ptr<USER_INFO_1,
         wil::function_deleter<decltype(&NetApiBufferFree), NetApiBufferFree>>{};
     const auto query_error = NetUserGetInfo(
@@ -424,6 +462,36 @@ export [[nodiscard]] auto ResetBackupAccountPassword(
             "because it is an administrator",
             std::filesystem::path{username.c_str()}.string()));
     }
+
+    auto mutex = [] {
+        // The backup account is shared by every supervisor process and Windows
+        // session on this computer. A single name in the global namespace makes
+        // all of their password resets and subsequent logons use the same mutex.
+        constexpr auto kPasswordMutexName = "Global\\devicefs-account-password"_zv;
+        // This DACL grants full control to SYSTEM and Administrators, allowing
+        // different administrators to open the mutex created by the first caller.
+        auto descriptor = wil::unique_hlocal_security_descriptor{};
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
+                "D:(A;;GA;;;SY)(A;;GA;;;BA)", SDDL_REVISION_1,
+                descriptor.addressof(), nullptr)) {
+            WinError("could not create the security descriptor for password mutex '{}'",
+                std::string_view{kPasswordMutexName});
+        }
+        auto attributes = SECURITY_ATTRIBUTES{
+            .nLength = sizeof(SECURITY_ATTRIBUTES),
+            .lpSecurityDescriptor = descriptor.get(),
+            .bInheritHandle = FALSE,
+        };
+        auto result = wil::unique_mutex_nothrow{CreateMutexExA(
+            &attributes, kPasswordMutexName.c_str(), 0,
+            SYNCHRONIZE | MUTEX_MODIFY_STATE)};
+        if (!result) {
+            WinError("could not create or open password mutex '{}'",
+                std::string_view{kPasswordMutexName});
+        }
+        return result;
+    }();
+    auto lock = mutex.acquire();
 
     auto error = NET_API_STATUS{};
     auto password = GenerateAccountPassword([username, &error](const std::span<wchar_t> candidate) {
@@ -447,7 +515,8 @@ export [[nodiscard]] auto ResetBackupAccountPassword(
             std::wstring_view{username.c_str(), username.size()},
             ExplicitWin32Error{error});
     }
-    return password;
+    return BackupAccountPassword{
+        std::move(mutex), std::move(lock), std::move(password)};
 }
 
 export [[nodiscard]] auto RunInternalWindowsAccountProcess(

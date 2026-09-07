@@ -23,8 +23,8 @@ and credentials remain centrally managed under Windows ProgramData.
 
 ## Getting started
 
-With [WinFsp](https://winfsp.dev/) installed, these steps prepare the machine
-and set up regular backups:
+These steps install the required components, prepare the machine, and set up
+regular backups:
 
 1. **Install from an elevated PowerShell window.** Run the supervisor from the
    directory containing it:
@@ -366,18 +366,33 @@ is visible in the console, and service operation has persistent logs.
 
 The `--install` command places the supervisor in Program Files, creates the
 initial configuration when needed, prepares the internal Windows account,
-installs a suitable WSL package, enables the Windows component needed for WSL1, and
-materializes the GNU/Linux distribution under the internal account. It also
-creates or updates the Windows service. The administrator supplies the PBS
+installs suitable WinFsp and WSL packages, enables the Windows component needed
+for WSL1, and materializes the GNU/Linux distribution under the internal account.
+It also creates or updates the Windows service. The administrator supplies the PBS
 server, datastore, authentication, and encryption settings in the generated
 configuration.
 
-WSL package installation and Windows component readiness are checked separately.
-The package supplies the executable and its features; the component supplies
-WSL1 support. If Windows reports that either preparation step needs a restart,
-the installer explains that the administrator should restart and run the same
-installation command again. Completed preparation remains available for that
-next invocation.
+WinFsp supplies the Windows filesystem integration used during backups. The
+WSL package supplies `wsl.exe`, which imports and starts the GNU/Linux
+distribution, while the Windows component enables WSL1.
+
+The installer prepares all three prerequisites even when one requires a
+restart, so the remaining preparations can finish during the same invocation.
+If the WSL package or component requires a restart, distribution materialization
+resumes when the administrator restarts Windows and reruns `--install`.
+When only WinFsp needs a restart, the installer can finish materializing the
+distribution because that operation uses WSL. It then asks the administrator
+to restart Windows before performing backups. Completed preparation remains
+available across restarts.
+
+DeviceFs records a chosen WinFsp release and its expected SHA-256 digest in
+source. Before running the downloaded MSI with administrator privileges, the
+installer computes its digest and checks it against the recorded value. This
+check rejects a changed download, so accepting a different installer requires
+an explicit source change. An existing WinFsp installation at or above the
+chosen version already meets the requirement. WSL uses Microsoft's current
+release because Windows already relies on Microsoft to supply trusted
+operating system code.
 
 The same command handles later updates. An existing configuration is preserved,
 and invoking the supervisor from its installed location skips the unnecessary

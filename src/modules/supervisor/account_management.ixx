@@ -45,6 +45,34 @@ import devicefs.supervisor.process_launch;
 export constexpr auto kMaterializeOciOption = std::string_view("--materialize-oci");
 
 [[nodiscard]] auto InstallWslPackage() -> bool;
+[[nodiscard]] auto EnsureWinFsp() -> bool;
+
+[[nodiscard]] auto IsSuitablePackageInstalled(
+    const wil::zwstring_view registration,
+    const std::span<const unsigned> minimum_version) -> bool {
+    // The package version check compares numeric components and treats omitted
+    // trailing components as zero, so `2.7.12` meets a minimum of `2.7.12.0`.
+    // However, `std::ranges::lexicographical_compare` considers a matching
+    // shorter sequence smaller. The caller therefore omits trailing zeros from
+    // `minimum_version` to avoid rejecting an equivalent shorter version.
+    auto version = wil::unique_cotaskmem_string{};
+    if (const auto result = wil::reg::get_value_string_nothrow(
+            HKEY_LOCAL_MACHINE, registration.c_str(), L"Version", version);
+        wil::reg::is_registry_not_found(result)) {
+        return false;
+    } else if (FAILED(result)) {
+        WinError("could not read the package version from 'HKLM\\{}'",
+            std::wstring_view{registration},
+            ExplicitWin32Error::FromHresult(result));
+    }
+
+    return !std::ranges::lexicographical_compare(
+        std::wstring_view{version.get()} | std::views::split(L'.') |
+            std::views::transform([](const auto component) {
+                return std::stoul(std::wstring{component.begin(), component.end()});
+            }),
+        minimum_version);
+}
 
 namespace {
 
@@ -277,32 +305,6 @@ auto EnsureWslDistributionDirectory(
             std::wstring_view{directory.native()},
             ExplicitWin32Error{update_error});
     }
-}
-
-[[nodiscard]] auto IsSuitableWslPackageInstalled() -> bool {
-    // The package version check compares numeric components and treats omitted
-    // trailing components as zero, so `2.7.12` meets a minimum of `2.7.12.0`.
-    // However, `std::ranges::lexicographical_compare` considers a matching
-    // shorter sequence smaller. Omitting trailing zeros from `minimum_version`
-    // prevents that comparison from rejecting an equivalent shorter version.
-    constexpr auto minimum_version = std::array{2u, 7u, 13u};
-    auto version = wil::unique_cotaskmem_string{};
-    if (const auto result = wil::reg::get_value_string_nothrow(
-            HKEY_LOCAL_MACHINE, kWslRegistration.c_str(), L"Version", version);
-        wil::reg::is_registry_not_found(result)) {
-        return false;
-    } else if (FAILED(result)) {
-        WinError("could not read the WSL package version from 'HKLM\\{}'",
-            std::wstring_view{kWslRegistration},
-            ExplicitWin32Error::FromHresult(result));
-    }
-
-    return !std::ranges::lexicographical_compare(
-        std::wstring_view{version.get()} | std::views::split(L'.') |
-            std::views::transform([](const auto component) {
-                return std::stoul(std::wstring{component.begin(), component.end()});
-            }),
-        minimum_version);
 }
 
 [[nodiscard]] auto EnsureWsl1Component() -> bool {
@@ -541,8 +543,10 @@ export auto EnsureInternalWindowsAccountAndEnvironment(
         HideAccountFromLogonScreen(username);
     }
     EnsureWslDistributionDirectory(username, wsl_directory);
+    const auto winfsp_restart_needed = EnsureWinFsp();
     const auto package_restart_needed = [] {
-        if (IsSuitableWslPackageInstalled()) {
+        constexpr auto minimum_version = std::array{2u, 7u, 13u};
+        if (IsSuitablePackageInstalled(kWslRegistration, minimum_version)) {
             devicefs::WriteToStream(
                 devicefs::stdout,
                 "backup-supervisor: a suitable version of 'wsl.exe' is "
@@ -551,7 +555,14 @@ export auto EnsureInternalWindowsAccountAndEnvironment(
         }
         return InstallWslPackage();
     }();
-    if (EnsureWsl1Component() || package_restart_needed) {
+    // Prepare WinFsp, the WSL package, and the WSL1 component before acting on
+    // their restart requirements, so one pending restart does not postpone the
+    // other preparations. Import requires the WSL package and component, so
+    // either of their restart requirements defers import. WinFsp is used later
+    // to expose the backup images; its restart message can wait until after
+    // materialization.
+    const auto component_restart_needed = EnsureWsl1Component();
+    if (package_restart_needed || component_restart_needed) {
         devicefs::WriteToStream(
             devicefs::stdout,
             "The installation is not complete. After restarting the computer, "
@@ -561,4 +572,8 @@ export auto EnsureInternalWindowsAccountAndEnvironment(
     }
     EnsureMaterializedWslDistribution(username, distribution,
         installed_executable);
+    if (winfsp_restart_needed) {
+        devicefs::WriteToStream(devicefs::stdout,
+            "The computer must be restarted before backups can be performed.\n");
+    }
 }

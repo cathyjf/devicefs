@@ -27,6 +27,10 @@ import <devicefs/windows_imports.h>;
 import <winrt/Windows.Data.Json.h>;
 import <winrt/Windows.Foundation.h>;
 import <winrt/Windows.Foundation.Collections.h>;
+import <winrt/Windows.Security.Cryptography.h>;
+import <winrt/Windows.Security.Cryptography.Core.h>;
+import <winrt/Windows.Storage.h>;
+import <winrt/Windows.Storage.Streams.h>;
 import <winrt/Windows.Web.Http.h>;
 import <winrt/Windows.Web.Http.Headers.h>;
 import devicefs.common;
@@ -38,6 +42,130 @@ import devicefs.supervisor.winrt_apartment;
 #undef GetObject
 #undef stderr
 #undef stdout
+
+namespace {
+
+// Installing WinFsp executes its MSI with administrator privileges. We select
+// a specific release and record its SHA-256 digest so `VerifyWinFspMsi` can
+// reject a changed download before Windows Installer executes it. Accepting
+// another WinFsp installer therefore requires changing these source constants.
+// WSL uses Microsoft's current release because Windows already relies on
+// Microsoft to supply trusted operating system code.
+//
+// The WinFsp release page publishes the version and SHA-256 recorded here:
+// https://github.com/winfsp/winfsp/releases/tag/v2.2B4
+constexpr auto kWinFspVersion = std::array{2u, 2u, 26215u};
+constexpr auto kWinFspRelease = std::string_view{
+    "https://github.com/winfsp/winfsp/releases/download/v2.2B4"};
+constexpr auto kWinFspSha256 = std::string_view{
+    "2ECB5C89405488A95BBD8A01875E02C48534FD37BBDFD84488F7590464D65944"};
+
+[[nodiscard]] auto InstallMsi(
+    const std::filesystem::path &path,
+    const std::string_view description) -> bool {
+    devicefs::WriteToStream(devicefs::stdout,
+        "backup-supervisor: installing {}\n", description);
+    const auto previous_ui = MsiSetInternalUI(INSTALLUILEVEL_NONE, nullptr);
+    const auto restore_ui = wil::scope_exit([previous_ui] {
+        MsiSetInternalUI(previous_ui, nullptr);
+    });
+    // Windows Installer can restart the machine during a silent install.
+    // `REBOOT=ReallySuppress` prevents that restart and leaves the caller
+    // responsible for reporting any restart requirement after installation.
+    const auto error = MsiInstallProductW(path.c_str(), L"REBOOT=ReallySuppress");
+    if ((error != ERROR_SUCCESS) && (error != ERROR_SUCCESS_REBOOT_REQUIRED)) {
+        WinError("could not install {} from '{}'", description,
+            std::wstring_view{path.native()}, ExplicitWin32Error{error});
+    }
+    devicefs::WriteToStream(devicefs::stdout,
+        "backup-supervisor: installed {}\n", description);
+    if (error == ERROR_SUCCESS_REBOOT_REQUIRED) {
+        devicefs::WriteToStream(devicefs::stdout,
+            "backup-supervisor: Windows must be restarted to complete "
+            "installation of {}\n", description);
+        return true;
+    }
+    return false;
+}
+
+auto VerifyWinFspMsi(const std::filesystem::path &path) {
+    using namespace winrt::Windows::Security::Cryptography;
+    using namespace winrt::Windows::Security::Cryptography::Core;
+    using namespace winrt::Windows::Storage;
+
+    try {
+        // The pinned installer is about 2 MiB, so reading the whole file for
+        // hashing has a modest memory cost and avoids a separate streaming
+        // implementation.
+        const auto file = StorageFile::GetFileFromPathAsync(path.native()).get();
+        const auto algorithm = HashAlgorithmProvider::OpenAlgorithm(
+            HashAlgorithmNames::Sha256());
+        const auto digest = algorithm.HashData(FileIO::ReadBufferAsync(file).get());
+        if (!CryptographicBuffer::Compare(digest,
+                CryptographicBuffer::DecodeFromHexString(
+                    winrt::to_hstring(kWinFspSha256)))) {
+            throw std::runtime_error(std::format(
+                "WinFsp MSI '{}' has SHA-256 {}; expected {}",
+                path.string(),
+                winrt::to_string(CryptographicBuffer::EncodeToHexString(digest)),
+                kWinFspSha256));
+        }
+    } catch (const winrt::hresult_error &error) {
+        WinError("could not verify the SHA-256 of WinFsp MSI '{}': {}",
+            std::wstring_view{path.native()}, std::wstring_view{error.message()},
+            ExplicitWin32Error::FromHresult(error.code()));
+    }
+}
+
+} // namespace
+
+auto EnsureWinFsp() -> bool {
+    // To decide whether an existing WinFsp installation is suitable, we read
+    // the product version that its MSI recorded in the `Version` value under
+    // `HKLM\SOFTWARE\Classes\Installer\Dependencies\WinFsp`. The separate
+    // `HKLM\SOFTWARE\WinFsp` key records installation paths but has no version.
+    //
+    // WinFsp's installer source enables this version record through its
+    // `<dep:Provides>` declaration:
+    // https://github.com/winfsp/winfsp/blob/v2.2B4/build/VStudio/installer/Product.wxs#L94-L103
+    constexpr auto registration = wil::zwstring_view{
+        L"SOFTWARE\\Classes\\Installer\\Dependencies\\WinFsp"};
+    const auto version = std::format("{}.{}.{}",
+        kWinFspVersion[0], kWinFspVersion[1], kWinFspVersion[2]);
+    if (IsSuitablePackageInstalled(registration, kWinFspVersion)) {
+        devicefs::WriteToStream(devicefs::stdout,
+            "backup-supervisor: WinFsp {} or later is already installed\n", version);
+        return false;
+    }
+
+    const auto apartment = WinrtApartment{
+        "could not initialize WinRT to install WinFsp", RO_INIT_MULTITHREADED};
+    const auto directory = TemporaryDirectory{
+        TemporarySystemDirectoryPath("devicefs-winfsp-package")};
+    const auto name = std::format("winfsp-{}.msi", version);
+    const auto destination = directory.Path() / name;
+    const auto url = std::format("{}/{}", kWinFspRelease, name);
+    devicefs::WriteToStream(devicefs::stdout,
+        "backup-supervisor: downloading pinned WinFsp MSI '{}' from '{}'\n",
+        name, url);
+    try {
+        const auto client = winrt::Windows::Web::Http::HttpClient{};
+        const auto bytes = DownloadFile(client,
+            winrt::Windows::Foundation::Uri{winrt::to_hstring(url)}, destination);
+        devicefs::WriteToStream(devicefs::stdout,
+            "backup-supervisor: downloaded '{}' ({} bytes)\n", name, bytes);
+    } catch (const winrt::hresult_error &error) {
+        WinError("could not acquire WinFsp MSI from '{}': {}",
+            url, std::wstring_view{error.message()},
+            ExplicitWin32Error::FromHresult(error.code()));
+    }
+    devicefs::WriteToStream(devicefs::stdout,
+        "backup-supervisor: verifying the pinned SHA-256 of '{}'\n", name);
+    VerifyWinFspMsi(destination);
+    devicefs::WriteToStream(devicefs::stdout,
+        "backup-supervisor: verified the pinned SHA-256 of '{}'\n", name);
+    return InstallMsi(destination, std::format("WinFsp MSI '{}'", name));
+}
 
 auto InstallWslPackage() -> bool {
     using namespace winrt::Windows::Data::Json;
@@ -101,31 +229,8 @@ auto InstallWslPackage() -> bool {
             L"backup-supervisor: downloaded '{}' ({} bytes)\n",
             std::wstring_view{name}, bytes);
 
-        devicefs::WriteToStream(devicefs::stdout,
-            L"backup-supervisor: installing WSL MSI '{}'\n",
-            std::wstring_view{name});
-        const auto previous_ui = MsiSetInternalUI(INSTALLUILEVEL_NONE, nullptr);
-        const auto restore_ui = wil::scope_exit([previous_ui] {
-            MsiSetInternalUI(previous_ui, nullptr);
-        });
-        // Windows Installer can restart the machine during a silent install.
-        // `REBOOT=ReallySuppress` prevents that restart and leaves the caller
-        // responsible for reporting any restart requirement after installation.
-        const auto error = MsiInstallProductW(destination.c_str(), L"REBOOT=ReallySuppress");
-        if ((error != ERROR_SUCCESS) && (error != ERROR_SUCCESS_REBOOT_REQUIRED)) {
-            WinError("could not install WSL MSI '{}'",
-                std::wstring_view{name}, ExplicitWin32Error{error});
-        }
-        devicefs::WriteToStream(devicefs::stdout,
-            L"backup-supervisor: installed WSL MSI '{}'\n",
-            std::wstring_view{name});
-        if (error == ERROR_SUCCESS_REBOOT_REQUIRED) {
-            devicefs::WriteToStream(devicefs::stdout,
-                "backup-supervisor: Windows must be restarted to complete "
-                "installation of the WSL package\n");
-            return true;
-        }
-        return false;
+        return InstallMsi(destination,
+            std::format("WSL MSI '{}'", winrt::to_string(name)));
     } catch (const winrt::hresult_error &error) {
         WinError("could not acquire or install the WSL package from '{}': {}",
             releases_url, std::wstring_view{error.message()},

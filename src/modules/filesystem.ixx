@@ -282,12 +282,15 @@ auto Usage(const auto output) noexcept {
         WinError("could not format the SID for --read-user account '{}'", account);
     }
 
+    // Administrators own the filesystem and mount directory, allowing an
+    // elevated administrator to create the directory without assigning
+    // ownership to another account through SeRestorePrivilege.
     // SYSTEM and Administrators get full access.
     // The user specified by `--read-user` gets read and execute.
     auto descriptor = wil::unique_hlocal_security_descriptor{};
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
             std::format(
-                "O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;{})",
+                "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;{})",
                 sid_text.get()).c_str(),
             SDDL_REVISION_1, descriptor.addressof(), nullptr)) {
         WinError("could not create the filesystem ACL for --read-user account '{}'",
@@ -417,10 +420,13 @@ public:
 
     auto Start() {
         if (!mount_.network) {
+            // The Windows mount directory has its own security descriptor.
+            // Passing ours here gives `--read-user` access to that directory
+            // as well as the root and files served by DeviceFs.
             [[gsl::suppress("type.3",
                 justification: "WinFsp copies the mount point despite accepting a mutable pointer.")]]
-            internal::CheckNt(FspFileSystemSetMountPoint(
-                fs_.get(), const_cast<PWSTR>(mount_.value.c_str())),
+            internal::CheckNt(FspFileSystemSetMountPointEx(
+                fs_.get(), const_cast<PWSTR>(mount_.value.c_str()), security_.get()),
                 "could not mount filesystem");
         }
         internal::CheckNt(FspFileSystemStartDispatcher(fs_.get(), 0),

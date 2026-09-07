@@ -72,6 +72,9 @@ function prompt {
         ('>' * ($nestedPromptLevel + 1))
     )
 }
+
+# Replace blinking cursor with solid vertical line.
+[Console]::Write("`e[6 q")
 )"sv;
 
 [[nodiscard]] auto PowerShellPathMsi(const auto version_guid)

@@ -878,6 +878,13 @@ mount -o bind,nosuid,nodev /tmp /tmp || exit
 mount -o remount,bind,ro /
 EOF
 
+# Fish normally writes every interactive command to a history file. When the
+# root filesystem is read-only, this causes an error messaage to be printed
+# after every command. We disable the history file to avoid this.
+COPY <<'EOF' /etc/fish/conf.d/disable-history.fish
+set -g fish_history ''
+EOF
+
 #
 # wsl --import materializes the filesystem but does not use container-image
 # process metadata to select a Linux user. /etc/wsl.conf is therefore the

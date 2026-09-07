@@ -857,6 +857,16 @@ EOF
 # leaving `/tmp` writable. An ordinary `remount,ro` would instead make the
 # shared filesystem read-only through both paths.
 #
+# The PBS client falls back to `/tmp` for downloaded indexes from the previous
+# backup when its cache directory is read-only. It reads those indexes through
+# read-only memory mappings, which failed with `EPERM` on WSL1 when `/tmp` had
+# `noexec`. The client then uploaded data without using the previous indexes.
+# Removing `noexec` restored index reuse in testing, so we omit it here.
+# Earlier WSL1 reports describe similar failures on `noexec` mounts for memory
+# mappings that do not request execution:
+# https://github.com/microsoft/WSL/issues/2974#issuecomment-368667507
+# https://github.com/microsoft/WSL/issues/3937#issuecomment-488397103
+#
 # WSL runs this script as root through the `boot.command` setting below.
 #
 # https://manpages.debian.org/trixie/mount/mount.8.en.html#Read-only_Setting_Notes
@@ -864,7 +874,7 @@ EOF
 #
 COPY --chmod=0755 <<'EOF' /usr/local/sbin/devicefs-startup
 #!/usr/bin/env -S fish --no-config
-mount -o bind,nosuid,noexec,nodev /tmp /tmp || exit
+mount -o bind,nosuid,nodev /tmp /tmp || exit
 mount -o remount,bind,ro /
 EOF
 

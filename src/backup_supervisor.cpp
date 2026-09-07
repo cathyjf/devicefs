@@ -23,7 +23,7 @@ import devicefs.common;
 import devicefs.filesystem;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
-import devicefs.supervisor.find_powershell;
+import devicefs.supervisor.launch_powershell;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.logging_console;
 import devicefs.supervisor.materialize_oci;

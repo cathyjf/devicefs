@@ -30,19 +30,26 @@ module;
 #include <wil/registry.h>
 #include <wil/resource.h>
 #include <wil/stl.h>
+#include <wil/win32_helpers.h>
 
-export module devicefs.supervisor.find_powershell;
+export module devicefs.supervisor.launch_powershell;
 
 import std;
 import devicefs.common;
 import devicefs.stream_writer;
+import devicefs.supervisor.account_management;
+import devicefs.supervisor.installation;
 import devicefs.supervisor.winrt_apartment;
 
+#undef stderr
 #undef stdout
+
+using namespace std::string_view_literals;
+
+export constexpr auto kRegisterMsixOption = "--internal-register-msix"sv;
 
 namespace {
 
-using namespace std::string_view_literals;
 using namespace wil::literals;
 
 constexpr auto kPowerShellMsiRegistrationPrefix =
@@ -75,7 +82,7 @@ constexpr auto kPowerShellPackageFamily = L"Microsoft.PowerShell_8wekyb3d8bbwe"_
     return std::filesystem::path(location.get()) / L"pwsh.exe";
 }
 
-[[nodiscard]] auto PowerShellPathMsix()
+[[nodiscard]] auto FindAndPreparePowerShellMsix(const wil::zwstring_view username)
     -> std::optional<std::filesystem::path> {
     try {
         const auto apartment = wil::RoInitialize();
@@ -109,6 +116,43 @@ constexpr auto kPowerShellPackageFamily = L"Microsoft.PowerShell_8wekyb3d8bbwe"_
         const auto selected =
             std::ranges::max(packages, {}, sortable_version);
         const auto location = selected.InstalledLocation().Path();
+        // The package files are shared across users, but Windows requires the
+        // backup account to register the package before it can execute pwsh.exe.
+        // Register the exact Store-signed version selected above by running the
+        // installed supervisor as that account, and wait for it to finish before
+        // returning the executable to the interactive-console launcher.
+        const auto supervisor = InstalledExecutablePath();
+        const auto arguments = std::to_array<std::string>({
+            supervisor.string(), std::string{kRegisterMsixOption},
+            winrt::to_string(selected.Id().FullName()),
+        });
+        auto command = std::filesystem::path{wil::ArgvToCommandLine(arguments)}.wstring();
+        try {
+            if (const auto exit_code = RunInternalWindowsAccountProcess(
+                    username, supervisor, std::move(command));
+                exit_code != 0) {
+                devicefs::WriteToStream(devicefs::stderr,
+                    L"backup-supervisor: MSIX PowerShell registration for user '{}' "
+                    L"failed with exit code 0x{:08x}; falling back to cmd.exe\n",
+                    std::wstring_view{username}, exit_code);
+                return std::nullopt;
+            }
+        } catch (const std::system_error &error) {
+            if (error.code().category() != std::system_category()) {
+                throw;
+            }
+            devicefs::WriteToStream(devicefs::stderr,
+                "backup-supervisor: MSIX PowerShell registration failed "
+                "(error 0x{:08x}): {}; falling back to cmd.exe\n",
+                std::bit_cast<DWORD>(error.code().value()), error.what());
+            if (error.code().value() == ERROR_FILE_NOT_FOUND) {
+                devicefs::WriteToStream(devicefs::stderr,
+                    L"The backup supervisor may not be installed at '{}'.\n"
+                    L"Use the `--install` command to install it.\n",
+                    supervisor.native());
+            }
+            return std::nullopt;
+        }
         return std::filesystem::path(location.c_str()) / L"pwsh.exe";
     } catch (const wil::ResultException &error) {
         throw std::runtime_error(std::format(
@@ -122,9 +166,17 @@ constexpr auto kPowerShellPackageFamily = L"Microsoft.PowerShell_8wekyb3d8bbwe"_
     }
 }
 
-} // namespace
+[[nodiscard]] auto FindAndPreparePowerShell(const wil::zwstring_view username)
+    -> std::optional<std::filesystem::path> {
+    for (const auto guid : kPowerShellVersionGuids) {
+        if (const auto path = PowerShellPathMsi(guid)) {
+            return path;
+        }
+    }
+    return FindAndPreparePowerShellMsix(username);
+}
 
-export constexpr auto kRegisterMsixOption = "--internal-register-msix"sv;
+} // namespace
 
 export auto EnsurePowerShellMsixRegistration(const wil::zwstring_view package_full_name) {
     const auto family_name = [package_full_name] {
@@ -192,12 +244,67 @@ export auto EnsurePowerShellMsixRegistration(const wil::zwstring_view package_fu
         winrt::to_string(package_full_name), user_name);
 }
 
-export [[nodiscard]] auto PowerShellPath()
-    -> std::optional<std::filesystem::path> {
-    for (const auto guid : kPowerShellVersionGuids) {
-        if (const auto path = PowerShellPathMsi(guid)) {
-            return path;
+export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) -> int {
+    struct ShellError {
+        DWORD win_error;
+        DWORD exit_code;
+    };
+    const auto try_start_shell = [username](
+        const std::filesystem::path &shell) -> std::expected<void, ShellError> {
+        auto startup = STARTUPINFOW{.cb = sizeof(STARTUPINFOW)};
+        auto process = wil::unique_process_information{};
+        // With zero creation flags, `CreateProcessWithLogonW` creates a new
+        // console. A null `STARTUPINFO::lpDesktop` makes the child inherit the
+        // supervisor's window station and desktop. See
+        // <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw>.
+        if (!CreateProcessWithLogonW(
+                username.c_str(), L".",
+                ResetBackupAccountPassword(username).c_str(),
+                LOGON_WITH_PROFILE, shell.c_str(), nullptr, 0,
+                nullptr, nullptr, &startup, &process)) {
+            return std::unexpected{ShellError{.win_error = GetLastError()}};
         }
+        constexpr auto kProcessStartWait = std::chrono::milliseconds{300};
+        std::this_thread::sleep_for(kProcessStartWait);
+        auto exit_code = DWORD{};
+        if (!GetExitCodeProcess(process.hProcess, &exit_code)) {
+            return std::unexpected{ShellError{.win_error = GetLastError()}};
+        } else if ((exit_code != STILL_ACTIVE) && (exit_code != 0)) {
+            return std::unexpected{ShellError{.exit_code = exit_code}};
+        }
+        return {};
+    };
+    if (const auto powershell = FindAndPreparePowerShell(username);
+        powershell && try_start_shell(*powershell)) {
+        return 0;
     }
-    return PowerShellPathMsix();
+    const auto shell = [] {
+        auto system_directory = std::wstring{};
+        if (const auto error = wil::GetSystemDirectoryW(system_directory);
+            FAILED(error)) {
+            WinError("could not identify the Windows system directory",
+                ExplicitWin32Error::FromHresult(error));
+        }
+        return std::filesystem::path{system_directory} / L"cmd.exe";
+    }();
+    if (const auto status = try_start_shell(shell); !status) {
+        const auto error = status.error();
+        if (error.exit_code != 0) {
+            devicefs::WriteToStream(devicefs::stderr,
+                L"Error: backup console '{}' for user '{}' unexpectedly "
+                L"closed quickly with exit code: 0x{:08x}\n",
+                shell.native(), std::wstring_view{username}, error.exit_code);
+            if (!wil::TryGetEnvironmentVariableW<std::wstring>(L"SSH_CONNECTION").empty()) {
+                devicefs::WriteToStream(devicefs::stderr,
+                    "Information: The `--backup-console` feature might not "
+                    "be able to launch a console in an SSH session.\nTry using "
+                    "a normal interactive Windows desktop session.\n");
+            }
+            return error.exit_code;
+        }
+        WinError("could not start console '{}' for backup user '{}'",
+            std::wstring_view{shell.native()}, std::wstring_view{username},
+            ExplicitWin32Error{error.win_error});
+    }
+    return 0;
 }

@@ -274,6 +274,10 @@ export [[nodiscard]] auto ProgramFilesDirectory() {
     return KnownFolderPath(FOLDERID_ProgramFiles, "Program Files");
 }
 
+export [[nodiscard]] auto InstalledExecutablePath() {
+    return ProgramFilesDirectory() / kProductDirectoryName / kExecutableName;
+}
+
 export [[nodiscard]] auto ResolvePersistentPaths() {
     auto result = PersistentPaths{};
     result.root = KnownFolderPath(FOLDERID_ProgramData, "ProgramData") /
@@ -304,10 +308,8 @@ export auto InstallService(
         }
     }
 
-    const auto installation_directory =
-        ProgramFilesDirectory() / kProductDirectoryName;
-    const auto installed_executable =
-        installation_directory / kExecutableName;
+    const auto installed_executable = InstalledExecutablePath();
+    const auto installation_directory = installed_executable.parent_path();
     const auto persistent = ResolvePersistentPaths();
 
     const auto public_directory =

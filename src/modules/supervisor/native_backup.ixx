@@ -29,9 +29,8 @@ export import :manifest;
 import :pbs;
 import devicefs.common;
 import devicefs.stream_writer;
-import devicefs.supervisor.account_management;
 import devicefs.supervisor.configuration;
-import devicefs.supervisor.find_powershell;
+import devicefs.supervisor.launch_powershell;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.vshadow;
 
@@ -158,68 +157,6 @@ export [[nodiscard]] auto RunBackupConsole() -> int {
         throw std::runtime_error(
             "--backup-console does not support invocation as LocalSystem");
     }
-    const auto username = std::filesystem::path{ReadBackupConfiguration(
-        ResolvePersistentPaths().configuration).windows_username}.wstring();
-    struct ShellError {
-        DWORD win_error;
-        DWORD exit_code;
-    };
-    const auto try_start_shell = [&username](
-        const std::filesystem::path &shell) -> std::expected<void, ShellError> {
-        auto startup = STARTUPINFOW{.cb = sizeof(STARTUPINFOW)};
-        auto process = wil::unique_process_information{};
-        // With zero creation flags, `CreateProcessWithLogonW` creates a new
-        // console. A null `STARTUPINFO::lpDesktop` makes the child inherit the
-        // supervisor's window station and desktop. See
-        // <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw>.
-        if (!CreateProcessWithLogonW(
-                username.c_str(), internal::kLocalDomain.c_str(),
-                ResetBackupAccountPassword(username).c_str(),
-                LOGON_WITH_PROFILE, shell.c_str(), nullptr, 0,
-                nullptr, nullptr, &startup, &process)) {
-            return std::unexpected{ShellError{.win_error = GetLastError()}};
-        }
-        constexpr auto kProcessStartWait = std::chrono::milliseconds{300};
-        std::this_thread::sleep_for(kProcessStartWait);
-        auto exit_code = DWORD{};
-        if (!GetExitCodeProcess(process.hProcess, &exit_code)) {
-            return std::unexpected{ShellError{.win_error = GetLastError()}};
-        } else if ((exit_code != STILL_ACTIVE) && (exit_code != 0)) {
-            return std::unexpected{ShellError{.exit_code = exit_code}};
-        }
-        return {};
-    };
-    if (const auto powershell = PowerShellPath();
-        powershell && try_start_shell(*powershell)) {
-        return 0;
-    }
-    const auto shell = [] {
-        auto system_directory = std::wstring{};
-        if (const auto error = wil::GetSystemDirectoryW(system_directory);
-            FAILED(error)) {
-            WinError("could not identify the Windows system directory",
-                ExplicitWin32Error::FromHresult(error));
-        }
-        return std::filesystem::path{system_directory} / L"cmd.exe";
-    }();
-    if (const auto status = try_start_shell(shell); !status) {
-        const auto error = status.error();
-        if (error.exit_code != 0) {
-            devicefs::WriteToStream(devicefs::stderr,
-                L"Error: backup console '{}' for user '{}' unexpectedly "
-                L"closed quickly with exit code: 0x{:08x}\n",
-                shell.native(), username, error.exit_code);
-            if (!wil::TryGetEnvironmentVariableW<std::wstring>(L"SSH_CONNECTION").empty()) {
-                devicefs::WriteToStream(devicefs::stderr,
-                    "Information: The `--backup-console` feature might not "
-                    "be able to launch a console in an SSH session.\nTry using "
-                    "a normal interactive Windows desktop session.\n");
-            }
-            return error.exit_code;
-        }
-        WinError("could not start console '{}' for backup user '{}'",
-            std::wstring_view{shell.native()}, std::wstring_view{username},
-            ExplicitWin32Error{error.win_error});
-    }
-    return 0;
+    return LaunchPowerShell(std::filesystem::path{ReadBackupConfiguration(
+        ResolvePersistentPaths().configuration).windows_username}.wstring());
 }

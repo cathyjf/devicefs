@@ -44,9 +44,11 @@ import devicefs.supervisor.winrt_apartment;
 #undef stderr
 #undef stdout
 
+using namespace std::string_literals;
 using namespace std::string_view_literals;
 
 export constexpr auto kRegisterMsixOption = "--internal-register-msix"sv;
+export constexpr auto kPreparePowerShellProfileOption = "--internal-prepare-powershell-profile"sv;
 
 namespace {
 
@@ -61,6 +63,16 @@ constexpr auto kPowerShellVersionGuids = std::array{
 constexpr auto kPowerShellMsiRegistrationValueName = L"InstallLocation"_zv;
 constexpr auto kPowerShellPackageFamily = L"Microsoft.PowerShell_8wekyb3d8bbwe"_zv;
 constexpr auto kTerminalPackageFamily = L"Microsoft.WindowsTerminal_8wekyb3d8bbwe"_zv;
+
+constexpr auto kPowerShellProfile = R"(
+function prompt {
+    "PS {0} {1}{2} " -f (
+        [System.Environment]::UserName,
+        $executionContext.SessionState.Path.CurrentLocation,
+        ('>' * ($nestedPromptLevel + 1))
+    )
+}
+)"sv;
 
 [[nodiscard]] auto PowerShellPathMsi(const auto version_guid)
     -> std::optional<std::filesystem::path> {
@@ -81,6 +93,43 @@ constexpr auto kTerminalPackageFamily = L"Microsoft.WindowsTerminal_8wekyb3d8bbw
             ExplicitWin32Error::FromHresult(result));
     }
     return std::filesystem::path(location.get()) / L"pwsh.exe";
+}
+
+[[nodiscard]] auto TryRunConsolePreparation(
+    const wil::zwstring_view username,
+    const std::string_view description,
+    const auto &...arguments) -> bool {
+    const auto supervisor = InstalledExecutablePath();
+    try {
+        auto command = std::filesystem::path{wil::ArgvToCommandLine(
+            std::array{supervisor.string(), arguments...})}.wstring();
+        if (const auto exit_code = RunInternalWindowsAccountProcess(
+                username, supervisor, std::move(command));
+            exit_code != 0) {
+            devicefs::WriteToStream(devicefs::stderr,
+                "backup-supervisor: {} for user '{}' failed with exit code "
+                "0x{:08x}; continuing console launch\n",
+                description, winrt::to_string(username), exit_code);
+            return false;
+        }
+    } catch (const std::system_error &error) {
+        if (error.code().category() != std::system_category()) {
+            throw;
+        }
+        devicefs::WriteToStream(devicefs::stderr,
+            "backup-supervisor: {} for user '{}' failed "
+            "(Windows error 0x{:08x}): {}; continuing console launch\n",
+            description, winrt::to_string(username),
+            std::bit_cast<DWORD>(error.code().value()), error.what());
+        if (error.code().value() == ERROR_FILE_NOT_FOUND) {
+            devicefs::WriteToStream(devicefs::stderr,
+                L"The backup supervisor may not be installed at '{}'.\n"
+                L"Use the `--install` command to install it.\n",
+                supervisor.native());
+        }
+        return false;
+    }
+    return true;
 }
 
 [[nodiscard]] auto FindAndPrepareMsixApplication(
@@ -125,37 +174,10 @@ constexpr auto kTerminalPackageFamily = L"Microsoft.WindowsTerminal_8wekyb3d8bbw
     // Register the exact Store-signed version selected above by running the
     // installed supervisor as that account, and wait for it to finish before
     // returning the executable to the interactive-console launcher.
-    const auto supervisor = InstalledExecutablePath();
-    const auto arguments = std::to_array<std::string>({
-        supervisor.string(), std::string{kRegisterMsixOption},
-        winrt::to_string(selected.Id().FullName()),
-    });
-    auto command = std::filesystem::path{wil::ArgvToCommandLine(arguments)}.wstring();
-    try {
-        if (const auto exit_code = RunInternalWindowsAccountProcess(
-                username, supervisor, std::move(command));
-            exit_code != 0) {
-            devicefs::WriteToStream(devicefs::stderr,
-                L"backup-supervisor: MSIX registration of '{}' for user '{}' "
-                L"failed with exit code 0x{:08x}\n",
-                std::wstring_view{package_family}, std::wstring_view{username}, exit_code);
-            return std::nullopt;
-        }
-    } catch (const std::system_error &error) {
-        if (error.code().category() != std::system_category()) {
-            throw;
-        }
-        devicefs::WriteToStream(devicefs::stderr,
-            "backup-supervisor: MSIX registration of '{}' failed "
-            "(error 0x{:08x}): {}\n",
-            winrt::to_string(package_family),
-            std::bit_cast<DWORD>(error.code().value()), error.what());
-        if (error.code().value() == ERROR_FILE_NOT_FOUND) {
-            devicefs::WriteToStream(devicefs::stderr,
-                L"The backup supervisor may not be installed at '{}'.\n"
-                L"Use the `--install` command to install it.\n",
-                supervisor.native());
-        }
+    if (!TryRunConsolePreparation(username,
+            std::format("MSIX registration of '{}'", winrt::to_string(package_family)),
+            std::string{kRegisterMsixOption},
+            winrt::to_string(selected.Id().FullName()))) {
         return std::nullopt;
     }
     return std::filesystem::path(location.c_str()) / executable;
@@ -202,6 +224,27 @@ constexpr auto kTerminalPackageFamily = L"Microsoft.WindowsTerminal_8wekyb3d8bbw
 }
 
 } // namespace
+
+export auto EnsurePowerShellProfile() {
+    // This mode runs as the backup account with its Windows profile loaded by
+    // `RunInternalWindowsAccountProcess`. Resolve that account's Documents folder
+    // because PowerShell follows its configured location, including redirection.
+    const auto directory = DocumentsDirectory() / L"PowerShell";
+    std::filesystem::create_directories(directory);
+    const auto path = directory / L"Profile.ps1";
+    auto profile = std::ofstream{path, std::ios::binary | std::ios::noreplace};
+    if (!profile && std::filesystem::exists(path)) {
+        return;
+    }
+    std::println(profile, "{}", kPowerShellProfile);
+    profile.flush();
+    if (!profile) {
+        throw std::runtime_error(std::format(
+            "could not write the PowerShell profile '{}'", path.string()));
+    }
+    devicefs::WriteToStream(devicefs::stdout,
+        "backup-supervisor: created PowerShell profile '{}'\n", path.string());
+}
 
 export auto EnsureConsoleMsixRegistration(const wil::zwstring_view package_full_name) {
     const auto family_name = [package_full_name] {
@@ -309,7 +352,14 @@ export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) ->
     // serializes each password reset with the logon that uses it.
     auto terminal_preparation = std::async(
         std::launch::async, FindAndPrepareWindowsTerminal, username);
-    if (const auto powershell = FindAndPreparePowerShell(username)) {
+    auto profile_preparation = std::async(std::launch::async, [username] {
+        std::ignore = TryRunConsolePreparation(username,
+            "PowerShell profile preparation"sv,
+            std::string{kPreparePowerShellProfileOption});
+    });
+    const auto powershell = FindAndPreparePowerShell(username);
+    profile_preparation.get();
+    if (powershell) {
         if (const auto terminal = terminal_preparation.get()) {
             // Supplying the PowerShell executable explicitly keeps Terminal's
             // profile selection from substituting another shell. The new-window
@@ -321,9 +371,9 @@ export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) ->
             const auto terminal_shell = powershell->string() |
                 std::views::split(';') | std::views::join_with("\\;"sv) |
                 std::ranges::to<std::string>();
-            const auto arguments = std::to_array<std::string>({
-                terminal->string(), "-w", "new", "new-tab", "--", terminal_shell,
-            });
+            const auto arguments = std::array{
+                terminal->string(), "-w"s, "new"s, "new-tab"s, "--"s, terminal_shell,
+            };
             const auto command =
                 std::filesystem::path{wil::ArgvToCommandLine(arguments)}.wstring();
             const auto status = try_shell(*terminal, command);

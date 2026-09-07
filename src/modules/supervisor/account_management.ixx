@@ -600,10 +600,10 @@ auto EnsureMaterializedWslDistribution(
     const wil::zwstring_view username,
     const std::string_view distribution,
     const std::filesystem::path &installed_executable) {
-    const auto arguments = std::to_array<std::string>({
+    const auto arguments = std::array{
         installed_executable.string(), std::string{kMaterializeOciOption},
         std::string{distribution},
-    });
+    };
     auto command = std::filesystem::path{wil::ArgvToCommandLine(arguments)}.wstring();
     devicefs::WriteToStream(devicefs::stdout,
         L"backup-supervisor: preparing WSL distribution '{}' as internal Windows account '{}'\n",

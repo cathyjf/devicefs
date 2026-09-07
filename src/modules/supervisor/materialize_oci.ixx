@@ -51,6 +51,7 @@ import devicefs.supervisor.winrt_apartment;
 
 namespace {
 
+using namespace std::string_literals;
 using namespace std::string_view_literals;
 
 constexpr auto kWslRegistration =
@@ -207,9 +208,9 @@ auto ExtractArchiveMember(
     // OCI members are emitted to the handle above rather than restored at
     // their archive paths. The layer therefore remains a tar archive for WSL
     // to unpack with Linux filesystem semantics.
-    RunCommand(std::to_array<std::string>({
-        tar.string(), "-xOf", archive.string(), "--", std::string{member},
-    }), file.get());
+    RunCommand(std::array{
+        tar.string(), "-xOf"s, archive.string(), "--"s, std::string{member},
+    }, file.get());
 }
 
 [[nodiscard]] auto BlobMember(std::string digest) {
@@ -412,9 +413,9 @@ auto ReplaceDistribution(
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: unregistering old WSL distribution '{}'\n", retired);
     try {
-        RunCommand(std::to_array<std::string>({
-            executable.string(), "--unregister", retired,
-        }), GetStdHandle(STD_OUTPUT_HANDLE));
+        RunCommand(std::array{
+            executable.string(), "--unregister"s, retired,
+        }, GetStdHandle(STD_OUTPUT_HANDLE));
     } catch (const std::runtime_error &error) {
         devicefs::WriteToStream(devicefs::stderr,
             "backup-supervisor: WSL distribution '{}' was replaced, but could not "
@@ -537,10 +538,10 @@ export [[nodiscard]] auto MaterializeOci(
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: importing WSL1 distribution '{}' into '{}'\n",
         import_name, installation.string());
-    RunCommand(std::to_array<std::string>({
-        executable.string(), "--import", import_name,
-        installation.string(), rootfs.string(), "--version", "1",
-    }), GetStdHandle(STD_OUTPUT_HANDLE));
+    RunCommand(std::array{
+        executable.string(), "--import"s, import_name,
+        installation.string(), rootfs.string(), "--version"s, "1"s,
+    }, GetStdHandle(STD_OUTPUT_HANDLE));
     // The layer digest identifies the imported filesystem for subsequent update
     // checks. Record it only after WSL reports a successful import. Failure to
     // record this metadata does not invalidate the imported distribution.

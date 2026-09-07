@@ -91,7 +91,8 @@ constexpr auto kPrivateFileSecurity =
 
 [[nodiscard]] auto KnownFolderPath(
     const KNOWNFOLDERID &identifier,
-    const std::string_view description) {
+    const std::string_view description,
+    const KNOWN_FOLDER_FLAG flags = KF_FLAG_DEFAULT) {
     // Microsoft requires COM to be initialized on the calling thread before
     // SHGetKnownFolderPath. ServiceMain is dispatched on a different thread
     // from main, so the initialization belongs at this narrow call boundary.
@@ -104,7 +105,7 @@ constexpr auto kPrivateFileSecurity =
     }
     auto result = wil::unique_cotaskmem_string{};
     const auto error = SHGetKnownFolderPath(
-        identifier, KF_FLAG_DEFAULT, nullptr, result.addressof());
+        identifier, flags, nullptr, result.addressof());
     if (FAILED(error)) {
         WinError("could not obtain the {} path", description,
             ExplicitWin32Error::FromHresult(error));
@@ -272,6 +273,10 @@ export [[nodiscard]] auto CurrentExecutablePath() {
 
 export [[nodiscard]] auto ProgramFilesDirectory() {
     return KnownFolderPath(FOLDERID_ProgramFiles, "Program Files");
+}
+
+export [[nodiscard]] auto DocumentsDirectory() {
+    return KnownFolderPath(FOLDERID_Documents, "Documents", KF_FLAG_DONT_VERIFY);
 }
 
 export [[nodiscard]] auto InstalledExecutablePath() {

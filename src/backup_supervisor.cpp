@@ -932,6 +932,10 @@ auto BackupSupervisorMain(
             InstallService(ServiceContext::kMinimumPreshutdownTimeout);
             return 0;
         }
+        if (option == kPreparePowerShellProfileOption) {
+            EnsurePowerShellProfile();
+            return 0;
+        }
         if (option == kRegisterMsixOption) {
             if (arguments.size() != 2) {
                 throw std::invalid_argument(std::format(

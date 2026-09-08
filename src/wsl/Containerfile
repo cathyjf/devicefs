@@ -249,6 +249,7 @@ shopt -s inherit_errexit; set -efux -o pipefail
 apt-get update
 nala install -y --no-autoremove --no-install-recommends \
     binutils \
+    cargo-auditable \
     clang \
     debcargo \
     devscripts \
@@ -342,6 +343,12 @@ EOF
 # time, link time, and temporary disk use before throwing it away. LLD handles
 # the remaining final ELF link concurrently.
 #
+# cargo-auditable records the Rust dependency names, versions, and relationships
+# in the executable so scanners can identify the crates used by the shipped
+# client. The compressed inventory is separate from debug information and
+# survives the stripping step below.
+#
+# https://github.com/rust-secure-code/cargo-auditable
 # https://doc.rust-lang.org/cargo/commands/cargo-build.html
 # https://doc.rust-lang.org/cargo/guide/build-performance.html#reduce-amount-of-generated-debug-information
 # https://doc.rust-lang.org/nightly/cargo/guide/build-performance.html#enable-the-experimental-parallel-frontend
@@ -358,7 +365,7 @@ sed --in-place \
 export CARGO_PROFILE_RELEASE_DEBUG=0
 export RUSTC_BOOTSTRAP=1
 export RUSTFLAGS='-Zthreads=0 -C link-arg=-fuse-ld=lld'
-cargo build \
+cargo auditable build \
     --release \
     --package proxmox-backup-client \
     --bin proxmox-backup-client

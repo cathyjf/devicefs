@@ -43,6 +43,7 @@ import devicefs.supervisor.winrt_apartment;
 #undef stderr
 #undef stdout
 
+using namespace std::chrono_literals;
 using namespace std::string_view_literals;
 using namespace wil::literals;
 
@@ -66,6 +67,39 @@ constexpr auto kWinFspSha256 =
 [[nodiscard]] auto InstallMsi(
     const std::filesystem::path &path,
     const std::string_view description) -> bool {
+    const auto mutex = [description] {
+        // Windows Installer rejects overlapping installations rather than
+        // waiting. Acquiring this execution mutex first lets us wait for
+        // another installation to finish. The mutex stays owned by this thread
+        // through `MsiInstallProductW`, which acquires the same mutex
+        // recursively. Releasing the mutex before that call would allow
+        // another installation to start first.
+        // https://devblogs.microsoft.com/setup/waiting-to-install/
+        constexpr auto kMsiMutexName = "Global\\_MSIExecute"_zv;
+        auto mutex = wil::unique_mutex_nothrow{CreateMutexExA(
+            nullptr, kMsiMutexName.c_str(), 0, SYNCHRONIZE | MUTEX_MODIFY_STATE)};
+        if (!mutex) {
+            WinError("could not create or open Windows Installer mutex '{}' "
+                "before installing {}", std::string_view{kMsiMutexName}, description);
+        }
+        return mutex;
+    }();
+    const auto lock = [&mutex, description] {
+        if (auto lock = mutex.acquire(nullptr, 0)) {
+            return lock;
+        }
+        auto finished = std::binary_semaphore{0};
+        auto reporter = std::jthread{[&finished, description] {
+            do {
+                devicefs::WriteToStream(devicefs::stdout,
+                    "backup-supervisor: waiting for another installation to finish "
+                    "before installing {}\n", description);
+            } while (!finished.try_acquire_for(10s));
+        }};
+        auto lock = mutex.acquire();
+        finished.release();
+        return lock;
+    }();
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: installing {}\n", description);
     MsiSetInternalUI(INSTALLUILEVEL_NONE, nullptr);

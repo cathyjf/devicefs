@@ -7,7 +7,7 @@
 #
 # The first stages contain source code, compilers, development headers, and
 # generated files. The final stage begins again from a clean Debian Trixie
-# image and copies in only the two stripped executables plus small files that
+# image and copies in only the three stripped executables plus small files that
 # record which source commits were built.
 #
 # When the final stage is exported with Buildah, none of the earlier stages is
@@ -409,7 +409,7 @@ EOF
 
 
 # ---------------------------------------------------------------------------
-# DeviceFs Samba RPC helper
+# DeviceFs Samba RPC helper and WSL startup broker
 # https://github.com/cathyjf/devicefs/tree/main/src/unix/samba_rpc
 # ---------------------------------------------------------------------------
 
@@ -590,10 +590,10 @@ WORKDIR /usr/src/devicefs/src/unix
 #
 # The release preset selects Ninja, enables optimization, and enables the gRPC
 # transport. BUILD_TESTING is disabled because this image needs the production
-# helper, not the test client, PowerShell fixture, loop-device fixture, or test
-# gRPC server.
+# helper and startup broker, not the test client, PowerShell fixture, loop-device
+# fixture, or test gRPC server.
 #
-# Naming rpcd_devicefs as the build target also prevents an unrelated future
+# Naming both executable targets also prevents an unrelated future
 # default target from silently becoming part of this deployment build.
 #
 # https://github.com/cathyjf/devicefs/blob/main/src/unix/CMakePresets.json
@@ -604,19 +604,23 @@ WORKDIR /usr/src/devicefs/src/unix
 RUN <<'EOF'
 shopt -s inherit_errexit; set -efux -o pipefail
 cmake --preset release -DBUILD_TESTING=OFF
-cmake --build --preset release --parallel --target rpcd_devicefs
+cmake --build --preset release --parallel --target \
+    rpcd_devicefs \
+    devicefs-wsl-startup-broker
 EOF
 
 #
-# As with the Rust client, the copied helper is stripped before it enters the
+# As with the Rust client, the copied executables are stripped before entering the
 # final filesystem. llvm-strip comes from the same LLVM 23 installation that
-# compiled the executable.
+# compiled the executables.
 #
 # The helper loads Samba's private RPC-worker library with dlopen, so that
 # library does not appear in its ELF DT_NEEDED list. The final stage therefore
 # installs Samba explicitly. dpkg-shlibdeps still owns the ordinary direct
 # dependencies such as gRPC, protobuf, libstdc++, Samba's public libraries,
 # talloc, tevent, TDB, and libc.
+# Both executables are passed to dpkg-shlibdeps so the resulting dependency
+# file also includes any libraries or library versions required by the broker.
 #
 # dpkg-shlibdeps is part of Debian's package-building machinery and reads a
 # debian/control file even when its result is written to standard output. The
@@ -638,14 +642,19 @@ shopt -s inherit_errexit; set -efux -o pipefail
 install -D --mode=0755 \
     /usr/src/devicefs/build/unix/samba_rpc/rpcd_devicefs \
     /out/rootfs/usr/local/bin/rpcd_devicefs
+install -D --mode=0755 \
+    /usr/src/devicefs/build/unix/devicefs-wsl-startup-broker \
+    /out/rootfs/usr/local/bin/devicefs-wsl-startup-broker
 /usr/lib/llvm-23/bin/llvm-strip \
     --strip-unneeded \
-    /out/rootfs/usr/local/bin/rpcd_devicefs
+    /out/rootfs/usr/local/bin/rpcd_devicefs \
+    /out/rootfs/usr/local/bin/devicefs-wsl-startup-broker
 (
     cd /tmp/rpcd-devicefs
     dpkg-shlibdeps \
         -O \
-        -e/out/rootfs/usr/local/bin/rpcd_devicefs
+        -e/out/rootfs/usr/local/bin/rpcd_devicefs \
+        -e/out/rootfs/usr/local/bin/devicefs-wsl-startup-broker
 ) \
     | sed -n 's/^shlibs:Depends=//p' \
         > /out/rpcd_devicefs.dependencies
@@ -807,28 +816,30 @@ COPY --from=samba-helper-build /out/rootfs/ /
 # Windows account and selects this Linux identity; it does not perform Linux
 # password authentication.
 #
+# WSL can start a user's shell before the boot command has made `/` read-only.
+# Both pbs-vss and root therefore use the startup broker as their shell. The
+# broker waits for the remount before executing Fish, with a bounded wait so a
+# failed boot command cannot block shell startup indefinitely. The broker's path is
+# also added to Debian's list of valid login shells in /etc/shells.
+#
 # https://learn.microsoft.com/en-us/windows/wsl/use-custom-distro
 # https://learn.microsoft.com/en-us/windows/wsl/file-permissions
 # https://manpages.debian.org/trixie/passwd/useradd.8.en.html
+# https://manpages.debian.org/trixie/manpages/shells.5.en.html
 #
 RUN <<'EOF'
 shopt -s inherit_errexit; set -efux -o pipefail
+broker_shell=/usr/local/bin/devicefs-wsl-startup-broker
+printf '%s\n' "${broker_shell}" >> /etc/shells
 groupadd --gid "${DEVICEFS_GID}" pbs-vss
 useradd \
     --uid "${DEVICEFS_UID}" \
     --gid "${DEVICEFS_GID}" \
     --create-home \
-    --shell /usr/bin/fish \
+    --shell "${broker_shell}" \
     pbs-vss
+chsh --shell "${broker_shell}" root
 install -d --mode=0755 --owner=pbs-vss --group=pbs-vss /mnt/vss
-EOF
-
-#
-# Set root's shell to Fish.
-#
-RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
-chsh --shell /usr/bin/fish root
 EOF
 
 #

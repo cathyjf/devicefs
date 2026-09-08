@@ -2462,8 +2462,7 @@ auto PrintNewMismatches(
     const std::uint64_t completed,
     const std::uint64_t total) noexcept {
     return total == 0 ? 100.0 :
-        (static_cast<double>(completed) /
-            static_cast<double>(total)) * 100.0;
+        (static_cast<double>(completed) / total) * 100.0;
 }
 
 auto PrintTraversalProgress(
@@ -2492,12 +2491,10 @@ auto PrintTraversalProgress(
             "      Average traversal rate: {:.2f} directories/s, "
             "{:.2f} object(s)/s, {}{:.2f} logical stream MiB "
             "observed/s\n",
-            static_cast<double>(inventory.directories) /
-                elapsed_seconds,
-            static_cast<double>(inventory.objects) /
-                elapsed_seconds,
+            inventory.directories / elapsed_seconds,
+            inventory.objects / elapsed_seconds,
             stream_bytes_prefix,
-            static_cast<double>(inventory.stream_bytes) /
+            inventory.stream_bytes /
                 (1024.0 * 1024.0 * elapsed_seconds));
     }
     if ((elapsed_seconds <= 0.0) ||
@@ -2522,16 +2519,14 @@ auto PrintTraversalProgress(
     const auto remaining_tasks =
         estimated_tasks - inventory.tasks_completed;
     const auto tasks_per_second =
-        static_cast<double>(inventory.tasks_completed) /
-        elapsed_seconds;
+        inventory.tasks_completed / elapsed_seconds;
     devicefs::WriteToStream(output,
         "      Approximate layout-based progress: {:.2f}% against a "
         "working estimate of {} work item(s); ETA {:.1f} minute(s) at "
         "the current average rate\n",
         Percentage(inventory.tasks_completed, estimated_tasks),
         estimated_tasks,
-        static_cast<double>(remaining_tasks) /
-            (tasks_per_second * 60.0));
+        remaining_tasks / (tasks_per_second * 60.0));
 }
 
 auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
@@ -2588,7 +2583,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                     *observation.comparison_started).count();
             const auto mebibytes_per_second = elapsed == 0.0
                 ? 0.0
-                : static_cast<double>(observation.compared_bytes) /
+                : observation.compared_bytes /
                     (1024.0 * 1024.0 * elapsed);
             devicefs::WriteToStream(devicefs::stdout,
                 "    Comparison rate: {:.2f} MiB/s\n",

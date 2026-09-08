@@ -439,7 +439,8 @@ struct StartedWslFish {
         wsl_arguments.push_back(*configuration.wsl.linux_user);
     }
     wsl_arguments.append_range(std::to_array<std::string_view>({
-        "--exec", "/usr/bin/fish", "--no-config", "-c",
+        "--exec",
+        "/usr/local/bin/devicefs-wsl-startup-broker", "--no-config", "-c",
         "read --null --global DEVICEFS_FISH_PROGRAM && eval $DEVICEFS_FISH_PROGRAM",
         "--",
     }));

@@ -36,7 +36,7 @@
       "name": "release",
       "configurePreset": "release",
       "output": {
-        "outputOnFailure": true
+        "verbosity": "verbose"
       }
     }
   ]

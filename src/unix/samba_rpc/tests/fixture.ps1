@@ -22,13 +22,7 @@ $CMakeCachePath = [IO.Path]::GetFullPath($CMakeCachePath)
 if ($GrpcBacking -and -not $TestClient) {
     throw '-GrpcBacking requires -TestClient.'
 }
-function Get-CachedPath([string] $Name) {
-    $record = & grep -m 1 "^${Name}:" -- $CMakeCachePath
-    if (($LASTEXITCODE -ne 0) -or $record.EndsWith('-NOTFOUND')) {
-        throw "CMake cache '$CMakeCachePath' does not define $Name."
-    }
-    return ($record -split '=', 2)[1]
-}
+. "$PSScriptRoot/../../tests/include/cmake.ps1"
 function Write-TestPattern(
     [IO.Stream] $Stream,
     [uint64] $Offset,

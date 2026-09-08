@@ -625,16 +625,18 @@ export auto EnsureInternalWindowsAccountAndEnvironment(
     const std::string_view distribution,
     const std::filesystem::path &installed_executable,
     const std::filesystem::path &wsl_directory) {
-    if (CreateAccountIfMissing(username)) {
-        devicefs::WriteToStream(
-            devicefs::stdout,
-            L"backup-supervisor: created internal Windows account '{}'\n",
-            std::wstring_view{username.c_str(), username.size()});
-        HideAccountFromLogonScreen(username);
-    }
-    EnsureWslDistributionDirectory(username, wsl_directory);
-    const auto winfsp_restart_needed = EnsureWinFsp();
-    const auto package_restart_needed = [] {
+    auto account_preparation = std::async(std::launch::async, [username, &wsl_directory] {
+        if (CreateAccountIfMissing(username)) {
+            devicefs::WriteToStream(
+                devicefs::stdout,
+                L"backup-supervisor: created internal Windows account '{}'\n",
+                std::wstring_view{username.c_str(), username.size()});
+            HideAccountFromLogonScreen(username);
+        }
+        EnsureWslDistributionDirectory(username, wsl_directory);
+    });
+    auto winfsp_preparation = std::async(std::launch::async, EnsureWinFsp);
+    auto package_preparation = std::async(std::launch::async, [] {
         constexpr auto minimum_version = std::array{2u, 7u, 13u};
         if (IsSuitablePackageInstalled(kWslRegistration, minimum_version)) {
             devicefs::WriteToStream(
@@ -644,25 +646,29 @@ export auto EnsureInternalWindowsAccountAndEnvironment(
             return false;
         }
         return InstallWslPackage();
-    }();
-    // Prepare WinFsp, the WSL package, and the WSL1 component before acting on
-    // their restart requirements, so one pending restart does not postpone the
-    // other preparations. Import requires the WSL package and component, so
-    // either of their restart requirements defers import. WinFsp is used later
-    // to expose the backup images; its restart message can wait until after
-    // materialization.
+    });
+    // Materialization runs as the internal Windows account, which must first exist
+    // and have permission to create a distribution beneath `wsl_directory`.
+    // Materialization also requires the WSL package and component to be usable;
+    // a restart required by either defers import until the installer is rerun.
+    //
+    // WinFsp is needed later to expose the backup images, so its preparation can
+    // continue during materialization. The installer collects the WinFsp result
+    // after materialization completes or is deferred.
     const auto component_restart_needed = EnsureWsl1Component();
+    account_preparation.get();
+    const auto package_restart_needed = package_preparation.get();
     if (package_restart_needed || component_restart_needed) {
         devicefs::WriteToStream(
             devicefs::stdout,
             "The installation is not complete. After restarting the computer, "
             "please run `backup-supervisor.exe --install` again to complete "
             "the installation.\n");
-        return;
+    } else {
+        EnsureMaterializedWslDistribution(username, distribution,
+            installed_executable);
     }
-    EnsureMaterializedWslDistribution(username, distribution,
-        installed_executable);
-    if (winfsp_restart_needed) {
+    if (winfsp_preparation.get()) {
         devicefs::WriteToStream(devicefs::stdout,
             "The computer must be restarted before backups can be performed.\n");
     }

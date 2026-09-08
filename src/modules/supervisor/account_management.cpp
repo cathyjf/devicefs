@@ -68,10 +68,7 @@ constexpr auto kWinFspSha256 =
     const std::string_view description) -> bool {
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: installing {}\n", description);
-    const auto previous_ui = MsiSetInternalUI(INSTALLUILEVEL_NONE, nullptr);
-    const auto restore_ui = wil::scope_exit([previous_ui] {
-        MsiSetInternalUI(previous_ui, nullptr);
-    });
+    MsiSetInternalUI(INSTALLUILEVEL_NONE, nullptr);
     // Windows Installer can restart the machine during a silent install.
     // `REBOOT=ReallySuppress` prevents that restart and leaves the caller
     // responsible for reporting any restart requirement after installation.

@@ -1,15 +1,6 @@
 # SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-cmake_minimum_required(VERSION 4.4)
-
-if(NOT CMAKE_TOOLCHAIN_FILE)
-    set(CMAKE_TOOLCHAIN_FILE
-        "${CMAKE_CURRENT_LIST_DIR}/cmake/llvm.cmake"
-        CACHE FILEPATH "DeviceFs Samba RPC LLVM toolchain"
-    )
-endif()
-
 project(devicefs-samba-rpc LANGUAGES C CXX)
 
 option(DEVICEFS_ENABLE_GRPC_TRANSPORT
@@ -213,7 +204,6 @@ else()
     target_link_libraries(rpcd_devicefs PRIVATE "${RPC_WORKER_LIBRARY}")
 endif()
 
-include(CTest)
 if(BUILD_TESTING)
     find_library(DCERPC_LIBRARY dcerpc REQUIRED)
     find_library(SAMBA_CREDENTIALS_LIBRARY samba-credentials REQUIRED)
@@ -224,7 +214,7 @@ if(BUILD_TESTING)
     find_program(PDBEDIT_EXECUTABLE NAMES pdbedit REQUIRED)
     find_program(POWERSHELL_EXECUTABLE NAMES pwsh-preview pwsh REQUIRED)
     set(DEVICEFS_EXECUTABLE
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../build/windows-x64/Release/devicefs.exe"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../build/windows-x64/Release/devicefs.exe"
         CACHE FILEPATH "DeviceFs executable used by the interactive fixture"
     )
     find_program(SAMBA_DCERPCD_EXECUTABLE

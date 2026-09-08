@@ -535,7 +535,8 @@ the x64 and ARM64 builds, supported MSVC toolchain, static analysis, and securit
 settings. Building the Windows supervisor also uses the DISM development
 headers and libraries supplied by the Windows ADK Deployment Tools.
 
-The [Samba RPC helper](src/samba_rpc) has its own CMake build for GNU/Linux and macOS.
+The [Samba RPC helper](src/unix/samba_rpc) uses the
+[Unix CMake build](src/unix) for GNU/Linux and macOS.
 The [OCI build](src/wsl/Containerfile) assembles the GNU/Linux runtime, and the
 [publication script](src/wsl/push-image.fish) publishes its architecture-specific
 images together.

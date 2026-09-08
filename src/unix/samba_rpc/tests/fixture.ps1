@@ -8,7 +8,7 @@
 
 param(
     [string] $CMakeCachePath = [IO.Path]::GetFullPath(
-        '../../../build/samba_rpc/CMakeCache.txt', $PSScriptRoot),
+        '../../../../build/unix/CMakeCache.txt', $PSScriptRoot),
 
     [switch] $TestClient,
 
@@ -77,7 +77,7 @@ function Invoke-TestClient(
 $MktempPath = Get-CachedPath 'MKTEMP_EXECUTABLE'
 $PdbEditPath = Get-CachedPath 'PDBEDIT_EXECUTABLE'
 $SambaDcerpcdPath = Get-CachedPath 'SAMBA_DCERPCD_EXECUTABLE'
-$build_directory = [IO.Path]::GetDirectoryName($CMakeCachePath)
+$build_directory = Get-CachedPath 'devicefs-samba-rpc_BINARY_DIR'
 $HelperPath = [IO.Path]::Combine($build_directory, 'rpcd_devicefs')
 $ClientPath = [IO.Path]::Combine(
     $build_directory, 'rpcd_devicefs_test_client')

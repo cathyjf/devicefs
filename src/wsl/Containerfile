@@ -22,7 +22,7 @@
 # CMake binary distribution. Keeping the release number in one build argument
 # makes the unavoidable version selection easy to update.
 #
-# https://github.com/cathyjf/devicefs/blob/main/src/samba_rpc/CMakeLists.txt
+# https://github.com/cathyjf/devicefs/blob/main/src/unix/CMakeLists.txt
 # https://packages.debian.org/trixie/cmake
 # https://cmake.org/download/
 ARG CMAKE_VERSION=4.4.3
@@ -410,7 +410,7 @@ EOF
 
 # ---------------------------------------------------------------------------
 # DeviceFs Samba RPC helper
-# https://github.com/cathyjf/devicefs/tree/main/src/samba_rpc
+# https://github.com/cathyjf/devicefs/tree/main/src/unix/samba_rpc
 # ---------------------------------------------------------------------------
 
 FROM build-base AS samba-helper-build
@@ -498,7 +498,7 @@ EOF
 # archives for those architectures. Selecting the archive from Debian's target
 # architecture keeps this build usable on either platform.
 #
-# https://github.com/cathyjf/devicefs/blob/main/src/samba_rpc/CMakeLists.txt
+# https://github.com/cathyjf/devicefs/blob/main/src/unix/CMakeLists.txt
 # https://packages.debian.org/trixie/cmake
 # https://cmake.org/download/
 #
@@ -585,7 +585,7 @@ RUN git clone \
     https://github.com/cathyjf/devicefs \
     /usr/src/devicefs
 
-WORKDIR /usr/src/devicefs/src/samba_rpc
+WORKDIR /usr/src/devicefs/src/unix
 
 #
 # The release preset selects Ninja, enables optimization, and enables the gRPC
@@ -596,8 +596,8 @@ WORKDIR /usr/src/devicefs/src/samba_rpc
 # Naming rpcd_devicefs as the build target also prevents an unrelated future
 # default target from silently becoming part of this deployment build.
 #
-# https://github.com/cathyjf/devicefs/blob/main/src/samba_rpc/CMakePresets.json
-# https://github.com/cathyjf/devicefs/blob/main/src/samba_rpc/CMakeLists.txt
+# https://github.com/cathyjf/devicefs/blob/main/src/unix/CMakePresets.json
+# https://github.com/cathyjf/devicefs/blob/main/src/unix/samba_rpc/CMakeLists.txt
 # https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html
 # https://cmake.org/cmake/help/latest/manual/cmake.1.html
 #
@@ -636,7 +636,7 @@ EOF
 RUN <<'EOF'
 shopt -s inherit_errexit; set -efux -o pipefail
 install -D --mode=0755 \
-    /usr/src/devicefs/build/samba_rpc/rpcd_devicefs \
+    /usr/src/devicefs/build/unix/samba_rpc/rpcd_devicefs \
     /out/rootfs/usr/local/bin/rpcd_devicefs
 /usr/lib/llvm-23/bin/llvm-strip \
     --strip-unneeded \

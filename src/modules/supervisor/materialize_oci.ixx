@@ -366,8 +366,8 @@ auto ExtractArchiveMember(
         winrt::to_string(architecture), image);
     const auto bytes = DownloadFile(client, layer_url, rootfs);
     devicefs::WriteToStream(devicefs::stdout,
-        "backup-supervisor: downloaded the root filesystem from '{}' ({} bytes)\n",
-        image, bytes);
+        "backup-supervisor: downloaded the root filesystem from '{}' ({:.2f} MiB)\n",
+        image, bytes / (1024.0 * 1024.0));
     return digest;
 }
 

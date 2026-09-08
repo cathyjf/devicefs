@@ -187,7 +187,8 @@ auto EnsureWinFsp() -> bool {
         const auto bytes = DownloadFile(client,
             winrt::Windows::Foundation::Uri{winrt::to_hstring(url)}, destination);
         devicefs::WriteToStream(devicefs::stdout,
-            "backup-supervisor: downloaded '{}' ({} bytes)\n", name, bytes);
+            "backup-supervisor: downloaded '{}' ({:.2f} MiB)\n",
+            name, bytes / (1024.0 * 1024.0));
     } catch (const winrt::hresult_error &error) {
         WinError("could not acquire WinFsp MSI from '{}': {}",
             url, std::wstring_view{error.message()},
@@ -260,8 +261,8 @@ auto InstallWslPackage() -> bool {
         const auto destination = directory.Path() / "wsl.msi";
         const auto bytes = DownloadFile(client, download_url, destination);
         devicefs::WriteToStream(devicefs::stdout,
-            L"backup-supervisor: downloaded '{}' ({} bytes)\n",
-            std::wstring_view{name}, bytes);
+            L"backup-supervisor: downloaded '{}' ({:.2f} MiB)\n",
+            std::wstring_view{name}, bytes / (1024.0 * 1024.0));
 
         return InstallMsi(destination,
             std::format("WSL MSI '{}'", winrt::to_string(name)));

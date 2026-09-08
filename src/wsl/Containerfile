@@ -905,6 +905,25 @@ mount -o remount,bind,ro /
 EOF
 
 #
+# Fish tries to create its data, configuration, and cache directories during
+# startup, even when history is disabled. Creating the missing directories in
+# the image avoids errors after the broker starts Fish with a read-only root.
+# The `generated_completions` directory also needs to exist because interactive
+# startup otherwise tries to create that directory and populate it.
+#
+# https://github.com/fish-shell/fish-shell/blob/master/src/path.rs
+# https://github.com/fish-shell/fish-shell/blob/master/share/functions/__fish_config_interactive.fish
+#
+RUN <<'EOF'
+shopt -s inherit_errexit; set -efux -o pipefail
+install -d --mode=0755 \
+    /home/pbs-vss/.local/share/fish \
+    /home/pbs-vss/.config/fish \
+    /home/pbs-vss/.cache/fish/generated_completions \
+    /root/.cache/fish/generated_completions
+EOF
+
+#
 # Fish normally writes every interactive command to a history file. When the
 # root filesystem is read-only, this causes an error messaage to be printed
 # after every command. We disable the history file to avoid this.

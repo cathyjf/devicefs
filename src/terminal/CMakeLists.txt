@@ -5,13 +5,14 @@ cmake_minimum_required(VERSION 4.2)
 
 project(devicefs-terminal LANGUAGES CXX)
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    # Debian's libc++ module manifest has paths relative to the compiler tree.
-    # Clang reports its multiarch pathname, where those paths do not resolve.
-    # Finding the compiler-tree pathname preserves the manifest's source paths.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     unset(CMAKE_CXX_STDLIB_MODULES_JSON)
     find_file(CMAKE_CXX_STDLIB_MODULES_JSON NAMES libc++.modules.json
-        HINTS "${LLVM_BIN_DIRECTORY}/../lib" REQUIRED)
+        HINTS
+            "${LLVM_BIN_DIRECTORY}/../lib/c++"
+            "${LLVM_BIN_DIRECTORY}/../lib"
+        REQUIRED
+    )
 endif()
 
 set(CMAKE_CXX_STANDARD 23)

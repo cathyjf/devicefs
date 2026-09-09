@@ -183,8 +183,7 @@ GSL_SUPPRESS("26496",
         auto units = 0;
         while (units < (grapheme_end - cluster_begin)) {
             auto character = char32_t{};
-            const auto length = std::mbrtoc32(
-                &character, remaining.data(), remaining.size(), &conversion);
+            const auto length = DecodeNextCodePoint(character, remaining, conversion);
             if ((length == 0) || (length > remaining.size())) {
                 throw std::invalid_argument(
                     "WriteWrappingText requires UTF-8 text from PrepareTerminalText");

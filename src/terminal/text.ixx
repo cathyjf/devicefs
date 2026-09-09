@@ -208,6 +208,32 @@ private:
     State state_ = State::Text;
 };
 
+export
+[[nodiscard, msvc::forceinline]]
+constexpr auto DecodeNextCodePoint(
+    char32_t &output, const std::string_view input, std::mbstate_t &state) {
+#if !defined(__APPLE__)
+    // On non-Apple platforms, `std::mbrtoc32` supplies the capability we need.
+    // https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/mbrtoc16-mbrtoc323
+    return std::mbrtoc32(&output, input.data(), input.size(), &state);
+#else
+    // macOS lacks `std::mbrtoc32`. However, with the UTF-8 locale required
+    // by our callers, the `std::mbrtowc` function decodes each character into
+    // a Unicode code point stored in a `wchar_t`. We can therefore use that
+    // function and assign the decoded value directly to a `char32_t`.
+    auto wide_char = wchar_t{};
+    const auto result = std::mbrtowc(
+        &wide_char, input.data(), input.length(), &state);
+    if ((result != -1uz) && (result != -2uz)) {
+        static_assert(std::ranges::less_equal{}(
+            std::numeric_limits<decltype(wide_char)>::max(),
+            std::numeric_limits<std::remove_reference_t<decltype(output)>>::max()));
+        output = wide_char;
+    }
+    return result;
+#endif
+}
+
 namespace {
 
 auto AppendDisplayCharacter(std::string &output,
@@ -246,7 +272,7 @@ auto AppendDisplayCharacter(std::string &output,
     output.append(bytes);
 }
 
-}
+} // namespace
 
 // `PrepareTerminalText` prepares a supplied label for display inside an
 // interface. Embedded terminal commands could move the cursor or change the
@@ -270,7 +296,9 @@ auto AppendDisplayCharacter(std::string &output,
 // https://www.unicode.org/reports/tr9/#Directional_Formatting_Characters
 //
 // The caller selects a UTF-8 LC_CTYPE locale before invoking this operation,
-// since the application's locale determines how `std::mbrtoc32` interprets bytes.
+// since the application's locale determines how `DecodeNextCodePoint`
+// interprets bytes (except on Windows, where `DecodeNextCodePoint` always
+// interprets its input as UTF-8).
 export [[nodiscard]] auto PrepareTerminalText(std::string_view input)
     -> std::string {
     auto filter = VtFilter{};
@@ -279,14 +307,13 @@ export [[nodiscard]] auto PrepareTerminalText(std::string_view input)
     output.reserve(input.size());
     while (!input.empty()) {
         auto character = char32_t{};
-        const auto length = std::mbrtoc32(
-            &character, input.data(), input.size(), &conversion);
+        const auto length = DecodeNextCodePoint(character, input, conversion);
         // Malformed UTF-8 is displayed byte by byte as \xHH, except inside a
-        // removed command. `mbrtoc32` reports invalid or incomplete input as -1
-        // or -2 represented as size_t; both exceed the supplied input length.
-        // Each byte of malformed input is processed independently, so decoding
-        // the next byte starts with a fresh conversion state.
-        // https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/mbrtoc16-mbrtoc323
+        // removed command. `DecodeNextCodePoint` reports invalid or incomplete
+        // input as -1 or -2 represented as size_t; both exceed the supplied
+        // input length. Each byte of malformed input is processed
+        // independently, so decoding the next byte starts with a fresh
+        // conversion state.
         if (length > input.size()) {
             conversion = {};
             // A command's string payload is discarded even when its bytes are
@@ -312,4 +339,4 @@ export [[nodiscard]] auto PrepareTerminalText(std::string_view input)
     return output;
 }
 
-}
+} // namespace devicefs::terminal

@@ -86,6 +86,7 @@
     {
       "name": "windows-x64",
       "configurePreset": "windows-x64",
+      "configuration": "Release",
       "output": {
         "verbosity": "verbose"
       }
@@ -98,7 +99,6 @@
     {
       "name": "unix",
       "configurePreset": "unix",
-      "configuration": "Release",
       "inherits": "windows-x64"
     }
   ]

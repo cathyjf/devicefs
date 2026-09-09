@@ -1,0 +1,121 @@
+// SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+export module devicefs.terminal.text_tests;
+
+import std;
+import devicefs.terminal.text;
+import devicefs.terminal.safecast;
+import devicefs.terminal.test_support;
+
+using namespace std::string_view_literals;
+using namespace devicefs::terminal;
+using namespace devicefs::terminal::tests;
+
+namespace {
+
+constexpr auto kSeed = 0x54455854u;
+constexpr auto kCaseCount = 2048uz;
+
+// Combining arbitrary bytes with recognizable fragments exercises transitions
+// between prose, malformed UTF-8, and partly received terminal commands. A fixed
+// seed makes a failing case reproducible; diagnostics also print its input.
+[[nodiscard]] auto GeneratedInputs() {
+    constexpr auto fragments = std::array{
+        "ordinary text"sv, "日本語 — é — 👩‍💻 — ©️"sv,
+        "\0\t\n\r\\"sv, "\x18\x1a"sv, "\x1b"sv, "\x1b["sv,
+        "\x1b]"sv, "\x1bP"sv, "\x1bX"sv, "\x1b^"sv, "\x1b_"sv,
+        "\x1b\\"sv, "\a"sv, "31m"sv, "?25l"sv, "38:2::1:2:3m"sv,
+        "\u009b"sv, "\u009d"sv, "\u009c"sv, "\u0090"sv,
+        "\u061c\u200e\u202e\u2066\u2069"sv, "\u2028\u2029"sv,
+        "\xc0\xaf"sv, "\xed\xa0\x80"sv, "\xf4\x90\x80\x80"sv,
+        "\xf0\x9f"sv, "\xff"sv,
+    };
+    auto random = std::mt19937{kSeed};
+    auto inputs = std::vector<std::string>(kCaseCount);
+    for (auto &input : inputs) {
+        const auto pieces = random() % 32;
+        for (auto piece = 0u; piece < pieces; ++piece) {
+            if ((random() % 4) == 0) {
+                input.push_back(std::bit_cast<char>(FailFastCast<unsigned char>(random() % 256)));
+            } else {
+                input.append(fragments.at(random() % fragments.size()));
+            }
+        }
+    }
+    return inputs;
+}
+
+[[nodiscard]] auto FilterChunks(const std::string_view input, const auto &next_length) {
+    auto storage = input | std::views::transform([](const char byte) {
+        return std::bit_cast<char8_t>(byte);
+    }) | std::ranges::to<std::u8string>();
+    auto remaining = std::span{storage};
+    auto filter = VtFilter{};
+    auto output = std::u8string{};
+    do {
+        Require(filter.Remove(remaining.first(0)).empty(), "an empty chunk produced output"sv);
+        const auto length = std::min(remaining.size(), std::invoke(next_length));
+        output.append(filter.Remove(remaining.first(length)));
+        remaining = remaining.subspan(length);
+    } while (!remaining.empty());
+    return output;
+}
+
+}
+
+export [[nodiscard]] auto TestGeneratedText() -> bool {
+    const auto inputs = GeneratedInputs();
+    auto passed = Test("2048 generated labels containing malformed UTF-8 and terminal commands"sv, [&inputs] {
+        for (const auto &[index, input] : std::views::enumerate(inputs)) {
+            try {
+                const auto prepared = PrepareTerminalText(input);
+                Require(PrepareTerminalText(input + "\x18" "VISIBLE_END").ends_with("VISIBLE_END"sv),
+                    "sequence cancellation did not restore ordinary label text"sv);
+                auto remaining = std::string_view{prepared};
+                auto state = std::mbstate_t{};
+                while (!remaining.empty()) {
+                    auto character = char32_t{};
+                    const auto length = DecodeNextCodePoint(character, remaining, state);
+                    Require((length > 0) && (length <= remaining.size()),
+                        "prepared text contains invalid UTF-8 or a NUL"sv);
+                    Require((character <= U'\U0010ffff') &&
+                        !((character >= 0xd800) && (character <= 0xdfff)),
+                        "prepared text contains a non-scalar Unicode value"sv);
+                    Require((character >= U' ') &&
+                        !((character >= U'\x7f') && (character <= U'\x9f')),
+                        "prepared text contains a raw terminal control"sv);
+                    Require((character != U'\u061c') &&
+                        !((character >= U'\u200e') && (character <= U'\u200f')) &&
+                        !((character >= U'\u2028') && (character <= U'\u202e')) &&
+                        !((character >= U'\u2066') && (character <= U'\u2069')),
+                        "prepared text contains an unescaped directional or line control"sv);
+                    remaining.remove_prefix(length);
+                }
+            } catch (const std::exception &error) {
+                throw std::runtime_error(std::format("case {}, seed {}, input {:?}: {}",
+                    index, kSeed, input, error.what()));
+            }
+        }
+    });
+    passed &= Test("2048 generated logs retaining the same output across byte and random chunk boundaries"sv,
+        [&inputs] {
+            auto random = std::mt19937{kSeed};
+            for (const auto &[index, input] : std::views::enumerate(inputs)) {
+                const auto whole = FilterChunks(input, [&input] { return input.size(); });
+                const auto bytes = FilterChunks(input, [] { return 1uz; });
+                const auto chunks = FilterChunks(input, [&random] {
+                    return CompileTimeCast<std::size_t>(random() % 32) + 1;
+                });
+                if ((whole != bytes) || (whole != chunks)) {
+                    throw std::runtime_error(std::format(
+                        "chunking changed log output in case {}, seed {}, input {:?}", index, kSeed, input));
+                }
+                Require(std::ranges::all_of(whole, [](const char8_t byte) {
+                    return (byte == u8'\t') || (byte == u8'\n') ||
+                        ((byte >= u8' ') && (byte != u8'\x7f'));
+                }), "filtered log contains an unexpected ASCII control"sv);
+            }
+        });
+    return passed;
+}

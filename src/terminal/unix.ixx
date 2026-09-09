@@ -301,9 +301,7 @@ private:
             // Ctrl+C can already be queued after a preceding reply, or arrive
             // while this query waits. Consume only that byte so other keys keep
             // their order when the caller handles cancellation.
-            if (const auto cancellation = pending_.find('\x03');
-                cancellation != std::string::npos) {
-                pending_.erase(cancellation, 1);
+            if (ConsumeCancellation()) {
                 throw InputCancelled{};
             }
             if (!ReceiveUntil(deadline)) {
@@ -322,12 +320,27 @@ private:
         }
     }
 
+    [[nodiscard]] auto ConsumeCancellation() -> bool {
+        const auto cancellation = pending_.find('\x03');
+        if (cancellation == std::string::npos) {
+            return false;
+        }
+        pending_.erase(cancellation, 1);
+        return true;
+    }
+
     // Escape is both a key and the first byte of navigation sequences. A short
     // wait admits a fragmented sequence; a lone Escape becomes Back when that
     // wait expires. Other keys already in the input queue retain their order.
     [[nodiscard]] auto ReadEscape() -> std::optional<MenuKey> {
         const auto deadline = std::chrono::steady_clock::now() + unix_detail::kEscapeTimeout;
         for (;;) {
+            // Ctrl+C is user input even when a fragmented terminal reply
+            // surrounds it. Consume cancellation before removing a complete
+            // sequence, leaving the reply and other keys queued for later input.
+            if (ConsumeCancellation()) {
+                return MenuKey::Cancel;
+            }
             if (pending_.size() > 1) {
                 if ((pending_[1] != '[') && (pending_[1] != 'O')) {
                     pending_.erase(0, 1);

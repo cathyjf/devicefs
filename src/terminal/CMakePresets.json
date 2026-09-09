@@ -10,6 +10,7 @@
     {
       "name": "base-configure-preset",
       "hidden": true,
+      "binaryDir": "${sourceDir}/../../build/terminal/${presetName}",
       "cacheVariables": {
         "DEVICEFS_TERMINAL_BUILD_TESTS": true
       },
@@ -32,7 +33,6 @@
         "lhs": "${hostSystemName}",
         "rhs": "Windows"
       },
-      "binaryDir": "${sourceDir}/../../build/terminal/${presetName}",
       "errors": {
         "dev": true
       }
@@ -47,7 +47,6 @@
       "inherits": "base-configure-preset",
       "generator": "Ninja Multi-Config",
       "toolchainFile": "${sourceDir}/../unix/cmake/llvm.cmake",
-      "binaryDir": "${sourceDir}/../../build/terminal/${presetName}",
       "condition": {
         "type": "notEquals",
         "lhs": "${hostSystemName}",

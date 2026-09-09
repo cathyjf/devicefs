@@ -208,19 +208,77 @@ private:
     State state_ = State::Text;
 };
 
+[[nodiscard, msvc::forceinline]]
+constexpr auto TransformDecodingResult(
+    const std::size_t result,
+    [[maybe_unused]] const std::size_t input_size,
+    [[maybe_unused]] const char32_t &output) {
+    // Microsoft's UCRT rejects surrogate values and values above U+10FFFF
+    // before reporting a successful conversion, so its result already meets
+    // the scalar-value requirement for label preparation and width measurement.
+    // The checks are in `__mbrtoc32_utf8`, in the Windows SDK source file
+    // `ucrt/convert/mbrtoc32.cpp`; the documented contract requires valid UTF-8:
+    // https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/mbrtoc16-mbrtoc323
+    //
+    // Therefore, with MSVC++, the result of `std::mbrtoc32` can be directly
+    // relied upon. The same analysis does not apply to glibc. The explanation
+    // follows.
+    //
+    // UTF-8 encodes Unicode scalar values. U+10FFFF is the greatest Unicode
+    // code point. The lower bound `0xd800` starts the high-surrogate range
+    // U+D800..U+DBFF, and `0xdfff` ends the adjacent low-surrogate range
+    // U+DC00..U+DFFF. Those ranges reserve values for the two halves of UTF-16
+    // surrogate pairs. The individual surrogate values are excluded from Unicode
+    // scalar values, so none of U+D800..U+DFFF can be encoded in valid UTF-8.
+    // Unicode section 3.8 defines the surrogate ranges in D71 and D73; section 3.9
+    // defines scalar values in D76 and permitted UTF-8 encodings in D92 and Table 3-7:
+    // https://www.unicode.org/versions/Unicode17.0.0/core-spec/chapter-3/
+    //
+    // The UTF-8 specification changed: RFC 2279 (1998) allowed the 31-bit UCS-4
+    // range through 0x7FFFFFFF, using up to six bytes per value. RFC 3629 (2003)
+    // restricted UTF-8 to Unicode's U+10FFFF limit and made Unicode the normative
+    // authority for the encoding. Section 12 explicitly records that change:
+    // https://www.rfc-editor.org/rfc/rfc2279.html#section-2
+    // https://www.rfc-editor.org/rfc/rfc3629.html#section-12
+    //
+    // glibc retains support for values from the older, broader range. Without this
+    // range check, `PrepareTerminalText` copies bytes that are invalid under the
+    // modern definition into its output as ordinary text. `MeasureText` then
+    // converts that output to UTF-16, which cannot represent those values. The
+    // conversion can throw, causing a malformed label to abort menu rendering.
+    // Returning the decoder's invalid-sequence result, `size_t{-1}`, makes
+    // `PrepareTerminalText` display the original bytes as `\xHH` instead. GNU's
+    // portability documentation records glibc's decoding beyond U+10FFFF:
+    // https://www.gnu.org/software/gnulib/manual/html_node/mbrtowc.html
+#if !defined(_MSC_VER)
+    if ((result <= input_size) &&
+        ((output > U'\U0010ffff') || ((output >= 0xd800) && (output <= 0xdfff)))) {
+        return -1uz;
+    }
+#endif
+    return result;
+}
+
+// `DecodeNextCodePoint` decodes the next UTF-8 character for label preparation
+// and width measurement.
 export
 [[nodiscard, msvc::forceinline]]
 constexpr auto DecodeNextCodePoint(
     char32_t &output, const std::string_view input, std::mbstate_t &state) {
 #if !defined(__APPLE__)
-    // On non-Apple platforms, `std::mbrtoc32` supplies the capability we need.
-    // https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/mbrtoc16-mbrtoc323
-    return std::mbrtoc32(&output, input.data(), input.size(), &state);
+    return TransformDecodingResult(
+        std::mbrtoc32(&output, input.data(), input.size(), &state),
+        input.size(), output);
 #else
     // macOS lacks `std::mbrtoc32`. However, with the UTF-8 locale required
     // by our callers, the `std::mbrtowc` function decodes each character into
     // a Unicode code point stored in a `wchar_t`. We can therefore use that
     // function and assign the decoded value directly to a `char32_t`.
+    //
+    // Apple's UTF-8 decoder rejects encodings of surrogate values and values
+    // above U+10FFFF before returning a decoded character. A successful
+    // `std::mbrtowc` conversion therefore needs no additional scalar-range check:
+    // https://github.com/apple-oss-distributions/Libc/blob/main/locale/FreeBSD/utf8.c
     auto wide_char = wchar_t{};
     const auto result = std::mbrtowc(
         &wide_char, input.data(), input.length(), &state);

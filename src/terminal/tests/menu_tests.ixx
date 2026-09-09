@@ -10,6 +10,7 @@ import devicefs.terminal;
 import devicefs.terminal.test_support;
 import devicefs.terminal.frame;
 import devicefs.terminal.menu;
+import devicefs.terminal.menu_measurements;
 
 using namespace std::string_view_literals;
 using namespace devicefs::terminal;
@@ -64,8 +65,8 @@ public:
     }
 
     template <WidthPolicy Policy = WidthPolicy::AllModes>
-    auto Flip(const FrameBuffer &frame) -> bool {
-        return presenter_.Flip<Policy>(*this, frame);
+    auto Flip(this auto &self, const FrameBuffer &frame) -> bool {
+        return self.presenter_.template Flip<Policy>(self, frame);
     }
 
     template <WidthPolicy Policy = WidthPolicy::AllModes>
@@ -294,7 +295,36 @@ constexpr auto kEntries = std::array{"Alpha"sv, "Bravo"sv, "Charlie"sv, "Delta"s
 }
 
 export [[nodiscard]] auto TestMenu() -> bool {
-    auto passed = Test("a back buffer leaving terminal output untouched until Flip"sv, [] {
+    auto passed = Test("complete menu traffic for initial display, selection, scrolling, and resizing"sv, [] {
+        constexpr auto input = std::array{
+            MenuInput{MenuKey::Down}, MenuInput{MenuKey::End}, MenuInput{MenuKey::Home},
+            MenuInput{MenuKey::Resize}, MenuInput{MenuKey::Accept}};
+        auto terminal = MeasuringConsole<MenuConsole>{input};
+        terminal.resize_to = TerminalSize{.rows = 8, .columns = 90};
+        const auto entries = [] {
+            auto result = std::vector<std::string>{};
+            for (auto index = 1; index <= 24; ++index) {
+                result.push_back(std::format("Backup {:02}", index));
+            }
+            result.back() = "Previously unseen XYZ";
+            return result;
+        }();
+        const auto labels = entries | std::views::transform([](const auto &entry) {
+            return std::string_view{entry};
+        }) | std::ranges::to<std::vector>();
+        Require(SelectMenuItem(terminal, kHeader, labels) == 0,
+            "measuring the menu changed its selection"sv);
+        PrintMenuMeasurements(terminal.measurements);
+        Require(terminal.measurements.size() == input.size(), "a menu update was not measured"sv);
+        Require((terminal.measurements.at(0).cursor_queries > 0) &&
+            (terminal.measurements.at(2).cursor_queries > 0),
+            "initial or unfamiliar text was not measured through the terminal"sv);
+        for (const auto index : {1uz, 3uz, 4uz}) {
+            Require(terminal.measurements.at(index).cursor_queries == 0,
+                "cached selection, scrolling, or resizing queried character widths again"sv);
+        }
+    });
+    passed &= Test("a back buffer leaving terminal output untouched until Flip"sv, [] {
         constexpr auto input = std::array{MenuInput{MenuKey::Accept}};
         constexpr auto size = TerminalSize{.rows = 3, .columns = 30};
         auto terminal = MenuConsole{input, size};

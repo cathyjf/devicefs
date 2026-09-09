@@ -71,7 +71,8 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
     endif()
     target_sources(devicefs-terminal-test PRIVATE
         FILE_SET CXX_MODULES FILES tests/menu_tests.ixx tests/frame_tests.ixx
-            tests/test_support.ixx tests/native_tests.ixx
+            tests/test_support.ixx tests/native_tests.ixx tests/text_tests.ixx
+            tests/menu_measurements.ixx
     )
     target_link_libraries(devicefs-terminal-test PRIVATE devicefs-terminal)
     target_include_directories(devicefs-terminal-test PRIVATE
@@ -99,7 +100,7 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
         target_link_libraries(devicefs-terminal-test PRIVATE util)
         add_test(NAME devicefs_terminal_native COMMAND devicefs-terminal-test --native-test)
     endif()
-    set_tests_properties(devicefs_terminal_native PROPERTIES TIMEOUT 30)
+    set_tests_properties(devicefs_terminal devicefs_terminal_native PROPERTIES TIMEOUT 30)
 endif()
 
 foreach(target IN LISTS DEVICEFS_TERMINAL_ANALYSIS_TARGETS)

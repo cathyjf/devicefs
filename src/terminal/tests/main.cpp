@@ -35,6 +35,8 @@ import devicefs.terminal.menu;
 import devicefs.terminal.menu_tests;
 import devicefs.terminal.frame_tests;
 import devicefs.terminal.native_tests;
+import devicefs.terminal.text_tests;
+import devicefs.terminal.menu_measurements;
 import devicefs.terminal.reports;
 
 #ifdef _WIN32
@@ -117,6 +119,11 @@ auto CheckText(const std::string_view actual, const std::string_view expected)
             "a\033[ éb"sv, "aéb"sv},
         TextCase{"invalid UTF-8 bytes becoming visible notation"sv,
             "a\377\300\257\233z"sv, "a\\xFF\\xC0\\xAF\\x9Bz"sv},
+        TextCase{"surrogate encodings and values beyond Unicode becoming visible bytes"sv,
+            "\xed\xa0\x80 \xf4\x90\x80\x80 \xf8\x88\x80\x80\x80 \xfc\x84\x80\x80\x80\x80"sv,
+            "\\xED\\xA0\\x80 \\xF4\\x90\\x80\\x80 \\xF8\\x88\\x80\\x80\\x80 \\xFC\\x84\\x80\\x80\\x80\\x80"sv},
+        TextCase{"valid Unicode scalars bordering the surrogate range and maximum value"sv,
+            "\ud7ff\ue000\U0010ffff"sv, "\ud7ff\ue000\U0010ffff"sv},
         TextCase{"an incomplete UTF-8 sequence at the end of a label"sv,
             "a\360\237"sv, "a\\xF0\\x9F"sv},
         TextCase{"invalid bytes remaining inside discarded payloads"sv,
@@ -632,6 +639,7 @@ constexpr auto EXIT_FAILURE = 1;
 [[nodiscard]] auto SelfTest() -> int {
     auto passed = TestTextPreparation();
     passed &= TestLoggingFilter();
+    passed &= TestGeneratedText();
     passed &= TestWrapping();
     passed &= TestMenu();
     passed &= RunFrameTests();
@@ -644,14 +652,17 @@ constexpr auto kHelp = R"(Usage:
   devicefs-terminal-test --self-test
   devicefs-terminal-test --native-test
   devicefs-terminal-test --menu
+  devicefs-terminal-test --measure-menu
   devicefs-terminal-test --text TEXT
   devicefs-terminal-test --file FILENAME
 
 With no arguments, display sample text in the attached console.
 The text is filtered, wrapped, and indented by two columns after each wrap.
 Text begins at the current cursor position and uses the remaining screen rows.
+--measure-menu reports each menu update's time and terminal traffic after exit.
 )"sv;
 
+template <MenuTerminal Console = NativeConsole>
 [[nodiscard]] auto MenuDemo() -> int {
     constexpr auto header = std::array{
         "DeviceFs terminal menu demonstration"sv,
@@ -677,15 +688,25 @@ Text begins at the current cursor position and uses the remaining screen rows.
     for (const auto &entry : entries) {
         labels.push_back(entry);
     }
-    const auto selection = [&] {
-        auto terminal = NativeConsole{};
-        return SelectMenuItem(terminal, header, labels);
+    struct MenuResult {
+        std::optional<std::size_t> selection;
+        std::vector<MenuMeasurement> measurements;
+    };
+    const auto [selection, measurements] = [&] {
+        auto terminal = Console{};
+        const auto selection = SelectMenuItem(terminal, header, labels);
+        if constexpr (std::same_as<Console, MeasuringConsole<NativeConsole>>) {
+            return MenuResult{.selection = selection, .measurements = std::move(terminal.measurements)};
+        } else {
+            return MenuResult{.selection = selection, .measurements = {}};
+        }
     }();
     if (selection) {
         std::println("Selected index: {}", *selection);
     } else {
         std::println("Menu cancelled.");
     }
+    PrintMenuMeasurements(measurements);
     return EXIT_SUCCESS;
 }
 
@@ -693,15 +714,23 @@ Text begins at the current cursor position and uses the remaining screen rows.
 
 auto main(const int argc, char *const argv[]) -> int {
 #ifdef _WIN32
-    std::ignore = std::setlocale(LC_CTYPE, ".UTF8");
+    constexpr auto kLocaleCodeset = ".UTF8";
 #else
-    std::ignore = std::setlocale(LC_CTYPE, "");
+    constexpr auto kLocaleCodeset = "C.UTF-8";
 #endif
     const auto arguments = std::span{argv, argv + argc};
     try {
+        if (std::setlocale(LC_CTYPE, kLocaleCodeset) == nullptr) {
+            throw std::runtime_error(std::format(
+                "failed to set the character encoding to {}", kLocaleCodeset));
+        }
         if ((arguments.size() == 2) &&
             (std::string_view{arguments[1]} == "--menu"sv)) {
             return MenuDemo();
+        }
+        if ((arguments.size() == 2) &&
+            (std::string_view{arguments[1]} == "--measure-menu"sv)) {
+            return MenuDemo<MeasuringConsole<NativeConsole>>();
         }
         if ((arguments.size() == 2) &&
             (std::string_view{arguments[1]} == "--self-test"sv)) {

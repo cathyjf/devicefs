@@ -32,7 +32,5 @@ as a separate library with the project's analysis and compiler settings.
 On MSVC, C26494 is disabled through the compatibility header textually included
 by the vendored source: the rule reports four declarations without initializers,
 but every value is assigned before reading. The reason is explained beside the
-pragma. First-party code retains the rule. The detector includes `precomp.h`
-for its integer typedefs and, on Windows, WIL's `LOG_CAUGHT_EXCEPTION`. The
-[replacement header](../../compat/precomp.h) supplies those dependencies so
-the copied source can compile without the rest of Windows Terminal.
+pragma. First-party code retains the rule. The detector includes `terminal_compat.h`
+for its integer typedefs and for other compatibility shims.

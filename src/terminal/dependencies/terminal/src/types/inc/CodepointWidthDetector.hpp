@@ -3,13 +3,7 @@
 
 #pragma once
 
-#ifdef _MSC_VER
 import std;
-#else
-#include <functional>
-#include <string_view>
-#include <unordered_map>
-#endif
 
 enum class TextMeasurementMode
 {

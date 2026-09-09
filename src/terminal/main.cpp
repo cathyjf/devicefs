@@ -15,25 +15,29 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #ifdef _WIN32
-#include <devicefs/strsafe_compat.h>
+    #include <devicefs/strsafe_compat.h>
 #else
-#include <clocale>
+    // The <clocale> header unit is needed for `LC_CTYPE`.
+    // It is imported on Windows and textually included on other platforms.
+    #include <clocale>
 #endif
 
 import std;
-// The <clocale> header unit is needed for `LC_CTYPE`.
+
 #ifdef _WIN32
-import <clocale>;
+    import <clocale>;
 #endif
+
 import devicefs.terminal;
 import devicefs.terminal.menu;
 import devicefs.terminal.menu_tests;
 import devicefs.terminal.frame_tests;
 import devicefs.terminal.reports;
+
 #ifdef _WIN32
-import devicefs.terminal.windows;
+    import devicefs.terminal.windows;
 #else
-import devicefs.terminal.unix;
+    import devicefs.terminal.unix;
 #endif
 
 using namespace std::string_view_literals;

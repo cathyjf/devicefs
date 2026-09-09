@@ -1,12 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-module;
-
-#ifdef _WIN32
-#include <devicefs/strsafe_compat.h>
-#endif
-
 export module devicefs.terminal.frame_tests;
 
 import std;

@@ -6,15 +6,16 @@ module;
 #include "compat/gsl_suppress.h"
 
 #ifndef _MSC_VER
-#include <terminal/src/types/inc/CodepointWidthDetector.hpp>
+    #include <terminal/src/types/inc/CodepointWidthDetector.hpp>
 #endif
 
 export module devicefs.terminal;
 
 import std;
 #ifdef _MSC_VER
-import <terminal/src/types/inc/CodepointWidthDetector.hpp>;
+    import <terminal/src/types/inc/CodepointWidthDetector.hpp>;
 #endif
+
 export import devicefs.terminal.text;
 
 using namespace std::string_view_literals;

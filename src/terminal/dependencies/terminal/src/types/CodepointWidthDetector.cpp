@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-#include "precomp.h"
+#include "terminal_compat.h"
 #include "inc/CodepointWidthDetector.hpp"
 
 // I was trying to minimize dependencies in this code so that it's easier to port to other terminal applications.

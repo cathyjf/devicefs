@@ -9,7 +9,11 @@ export module devicefs.terminal.safecast;
 
 import std;
 #ifdef _WIN32
-import <intrin.h>;
+    import <intrin.h>;
+#endif
+
+#ifndef __has_builtin
+    #define __has_builtin(x) 0
 #endif
 
 export namespace devicefs::terminal {
@@ -23,8 +27,7 @@ template <std::integral Target, std::integral Source>
     requires ((std::numeric_limits<Target>::digits <
         std::numeric_limits<Source>::digits) ||
         (std::is_signed_v<Source> && !std::is_signed_v<Target>))
-[[nodiscard]]
-[[msvc::forceinline]]
+[[nodiscard, msvc::forceinline]]
 constexpr auto FailFastCast(const Source input) noexcept -> Target {
     // Unary `+` promotes character operands to ordinary integer types without
     // changing their values. The standard comparison functions can then accept
@@ -34,6 +37,8 @@ constexpr auto FailFastCast(const Source input) noexcept -> Target {
 #ifdef _WIN32
         // Reason code 8 is FAST_FAIL_RANGE_CHECK_FAILURE.
         __fastfail(8);
+#elif __has_builtin(__builtin_trap)
+        __builtin_trap();
 #else
         std::terminate();
 #endif
@@ -46,8 +51,7 @@ constexpr auto FailFastCast(const Source input) noexcept -> Target {
 
 template <class Target, auto... Constant, class... Source>
     requires ((sizeof...(Constant) + sizeof...(Source)) == 1)
-[[nodiscard]]
-[[msvc::forceinline]]
+[[nodiscard, msvc::forceinline]]
 constexpr decltype(auto) CompileTimeCast(Source &&...input) {
     GSL_SUPPRESS("26493",
         "C26493 misidentifies this braced initialization as a C-style "

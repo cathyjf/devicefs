@@ -223,7 +223,22 @@ public:
 
 [[nodiscard]] auto TestNativeInput(NativeInput &input) -> bool {
     const auto original_modes = input.Modes();
-    auto passed = Test("native fragmented cursor reply with keys before and after it"sv, [&] {
+    auto passed = Test("native update measurements counting begin, presentation, and guard output"sv, [&] {
+        constexpr auto update_sequences = "\x1b[?2026h\x1b[?2026l\x1b[?2026l"sv;
+        auto console = MeasuringConsole<NativeConsole>{};
+        {
+            const auto update = console.BeginUpdate();
+            console.PresentFrame();
+        }
+        input.Feed("\x0c"sv);
+        Require(console.ReadMenuInput().key == MenuKey::Redraw,
+            "recording an update changed the supplied input"sv);
+        const auto &measurement = console.measurements.at(0);
+        Require(measurement.writes == 3, "an update control write was not counted"sv);
+        Require(measurement.bytes == update_sequences.size(),
+            "update measurements omitted control-sequence bytes"sv);
+    });
+    passed &= Test("native fragmented cursor reply with keys before and after it"sv, [&] {
         auto console = TestConsole{};
         auto remainder = std::future<void>{};
         console.on_write = [&](const auto text) {

@@ -165,6 +165,7 @@ private:
     friend class BaseConsole;
     static constexpr auto kEnterMenu = "\x1b[?1049h\x1b[?25l"sv;
 
+protected:
     // These control sequences contain only ASCII, so WriteConsoleA can send
     // them under any console code page without allocating a UTF-16 copy.
     // Cleanup ignores output failure to preserve an exception already in flight.
@@ -174,6 +175,7 @@ private:
             FailFastCast<DWORD>(sequence.size()), &written, nullptr);
     }
 
+private:
     [[nodiscard]] auto RestoreScreenOnExit() {
         auto previous_cursor = CONSOLE_CURSOR_INFO{};
         if (!GetConsoleCursorInfo(output_.get(), &previous_cursor)) {

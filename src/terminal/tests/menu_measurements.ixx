@@ -20,8 +20,10 @@ struct MenuMeasurement {
     std::chrono::steady_clock::duration elapsed{};
 };
 
-// `MeasuringConsole` records the terminal traffic and elapsed time of each menu
-// update. Reaching the next input request completes the measurement; waiting
+// `MeasuringConsole` records output calls, supplied UTF-8 bytes, terminal queries,
+// and elapsed time for each menu update. Both ordinary writes and nonthrowing
+// control writes count, including the update guard's release of synchronized
+// output. Reaching the next input request completes the measurement; waiting
 // for the user is excluded. The initial measurement also includes preparation
 // of the labels and entry into the menu screen. Results remain in memory until
 // the caller has left the menu, so reporting cannot interfere with its drawing.
@@ -34,6 +36,12 @@ public:
         ++current_.writes;
         current_.bytes += text.size();
         Console::Write(text);
+    }
+
+    auto WriteControlSequenceNoThrow(const std::string_view sequence) noexcept -> void {
+        ++current_.writes;
+        current_.bytes += sequence.size();
+        Console::WriteControlSequenceNoThrow(sequence);
     }
 
     [[nodiscard]] auto QueryCursor() -> std::optional<CursorPosition> {

@@ -194,10 +194,12 @@ private:
     static constexpr auto kEnterMenu = "\x1b[?1049h\x1b[?25s\x1b[?25l"sv;
     static constexpr auto kLeaveMenu = "\x1b[0m\x1b[?25h\x1b[?25r\x1b[?1049l"sv;
 
+protected:
     auto WriteControlSequenceNoThrow(const std::string_view sequence) const noexcept -> void {
         std::ignore = unix_detail::WriteTerminal(descriptor_, sequence);
     }
 
+private:
     // Saving private mode 25 on entry preserves cursor visibility on terminals
     // supporting XTSAVE/XTRESTORE. Restoration first shows the cursor, then
     // restores the saved setting; terminals that ignore those extensions are

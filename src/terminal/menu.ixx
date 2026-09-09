@@ -35,19 +35,18 @@ enum class MenuScrollPolicy { Line, Page };
 // reaches the display. Layout sometimes measures text by writing to the
 // terminal; `BeginUpdate` owns that temporary work, and `InvalidateFrameRows`
 // identifies the rows those measurements may overwrite.
-template <typename T>
-concept MenuTerminal = Terminal<T> && requires(T &terminal,
+template <typename T, WidthPolicy Policy = WidthPolicy::AllModes>
+concept MenuTerminal = FrameTerminal<T> && requires(T &terminal,
     const FrameBuffer &frame, const std::string_view text) {
     { terminal.QuerySize() } -> std::same_as<std::optional<TerminalSize>>;
     { terminal.ReadMenuInput() } -> std::same_as<MenuInput>;
-    terminal.EnterMenu();
-    terminal.BeginUpdate();
-    terminal.PresentFrame();
-    { terminal.template Flip<WidthPolicy::AllModes>(frame) } -> std::same_as<bool>;
-    { terminal.template KnownTextWidths<WidthPolicy::AllModes>(text) } ->
+    { terminal.EnterMenu() } -> std::destructible;
+    { terminal.BeginUpdate() } -> std::destructible;
+    { terminal.template Flip<Policy>(frame) } -> std::same_as<bool>;
+    { terminal.template KnownTextWidths<Policy>(text) } ->
         std::same_as<std::optional<std::vector<MeasuredCluster>>>;
-    terminal.InvalidateFrameRows(1, 1);
-    terminal.InvalidateFrame();
+    { terminal.InvalidateFrameRows(1, 1) } -> std::same_as<void>;
+    { terminal.InvalidateFrame() } -> std::same_as<void>;
 };
 
 }
@@ -104,7 +103,7 @@ auto MoveTo(Terminal auto &terminal, const int row, const int column) -> void {
 // reports cannot establish the row boundaries, the function returns `std::nullopt`;
 // the menu then displays a message offering a redraw.
 template <WidthPolicy Policy>
-[[nodiscard]] auto LayoutText(MenuTerminal auto &terminal,
+[[nodiscard]] auto LayoutText(MenuTerminal<Policy> auto &terminal,
     const std::string_view text, const TerminalSize size,
     const int first_row, const int available_rows, const std::size_t limit)
     -> std::optional<TextLayout> {
@@ -276,7 +275,7 @@ public:
     }
 
     template <WidthPolicy Policy, MenuScrollPolicy Scrolling>
-    [[nodiscard]] auto Prepare(MenuTerminal auto &terminal,
+    [[nodiscard]] auto Prepare(MenuTerminal<Policy> auto &terminal,
         const MenuViewport viewport, const MenuInput input) -> bool {
         if (entries_.empty()) {
             return true;
@@ -352,7 +351,7 @@ public:
 
 private:
     template <WidthPolicy Policy>
-    [[nodiscard]] auto EnsureLayout(MenuTerminal auto &terminal,
+    [[nodiscard]] auto EnsureLayout(MenuTerminal<Policy> auto &terminal,
         const MenuViewport viewport, const std::size_t entry) -> bool {
         auto &layout = entry_layouts_.at(entry);
         if (!layout) {
@@ -363,7 +362,7 @@ private:
     }
 
     template <WidthPolicy Policy>
-    [[nodiscard]] auto Advance(MenuTerminal auto &terminal, const MenuViewport viewport,
+    [[nodiscard]] auto Advance(MenuTerminal<Policy> auto &terminal, const MenuViewport viewport,
         Position position, const int direction) -> Position {
         if (direction > 0) {
             if (EnsureLayout<Policy>(terminal, viewport, position.entry)) {
@@ -384,7 +383,7 @@ private:
     }
 
     template <WidthPolicy Policy>
-    auto Scroll(MenuTerminal auto &terminal, const MenuViewport viewport,
+    auto Scroll(MenuTerminal<Policy> auto &terminal, const MenuViewport viewport,
         const int direction, const std::size_t rows) -> void {
         for (auto count = std::size_t{}; count < rows; ++count) {
             const auto next = Advance<Policy>(terminal, viewport, viewport_begin_, direction);
@@ -396,7 +395,7 @@ private:
     }
 
     template <WidthPolicy Policy>
-    [[nodiscard]] auto FillViewport(MenuTerminal auto &terminal, const MenuViewport viewport) -> bool {
+    [[nodiscard]] auto FillViewport(MenuTerminal<Policy> auto &terminal, const MenuViewport viewport) -> bool {
         visible_positions_.clear();
         auto position = viewport_begin_;
         for (auto row = 0; row < viewport.rows; ++row) {
@@ -440,7 +439,7 @@ public:
     auto InvalidateLayout() noexcept -> void { layout_width_ = 0; }
 
     template <WidthPolicy Policy>
-    [[nodiscard]] auto Prepare(MenuTerminal auto &terminal, const MenuViewport viewport) -> bool {
+    [[nodiscard]] auto Prepare(MenuTerminal<Policy> auto &terminal, const MenuViewport viewport) -> bool {
         if (!layout_) {
             layout_ = LayoutText<Policy>(terminal, text_, viewport.size,
                 viewport.first_row, viewport.rows, std::numeric_limits<std::size_t>::max());
@@ -535,7 +534,7 @@ struct MenuPresentation {
 // set to false. The input loop then waits for resizing, redrawing, leaving the
 // full-name view, or cancellation.
 template <WidthPolicy Policy, MenuScrollPolicy Scrolling>
-[[nodiscard]] auto PresentMenu(MenuTerminal auto &terminal, const MenuText &text,
+[[nodiscard]] auto PresentMenu(MenuTerminal<Policy> auto &terminal, const MenuText &text,
     MenuListView &list, const std::optional<std::reference_wrapper<FullNameView>> full_name,
     const std::optional<TerminalSize> cached_size, const MenuInput input) -> MenuPresentation {
     const auto update = terminal.BeginUpdate();
@@ -617,11 +616,11 @@ export namespace devicefs::terminal {
 // cancellation; terminal I/O exceptions propagate to the caller.
 template <WidthPolicy Policy = WidthPolicy::AllModes,
     MenuScrollPolicy Scrolling = MenuScrollPolicy::Line>
-[[nodiscard]] auto SelectMenuItem(MenuTerminal auto &terminal,
+[[nodiscard]] auto SelectMenuItem(MenuTerminal<Policy> auto &terminal,
     const std::span<const std::string_view> header,
     const std::span<const std::string_view> entries,
     const std::span<const std::string_view> footer = {},
-    const std::size_t initial_selection = 0) -> std::optional<std::size_t> {
+    const std::size_t initial_selection = 0) -> std::optional<std::size_t> try {
     using namespace menu_detail;
     const auto text = MenuText{.header = PrepareLines(header),
         .entries = PrepareLines(entries), .footer = PrepareLines(footer)};
@@ -672,6 +671,8 @@ template <WidthPolicy Policy = WidthPolicy::AllModes,
         }
         presentation = present(input, presentation.terminal_size);
     }
+} catch (const InputCancelled &) {
+    return std::nullopt;
 }
 
 }

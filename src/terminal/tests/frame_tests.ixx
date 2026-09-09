@@ -5,30 +5,14 @@ export module devicefs.terminal.frame_tests;
 
 import std;
 import devicefs.terminal;
+import devicefs.terminal.test_support;
 import devicefs.terminal.frame;
 
 using namespace std::string_view_literals;
 using namespace devicefs::terminal;
+using namespace devicefs::terminal::tests;
 
 namespace {
-
-auto Require(const bool condition, const std::string_view message) -> void {
-    if (!condition) {
-        throw std::runtime_error(std::string{message});
-    }
-}
-
-[[nodiscard]] auto Test(const std::string_view name, const auto &operation) -> bool {
-    std::println("Testing {}.", name);
-    try {
-        std::invoke(operation);
-        std::println("PASS: {}.", name);
-        return true;
-    } catch (const std::exception &error) {
-        std::println(std::cerr, "FAIL: {}: {}", name, error.what());
-        return false;
-    }
-}
 
 // This terminal has explicit widths for the Unicode text used by these tests.
 // MeasureText identifies complete groups, but the fake never uses their width
@@ -47,6 +31,8 @@ public:
     explicit FrameConsole(const TerminalSize size) noexcept : size_{size} {}
 
     auto Write(std::string_view text) -> void {
+        ++writes;
+        bytes += text.size();
         while (!text.empty()) {
             if (text.starts_with("\x1b["sv)) {
                 text.remove_prefix(2);
@@ -58,12 +44,14 @@ public:
                 const auto number = parameters.empty() ? 0 :
                     std::stoi(std::string{parameters});
                 if (command == 'H') {
+                    ++cursor_moves;
                     const auto separator = parameters.find(';');
                     cursor_ = {.row = number == 0 ? 1 : number,
                         .column = separator == std::string_view::npos ? 1 :
                             std::stoi(std::string{parameters.substr(separator + 1)})};
                     pending_wrap_ = false;
                 } else if (command == 'm') {
+                    ++attribute_changes;
                     Require((number == 0) || (number == 7), "unexpected frame attribute"sv);
                     reverse_ = number == 7;
                 } else if (command == 'J') {
@@ -125,7 +113,8 @@ public:
         }
     }
 
-    [[nodiscard]] auto QueryCursor() const noexcept -> std::optional<CursorPosition> {
+    [[nodiscard]] auto QueryCursor() noexcept -> std::optional<CursorPosition> {
+        ++queries;
         return cursor_;
     }
     auto PresentFrame() noexcept -> void { ++presentations; }
@@ -134,6 +123,11 @@ public:
         erased.clear();
         presentations = 0;
         screen_erases = 0;
+        writes = 0;
+        bytes = 0;
+        queries = 0;
+        cursor_moves = 0;
+        attribute_changes = 0;
     }
     auto Resize(const TerminalSize size) -> void {
         const auto removed_rows = std::max(0, size_.rows - size.rows);
@@ -172,6 +166,11 @@ public:
     std::vector<std::pair<int, int>> erased;
     int presentations = 0;
     int screen_erases = 0;
+    int writes = 0;
+    std::size_t bytes = 0;
+    int queries = 0;
+    int cursor_moves = 0;
+    int attribute_changes = 0;
 
 private:
     auto ClearCell(const int row, const int column) -> void {
@@ -193,7 +192,27 @@ private:
 }
 
 export [[nodiscard]] auto RunFrameTests() -> bool {
+    static_assert(FrameTerminal<FrameConsole>);
     auto passed = true;
+    passed &= Test("adjacent Unicode groups sharing cursor positioning and highlighting"sv, [] {
+        auto terminal = FrameConsole{{.rows = 2, .columns = 80}};
+        auto presenter = DeltaFramePresenter{};
+        auto frame = FrameBuffer{TerminalSize{.rows = 2, .columns = 80}};
+        frame.rows.front().text = "日本 👩‍💻 é Installation";
+        Require(presenter.Flip(terminal, frame), "the initial frame was not presented"sv);
+        std::println("Initial frame: {} writes, {} bytes, {} cursor queries.",
+            terminal.writes, terminal.bytes, terminal.queries);
+        terminal.ResetActivity();
+        frame.rows.front().reverse = true;
+        Require(presenter.Flip(terminal, frame) && terminal.AllReversed(),
+            "highlighting did not cover the Unicode row"sv);
+        Require(terminal.Row(1) == frame.rows.front().text, "consecutive writes changed the text"sv);
+        Require((terminal.writes == 1) && (terminal.queries == 0) &&
+            (terminal.cursor_moves == 1) && (terminal.attribute_changes == 2),
+            "adjacent cached groups produced redundant writes, queries, or control sequences"sv);
+        std::println("Highlight change: {} write, {} bytes, {} cursor queries.",
+            terminal.writes, terminal.bytes, terminal.queries);
+    });
     passed &= Test("changing one digit beside Japanese, joined emoji and a combining accent"sv, [] {
         auto terminal = FrameConsole{{.rows = 2, .columns = 32}};
         auto presenter = DeltaFramePresenter{};

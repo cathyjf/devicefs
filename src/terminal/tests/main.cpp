@@ -29,9 +29,12 @@ import std;
 #endif
 
 import devicefs.terminal;
+import devicefs.terminal.frame;
+import devicefs.terminal.test_support;
 import devicefs.terminal.menu;
 import devicefs.terminal.menu_tests;
 import devicefs.terminal.frame_tests;
+import devicefs.terminal.native_tests;
 import devicefs.terminal.reports;
 
 #ifdef _WIN32
@@ -42,6 +45,7 @@ import devicefs.terminal.reports;
 
 using namespace std::string_view_literals;
 using namespace devicefs::terminal;
+using namespace devicefs::terminal::tests;
 
 namespace {
 
@@ -51,30 +55,11 @@ using NativeConsole = WindowsConsole;
 using NativeConsole = UnixConsole;
 #endif
 
-auto Require(const bool condition, const std::string_view message) -> void {
-    if (!condition) {
-        throw std::runtime_error(std::string{message});
-    }
-}
-
 auto CheckText(const std::string_view actual, const std::string_view expected)
     -> void {
     if (actual != expected) {
         throw std::runtime_error(std::format(
             "expected {:?}, received {:?}", expected, actual));
-    }
-}
-
-[[nodiscard]] auto Test(const std::string_view name, const auto &operation)
-    -> bool {
-    std::println("Testing {}.", name);
-    try {
-        std::invoke(operation);
-        std::println("PASS: {}.", name);
-        return true;
-    } catch (const std::exception &error) {
-        std::println(std::cerr, "FAIL: {}: {}", name, error.what());
-        return false;
     }
 }
 
@@ -226,6 +211,8 @@ public:
 private:
     std::optional<std::span<const CursorPosition>> replies_;
 };
+
+static_assert(Terminal<ScriptedTerminal> && !FrameTerminal<ScriptedTerminal>);
 
 [[nodiscard]] auto TestWrapping() -> bool {
     auto passed = true;
@@ -655,6 +642,7 @@ constexpr auto EXIT_FAILURE = 1;
 
 constexpr auto kHelp = R"(Usage:
   devicefs-terminal-test --self-test
+  devicefs-terminal-test --native-test
   devicefs-terminal-test --menu
   devicefs-terminal-test --text TEXT
   devicefs-terminal-test --file FILENAME
@@ -718,6 +706,10 @@ auto main(const int argc, char *const argv[]) -> int {
         if ((arguments.size() == 2) &&
             (std::string_view{arguments[1]} == "--self-test"sv)) {
             return SelfTest();
+        }
+        if ((arguments.size() == 2) &&
+            (std::string_view{arguments[1]} == "--native-test"sv)) {
+            return RunNativeTests();
         }
         if ((arguments.size() == 2) &&
             (std::string_view{arguments[1]} == "--help"sv)) {

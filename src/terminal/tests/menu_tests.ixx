@@ -7,31 +7,15 @@ import std;
 import devicefs.terminal.scope_exit;
 import devicefs.terminal.safecast;
 import devicefs.terminal;
+import devicefs.terminal.test_support;
 import devicefs.terminal.frame;
 import devicefs.terminal.menu;
 
 using namespace std::string_view_literals;
 using namespace devicefs::terminal;
+using namespace devicefs::terminal::tests;
 
 namespace {
-
-auto Require(const bool condition, const std::string_view message) -> void {
-    if (!condition) {
-        throw std::runtime_error(std::string{message});
-    }
-}
-
-[[nodiscard]] auto Test(const std::string_view name, const auto &operation) -> bool {
-    std::println("Testing {}.", name);
-    try {
-        std::invoke(operation);
-        std::println("PASS: {}.", name);
-        return true;
-    } catch (const std::exception &error) {
-        std::println(std::cerr, "FAIL: {}: {}", name, error.what());
-        return false;
-    }
-}
 
 class InputFailure : public std::runtime_error {
 public:
@@ -304,6 +288,7 @@ public:
 };
 
 constexpr auto kHeader = std::array{"Menu regression test"sv};
+static_assert(MenuTerminal<MenuConsole, WidthPolicy::WindowsTerminalGraphemes>);
 constexpr auto kEntries = std::array{"Alpha"sv, "Bravo"sv, "Charlie"sv, "Delta"sv};
 
 }

@@ -18,6 +18,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 if(WIN32)
+    find_program(POWERSHELL_EXECUTABLE NAMES pwsh REQUIRED)
     set(CMAKE_VS_GLOBALS
         "UseMultiToolTask=true"
         "EnableClServerMode=true"
@@ -69,6 +70,7 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
     endif()
     target_sources(devicefs-terminal-test PRIVATE
         FILE_SET CXX_MODULES FILES tests/menu_tests.ixx tests/frame_tests.ixx
+            tests/test_support.ixx tests/native_tests.ixx
     )
     target_link_libraries(devicefs-terminal-test PRIVATE devicefs-terminal)
     target_include_directories(devicefs-terminal-test PRIVATE
@@ -86,6 +88,17 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
     add_test(NAME devicefs_terminal
         COMMAND devicefs-terminal-test --self-test
     )
+    if(WIN32)
+        add_test(NAME devicefs_terminal_native
+            COMMAND "${POWERSHELL_EXECUTABLE}" -NoProfile -NonInteractive
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/native_windows.ps1"
+                -Executable "$<TARGET_FILE:devicefs-terminal-test>"
+        )
+    else()
+        target_link_libraries(devicefs-terminal-test PRIVATE util)
+        add_test(NAME devicefs_terminal_native COMMAND devicefs-terminal-test --native-test)
+    endif()
+    set_tests_properties(devicefs_terminal_native PROPERTIES TIMEOUT 30)
 endif()
 
 foreach(target IN LISTS DEVICEFS_TERMINAL_ANALYSIS_TARGETS)
@@ -112,7 +125,6 @@ foreach(target IN LISTS DEVICEFS_TERMINAL_ANALYSIS_TARGETS)
 endforeach()
 
 if(WIN32)
-    find_program(POWERSHELL_EXECUTABLE NAMES pwsh REQUIRED)
     add_custom_target(check-terminal-code-analysis ALL
         COMMAND "${POWERSHELL_EXECUTABLE}"
             -NoProfile -NonInteractive -File

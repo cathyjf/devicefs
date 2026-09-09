@@ -137,7 +137,8 @@ export namespace devicefs::terminal {
 // The console owns its descriptor and temporary termios settings. Menu and
 // update guards must be destroyed before the console; those guards restore the
 // screen, while console destruction restores termios and closes the descriptor.
-// Unavailable reports return an empty optional. Terminal I/O failures throw.
+// Unavailable reports return an empty optional. Terminal I/O failures throw;
+// Ctrl+C during a query raises InputCancelled.
 class UnixConsole : public BaseConsole {
 public:
     UnixConsole() = default;
@@ -259,8 +260,22 @@ private:
         // include a report left over from a request that timed out.
         auto position = pending_.size();
         auto reader = detail::ReportReader<std::size_t>{report};
-        while (ReceiveUntil(deadline)) {
+        for (;;) {
+            // Ctrl+C can already be queued after a preceding reply, or arrive
+            // while this query waits. Consume only that byte so other keys keep
+            // their order when the caller handles cancellation.
+            if (const auto cancellation = pending_.find('\x03');
+                cancellation != std::string::npos) {
+                pending_.erase(cancellation, 1);
+                throw InputCancelled{};
+            }
+            if (!ReceiveUntil(deadline)) {
+                return std::nullopt;
+            }
             for (; position < pending_.size(); ++position) {
+                if (pending_[position] == '\x03') {
+                    break;
+                }
                 if (const auto values = reader.Push(
                         std::bit_cast<unsigned char>(pending_[position]), position)) {
                     pending_.erase(reader.Positions().front(), reader.Positions().size());
@@ -268,7 +283,6 @@ private:
                 }
             }
         }
-        return std::nullopt;
     }
 
     // Escape is both a key and the first byte of navigation sequences. A short

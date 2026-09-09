@@ -18,11 +18,11 @@ supported Unix platforms. Explicit UTF-16 types let the same decoder process
 surrogate pairs correctly on every platform. The Unicode tables and
 segmentation algorithms retain their upstream implementation.
 
-The header imports `std` when built with MSVC. Upstream obtains its
-standard-library declarations through a precompiled header, but the MSVC build
-imports `CodepointWidthDetector.hpp` as a header unit, which is compiled
-separately from its importer. The Clang build includes the detector header
-textually, and the header includes its standard-library dependencies there.
+The header imports `std` on both platforms. Upstream obtains its
+standard-library declarations through a precompiled header. The MSVC build
+imports `CodepointWidthDetector.hpp` as a header unit, while the Clang build
+includes the detector header textually. The compatibility header supplies
+Clang with the `<cwchar>` declarations needed by that textual inclusion.
 Clang's `-fms-extensions` option enables the source's `msvc::forceinline` and
 `__declspec(noinline)` annotations. For Clang, the compatibility header maps
 `__assume` to `__builtin_assume`, preserving the decoder's optimization assumptions.
@@ -33,4 +33,6 @@ On MSVC, C26494 is disabled through the compatibility header textually included
 by the vendored source: the rule reports four declarations without initializers,
 but every value is assigned before reading. The reason is explained beside the
 pragma. First-party code retains the rule. The detector includes `terminal_compat.h`
-for its integer typedefs and for other compatibility shims.
+for its integer typedefs and for other compatibility shims. That header also
+defines `LOG_CAUGHT_EXCEPTION()` as an empty macro: caught fallback-callback
+exceptions use the detector's existing recovery behavior without WIL logging.

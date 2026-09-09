@@ -117,6 +117,8 @@ private:
     // Some terminals omit unsupported reports, so the deadline covers the whole
     // query, including time spent receiving other input. Native receivers keep
     // the input's original representation and remove only the matching report.
+    // Ctrl+C raises InputCancelled so the caller can end the operation before
+    // the reply arrives or the deadline expires.
     [[nodiscard]] auto Query(this auto &self, const detail::TerminalReport report)
         -> std::optional<std::array<int, 3>> {
         constexpr auto kReplyTimeout = 5s;

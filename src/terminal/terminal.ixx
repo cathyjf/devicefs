@@ -33,6 +33,17 @@ struct TerminalSize {
     int columns;
 };
 
+// A query can receive Ctrl+C while waiting for the terminal's reply. This
+// distinct exception ends that wait and lets SelectMenuItem return cancellation
+// without drawing a recovery message. Other console callers can handle the
+// same cancellation separately from missing reports and terminal I/O failures.
+class InputCancelled : public std::exception {
+public:
+    [[nodiscard]] auto what() const noexcept -> const char * override {
+        return "terminal input cancelled";
+    }
+};
+
 // `WrappingOptions` specifies the space in which `WriteWrappingText` may display
 // a label. The first line begins at the current cursor; later lines begin at
 // `continuation_column`, counted from one.

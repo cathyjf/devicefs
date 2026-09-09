@@ -51,6 +51,14 @@ struct FrameBuffer {
             FailFastCast<std::size_t>(dimensions->rows) : std::size_t{1}) {}
 };
 
+// Presenting a frame adds an explicit completion operation to the smaller
+// text-writing interface. The presenter calls PresentFrame only after drawing
+// succeeds; adapters use that operation to release a buffered display update.
+template <typename T>
+concept FrameTerminal = Terminal<T> && requires(T &terminal) {
+    { terminal.PresentFrame() } -> std::same_as<void>;
+};
+
 }
 
 namespace devicefs::terminal::frame_detail {
@@ -147,7 +155,7 @@ public:
     }
 
     template <WidthPolicy Policy = WidthPolicy::AllModes>
-    [[nodiscard]] auto Flip(Terminal auto &terminal, const FrameBuffer &frame) -> bool {
+    [[nodiscard]] auto Flip(FrameTerminal auto &terminal, const FrameBuffer &frame) -> bool {
         using namespace frame_detail;
         auto failed = ScopeExit{[this] { Invalidate(); }};
         auto output = FrameOutput{terminal};
@@ -227,13 +235,28 @@ private:
         auto next = DisplayedRow{.source = line, .groups = {}, .columns = columns};
         const auto old_end = previous ?
             (previous->groups.empty() ? 1 : previous->groups.back().end_column) : columns + 1;
+        // Adjacent changed groups can be written consecutively. Remember where
+        // the preceding write ended and which highlighting it used, so those
+        // groups need no cursor or attribute commands between them. Skipping
+        // unchanged text leaves this output position untouched.
+        auto written_column = std::optional<int>{};
+        auto written_reverse = std::optional<bool>{};
         const auto move = [&](const int column) {
-            output.Write(std::format(kPositionCursor, row, column));
+            if (written_column != column) {
+                output.Write(std::format(kPositionCursor, row, column));
+                written_column = column;
+            }
+        };
+        const auto highlight = [&](const bool reverse) {
+            if (written_reverse != reverse) {
+                output.Write(reverse ? kReverseAttributes : kResetAttributes);
+                written_reverse = reverse;
+            }
         };
         const auto erase = [&](const int column, const int count) {
             if (count > 0) {
                 move(column);
-                output.Write(kResetAttributes);
+                highlight(false);
                 output.Write(std::format(kEraseCells, count));
             }
         };
@@ -264,7 +287,7 @@ private:
                     erase(columns, 1);
                 }
                 move(column);
-                output.Write(line.reverse ? kReverseAttributes : kResetAttributes);
+                highlight(line.reverse);
                 output.Write(group.text);
                 if (!same_text && (known == widths_.end())) {
                     const auto observed = output.QueryCursor();
@@ -288,6 +311,7 @@ private:
                 } else if (!same_text) {
                     end_column = column + known->second;
                 }
+                written_column = uncertain_width ? std::nullopt : std::optional{end_column};
             }
             return DisplayedGroup{.text = std::string{group.text},
                 .column = column, .end_column = end_column,
@@ -348,7 +372,7 @@ private:
         // https://github.com/microsoft/terminal/blob/v1.19.10821.0/src/renderer/vt/paint.cpp#L622-L658
         if (column < std::min(old_end, columns + 1)) {
             move(column);
-            output.Write(kResetAttributes);
+            highlight(false);
             output.Write(kEraseToEndOfLine);
         }
         return next;

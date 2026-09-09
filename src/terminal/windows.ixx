@@ -62,7 +62,7 @@ export namespace devicefs::terminal {
 // operations. Destruction restores the previous modes before closing the handles.
 // A query returns an empty optional when a usable report is unavailable within
 // its timeout. Failures to open, configure, read, or write the console throw
-// exceptions.
+// exceptions. Ctrl+C during a query raises InputCancelled.
 class WindowsConsole : public BaseConsole {
 public:
     WindowsConsole() = default;
@@ -120,6 +120,18 @@ public:
                 continue;
             }
             const auto &key = record.Event.KeyEvent;
+            if (key.uChar.UnicodeChar == L'\x03') {
+                return {.key = MenuKey::Cancel};
+            }
+            // A reply arriving after its query timed out reaches this input
+            // loop. Its characters describe a VT command, not menu shortcuts;
+            // for example, the 1 in a cursor report must not open a full name.
+            // Filter character-only events while preserving physical key events
+            // and their virtual-key information. Ctrl+C above also works during
+            // an unfinished sequence.
+            if ((key.wVirtualKeyCode == 0) && !unclaimed_sequences_.Preserve(key.uChar.UnicodeChar)) {
+                continue;
+            }
             const auto action = [&key]() -> std::optional<MenuKey> {
                 switch (key.wVirtualKeyCode) {
                 case VK_UP:
@@ -192,6 +204,17 @@ private:
         -> std::optional<std::array<int, 3>> {
         auto reader = detail::ReportReader<std::list<INPUT_RECORD>::iterator>{report};
         for (;;) {
+            // Queries preserve other input for ReadInput. Ctrl+C instead ends
+            // the query immediately; consuming that event here prevents the
+            // same cancellation from being delivered again to a later menu.
+            const auto cancellation = std::ranges::find_if(pending_, [](const auto &record) {
+                return (record.EventType == KEY_EVENT) && record.Event.KeyEvent.bKeyDown &&
+                    (record.Event.KeyEvent.uChar.UnicodeChar == L'\x03');
+            });
+            if (cancellation != pending_.end()) {
+                pending_.erase(cancellation);
+                throw InputCancelled{};
+            }
             const auto remaining = deadline - std::chrono::steady_clock::now();
             if (remaining <= remaining.zero()) {
                 return std::nullopt;
@@ -244,6 +267,7 @@ private:
                 ENABLE_VIRTUAL_TERMINAL_PROCESSING,
             0);
     std::list<INPUT_RECORD> pending_;
+    VtFilter unclaimed_sequences_;
 };
 
 }

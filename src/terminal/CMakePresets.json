@@ -1,0 +1,49 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Kitware/CMake/refs/tags/v4.4.3/Help/manual/presets/schema.json",
+  "version": 9,
+  "cmakeMinimumRequired": {
+    "major": 4,
+    "minor": 2,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-x64",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/../../build/terminal/${presetName}",
+      "cacheVariables": {
+        "DEVICEFS_TERMINAL_BUILD_TESTS": true
+      },
+      "environment": {
+        "POWERSHELL_TELEMETRY_OPTOUT": "true",
+        "POWERSHELL_UPDATECHECK": "Off",
+        "POWERSHELL_DIAGNOSTICS_OPTOUT": "true"
+      },
+      "warnings": {
+        "uninitialized": true
+      },
+      "errors": {
+        "dev": true
+      }
+    },
+    {
+      "name": "windows-arm64",
+      "inherits": "windows-x64",
+      "architecture": "arm64"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-x64-release",
+      "configurePreset": "windows-x64",
+      "configuration": "Release",
+      "nativeToolOptions": ["/m"]
+    },
+    {
+      "name": "windows-arm64-release",
+      "configurePreset": "windows-arm64",
+      "inherits": "windows-x64-release"
+    }
+  ]
+}

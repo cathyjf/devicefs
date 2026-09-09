@@ -30,6 +30,8 @@ using namespace devicefs::terminal;
 
 namespace {
 
+using NativeConsole = WindowsConsole;
+
 auto Require(const bool condition, const std::string_view message) -> void {
     if (!condition) {
         throw std::runtime_error(std::string{message});
@@ -610,7 +612,7 @@ Text begins at the current cursor position and uses the remaining screen rows.
         labels.push_back(entry);
     }
     const auto selection = [&] {
-        auto terminal = WindowsConsole{};
+        auto terminal = NativeConsole{};
         return SelectMenuItem(terminal, header, labels);
     }();
     if (selection) {
@@ -669,7 +671,7 @@ auto main(const int argc, char *const argv[]) -> int {
         }();
         const auto prepared = PrepareTerminalText(text);
         const auto result = [&prepared]() -> std::optional<WrappingResult> {
-            auto console = WindowsConsole{};
+            auto console = NativeConsole{};
             const auto size = console.QuerySize();
             if (!size) {
                 console.Write(prepared);

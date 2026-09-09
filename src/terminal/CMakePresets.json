@@ -45,5 +45,19 @@
       "configurePreset": "windows-arm64",
       "inherits": "windows-x64-release"
     }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-x64",
+      "configurePreset": "windows-x64",
+      "output": {
+        "verbosity": "verbose"
+      }
+    },
+    {
+      "name": "windows-arm64",
+      "configurePreset": "windows-arm64",
+      "inherits": "windows-x64"
+    }
   ]
 }

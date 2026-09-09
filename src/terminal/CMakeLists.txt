@@ -5,18 +5,6 @@ cmake_minimum_required(VERSION 4.2)
 
 project(devicefs-terminal LANGUAGES CXX)
 
-if(NOT WIN32 OR NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-    message(FATAL_ERROR "devicefs-terminal requires the Microsoft Visual C++ compiler on Windows")
-endif()
-
-if(MSVC_VERSION LESS 1951)
-    message(FATAL_ERROR "devicefs-terminal requires MSVC Build Tools 14.51 or newer")
-endif()
-
-if(NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "^(x64|ARM64)$")
-    message(FATAL_ERROR "devicefs-terminal requires an x64 or ARM64 target")
-endif()
-
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
@@ -71,6 +59,11 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
         $<$<STREQUAL:${CMAKE_CXX_COMPILER_ARCHITECTURE_ID},x64>:/CETCOMPAT>
     )
     list(APPEND DEVICEFS_TERMINAL_ANALYSIS_TARGETS devicefs-terminal-test)
+
+    enable_testing()
+    add_test(NAME devicefs_terminal
+        COMMAND devicefs-terminal-test --self-test
+    )
 endif()
 
 foreach(target IN LISTS DEVICEFS_TERMINAL_ANALYSIS_TARGETS)

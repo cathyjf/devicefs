@@ -1,15 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-module;
-
-#include <devicefs/strsafe_compat.h>
-
 export module devicefs.terminal.menu_tests;
 
 import std;
 import <wil/resource.h>;
-import <wil/safecast.h>;
+import devicefs.terminal.safecast;
 import devicefs.terminal;
 import devicefs.terminal.frame;
 import devicefs.terminal.menu;
@@ -132,7 +128,7 @@ public:
                     const auto first_column = parameters == "2"sv ? 1 : screen.cursor.column;
                     auto &line = screen.lines[screen.cursor.row];
                     line.resize(std::min(line.size(),
-                        wil::safe_cast_failfast<std::size_t>(first_column - 1)));
+                        FailFastCast<std::size_t>(first_column - 1)));
                     if (screen.cursor.row == size_.rows) {
                         for (auto column = first_column; column <= size_.columns; ++column) {
                             pending_status_columns_.insert(column);
@@ -147,7 +143,7 @@ public:
                     auto &line = screen.lines[screen.cursor.row];
                     for (auto column = screen.cursor.column; column < end_column; ++column) {
                         if (std::cmp_less_equal(column, line.size())) {
-                            line.at(wil::safe_cast_failfast<std::size_t>(column - 1)) = ' ';
+                            line.at(FailFastCast<std::size_t>(column - 1)) = ' ';
                         }
                         if (screen.cursor.row == size_.rows) {
                             pending_status_columns_.insert(column);
@@ -163,7 +159,7 @@ public:
                     auto &line = screen.lines[screen.cursor.row];
                     for (auto index = 0; index < columns; ++index) {
                         line.insert(std::next(line.begin(),
-                            wil::safe_cast_failfast<std::ptrdiff_t>(screen.cursor.column) - 1), ' ');
+                            CompileTimeCast<std::ptrdiff_t>(screen.cursor.column) - 1), ' ');
                     }
                     pending_touched_rows_.insert(screen.cursor.row);
                 }
@@ -189,7 +185,7 @@ public:
                 line.push_back(' ');
             }
             *std::next(line.begin(),
-                wil::safe_cast_failfast<std::ptrdiff_t>(screen.cursor.column) - 1) = text.front();
+                CompileTimeCast<std::ptrdiff_t>(screen.cursor.column) - 1) = text.front();
             text.remove_prefix(1);
             if (screen.cursor.column == size_.columns) {
                 screen.pending_wrap = true;
@@ -248,7 +244,7 @@ public:
             });
             for (auto &[row, line] : displayed_.lines) {
                 line.resize(std::min(line.size(),
-                    wil::safe_cast_failfast<std::size_t>(size_.columns)));
+                    FailFastCast<std::size_t>(size_.columns)));
             }
             displayed_.cursor.row = std::min(displayed_.cursor.row, size_.rows);
             displayed_.cursor.column = std::min(displayed_.cursor.column, size_.columns);

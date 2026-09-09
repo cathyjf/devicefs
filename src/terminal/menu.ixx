@@ -1,14 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-module;
-
-#include <devicefs/strsafe_compat.h>
-
 export module devicefs.terminal.menu;
 
 import std;
-import <wil/safecast.h>;
+import devicefs.terminal.safecast;
 import devicefs.terminal;
 import devicefs.terminal.frame;
 
@@ -154,20 +150,20 @@ template <WidthPolicy Policy>
         }
         const auto measured_rows = layout.rows.size();
         const auto rows_to_measure = std::min(
-            wil::safe_cast_failfast<std::size_t>(available_rows), limit - measured_rows);
+            FailFastCast<std::size_t>(available_rows), limit - measured_rows);
         MoveTo(terminal, first_row,
             measured_rows == 0 ? kTextColumn : kContinuationColumn);
         const auto result = WriteWrappingText(terminal, clusters,
             WrappingOptions{.size = size,
                 .continuation_column = kContinuationColumn,
-                .maximum_rows = wil::safe_cast_failfast<int>(rows_to_measure)},
+                .maximum_rows = FailFastCast<int>(rows_to_measure)},
             [&layout](const std::string_view suffix) {
                 layout.rows.push_back(suffix);
             });
         if (result.stop == WrappingStop::RedrawRequired) {
             return std::nullopt;
         }
-        layout.rows.resize(measured_rows + wil::safe_cast_failfast<std::size_t>(result.rows));
+        layout.rows.resize(measured_rows + FailFastCast<std::size_t>(result.rows));
         for (auto index = measured_rows; index < layout.rows.size(); ++index) {
             const auto next_row_suffix = (index + 1) < layout.rows.size() ?
                 layout.rows.at(index + 1) : result.remaining;
@@ -205,15 +201,15 @@ struct MenuViewport {
     int rows;
 };
 
-[[nodiscard]] auto MakeMenuViewport(const TerminalSize size, const MenuText &text)
+[[nodiscard]] auto MakeMenuViewport(const TerminalSize size, const MenuText &text) noexcept
     -> std::optional<MenuViewport> {
     const auto fixed_rows = text.header.size() + text.footer.size() + kInformationRows;
     if ((size.columns < kMinimumColumns) || (std::cmp_less_equal(size.rows, fixed_rows))) {
         return std::nullopt;
     }
     return MenuViewport{.size = size,
-        .first_row = wil::safe_cast_failfast<int>(text.header.size()) + 1,
-        .rows = size.rows - wil::safe_cast_failfast<int>(fixed_rows)};
+        .first_row = FailFastCast<int>(text.header.size()) + 1,
+        .rows = size.rows - FailFastCast<int>(fixed_rows)};
 }
 
 // `MenuListView` manages selection and scrolling through the menu's entries.
@@ -251,7 +247,7 @@ public:
         if (entries_.empty()) {
             return false;
         }
-        const auto repeat = wil::safe_cast_failfast<std::size_t>(input.repeat);
+        const std::size_t repeat = input.repeat;
         switch (input.key) {
         case MenuKey::Up:
             selected_entry_ -= std::min(selected_entry_, repeat);
@@ -288,7 +284,7 @@ public:
             (input.key == MenuKey::PageUp ? -1 : 0);
         if (paging != 0) {
             Scroll<Policy>(terminal, viewport, paging,
-                wil::safe_cast_failfast<std::size_t>(input.repeat) * viewport.rows);
+                input.repeat * FailFastCast<std::size_t>(viewport.rows));
         }
         const auto reveal_selection = (input.key == MenuKey::Up) ||
             (input.key == MenuKey::Down) || (input.key == MenuKey::Resize) ||
@@ -318,7 +314,7 @@ public:
 
     [[nodiscard]] auto BuildFrame(const MenuViewport viewport) const -> FrameBuffer {
         auto frame = FrameBuffer{viewport.size};
-        const auto first_row = wil::safe_cast_failfast<std::size_t>(viewport.first_row - 1);
+        const auto first_row = FailFastCast<std::size_t>(viewport.first_row - 1);
         if (entries_.empty()) {
             frame.rows.at(first_row) = {.text = "No entries are available.",
                 .clipping = FrameClipping::IfNeeded};
@@ -455,10 +451,10 @@ public:
         return true;
     }
 
-    [[nodiscard]] auto Navigate(const MenuInput input, const int content_rows) -> bool {
-        const auto amount = wil::safe_cast_failfast<std::size_t>(input.repeat) *
+    [[nodiscard]] auto Navigate(const MenuInput input, const int content_rows) noexcept -> bool {
+        const auto amount = input.repeat *
             ((input.key == MenuKey::PageUp) || (input.key == MenuKey::PageDown) ?
-                wil::safe_cast_failfast<std::size_t>(content_rows) : 1);
+                FailFastCast<std::size_t>(content_rows) : 1);
         switch (input.key) {
         case MenuKey::Up:
         case MenuKey::PageUp:
@@ -483,10 +479,10 @@ public:
 
     [[nodiscard]] auto BuildFrame(const MenuViewport viewport) const -> FrameBuffer {
         auto frame = FrameBuffer{viewport.size};
-        const auto count = std::min(wil::safe_cast_failfast<std::size_t>(viewport.rows),
+        const auto count = std::min(FailFastCast<std::size_t>(viewport.rows),
             layout_->rows.size() - first_row_);
         for (auto index = std::size_t{}; index < count; ++index) {
-            frame.rows.at(wil::safe_cast_failfast<std::size_t>(viewport.first_row - 1) + index) = {
+            frame.rows.at(FailFastCast<std::size_t>(viewport.first_row - 1) + index) = {
                 .text = std::format("{}{}", (first_row_ + index) == 0 ? "  "sv : "    "sv,
                     layout_->rows.at(first_row_ + index))};
         }

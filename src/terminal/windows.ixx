@@ -1,20 +1,16 @@
 // SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-module;
-
-#include "devicefs/strsafe_compat.h"
-
 export module devicefs.terminal.windows;
 
 import std;
 import <windows.h>;
 import <wil/resource.h>;
-import <wil/safecast.h>;
 import <wil/stl.h>;
 import devicefs.terminal;
 import devicefs.terminal.frame;
 import devicefs.terminal.menu;
+import devicefs.terminal.safecast;
 
 using namespace std::string_view_literals;
 using namespace std::chrono_literals;
@@ -101,7 +97,7 @@ public:
             constexpr auto sequence = L"\x1b[?2026l"sv;
             auto written = DWORD{};
             std::ignore = WriteConsoleW(output_.get(), sequence.data(),
-                wil::safe_cast_failfast<DWORD>(sequence.size()), &written, nullptr);
+                CompileTimeCast<DWORD, sequence.size()>(), &written, nullptr);
         });
         Write("\x1b[?2026h"sv);
         return finish;
@@ -126,7 +122,7 @@ public:
         }
         auto restore = wil::scope_exit([handle = output_.get(), previous_cursor] {
             constexpr auto sequence = L"\x1b[?1049l"sv;
-            const auto length = wil::safe_cast_failfast<DWORD>(sequence.size());
+            constexpr auto length = CompileTimeCast<DWORD, sequence.size()>();
             auto written = DWORD{};
             std::ignore = WriteConsoleW(
                 handle, sequence.data(), length, &written, nullptr);
@@ -147,7 +143,13 @@ public:
         // describes the separate encodings accepted by the A and W functions:
         // https://learn.microsoft.com/en-us/windows/console/writeconsole
         const auto wide = std::filesystem::path{text}.wstring();
-        const auto length = wil::safe_cast<DWORD>(wide.size());
+        if (wide.size() > std::numeric_limits<DWORD>::max()) {
+            throw std::length_error(std::format(
+                "terminal text has {} UTF-16 code units; WriteConsoleW's "
+                "count parameter can represent at most {}",
+                wide.size(), std::numeric_limits<DWORD>::max()));
+        }
+        const auto length = FailFastCast<DWORD>(wide.size());
         auto written = DWORD{};
         if (!WriteConsoleW(output_.get(), wide.data(), length,
                 &written, nullptr)) {
@@ -285,9 +287,11 @@ private:
             if (remaining <= remaining.zero()) {
                 return std::nullopt;
             }
+            // The positive time remaining is at most `kReplyTimeout`, so the
+            // rounded millisecond count fits the Windows wait parameter.
             const auto wait = WaitForSingleObject(input_.get(),
-                wil::safe_cast<DWORD>(
-                    std::chrono::ceil<std::chrono::milliseconds>(remaining).count()));
+                std::chrono::ceil<std::chrono::duration<DWORD, std::milli>>(
+                    remaining).count());
             if (wait == WAIT_TIMEOUT) {
                 continue;
             }
@@ -319,12 +323,20 @@ private:
             if (reply.empty()) {
                 continue;
             }
+            // Cursor and size reports use an ESC [ prefix, decimal parameters,
+            // and an R or t suffix, as specified in XTerm's control-sequence
+            // reference. Every character in that syntax is ASCII, so values
+            // above 0x7f cannot be part of these replies.
+            // https://invisible-mirror.net/xterm/ctlseqs/ctlseqs.html
             if ((character > 0x7f) || (reply.size() == kMaximumReplyLength)) {
                 discard_candidate();
                 continue;
             }
             records.push_back(position);
-            reply.push_back(wil::safe_cast_failfast<char>(character));
+            // Windows `wchar_t` is unsigned, and the check above rejects values
+            // above 0x7f. The remaining values are therefore between 0 and 127,
+            // all of which fit in `char`, so this conversion preserves the value.
+            reply.push_back(FailFastCast<char>(character));
             if (reply.size() <= prefix.size()) {
                 if (!prefix.starts_with(reply)) {
                     discard_candidate();
@@ -350,7 +362,7 @@ private:
                     valid = false;
                     break;
                 }
-                body.remove_prefix(wil::safe_cast_failfast<std::size_t>(
+                body.remove_prefix(FailFastCast<std::size_t>(
                     end - body.data()));
                 if ((index + 1) < fields) {
                     if (!body.starts_with(';')) {

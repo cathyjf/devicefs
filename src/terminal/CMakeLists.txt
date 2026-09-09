@@ -31,7 +31,7 @@ target_include_directories(windows-terminal-width PRIVATE
 
 add_library(devicefs-terminal STATIC)
 target_sources(devicefs-terminal PUBLIC
-    FILE_SET CXX_MODULES FILES terminal.ixx text.ixx frame.ixx menu.ixx windows.ixx
+    FILE_SET CXX_MODULES FILES terminal.ixx text.ixx frame.ixx menu.ixx windows.ixx safecast.ixx
 )
 target_link_libraries(devicefs-terminal PRIVATE windows-terminal-width)
 target_include_directories(devicefs-terminal PRIVATE

@@ -9,7 +9,7 @@ export module devicefs.terminal.frame;
 
 import std;
 import <wil/resource.h>;
-import <wil/safecast.h>;
+import devicefs.terminal.safecast;
 import devicefs.terminal;
 
 using namespace std::string_view_literals;
@@ -52,7 +52,7 @@ struct FrameBuffer {
 
     explicit FrameBuffer(const std::optional<TerminalSize> dimensions)
         : size{dimensions}, rows(dimensions ?
-            wil::safe_cast_failfast<std::size_t>(dimensions->rows) : std::size_t{1}) {}
+            FailFastCast<std::size_t>(dimensions->rows) : std::size_t{1}) {}
 };
 
 }
@@ -183,7 +183,7 @@ public:
             }
             auto old = std::exchange(previous, std::nullopt);
             previous = PaintRow<Policy>(output, line,
-                wil::safe_cast_failfast<int>(index) + 1, columns, old);
+                FailFastCast<int>(index) + 1, columns, old);
             complete &= previous.has_value();
         }
         if (output.written) {
@@ -201,8 +201,8 @@ public:
     // text has not changed. Callers use this when writing outside the presenter,
     // for example when measuring how text wraps.
     auto InvalidateRows(const int first_row, const int count) -> void {
-        const auto first = wil::safe_cast_failfast<std::size_t>(first_row - 1);
-        const auto end = first + wil::safe_cast_failfast<std::size_t>(count);
+        const auto first = FailFastCast<std::size_t>(first_row - 1);
+        const auto end = first + FailFastCast<std::size_t>(count);
         displayed_.resize(std::max(displayed_.size(), end));
         for (auto index = first; index < end; ++index) {
             displayed_.at(index).reset();

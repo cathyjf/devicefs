@@ -76,11 +76,7 @@ private:
     bool _graphemePrevWcswidth(GraphemeState& s, const std::u16string_view& str) const noexcept;
     bool _graphemeNextConsole(GraphemeState& s, const std::u16string_view& str) noexcept;
     bool _graphemePrevConsole(GraphemeState& s, const std::u16string_view& str) noexcept;
-#ifdef _MSC_VER
     __declspec(noinline)
-#else
-    [[gnu::noinline]]
-#endif
     int _checkFallbackViaCache(char32_t codepoint) noexcept;
 
     std::unordered_map<char32_t, int> _fallbackCache;

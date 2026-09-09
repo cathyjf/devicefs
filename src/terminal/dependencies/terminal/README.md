@@ -23,8 +23,9 @@ standard-library declarations through a precompiled header, but the MSVC build
 imports `CodepointWidthDetector.hpp` as a header unit, which is compiled
 separately from its importer. The Clang build includes the detector header
 textually, and the header includes its standard-library dependencies there.
-Compiler-specific optimization attributes and diagnostic directives are
-conditional so each compiler receives the syntax that it supports.
+Clang's `-fms-extensions` option enables the source's `msvc::forceinline` and
+`__declspec(noinline)` annotations. For Clang, the compatibility header maps
+`__assume` to `__builtin_assume`, preserving the decoder's optimization assumptions.
 
 The component's [CMake configuration](../../CMakeLists.txt) builds the detector
 as a separate library with the project's analysis and compiler settings.

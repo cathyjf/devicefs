@@ -24,9 +24,7 @@ template <std::integral Target, std::integral Source>
         std::numeric_limits<Source>::digits) ||
         (std::is_signed_v<Source> && !std::is_signed_v<Target>))
 [[nodiscard]]
-#ifdef _MSC_VER
 [[msvc::forceinline]]
-#endif
 constexpr auto FailFastCast(const Source input) noexcept -> Target {
     // Unary `+` promotes character operands to ordinary integer types without
     // changing their values. The standard comparison functions can then accept
@@ -49,9 +47,7 @@ constexpr auto FailFastCast(const Source input) noexcept -> Target {
 template <class Target, auto... Constant, class... Source>
     requires ((sizeof...(Constant) + sizeof...(Source)) == 1)
 [[nodiscard]]
-#ifdef _MSC_VER
 [[msvc::forceinline]]
-#endif
 constexpr decltype(auto) CompileTimeCast(Source &&...input) {
     GSL_SUPPRESS("26493",
         "C26493 misidentifies this braced initialization as a C-style "

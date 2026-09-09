@@ -14,7 +14,7 @@ export module devicefs.terminal.unix;
 
 import std;
 import devicefs.terminal;
-import devicefs.terminal.frame;
+import devicefs.terminal.base_console;
 import devicefs.terminal.menu;
 import devicefs.terminal.reports;
 import devicefs.terminal.safecast;
@@ -25,13 +25,8 @@ using namespace std::chrono_literals;
 
 namespace devicefs::terminal::unix_detail {
 
-constexpr auto kReplyTimeout = 5s;
 constexpr auto kInputPollInterval = 100ms;
 constexpr auto kEscapeTimeout = 100ms;
-constexpr auto kBeginUpdate = "\x1b[?2026h"sv;
-constexpr auto kEndUpdate = "\x1b[?2026l"sv;
-constexpr auto kEnterMenu = "\x1b[?1049h\x1b[?25s\x1b[?25l"sv;
-constexpr auto kLeaveMenu = "\x1b[0m\x1b[?25h\x1b[?25r\x1b[?1049l"sv;
 
 [[nodiscard]] auto OpenTerminal() -> int {
     const auto descriptor = open("/dev/tty", O_RDWR | O_NOCTTY | O_CLOEXEC);
@@ -143,82 +138,17 @@ export namespace devicefs::terminal {
 // update guards must be destroyed before the console; those guards restore the
 // screen, while console destruction restores termios and closes the descriptor.
 // Unavailable reports return an empty optional. Terminal I/O failures throw.
-class UnixConsole {
+class UnixConsole : public BaseConsole {
 public:
     UnixConsole() = default;
     UnixConsole(const UnixConsole &) = delete;
     auto operator=(const UnixConsole &) -> UnixConsole & = delete;
-
-    template <WidthPolicy Policy = WidthPolicy::AllModes>
-    [[nodiscard]] auto Flip(const FrameBuffer &frame) -> bool {
-        return presenter_.Flip<Policy>(*this, frame);
-    }
-
-    template <WidthPolicy Policy = WidthPolicy::AllModes>
-    [[nodiscard]] auto KnownTextWidths(const std::string_view text) const {
-        return presenter_.KnownTextWidths<Policy>(text);
-    }
-
-    auto InvalidateFrameRows(const int first_row, const int count) -> void {
-        presenter_.InvalidateRows(first_row, count);
-    }
-
-    auto InvalidateFrame() -> void {
-        presenter_.Invalidate();
-    }
-
-    // Synchronized output lets supporting terminals display a completed update
-    // together. The guard releases the hold even when layout or drawing fails.
-    [[nodiscard]] auto BeginUpdate() {
-        auto finish = ScopeExit{[descriptor = descriptor_] {
-            std::ignore = unix_detail::WriteTerminal(
-                descriptor, unix_detail::kEndUpdate);
-        }};
-        Write(unix_detail::kBeginUpdate);
-        return finish;
-    }
-
-    auto PresentFrame() -> void {
-        Write(unix_detail::kEndUpdate);
-    }
-
-    // The alternate screen preserves the caller's display while the menu runs.
-    // On terminals supporting XTSAVE/XTRESTORE, saving private mode 25 also
-    // preserves cursor visibility. Restoration first shows the cursor, then
-    // restores the saved setting; terminals that ignore those extensions are
-    // therefore left with a visible cursor when the menu ends.
-    // https://invisible-mirror.net/xterm/ctlseqs/ctlseqs.html
-    [[nodiscard]] auto EnterMenu() {
-        presenter_ = DeltaFramePresenter{};
-        auto restore = ScopeExit{[descriptor = descriptor_] {
-            std::ignore = unix_detail::WriteTerminal(
-                descriptor, unix_detail::kLeaveMenu);
-        }};
-        Write(unix_detail::kEnterMenu);
-        return restore;
-    }
 
     auto Write(const std::string_view text) -> void {
         if (const auto error = unix_detail::WriteTerminal(descriptor_, text)) {
             throw std::system_error(error,
                 "could not write text to the controlling terminal");
         }
-    }
-
-    [[nodiscard]] auto QueryCursor() -> std::optional<CursorPosition> {
-        const auto reply = Query(detail::TerminalReport::Cursor);
-        if (!reply || ((*reply)[0] < 1) || ((*reply)[1] < 1)) {
-            return std::nullopt;
-        }
-        return CursorPosition{.row = (*reply)[0], .column = (*reply)[1]};
-    }
-
-    [[nodiscard]] auto QuerySize() -> std::optional<TerminalSize> {
-        const auto reply = Query(detail::TerminalReport::Size);
-        if (!reply || ((*reply)[0] != 8) || ((*reply)[1] < 1) || ((*reply)[2] < 1)) {
-            return std::nullopt;
-        }
-        return TerminalSize{.rows = (*reply)[1], .columns = (*reply)[2]};
     }
 
     [[nodiscard]] auto ReadMenuInput() -> MenuInput {
@@ -245,23 +175,33 @@ public:
             }
             const auto character = pending_.front();
             pending_.erase(0, 1);
-            switch (character) {
-            case '\r':
-            case '\n':
+            if ((character == '\r') || (character == '\n')) {
                 return {.key = MenuKey::Accept};
-            case '\x03':
-                return {.key = MenuKey::Cancel};
-            case '\x0c':
-                return {.key = MenuKey::Redraw};
-            case '1':
-                return {.key = MenuKey::Details};
-            default:
-                break;
+            }
+            if (const auto action = CharacterMenuKey(std::bit_cast<unsigned char>(character))) {
+                return {.key = *action};
             }
         }
     }
 
 private:
+    friend class BaseConsole;
+    static constexpr auto kEnterMenu = "\x1b[?1049h\x1b[?25s\x1b[?25l"sv;
+    static constexpr auto kLeaveMenu = "\x1b[0m\x1b[?25h\x1b[?25r\x1b[?1049l"sv;
+
+    auto WriteControlSequenceNoThrow(const std::string_view sequence) const noexcept -> void {
+        std::ignore = unix_detail::WriteTerminal(descriptor_, sequence);
+    }
+
+    // Saving private mode 25 on entry preserves cursor visibility on terminals
+    // supporting XTSAVE/XTRESTORE. Restoration first shows the cursor, then
+    // restores the saved setting; terminals that ignore those extensions are
+    // therefore left with a visible cursor when the menu ends.
+    // https://invisible-mirror.net/xterm/ctlseqs/ctlseqs.html
+    [[nodiscard]] auto RestoreScreenOnExit() {
+        return ScopeExit{[this] { WriteControlSequenceNoThrow(kLeaveMenu); }};
+    }
+
     [[nodiscard]] auto ReadWindowSize() const -> TerminalSize {
         auto size = winsize{};
         if (ioctl(descriptor_, TIOCGWINSZ, &size) < 0) {
@@ -312,44 +252,20 @@ private:
         }
     }
 
-    // A query consumes only its matching report. Bytes typed while the reply is
-    // arriving remain in `pending_` for menu input. Searching from the old end
-    // avoids accepting a leftover report from an earlier, timed-out query.
-    [[nodiscard]] auto Query(const detail::TerminalReport report)
+    [[nodiscard]] auto ReceiveReport(const detail::TerminalReport report,
+        const std::chrono::steady_clock::time_point deadline)
         -> std::optional<std::array<int, 3>> {
-        auto search_from = pending_.size();
-        const auto deadline = std::chrono::steady_clock::now() + unix_detail::kReplyTimeout;
-        Write(detail::ReportRequest(report));
+        // Only newly received bytes can answer this query. Earlier input may
+        // include a report left over from a request that timed out.
+        auto position = pending_.size();
+        auto reader = detail::ReportReader<std::size_t>{report};
         while (ReceiveUntil(deadline)) {
-            for (;;) {
-                const auto start = pending_.find(detail::kReportPrefix, search_from);
-                if (start == std::string::npos) {
-                    search_from = pending_.size() - 1;
-                    break;
+            for (; position < pending_.size(); ++position) {
+                if (const auto values = reader.Push(
+                        std::bit_cast<unsigned char>(pending_[position]), position)) {
+                    pending_.erase(reader.Positions().front(), reader.Positions().size());
+                    return values;
                 }
-                const auto end = pending_.find(detail::ReportSuffix(report), start + 2);
-                if ((end != std::string::npos) &&
-                    ((end - start + 1) <= detail::kMaximumReportLength)) {
-                    const auto text = std::string_view{pending_}.substr(start, end - start + 1);
-                    if (const auto values = detail::ParseTerminalReport(text, report)) {
-                        pending_.erase(start, text.size());
-                        return values;
-                    }
-                    search_from = start + 1;
-                    continue;
-                }
-                if (const auto next = pending_.find(detail::kReportPrefix, start + 2);
-                    next != std::string::npos) {
-                    search_from = next;
-                    continue;
-                }
-                if ((pending_.size() - start) < detail::kMaximumReportLength) {
-                    // A report can be divided across reads. Keep its candidate
-                    // prefix until enough bytes arrive to accept or reject it.
-                    search_from = start;
-                    break;
-                }
-                search_from = start + 1;
             }
         }
         return std::nullopt;
@@ -395,7 +311,6 @@ private:
         unix_detail::SetTerminalModeScoped(descriptor_);
     TerminalSize window_size_ = ReadWindowSize();
     std::string pending_;
-    DeltaFramePresenter presenter_;
 };
 
 }

@@ -29,6 +29,7 @@ import devicefs.terminal;
 import devicefs.terminal.menu;
 import devicefs.terminal.menu_tests;
 import devicefs.terminal.frame_tests;
+import devicefs.terminal.reports;
 #ifdef _WIN32
 import devicefs.terminal.windows;
 #else
@@ -579,12 +580,71 @@ private:
 constexpr auto EXIT_SUCCESS = 0;
 constexpr auto EXIT_FAILURE = 1;
 
+[[nodiscard]] auto TestReports() -> bool {
+    struct ReportCase {
+        std::string_view name;
+        std::u32string_view input;
+        detail::TerminalReport report;
+        std::optional<std::array<int, 3>> expected;
+        std::u32string_view retained;
+    };
+    const auto cases = std::array{
+        ReportCase{"cursor reply surrounded by keyboard input"sv,
+            U"a\x1b[12;34Rb"sv, detail::TerminalReport::Cursor,
+            std::array{12, 34, 0}, U"ab"sv},
+        ReportCase{"size reply following an arrow key"sv,
+            U"\x1b[B\x1b[8;24;80t"sv, detail::TerminalReport::Size,
+            std::array{8, 24, 80}, U"\x1b[B"sv},
+        ReportCase{"a new escape replacing an incomplete reply"sv,
+            U"\x1b[12;\x1b[3;4R"sv, detail::TerminalReport::Cursor,
+            std::array{3, 4, 0}, U"\x1b[12;"sv},
+        ReportCase{"an incomplete reply remaining available as input"sv,
+            U"\x1b[12;34"sv, detail::TerminalReport::Cursor,
+            std::nullopt, U"\x1b[12;34"sv},
+        ReportCase{"non-ASCII input invalidating a candidate reply"sv,
+            U"\x1b[12;\u1234R\x1b[5;6R"sv, detail::TerminalReport::Cursor,
+            std::array{5, 6, 0}, U"\x1b[12;\u1234R"sv},
+        ReportCase{"an overflowing report preceding a valid reply"sv,
+            U"\x1b[2147483648;1R\x1b[5;6R"sv, detail::TerminalReport::Cursor,
+            std::array{5, 6, 0}, U"\x1b[2147483648;1R"sv},
+        ReportCase{"a report for another query remaining available as input"sv,
+            U"\x1b[8;24;80t\x1b[5;6R"sv, detail::TerminalReport::Cursor,
+            std::array{5, 6, 0}, U"\x1b[8;24;80t"sv},
+        ReportCase{"an overlong candidate preceding a valid reply"sv,
+            U"\x1b[00000000000000000000000000000000000001;1R\x1b[5;6R"sv,
+            detail::TerminalReport::Cursor, std::array{5, 6, 0},
+            U"\x1b[00000000000000000000000000000000000001;1R"sv},
+    };
+    auto passed = true;
+    for (const auto &test : cases) {
+        passed &= Test(test.name, [&test] {
+            auto reader = detail::ReportReader<std::size_t>{test.report};
+            auto retained = std::u32string{test.input};
+            const auto reply = [&test, &reader, &retained] {
+                for (auto position = 0uz; position < test.input.size(); ++position) {
+                    if (const auto values = reader.Push(test.input[position], position)) {
+                        for (const auto removed : reader.Positions() | std::views::reverse) {
+                            retained.erase(removed, 1);
+                        }
+                        return values;
+                    }
+                }
+                return std::optional<std::array<int, 3>>{};
+            }();
+            Require(reply == test.expected, "the recognized report had unexpected fields"sv);
+            Require(retained == test.retained, "report recognition consumed other input"sv);
+        });
+    }
+    return passed;
+}
+
 [[nodiscard]] auto SelfTest() -> int {
     auto passed = TestTextPreparation();
     passed &= TestLoggingFilter();
     passed &= TestWrapping();
     passed &= TestMenu();
     passed &= RunFrameTests();
+    passed &= TestReports();
     std::println("\nTerminal library self-tests {}.", passed ? "passed" : "failed");
     return passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }

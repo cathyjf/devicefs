@@ -103,6 +103,18 @@ public:
         if (tcgetattr(slave_, &modes) < 0) {
             throw std::system_error(errno, std::generic_category(), "could not read test terminal modes");
         }
+#ifdef __APPLE__
+        // These snapshots let the tests verify that destroying `UnixConsole`
+        // restores the settings saved before construction. To receive individual
+        // keystrokes, the console temporarily disables `ICANON`, the mode that
+        // collects input one line at a time. When destruction restores `ICANON`,
+        // macOS also sets `PENDIN` to request that queued input be reprocessed
+        // under the restored rules. Excluding `PENDIN` from the snapshots
+        // prevents that kernel-generated request from being reported as a
+        // failure to restore the caller's settings.
+        // https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/tty.c#L1358-L1391
+        modes.c_lflag &= ~PENDIN;
+#endif
         return std::tuple{modes.c_iflag, modes.c_oflag, modes.c_cflag, modes.c_lflag,
             cfgetispeed(&modes), cfgetospeed(&modes), std::to_array(modes.c_cc)};
     }
@@ -326,6 +338,17 @@ export auto RunNativeTests() -> int {
                 throw std::system_error(errno, std::generic_category(),
                     "could not attach the test controlling terminal");
             }
+            // These tests intercept ordinary output with `TestConsole::Write`,
+            // but screen-restoration guards write directly to the pseudoterminal.
+            // Nothing reads those restoration sequences. macOS waits for the
+            // session leader's terminal output to drain during process exit,
+            // so the child would wait forever while the parent waits in `waitpid`.
+            // This guard discards the unused output after all test consoles have
+            // been destroyed, including when a test throws.
+            // https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_exit.c#L2286-L2332
+            const auto discard_output = ScopeExit{[slave = descriptors[1]] {
+                std::ignore = tcflush(slave, TCOFLUSH);
+            }};
             Require(TestNativeInput(NativeInput{descriptors[0], descriptors[1]}),
                 "one or more native input tests failed"sv);
         });

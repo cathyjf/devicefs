@@ -15,6 +15,7 @@ auto Require(const bool condition, const std::string_view message) -> void {
 
 [[nodiscard]] auto Test(const std::string_view name, const auto &operation) -> bool {
     std::println("Testing {}.", name);
+    std::cout.flush();
     try {
         std::invoke(operation);
         std::println("PASS: {}.", name);

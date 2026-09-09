@@ -235,7 +235,8 @@ private:
             }
         };
         auto column = 1;
-        const auto paint = [&](const MeasuredCluster &group, const bool final_group) -> bool {
+        const auto paint = [&](const MeasuredCluster &group, const bool final_group)
+            -> std::optional<DisplayedGroup> {
             const auto old = previous ? std::ranges::find(previous->groups,
                 column, &DisplayedGroup::column) : std::vector<DisplayedGroup>::const_iterator{};
             // `uncertain_width` marks a group whose cursor report could not tell
@@ -266,7 +267,7 @@ private:
                     const auto observed = output.QueryCursor();
                     if (!observed || (observed->row != row) ||
                         (observed->column < column) || (observed->column > columns)) {
-                        return false;
+                        return std::nullopt;
                     }
                     // A group followed by more text in a fitted row must leave
                     // room for that text. `MeasureText` attaches zero-width text
@@ -285,11 +286,9 @@ private:
                     end_column = column + known->second;
                 }
             }
-            next.groups.push_back({.text = std::string{group.text},
+            return DisplayedGroup{.text = std::string{group.text},
                 .column = column, .end_column = end_column,
-                .uncertain_width = uncertain_width});
-            column = end_column;
-            return true;
+                .uncertain_width = uncertain_width};
         };
         const auto groups = MeasureText<Policy>(line.text);
         const auto reserve = [&] {
@@ -320,16 +319,22 @@ private:
                 next.shortened = true;
                 break;
             }
-            if (!paint(group, (index + 1) == groups.size())) {
+            auto painted = paint(group, (index + 1) == groups.size());
+            if (!painted) {
                 return std::nullopt;
             }
+            column = painted->end_column;
+            next.groups.push_back(std::move(*painted));
         }
         if ((line.clipping == FrameClipping::Ellipsis) ||
             (next.shortened && (line.clipping == FrameClipping::IfNeeded))) {
             for (auto index = 0; index < reserve; ++index) {
-                if (!paint({.text = "."sv, .width_bound = 1}, (index + 1) == reserve)) {
+                auto painted = paint({.text = "."sv, .width_bound = 1}, (index + 1) == reserve);
+                if (!painted) {
                     return std::nullopt;
                 }
+                column = painted->end_column;
+                next.groups.push_back(std::move(*painted));
             }
         }
         // Each frame owns the blank tail through the right margin. Console Host

@@ -203,7 +203,7 @@ public:
         Require(!active || updating,
             "menu layout queried the displayed cursor outside a hidden update"sv);
         ++pending_cursor_queries_;
-        if (std::exchange(fail_next_cursor_query, false)) {
+        if (std::exchange(fail_next_cursor_query, false) || !cursor_reports_available) {
             return std::nullopt;
         }
         return updating ? hidden_.cursor : displayed_.cursor;
@@ -256,6 +256,7 @@ public:
     bool active = false;
     bool updating = false;
     bool fail_next_cursor_query = false;
+    bool cursor_reports_available = true;
     bool fail_after_hidden_text = false;
     std::size_t write_calls = 0;
     std::size_t cursor_query_calls = 0;
@@ -778,6 +779,63 @@ export [[nodiscard]] auto TestMenu() -> bool {
             "the second full-name view reused the first entry's text"sv);
         Require(!terminal.active,
             "accepting the second entry retained the temporary menu screen"sv);
+    });
+    passed &= Test("a failed frame stopping after one unavailable cursor report"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 3, .columns = 30};
+        auto terminal = MenuConsole{std::span<const MenuInput>{}, size};
+        const auto session = terminal.EnterMenu();
+        auto frame = FrameBuffer{size};
+        frame.rows.front().text = "First row";
+        frame.rows.at(1).text = "Second row";
+        frame.rows.back().text = "Third row";
+        terminal.cursor_reports_available = false;
+        {
+            const auto update = terminal.BeginUpdate();
+            Require(!terminal.Flip(frame), "a frame with no cursor reports was reported complete"sv);
+        }
+        Require(terminal.cursor_query_calls == 1,
+            "the failed frame requested another cursor report for a later row"sv);
+        Require(terminal.Row(1).empty() && terminal.Row(2).empty() && terminal.Row(3).empty(),
+            "the failed frame was published as a complete drawing"sv);
+        terminal.cursor_reports_available = true;
+        {
+            const auto update = terminal.BeginUpdate();
+            Require(terminal.Flip(frame), "the frame could not be retried after reports resumed"sv);
+        }
+        Require((terminal.Row(1) == "First row"sv) &&
+            (terminal.Row(2) == "Second row"sv) && (terminal.Row(3) == "Third row"sv),
+            "retrying the frame omitted its failed row or an unattempted row"sv);
+    });
+    passed &= Test("unavailable cursor reports leaving recovery instructions and allowing cancellation"sv, [] {
+        for (const auto key : std::array{MenuKey::Back, MenuKey::Cancel}) {
+            const auto input = std::array{MenuInput{key}};
+            auto terminal = MenuConsole{input};
+            terminal.cursor_reports_available = false;
+            Require(!SelectMenuItem(terminal, kHeader, kEntries),
+                "the menu did not accept cancellation after a failed frame"sv);
+            Require(terminal.Row(1) == "Layout unavailable.    Ctrl+L: Redraw    Esc: Back"sv,
+                "the failed frame did not display the recovery instructions"sv);
+            Require((terminal.cursor_query_calls == 1) && (terminal.presentations.front() == 1),
+                "recovery queried the cursor again or published the failed drawing"sv);
+            for (auto row = 2; row <= 8; ++row) {
+                Require(terminal.Row(row).empty(),
+                    "the recovery screen retained part of the failed menu frame"sv);
+            }
+            Require(!terminal.active && !terminal.updating,
+                "cancellation left the menu screen or an update active"sv);
+        }
+    });
+    passed &= Test("layout measurement failure displaying instructions without another cursor query"sv, [] {
+        const auto name = std::string(100, 'A');
+        const auto entries = std::array{std::string_view{name}};
+        constexpr auto input = std::array{MenuInput{MenuKey::Cancel}};
+        auto terminal = MenuConsole{input};
+        terminal.cursor_reports_available = false;
+        Require(!SelectMenuItem(terminal, kHeader, entries),
+            "failed layout measurement did not allow cancellation"sv);
+        Require((terminal.cursor_query_calls == 1) &&
+            (terminal.Row(1) == "Layout unavailable.    Ctrl+L: Redraw    Esc: Back"sv),
+            "layout recovery needed a cursor report or omitted its instructions"sv);
     });
     passed &= Test("redrawing after an unavailable cursor report"sv, [] {
         constexpr auto header = std::array{"abcdefghijklmnopqrst café"sv};

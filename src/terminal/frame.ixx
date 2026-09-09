@@ -122,8 +122,10 @@ export namespace devicefs::terminal {
 // their widths. Recorded widths serve subsequent frames and layouts; upper
 // bounds on unmeasured widths determine where text may be shortened. Rows marked
 // `FrameClipping::None` rely on the caller's completed layout. `Flip` returns
-// false if a cursor report cannot establish a usable position; the affected row
-// is retried on the next frame. Terminal I/O exceptions propagate to the caller.
+// false if a cursor report cannot establish a usable position. Drawing stops
+// at that row so one unavailable report does not cause another wait on each
+// remaining row. The caller can then show recovery instructions or retry the
+// frame. Terminal I/O exceptions propagate to the caller.
 //
 // The presenter retains measurements for one terminal session. A font or
 // character-width-policy change requires `Invalidate` to discard those
@@ -180,12 +182,17 @@ public:
             auto old = std::exchange(previous, std::nullopt);
             previous = PaintRow<Policy>(output, line,
                 FailFastCast<int>(index) + 1, columns, old);
-            complete &= previous.has_value();
+            if (!previous) {
+                complete = false;
+                break;
+            }
         }
         if (output.written) {
             output.Write(kResetAttributes);
             output.Flush();
-            terminal.PresentFrame();
+            if (complete) {
+                terminal.PresentFrame();
+            }
         }
         initialized_ = true;
         failed.release();

@@ -42,6 +42,7 @@ concept MenuTerminal = Terminal<T> && requires(T &terminal,
     { terminal.ReadMenuInput() } -> std::same_as<MenuInput>;
     terminal.EnterMenu();
     terminal.BeginUpdate();
+    terminal.PresentFrame();
     { terminal.template Flip<WidthPolicy::AllModes>(frame) } -> std::same_as<bool>;
     { terminal.template KnownTextWidths<WidthPolicy::AllModes>(text) } ->
         std::same_as<std::optional<std::vector<MeasuredCluster>>>;
@@ -540,9 +541,33 @@ template <WidthPolicy Policy, MenuScrollPolicy Scrolling>
     const auto update = terminal.BeginUpdate();
     const auto terminal_size = cached_size ? cached_size : terminal.QuerySize();
     const auto show_message = [&](const std::span<const std::string_view> items) {
-        auto frame = FrameBuffer{terminal_size};
-        frame.rows.front() = MakeInformationLine(items);
-        std::ignore = terminal.template Flip<Policy>(frame);
+        // Recovery instructions must be readable when cursor reports are
+        // unavailable. Fit the message using width bounds, then send the
+        // completed screen in one write without querying the terminal.
+        auto message = MakeInformationLine(items).text;
+        if (terminal_size) {
+            const auto groups = MeasureText<Policy>(message);
+            if (std::ranges::fold_left(groups, 0,
+                    [](const auto width, const auto &group) { return width + group.width_bound; }) >
+                terminal_size->columns) {
+                const auto marker_width = std::min(3, terminal_size->columns);
+                auto remaining_columns = terminal_size->columns - marker_width;
+                auto retained_bytes = std::size_t{};
+                for (const auto &group : groups) {
+                    if (group.width_bound > remaining_columns) {
+                        break;
+                    }
+                    remaining_columns -= group.width_bound;
+                    retained_bytes += group.text.size();
+                }
+                message.resize(retained_bytes);
+                message.append(FailFastCast<std::size_t>(marker_width), '.');
+            }
+        }
+        constexpr auto kMessageScreen = "\x1b[0m\x1b[2J\x1b[H{}"sv;
+        terminal.InvalidateFrame();
+        terminal.Write(std::format(kMessageScreen, message));
+        terminal.PresentFrame();
         return MenuPresentation{.terminal_size = terminal_size, .ready = false};
     };
     if (!terminal_size) {
@@ -561,9 +586,11 @@ template <WidthPolicy Policy, MenuScrollPolicy Scrolling>
             list.Prepare<Policy, Scrolling>(terminal, *viewport, input))) {
         return show_message(kLayoutUnavailable);
     }
-    return {.terminal_size = terminal_size,
-        .ready = terminal.template Flip<Policy>(full_name ?
-            BuildMenuFrame(text, *viewport, full_name->get()) : BuildMenuFrame(text, *viewport, list))};
+    if (!terminal.template Flip<Policy>(full_name ?
+            BuildMenuFrame(text, *viewport, full_name->get()) : BuildMenuFrame(text, *viewport, list))) {
+        return show_message(kLayoutUnavailable);
+    }
+    return {.terminal_size = terminal_size, .ready = true};
 }
 
 }

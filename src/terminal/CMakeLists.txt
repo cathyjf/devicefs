@@ -5,14 +5,25 @@ cmake_minimum_required(VERSION 4.2)
 
 project(devicefs-terminal LANGUAGES CXX)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Debian's libc++ module manifest has paths relative to the compiler tree.
+    # Clang reports its multiarch pathname, where those paths do not resolve.
+    # Finding the compiler-tree pathname preserves the manifest's source paths.
+    unset(CMAKE_CXX_STDLIB_MODULES_JSON)
+    find_file(CMAKE_CXX_STDLIB_MODULES_JSON NAMES libc++.modules.json
+        HINTS "${LLVM_BIN_DIRECTORY}/../lib" REQUIRED)
+endif()
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-set(CMAKE_VS_GLOBALS
-    "UseMultiToolTask=true"
-    "EnableClServerMode=true"
-    "BuildPassReferences=true"
-)
+if(WIN32)
+    set(CMAKE_VS_GLOBALS
+        "UseMultiToolTask=true"
+        "EnableClServerMode=true"
+        "BuildPassReferences=true"
+    )
+endif()
 
 option(DEVICEFS_TERMINAL_BUILD_TESTS "Build the terminal test entry point" OFF)
 
@@ -31,8 +42,14 @@ target_include_directories(windows-terminal-width PRIVATE
 
 add_library(devicefs-terminal STATIC)
 target_sources(devicefs-terminal PUBLIC
-    FILE_SET CXX_MODULES FILES terminal.ixx text.ixx frame.ixx menu.ixx windows.ixx safecast.ixx
+    FILE_SET CXX_MODULES FILES terminal.ixx text.ixx frame.ixx menu.ixx safecast.ixx
+        scope_exit.ixx terminal_reports.ixx
 )
+if(WIN32)
+    target_sources(devicefs-terminal PUBLIC FILE_SET CXX_MODULES FILES windows.ixx)
+else()
+    target_sources(devicefs-terminal PUBLIC FILE_SET CXX_MODULES FILES unix.ixx)
+endif()
 target_link_libraries(devicefs-terminal PRIVATE windows-terminal-width)
 target_include_directories(devicefs-terminal PRIVATE
     "${DEVICEFS_ROOT}/src/modules/include"
@@ -45,8 +62,11 @@ set(DEVICEFS_TERMINAL_ANALYSIS_TARGETS
 if(DEVICEFS_TERMINAL_BUILD_TESTS)
     add_executable(devicefs-terminal-test
         main.cpp
-        "${DEVICEFS_ROOT}/src/resources/devicefs.manifest"
     )
+    if(WIN32)
+        target_sources(devicefs-terminal-test PRIVATE
+            "${DEVICEFS_ROOT}/src/resources/devicefs.manifest")
+    endif()
     target_sources(devicefs-terminal-test PRIVATE
         FILE_SET CXX_MODULES FILES menu_tests.ixx frame_tests.ixx
     )
@@ -54,10 +74,12 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
     target_include_directories(devicefs-terminal-test PRIVATE
         "${DEVICEFS_ROOT}/src/modules/include"
     )
-    target_link_options(devicefs-terminal-test PRIVATE
-        /GUARD:CF /guard:ehcont
-        $<$<STREQUAL:${CMAKE_CXX_COMPILER_ARCHITECTURE_ID},x64>:/CETCOMPAT>
-    )
+    if(WIN32)
+        target_link_options(devicefs-terminal-test PRIVATE
+            /GUARD:CF /guard:ehcont
+            $<$<STREQUAL:${CMAKE_CXX_COMPILER_ARCHITECTURE_ID},x64>:/CETCOMPAT>
+        )
+    endif()
     list(APPEND DEVICEFS_TERMINAL_ANALYSIS_TARGETS devicefs-terminal-test)
 
     enable_testing()
@@ -67,6 +89,10 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
 endif()
 
 foreach(target IN LISTS DEVICEFS_TERMINAL_ANALYSIS_TARGETS)
+    if(NOT WIN32)
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Werror)
+        continue()
+    endif()
     set_target_properties(${target} PROPERTIES
         VS_GLOBAL_EnableCppCoreCheck true
         VS_GLOBAL_RunCodeAnalysis true
@@ -85,14 +111,16 @@ foreach(target IN LISTS DEVICEFS_TERMINAL_ANALYSIS_TARGETS)
     )
 endforeach()
 
-find_program(POWERSHELL_EXECUTABLE NAMES pwsh REQUIRED)
-add_custom_target(check-terminal-code-analysis ALL
-    COMMAND "${POWERSHELL_EXECUTABLE}"
-        -NoProfile -NonInteractive -File
-        "${DEVICEFS_ROOT}/misc/Check-NativeCodeAnalysis.ps1"
-        -BuildDirectory "${CMAKE_CURRENT_BINARY_DIR}"
-        -Configuration "$<CONFIG>"
-    USES_TERMINAL
-    VERBATIM
-)
-add_dependencies(check-terminal-code-analysis ${DEVICEFS_TERMINAL_ANALYSIS_TARGETS})
+if(WIN32)
+    find_program(POWERSHELL_EXECUTABLE NAMES pwsh REQUIRED)
+    add_custom_target(check-terminal-code-analysis ALL
+        COMMAND "${POWERSHELL_EXECUTABLE}"
+            -NoProfile -NonInteractive -File
+            "${DEVICEFS_ROOT}/misc/Check-NativeCodeAnalysis.ps1"
+            -BuildDirectory "${CMAKE_CURRENT_BINARY_DIR}"
+            -Configuration "$<CONFIG>"
+        USES_TERMINAL
+        VERBATIM
+    )
+    add_dependencies(check-terminal-code-analysis ${DEVICEFS_TERMINAL_ANALYSIS_TARGETS})
+endif()

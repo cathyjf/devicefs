@@ -11,6 +11,7 @@ import devicefs.terminal;
 import devicefs.terminal.frame;
 import devicefs.terminal.menu;
 import devicefs.terminal.safecast;
+import devicefs.terminal.reports;
 
 using namespace std::string_view_literals;
 using namespace std::chrono_literals;
@@ -164,7 +165,7 @@ public:
     }
 
     [[nodiscard]] auto QueryCursor() -> std::optional<CursorPosition> {
-        const auto reply = Query("\x1b[6n"sv, "\x1b["sv, "R"sv, 2);
+        const auto reply = Query(detail::TerminalReport::Cursor);
         if (!reply || ((*reply)[0] < 1) || ((*reply)[1] < 1)) {
             return std::nullopt;
         }
@@ -172,7 +173,7 @@ public:
     }
 
     [[nodiscard]] auto QuerySize() -> std::optional<TerminalSize> {
-        const auto reply = Query("\x1b[18t"sv, "\x1b["sv, "t"sv, 3);
+        const auto reply = Query(detail::TerminalReport::Size);
         if (!reply || ((*reply)[0] != 8) || ((*reply)[1] < 1) || ((*reply)[2] < 1)) {
             return std::nullopt;
         }
@@ -260,28 +261,25 @@ private:
     // console input buffer. Replies arrive alongside keyboard and resize events.
     // The requested report is consumed here; other events remain available to
     // `ReadInput` in their original arrival order.
-    [[nodiscard]] auto Query(const std::string_view request,
-        const std::string_view prefix, const std::string_view suffix,
-        const std::size_t fields)
+    [[nodiscard]] auto Query(const detail::TerminalReport report)
         -> std::optional<std::array<int, 3>> {
+        constexpr auto prefix = detail::kReportPrefix;
+        const auto suffix = detail::ReportSuffix(report);
         // Some terminals omit unsupported reports. A deadline lets the caller
         // regain control in that case. The timeout covers the whole query,
         // including time spent receiving keyboard input while awaiting a reply.
         constexpr auto kReplyTimeout = 5s;
-        // Cursor and size reports contain at most three nonnegative `int` values.
-        // Ten decimal digits per value, separators, and VT framing fit within
-        // this reply-length limit.
-        constexpr auto kMaximumReplyLength = 37uz;
+
         auto records = std::vector<std::list<INPUT_RECORD>::iterator>{};
-        records.reserve(kMaximumReplyLength);
+        records.reserve(detail::kMaximumReportLength);
         auto reply = std::string{};
-        reply.reserve(kMaximumReplyLength);
+        reply.reserve(detail::kMaximumReportLength);
         const auto discard_candidate = [&] {
             records.clear();
             reply.clear();
         };
         const auto deadline = std::chrono::steady_clock::now() + kReplyTimeout;
-        Write(request);
+        Write(detail::ReportRequest(report));
         for (;;) {
             const auto remaining = deadline - std::chrono::steady_clock::now();
             if (remaining <= remaining.zero()) {
@@ -328,7 +326,7 @@ private:
             // reference. Every character in that syntax is ASCII, so values
             // above 0x7f cannot be part of these replies.
             // https://invisible-mirror.net/xterm/ctlseqs/ctlseqs.html
-            if ((character > 0x7f) || (reply.size() == kMaximumReplyLength)) {
+            if ((character > 0x7f) || (reply.size() == detail::kMaximumReportLength)) {
                 discard_candidate();
                 continue;
             }
@@ -351,28 +349,7 @@ private:
             if (!reply.ends_with(suffix)) {
                 continue;
             }
-            auto values = std::array<int, 3>{};
-            auto body = std::string_view{reply}.substr(
-                prefix.size(), reply.size() - prefix.size() - suffix.size());
-            auto valid = true;
-            for (auto index = 0uz; index < fields; ++index) {
-                const auto [end, error] = std::from_chars(
-                    body.data(), body.data() + body.size(), values.at(index));
-                if ((error != std::errc{}) || (values.at(index) < 0)) {
-                    valid = false;
-                    break;
-                }
-                body.remove_prefix(FailFastCast<std::size_t>(
-                    end - body.data()));
-                if ((index + 1) < fields) {
-                    if (!body.starts_with(';')) {
-                        valid = false;
-                        break;
-                    }
-                    body.remove_prefix(1);
-                }
-            }
-            if (valid && body.empty()) {
+            if (const auto values = detail::ParseTerminalReport(reply, report)) {
                 for (const auto &position_to_erase : records) {
                     pending_.erase(position_to_erase);
                 }

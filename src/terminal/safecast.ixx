@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+module;
+
+#include "compat/gsl_suppress.h"
+
 export module devicefs.terminal.safecast;
 
 import std;
@@ -36,12 +40,9 @@ constexpr auto FailFastCast(const Source input) noexcept -> Target {
         std::terminate();
 #endif
     }
-#ifdef _MSC_VER
-    [[gsl::suppress("26472",
-        justification:
-            "The range check establishes that the input is representable in "
-            "the target type. A failed check terminates before this cast.")]]
-#endif
+    GSL_SUPPRESS("26472",
+        "The range check establishes that the input is representable in "
+        "the target type. A failed check terminates before this cast.")
     return static_cast<Target>(input);
 }
 
@@ -52,15 +53,12 @@ template <class Target, auto... Constant, class... Source>
 [[msvc::forceinline]]
 #endif
 constexpr decltype(auto) CompileTimeCast(Source &&...input) {
-#ifdef _MSC_VER
-    [[gsl::suppress("26493",
-        justification:
-            "C26493 misidentifies this braced initialization as a C-style "
-            "cast. The language rejects narrowing conversions here, including "
-            "constant values that do not fit in the target type. This "
-            "centralized helper function allows the suppression to exist in "
-            "only one place.")]]
-#endif
+    GSL_SUPPRESS("26493",
+        "C26493 misidentifies this braced initialization as a C-style "
+        "cast. The language rejects narrowing conversions here, including "
+        "constant values that do not fit in the target type. This "
+        "centralized helper function allows the suppression to exist in "
+        "only one place.")
     return Target{Constant..., std::forward<Source>(input)...};
 }
 

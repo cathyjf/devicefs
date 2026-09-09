@@ -12,20 +12,26 @@ Git object database for comparison without putting the dependency into history.
 | `src/types/inc/CodepointWidthDetector.hpp` | `3b18ce205714768266fd87bc3a7041d86b191a58` |
 | `LICENSE` | `017b9885a46ad4c7f4367ad2949fb66fb56f977f` |
 
-The header now imports `std`. Upstream obtains its standard-library
-declarations through a precompiled header, but importing
-`CodepointWidthDetector.hpp` as a C++ header unit compiles the header separately
-from its importer. Importing `std` gives the header those declarations directly.
+The copied detector uses `char16_t` and `std::u16string_view` for its UTF-16
+input. Upstream uses `wchar_t`, which has 16 bits on Windows but 32 bits on the
+supported Unix platforms. Explicit UTF-16 types let the same decoder process
+surrogate pairs correctly on every platform. The Unicode tables and
+segmentation algorithms retain their upstream implementation.
 
-Importing `std` is the only change to the upstream files. The implementation
-and license remain identical to the recorded upstream blobs.
+The header imports `std` when built with MSVC. Upstream obtains its
+standard-library declarations through a precompiled header, but the MSVC build
+imports `CodepointWidthDetector.hpp` as a header unit, which is compiled
+separately from its importer. The Clang build includes the detector header
+textually, and the header includes its standard-library dependencies there.
+Compiler-specific optimization attributes and diagnostic directives are
+conditional so each compiler receives the syntax that it supports.
 
 The component's [CMake configuration](../../CMakeLists.txt) builds the detector
 as a separate library with the project's analysis and compiler settings.
-C26494 is disabled through the compatibility header textually included by the
-vendored source: the rule reports four declarations without initializers, but
-every value is assigned before reading. The reason is explained beside the
+On MSVC, C26494 is disabled through the compatibility header textually included
+by the vendored source: the rule reports four declarations without initializers,
+but every value is assigned before reading. The reason is explained beside the
 pragma. First-party code retains the rule. The detector includes `precomp.h`
-for its integer typedefs and WIL's `LOG_CAUGHT_EXCEPTION`. The
+for its integer typedefs and, on Windows, WIL's `LOG_CAUGHT_EXCEPTION`. The
 [replacement header](../../compat/precomp.h) supplies those dependencies so
 the copied source can compile without the rest of Windows Terminal.

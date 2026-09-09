@@ -4,6 +4,7 @@
 #include "precomp.h"
 #include "inc/CodepointWidthDetector.hpp"
 
+#ifdef _MSC_VER
 // I was trying to minimize dependencies in this code so that it's easier to port to other terminal applications.
 // That's why it doesn't use any of the GSL helpers and makes minimal use of the STL.
 #pragma warning(disable : 26446) // Prefer to use gsl::at() instead of unchecked subscript operator (bounds.4).
@@ -13,6 +14,7 @@
 #pragma warning(disable : 26438) // Avoid 'goto' (es.76).
 #pragma warning(disable : 26481) // Don't use pointer arithmetic. Use span instead (bounds.1).
 #pragma warning(disable : 26482) // Only index into arrays using constant expressions (bounds.2).
+#endif
 
 // s_stage1/2/3/4 represents a multi-stage table, aka trie.
 // The highest bits of the codepoint are an index into s_stage1, which selects a row in s_stage2.
@@ -689,10 +691,17 @@ constexpr int ucdToCharacterWidth(const int val) noexcept
 
 // Decodes the next codepoint from the given UTF-16 string.
 // Returns the start of the next codepoint. Assumes `it < end`.
-[[msvc::forceinline]] constexpr const wchar_t* utf16NextOrFFFD(const wchar_t* it, const wchar_t* end, char32_t& out)
+#ifdef _MSC_VER
+[[msvc::forceinline]]
+#else
+[[gnu::always_inline]]
+#endif
+constexpr const char16_t* utf16NextOrFFFD(const char16_t* it, const char16_t* end, char32_t& out)
 {
+#ifdef _MSC_VER
     __assume(it != nullptr);
     __assume(end != nullptr);
+#endif
 
     char32_t c = *it++;
 
@@ -721,10 +730,17 @@ constexpr int ucdToCharacterWidth(const int val) noexcept
 
 // Decodes the preceding codepoint from the given UTF-16 string.
 // Returns the start of the preceding codepoint. Assumes `it > beg`.
-[[msvc::forceinline]] constexpr const wchar_t* utf16PrevOrFFFD(const wchar_t* it, const wchar_t* beg, char32_t& out)
+#ifdef _MSC_VER
+[[msvc::forceinline]]
+#else
+[[gnu::always_inline]]
+#endif
+constexpr const char16_t* utf16PrevOrFFFD(const char16_t* it, const char16_t* beg, char32_t& out)
 {
+#ifdef _MSC_VER
     __assume(it != nullptr);
     __assume(beg != nullptr);
+#endif
 
     char32_t c = *--it;
 
@@ -752,7 +768,7 @@ constexpr int ucdToCharacterWidth(const int val) noexcept
 }
 
 // Returns `reset` if `ptr` is outside the range [beg, end). Otherwise, it returns `ptr` unmodified.
-constexpr const wchar_t* resetIfOutOfRange(const wchar_t* beg, const wchar_t* end, const wchar_t* reset, const wchar_t* ptr)
+constexpr const char16_t* resetIfOutOfRange(const char16_t* beg, const char16_t* end, const char16_t* reset, const char16_t* ptr)
 {
     auto ret = ptr;
     // This uses individual if-assignments to get the compiler to emit conditional moves.
@@ -774,7 +790,7 @@ CodepointWidthDetector& CodepointWidthDetector::Singleton() noexcept
     return s_codepointWidthDetector;
 }
 
-bool CodepointWidthDetector::GraphemeNext(GraphemeState& s, const std::wstring_view& str) noexcept
+bool CodepointWidthDetector::GraphemeNext(GraphemeState& s, const std::u16string_view& str) noexcept
 {
     if (_mode == TextMeasurementMode::Graphemes)
     {
@@ -787,7 +803,7 @@ bool CodepointWidthDetector::GraphemeNext(GraphemeState& s, const std::wstring_v
     return _graphemeNextConsole(s, str);
 }
 
-bool CodepointWidthDetector::GraphemePrev(GraphemeState& s, const std::wstring_view& str) noexcept
+bool CodepointWidthDetector::GraphemePrev(GraphemeState& s, const std::u16string_view& str) noexcept
 {
     if (_mode == TextMeasurementMode::Graphemes)
     {
@@ -802,7 +818,7 @@ bool CodepointWidthDetector::GraphemePrev(GraphemeState& s, const std::wstring_v
 
 // Parses the next grapheme cluster from the given string. The algorithm largely follows "UAX #29: Unicode Text Segmentation",
 // but takes some mild liberties. Returns false if the end of the string was reached. Updates `s` with the cluster.
-bool CodepointWidthDetector::_graphemeNext(GraphemeState& s, const std::wstring_view& str) const noexcept
+bool CodepointWidthDetector::_graphemeNext(GraphemeState& s, const std::u16string_view& str) const noexcept
 {
     const auto beg = str.data();
     const auto end = beg + str.size();
@@ -899,7 +915,7 @@ bool CodepointWidthDetector::_graphemeNext(GraphemeState& s, const std::wstring_
 // Parses the preceding grapheme cluster from the given string. The algorithm largely follows "UAX #29: Unicode Text Segmentation",
 // but takes some mild liberties. Returns false if the end of the string was reached. Updates `s` with the cluster.
 // This code is identical to _graphemeNext() but with the order of operations reversed since we're iterating backwards.
-bool CodepointWidthDetector::_graphemePrev(GraphemeState& s, const std::wstring_view& str) const noexcept
+bool CodepointWidthDetector::_graphemePrev(GraphemeState& s, const std::u16string_view& str) const noexcept
 {
     const auto beg = str.data();
     const auto end = beg + str.size();
@@ -997,7 +1013,7 @@ bool CodepointWidthDetector::_graphemePrev(GraphemeState& s, const std::wstring_
 // Such terminals have no actual notion of graphemes or joining characters, but do know zero-width characters.
 // During cursor navigation they'll skip over such zero-width characters to reach the target column.
 // In effect this means, that a non-zero-width character gets clustered with any number of following zero-width characters.
-bool CodepointWidthDetector::_graphemeNextWcswidth(GraphemeState& s, const std::wstring_view& str) const noexcept
+bool CodepointWidthDetector::_graphemeNextWcswidth(GraphemeState& s, const std::u16string_view& str) const noexcept
 {
     const auto beg = str.data();
     const auto end = beg + str.size();
@@ -1063,7 +1079,7 @@ bool CodepointWidthDetector::_graphemeNextWcswidth(GraphemeState& s, const std::
 // Such terminals have no actual notion of graphemes or joining characters, but do know zero-width characters.
 // During cursor navigation they'll skip over such zero-width characters to reach the target column.
 // In effect this means, that a non-zero-width character gets clustered with any number of following zero-width characters.
-bool CodepointWidthDetector::_graphemePrevWcswidth(GraphemeState& s, const std::wstring_view& str) const noexcept
+bool CodepointWidthDetector::_graphemePrevWcswidth(GraphemeState& s, const std::u16string_view& str) const noexcept
 {
     const auto beg = str.data();
     const auto end = beg + str.size();
@@ -1123,7 +1139,7 @@ bool CodepointWidthDetector::_graphemePrevWcswidth(GraphemeState& s, const std::
 
 // Implements a clustering algorithm that behaves similar to the old conhost.
 // It even asks the text renderer how wide ambiguous width characters are instead of defaulting to 1 (or 2).
-bool CodepointWidthDetector::_graphemeNextConsole(GraphemeState& s, const std::wstring_view& str) noexcept
+bool CodepointWidthDetector::_graphemeNextConsole(GraphemeState& s, const std::u16string_view& str) noexcept
 {
     const auto beg = str.data();
     const auto end = beg + str.size();
@@ -1169,7 +1185,7 @@ bool CodepointWidthDetector::_graphemeNextConsole(GraphemeState& s, const std::w
 
 // Implements a clustering algorithm that behaves similar to the old conhost.
 // It even asks the text renderer how wide ambiguous width characters are instead of defaulting to 1 (or 2).
-bool CodepointWidthDetector::_graphemePrevConsole(GraphemeState& s, const std::wstring_view& str) noexcept
+bool CodepointWidthDetector::_graphemePrevConsole(GraphemeState& s, const std::u16string_view& str) noexcept
 {
     const auto beg = str.data();
     const auto end = beg + str.size();
@@ -1229,17 +1245,17 @@ try
         return it->second;
     }
 
-    wchar_t buf[2];
+    char16_t buf[2];
     size_t len;
     if (codepoint <= 0xffff)
     {
-        buf[0] = static_cast<wchar_t>(codepoint);
+        buf[0] = static_cast<char16_t>(codepoint);
         len = 1;
     }
     else
     {
-        buf[0] = static_cast<wchar_t>((codepoint >> 10) + 0xD7C0);
-        buf[1] = static_cast<wchar_t>((codepoint & 0x3ff) | 0xDC00);
+        buf[0] = static_cast<char16_t>((codepoint >> 10) + 0xD7C0);
+        buf[1] = static_cast<char16_t>((codepoint & 0x3ff) | 0xDC00);
         len = 2;
     }
 
@@ -1249,7 +1265,9 @@ try
 }
 catch (...)
 {
+#ifdef _WIN32
     LOG_CAUGHT_EXCEPTION();
+#endif
     return 1;
 }
 
@@ -1278,7 +1296,7 @@ void CodepointWidthDetector::SetAmbiguousWidth(const int width) noexcept
 // - pfnFallback - the function to use as the fallback method.
 // Return Value:
 // - <none>
-void CodepointWidthDetector::SetFallbackMethod(std::function<bool(const std::wstring_view&)> pfnFallback) noexcept
+void CodepointWidthDetector::SetFallbackMethod(std::function<bool(const std::u16string_view&)> pfnFallback) noexcept
 {
     _pfnFallbackMethod = std::move(pfnFallback);
 }

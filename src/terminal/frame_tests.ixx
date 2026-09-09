@@ -3,7 +3,9 @@
 
 module;
 
+#ifdef _WIN32
 #include <devicefs/strsafe_compat.h>
+#endif
 
 export module devicefs.terminal.frame_tests;
 

@@ -3,7 +3,13 @@
 
 #pragma once
 
+#ifdef _MSC_VER
 import std;
+#else
+#include <functional>
+#include <string_view>
+#include <unordered_map>
+#endif
 
 enum class TextMeasurementMode
 {
@@ -37,7 +43,7 @@ struct GraphemeState
     // the emoji with a width of 1, and the second call will return U+FE0F with a width of 2.
     // You know these two belong together because the first call returned false.
     // The total width is not 1+2 but rather just 2.
-    const wchar_t* beg = nullptr;
+    const char16_t* beg = nullptr;
     int len = 0;
     // width will always be between 0 or 2.
     int width = 0;
@@ -54,26 +60,31 @@ struct CodepointWidthDetector
     static CodepointWidthDetector& Singleton() noexcept;
 
     // Returns false if the end of the string has been reached.
-    bool GraphemeNext(GraphemeState& s, const std::wstring_view& str) noexcept;
-    bool GraphemePrev(GraphemeState& s, const std::wstring_view& str) noexcept;
+    bool GraphemeNext(GraphemeState& s, const std::u16string_view& str) noexcept;
+    bool GraphemePrev(GraphemeState& s, const std::u16string_view& str) noexcept;
 
     TextMeasurementMode GetMode() const noexcept;
     int GetAmbiguousWidth() const noexcept;
     void SetAmbiguousWidth(int width) noexcept;
-    void SetFallbackMethod(std::function<bool(const std::wstring_view&)> pfnFallback) noexcept;
+    void SetFallbackMethod(std::function<bool(const std::u16string_view&)> pfnFallback) noexcept;
     void Reset(TextMeasurementMode mode) noexcept;
 
 private:
-    bool _graphemeNext(GraphemeState& s, const std::wstring_view& str) const noexcept;
-    bool _graphemePrev(GraphemeState& s, const std::wstring_view& str) const noexcept;
-    bool _graphemeNextWcswidth(GraphemeState& s, const std::wstring_view& str) const noexcept;
-    bool _graphemePrevWcswidth(GraphemeState& s, const std::wstring_view& str) const noexcept;
-    bool _graphemeNextConsole(GraphemeState& s, const std::wstring_view& str) noexcept;
-    bool _graphemePrevConsole(GraphemeState& s, const std::wstring_view& str) noexcept;
-    __declspec(noinline) int _checkFallbackViaCache(char32_t codepoint) noexcept;
+    bool _graphemeNext(GraphemeState& s, const std::u16string_view& str) const noexcept;
+    bool _graphemePrev(GraphemeState& s, const std::u16string_view& str) const noexcept;
+    bool _graphemeNextWcswidth(GraphemeState& s, const std::u16string_view& str) const noexcept;
+    bool _graphemePrevWcswidth(GraphemeState& s, const std::u16string_view& str) const noexcept;
+    bool _graphemeNextConsole(GraphemeState& s, const std::u16string_view& str) noexcept;
+    bool _graphemePrevConsole(GraphemeState& s, const std::u16string_view& str) noexcept;
+#ifdef _MSC_VER
+    __declspec(noinline)
+#else
+    [[gnu::noinline]]
+#endif
+    int _checkFallbackViaCache(char32_t codepoint) noexcept;
 
     std::unordered_map<char32_t, int> _fallbackCache;
-    std::function<bool(const std::wstring_view&)> _pfnFallbackMethod;
+    std::function<bool(const std::u16string_view&)> _pfnFallbackMethod;
     TextMeasurementMode _mode = TextMeasurementMode::Graphemes;
     int _ambiguousWidth = 1;
 };

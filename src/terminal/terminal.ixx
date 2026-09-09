@@ -1,10 +1,20 @@
 // SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+module;
+
+#include "compat/gsl_suppress.h"
+
+#ifndef _MSC_VER
+#include <terminal/src/types/inc/CodepointWidthDetector.hpp>
+#endif
+
 export module devicefs.terminal;
 
 import std;
+#ifdef _MSC_VER
 import <terminal/src/types/inc/CodepointWidthDetector.hpp>;
+#endif
 export import devicefs.terminal.text;
 
 using namespace std::string_view_literals;
@@ -97,15 +107,14 @@ export struct MeasuredCluster {
 // alongside those results locates the corresponding bytes, so the returned
 // views refer to the caller's original text.
 export template <WidthPolicy Policy = WidthPolicy::AllModes>
-[[gsl::suppress("26496",
-    justification:
-        "The analyzer recommends const for locals that are unchanged in the "
-        "WindowsTerminalGraphemes instantiation. The AllModes instantiation "
-        "updates the same locals while finding group boundaries and summing "
-        "widths, so their declarations must permit those updates.")]]
+GSL_SUPPRESS("26496",
+    "The analyzer recommends const for locals that are unchanged in the "
+    "WindowsTerminalGraphemes instantiation. The AllModes instantiation "
+    "updates the same locals while finding group boundaries and summing "
+    "widths, so their declarations must permit those updates.")
 [[nodiscard]] auto MeasureText(const std::string_view prepared)
     -> std::vector<MeasuredCluster> {
-    const auto wide = std::filesystem::path{prepared}.wstring();
+    const auto wide = std::filesystem::path{prepared}.u16string();
     // Windows Terminal's detector uses int for cluster lengths and intermediate
     // width sums. Each UTF-16 code unit can contribute at most two columns to
     // those sums, even when the final composed character is much narrower.
@@ -171,7 +180,7 @@ export template <WidthPolicy Policy = WidthPolicy::AllModes>
             const auto wide_length = character <= U'\uffff' ?
                 std::size_t{1} : std::size_t{2};
             if constexpr (Policy == WidthPolicy::AllModes) {
-                const auto scalar = std::wstring_view{wide}.substr(wide_offset, wide_length);
+                const auto scalar = std::u16string_view{wide}.substr(wide_offset, wide_length);
                 auto scalar_state = GraphemeState{.beg = scalar.data()};
                 std::ignore = detector.GraphemeNext(scalar_state, scalar);
                 // The AllModes estimate reserves space for every component of
@@ -287,7 +296,7 @@ export template <typename LineStarted = std::nullptr_t>
     auto remaining = prepared;
     auto clusters = measured;
     auto cursor = *start;
-    const auto notify_line = [&line_started](const std::string_view suffix) {
+    const auto notify_line = [&](const std::string_view suffix) {
         if constexpr (!std::is_null_pointer_v<LineStarted>) {
             std::invoke(line_started, suffix);
         }

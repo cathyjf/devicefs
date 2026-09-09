@@ -4,7 +4,7 @@
 export module devicefs.terminal.menu_tests;
 
 import std;
-import <wil/resource.h>;
+import devicefs.terminal.scope_exit;
 import devicefs.terminal.safecast;
 import devicefs.terminal;
 import devicefs.terminal.frame;
@@ -63,14 +63,14 @@ public:
     [[nodiscard]] auto EnterMenu() noexcept {
         presenter_ = DeltaFramePresenter{};
         active = true;
-        return wil::scope_exit([this]() noexcept { active = false; });
+        return ScopeExit{[this]() noexcept { active = false; }};
     }
 
     [[nodiscard]] auto BeginUpdate() {
         Require(!updating, "a screen update began before the previous update ended"sv);
         hidden_ = displayed_;
         updating = true;
-        return wil::scope_exit([this]() noexcept { updating = false; });
+        return ScopeExit{[this]() noexcept { updating = false; }};
     }
 
     auto PresentFrame() -> void {

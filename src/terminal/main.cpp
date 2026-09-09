@@ -14,23 +14,37 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+#ifdef _WIN32
 #include <devicefs/strsafe_compat.h>
+#else
+#include <clocale>
+#endif
 
 import std;
 // The <clocale> header unit is needed for `LC_CTYPE`.
+#ifdef _WIN32
 import <clocale>;
+#endif
 import devicefs.terminal;
 import devicefs.terminal.menu;
 import devicefs.terminal.menu_tests;
 import devicefs.terminal.frame_tests;
+#ifdef _WIN32
 import devicefs.terminal.windows;
+#else
+import devicefs.terminal.unix;
+#endif
 
 using namespace std::string_view_literals;
 using namespace devicefs::terminal;
 
 namespace {
 
+#ifdef _WIN32
 using NativeConsole = WindowsConsole;
+#else
+using NativeConsole = UnixConsole;
+#endif
 
 auto Require(const bool condition, const std::string_view message) -> void {
     if (!condition) {
@@ -626,7 +640,11 @@ Text begins at the current cursor position and uses the remaining screen rows.
 }
 
 auto main(const int argc, char *const argv[]) -> int {
+#ifdef _WIN32
     std::ignore = std::setlocale(LC_CTYPE, ".UTF8");
+#else
+    std::ignore = std::setlocale(LC_CTYPE, "");
+#endif
     const auto arguments = std::span{argv, argv + argc};
     try {
         if ((arguments.size() == 2) &&

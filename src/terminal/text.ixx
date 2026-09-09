@@ -49,7 +49,7 @@ public:
     [[nodiscard]] auto Remove(const std::span<char8_t> input) noexcept {
         auto output_size = 0uz;
         for (const auto character : input) {
-            if (Preserve<false>(character)) {
+            if (Preserve<false>(+character)) {
                 input[output_size++] = character;
             }
         }

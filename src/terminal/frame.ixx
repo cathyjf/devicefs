@@ -3,12 +3,14 @@
 
 module;
 
+#ifdef _WIN32
 #include <devicefs/strsafe_compat.h>
+#endif
 
 export module devicefs.terminal.frame;
 
 import std;
-import <wil/resource.h>;
+import devicefs.terminal.scope_exit;
 import devicefs.terminal.safecast;
 import devicefs.terminal;
 
@@ -151,7 +153,7 @@ public:
     template <WidthPolicy Policy = WidthPolicy::AllModes>
     [[nodiscard]] auto Flip(Terminal auto &terminal, const FrameBuffer &frame) -> bool {
         using namespace frame_detail;
-        auto failed = wil::scope_exit([this] { Invalidate(); });
+        auto failed = ScopeExit{[this] { Invalidate(); }};
         auto output = FrameOutput{terminal};
         if (!initialized_ || !frame.size) {
             output.Write(kClearScreen);
@@ -221,7 +223,7 @@ private:
         const std::optional<frame_detail::DisplayedRow> &previous)
         -> std::optional<frame_detail::DisplayedRow> {
         using namespace frame_detail;
-        auto next = DisplayedRow{.source = line, .columns = columns};
+        auto next = DisplayedRow{.source = line, .groups = {}, .columns = columns};
         const auto old_end = previous ?
             (previous->groups.empty() ? 1 : previous->groups.back().end_column) : columns + 1;
         const auto move = [&](const int column) {

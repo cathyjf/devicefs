@@ -29,6 +29,17 @@ struct FrameLine {
     auto operator==(const FrameLine &) const -> bool = default;
 };
 
+// MakeInformationLine builds a footer or status row from separate pieces of
+// prepared terminal text. Empty pieces omit optional information without
+// leaving extra separators. The completed row is clipped when space is limited.
+[[nodiscard]] auto MakeInformationLine(const std::span<const std::string_view> items,
+    const std::string_view separator = "    "sv) -> FrameLine {
+    return {.text = items |
+        std::views::filter([](const auto item) { return !item.empty(); }) |
+        std::views::join_with(separator) | std::ranges::to<std::string>(),
+        .clipping = FrameClipping::IfNeeded};
+}
+
 // A back buffer describes the desired screen without sending terminal output.
 // Each element is one physical row; an empty element requests a blank row.
 // Text is prepared with PrepareTerminalText and contains no terminal commands.

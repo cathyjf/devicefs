@@ -408,8 +408,8 @@ export [[nodiscard]] auto TestMenu() -> bool {
         const auto &frame = terminal.submitted_frames.back();
         constexpr auto expected = std::array{
             kHeader.front(), "  Alpha"sv, "> Bravo"sv, "  Charlie"sv, "  Delta"sv,
-            footer.front(), "Up/Down: Select  Enter: Choose  Esc: Back"sv,
-            "Entry 2 of 4  PgUp/PgDn: Scroll  Home/End: First/Last"sv};
+            footer.front(), "Up/Down: Select    Enter: Choose    Esc: Back"sv,
+            "Entry 2 of 4    PgUp/PgDn: Scroll    Home/End: First/Last"sv};
         Require(std::ranges::equal(frame.rows, expected, {}, &FrameLine::text),
             "the submitted frame omitted or misplaced menu entries, fixed text, or status"sv);
         Require(terminal.submitted_frames.front().rows.at(1).reverse &&
@@ -537,9 +537,9 @@ export [[nodiscard]] auto TestMenu() -> bool {
         Require(SelectMenuItem(terminal, kHeader, entries, {}, 8) == 8,
             "returning from entry ten did not select entry nine"sv);
         Require(terminal.frames.at(1).contains(
-                "Entry 10 of 10  PgUp/PgDn: Scroll  Home/End: First/Last"sv),
+                "Entry 10 of 10    PgUp/PgDn: Scroll    Home/End: First/Last"sv),
             "adding a digit corrupted the status text following the entry number"sv);
-        Require(terminal.Row(6) == "Entry 9 of 10  PgUp/PgDn: Scroll  Home/End: First/Last"sv,
+        Require(terminal.Row(6) == "Entry 9 of 10    PgUp/PgDn: Scroll    Home/End: First/Last"sv,
             "removing a digit left stale text at the end of the status line"sv);
     });
     passed &= Test("wrapped selection repainting every visible continuation and replacing its hint"sv, [] {

@@ -57,6 +57,8 @@ constexpr auto kPreviewRows = std::size_t{8};
 constexpr auto kTextColumn = 3;
 constexpr auto kContinuationColumn = 5;
 constexpr auto kMinimumColumns = 12;
+constexpr auto kLayoutUnavailable = std::array{
+    "Layout unavailable."sv, "Ctrl+L: Redraw"sv, "Esc: Back"sv};
 
 struct TextLayout {
     std::vector<std::string_view> rows;
@@ -233,20 +235,20 @@ template <WidthPolicy Policy = WidthPolicy::AllModes,
             terminal_size = terminal.QuerySize();
         }
         visible_positions.clear();
-        const auto show_message = [&](const std::string_view text) {
+        const auto show_message = [&](const std::span<const std::string_view> items) {
             auto back_buffer = FrameBuffer{terminal_size};
-            back_buffer.rows.front() = {.text = std::string{text},
-                .clipping = FrameClipping::IfNeeded};
+            back_buffer.rows.front() = MakeInformationLine(items);
             std::ignore = terminal.template Flip<Policy>(back_buffer);
         };
         if (!terminal_size) {
-            show_message("Terminal size unavailable. Ctrl+L: Retry  Esc: Back"sv);
+            show_message(std::array{
+                "Terminal size unavailable."sv, "Ctrl+L: Retry"sv, "Esc: Back"sv});
             return false;
         }
         const auto fixed_rows = header.size() + footer.size() + 2;
         if ((terminal_size->columns < kMinimumColumns) ||
             (std::cmp_less_equal(terminal_size->rows, fixed_rows))) {
-            show_message("Enlarge the window. Esc: Back"sv);
+            show_message(std::array{"Enlarge the window."sv, "Esc: Back"sv});
             return false;
         }
         content_rows = terminal_size->rows - wil::safe_cast_failfast<int>(fixed_rows);
@@ -304,7 +306,7 @@ template <WidthPolicy Policy = WidthPolicy::AllModes,
                     std::numeric_limits<std::size_t>::max(), before_measure);
             }
             if (!full_name_layout) {
-                show_message("Layout unavailable. Ctrl+L: Redraw  Esc: Back"sv);
+                show_message(kLayoutUnavailable);
                 return false;
             }
             first_detail_row = std::min(first_detail_row, full_name_layout->rows.size() - 1);
@@ -318,7 +320,7 @@ template <WidthPolicy Policy = WidthPolicy::AllModes,
                 auto position = viewport_begin;
                 for (auto row = 0; row < content_rows; ++row) {
                     if (!layout_entry(position.entry)) {
-                        show_message("Layout unavailable. Ctrl+L: Redraw  Esc: Back"sv);
+                        show_message(kLayoutUnavailable);
                         return false;
                     }
                     visible_positions.push_back(position);
@@ -379,25 +381,30 @@ template <WidthPolicy Policy = WidthPolicy::AllModes,
             back_buffer.rows.at(back_buffer.rows.size() - footer.size() - 2 + index) = {
                 .text = prepared_footer.at(index), .clipping = FrameClipping::IfNeeded};
         }
-        back_buffer.rows.at(back_buffer.rows.size() - 2) = {.text = showing_full_name ?
-            "Up/Down/PgUp/PgDn: Scroll  Home/End  Esc: Back" :
-            "Up/Down: Select  Enter: Choose  Esc: Back",
-            .clipping = FrameClipping::IfNeeded};
-        back_buffer.rows.back() = {.text = [&] {
+        back_buffer.rows.at(back_buffer.rows.size() - 2) = MakeInformationLine(showing_full_name ?
+            std::array{"Up/Down/PgUp/PgDn: Scroll"sv, "Home/End"sv, "Esc: Back"sv} :
+            std::array{"Up/Down: Select"sv, "Enter: Choose"sv, "Esc: Back"sv});
+        back_buffer.rows.back() = [&] {
             if (showing_full_name) {
-                return full_name_layout->oversized ?
+                const auto information = full_name_layout->oversized ?
                     std::string{"Enlarge the window to fit the next composed character."} :
                     std::format("Full name: lines {}-{} of {}", first_detail_row + 1,
                         std::min(full_name_layout->rows.size(), first_detail_row + content_rows),
                         full_name_layout->rows.size());
+                return MakeInformationLine(std::array{std::string_view{information}});
             }
             if (entries.empty()) {
-                return std::string{"Esc: Back"};
+                return MakeInformationLine(std::array{"Esc: Back"sv});
             }
-            return std::format("Entry {} of {}{}  PgUp/PgDn: Scroll  Home/End: First/Last", selected_entry + 1,
-                entries.size(), entry_layouts.at(selected_entry) && entry_layouts.at(selected_entry)->truncated ?
-                    "  1: View full name"sv : ""sv);
-        }(), .clipping = FrameClipping::IfNeeded};
+            const auto position = std::format("Entry {} of {}", selected_entry + 1, entries.size());
+            return MakeInformationLine(std::array{
+                std::string_view{position},
+                entry_layouts.at(selected_entry) && entry_layouts.at(selected_entry)->truncated ?
+                    "1: View full name"sv : ""sv,
+                "PgUp/PgDn: Scroll"sv,
+                "Home/End: First/Last"sv,
+            });
+        }();
         return terminal.template Flip<Policy>(back_buffer);
     };
 

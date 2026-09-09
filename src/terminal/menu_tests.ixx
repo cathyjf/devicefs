@@ -763,6 +763,26 @@ export [[nodiscard]] auto TestMenu() -> bool {
                 [](const auto count) { return count == 1; }),
             "opening, scrolling, or closing the full-name view published a partial frame"sv);
     });
+    passed &= Test("opening another full name using that entry's text"sv, [] {
+        const auto first_name = std::format("FIRST-NAME {}", std::string(650, 'A'));
+        const auto second_name = std::format("SECOND-NAME {}", std::string(650, 'B'));
+        const auto entries = std::array{
+            std::string_view{first_name}, std::string_view{second_name}};
+        constexpr auto input = std::array{
+            MenuInput{MenuKey::Details}, MenuInput{MenuKey::Back},
+            MenuInput{MenuKey::Down}, MenuInput{MenuKey::Details},
+            MenuInput{MenuKey::Back}, MenuInput{MenuKey::Accept}};
+        auto terminal = MenuConsole{input, {.rows = 9, .columns = 80}};
+        Require(SelectMenuItem(terminal, kHeader, entries) == 1,
+            "returning from the second full name changed the selected entry's original index"sv);
+        Require(terminal.frames.at(1).contains("FIRST-NAME"sv),
+            "the first full-name view did not show the first entry"sv);
+        Require(terminal.frames.at(4).contains("SECOND-NAME"sv) &&
+            !terminal.frames.at(4).contains("FIRST-NAME"sv),
+            "the second full-name view reused the first entry's text"sv);
+        Require(!terminal.active,
+            "accepting the second entry retained the temporary menu screen"sv);
+    });
     passed &= Test("redrawing after an unavailable cursor report"sv, [] {
         constexpr auto header = std::array{"abcdefghijklmnopqrst café"sv};
         constexpr auto input = std::array{MenuInput{MenuKey::Redraw}, MenuInput{MenuKey::Accept}};

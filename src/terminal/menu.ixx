@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+module;
+
+#include <devicefs/strsafe_compat.h>
+
 export module devicefs.terminal.menu;
 
 import std;
@@ -57,6 +61,7 @@ constexpr auto kPreviewRows = std::size_t{8};
 constexpr auto kTextColumn = 3;
 constexpr auto kContinuationColumn = 5;
 constexpr auto kMinimumColumns = 12;
+constexpr auto kInformationRows = 2;
 constexpr auto kLayoutUnavailable = std::array{
     "Layout unavailable."sv, "Ctrl+L: Redraw"sv, "Esc: Back"sv};
 
@@ -86,19 +91,25 @@ auto MoveTo(Terminal auto &terminal, const int row, const int column) -> void {
     terminal.Write(std::format(kPositionCursor, row, column));
 }
 
-// Scrolling needs the boundaries of the rows displayed by the terminal. Exact
-// group widths retained from earlier drawings let layout find those boundaries
-// in memory. A label whose conservative bound fits also needs no measurement.
-// Other labels are written to discover where the terminal wraps them. Before
-// those writes, `before_measure` lets the caller mark the measurement area for
-// repainting. Cached row boundaries remain usable until the width changes.
-// Only entries needed for the viewport are laid out; the full-name view lays
-// out the selected name when the user asks to see it.
-template <WidthPolicy Policy, typename BeforeMeasure>
+// `LayoutText` divides an entry's text into the rows needed to display it in the
+// menu. The returned views identify each row within the supplied string, allowing
+// the menu to scroll through long names one displayed row at a time. `limit`
+// caps the number of rows in a preview; `truncated` records whether text remains.
+// The supplied string must outlive those views.
+//
+// Row boundaries depend on how the terminal renders Unicode text. Previously
+// measured character-group widths let this function calculate boundaries in
+// memory. If an upper bound on the entire text's width fits on one row, no
+// wrapping measurement is needed.
+// Otherwise, `WriteWrappingText` writes the text and observes the terminal's
+// wrapping. Measuring can overwrite the menu's content area, so that area is
+// marked for restoration when the completed frame is presented. If cursor
+// reports cannot establish the row boundaries, the function returns `std::nullopt`;
+// the menu then displays a message offering a redraw.
+template <WidthPolicy Policy>
 [[nodiscard]] auto LayoutText(MenuTerminal auto &terminal,
     const std::string_view text, const TerminalSize size,
-    const int first_row, const int available_rows, const std::size_t limit,
-    const BeforeMeasure &before_measure)
+    const int first_row, const int available_rows, const std::size_t limit)
     -> std::optional<TextLayout> {
     auto layout = TextLayout{};
     auto remaining = text;
@@ -139,7 +150,7 @@ template <WidthPolicy Policy, typename BeforeMeasure>
     auto clusters = std::span<const MeasuredCluster>{measured};
     while (!remaining.empty() && (layout.rows.size() < limit)) {
         if (layout.rows.empty()) {
-            std::invoke(before_measure);
+            terminal.InvalidateFrameRows(first_row, available_rows);
         }
         const auto measured_rows = layout.rows.size();
         const auto rows_to_measure = std::min(
@@ -182,6 +193,376 @@ template <WidthPolicy Policy, typename BeforeMeasure>
     return layout;
 }
 
+struct MenuText {
+    std::vector<std::string> header;
+    std::vector<std::string> entries;
+    std::vector<std::string> footer;
+};
+
+struct MenuViewport {
+    TerminalSize size;
+    int first_row;
+    int rows;
+};
+
+[[nodiscard]] auto MakeMenuViewport(const TerminalSize size, const MenuText &text)
+    -> std::optional<MenuViewport> {
+    const auto fixed_rows = text.header.size() + text.footer.size() + kInformationRows;
+    if ((size.columns < kMinimumColumns) || (std::cmp_less_equal(size.rows, fixed_rows))) {
+        return std::nullopt;
+    }
+    return MenuViewport{.size = size,
+        .first_row = wil::safe_cast_failfast<int>(text.header.size()) + 1,
+        .rows = size.rows - wil::safe_cast_failfast<int>(fixed_rows)};
+}
+
+// `MenuListView` manages selection and scrolling through the menu's entries.
+// One entry can occupy several rows, so moving through displayed rows is a
+// different operation from selecting the next entry. Paging can leave only an
+// entry's continuation visible. Preview layouts belong to this view and are
+// calculated as scrolling encounters entries. `Prepare` finds the rows for the
+// next frame; `Render` copies those rows and the hints into the back buffer.
+class MenuListView {
+public:
+    MenuListView(const std::span<const std::string> entries, const std::size_t initial)
+        : entries_(entries),
+          selected_entry_(entries.empty() ? 0 : std::min(initial, entries.size() - 1)),
+          viewport_begin_{.entry = selected_entry_},
+          entry_layouts_(entries.size()) {}
+
+    auto SetWidth(const int columns) -> void {
+        if (layout_width_ != columns) {
+            entry_layouts_.assign(entries_.size(), std::nullopt);
+            viewport_begin_.row = 0;
+            layout_width_ = columns;
+        }
+    }
+
+    auto InvalidateLayout() noexcept -> void { layout_width_ = 0; }
+
+    [[nodiscard]] auto SelectedIndex() const noexcept { return selected_entry_; }
+
+    [[nodiscard]] auto CanViewFullName() const -> bool {
+        return !entries_.empty() && entry_layouts_.at(selected_entry_) &&
+            entry_layouts_.at(selected_entry_)->truncated;
+    }
+
+    [[nodiscard]] auto Navigate(const MenuInput input) -> bool {
+        if (entries_.empty()) {
+            return false;
+        }
+        const auto repeat = wil::safe_cast_failfast<std::size_t>(input.repeat);
+        switch (input.key) {
+        case MenuKey::Up:
+            selected_entry_ -= std::min(selected_entry_, repeat);
+            break;
+        case MenuKey::Down:
+            selected_entry_ += std::min(entries_.size() - 1 - selected_entry_, repeat);
+            break;
+        case MenuKey::Home:
+            selected_entry_ = 0;
+            break;
+        case MenuKey::End:
+            selected_entry_ = entries_.size() - 1;
+            break;
+        case MenuKey::PageUp:
+        case MenuKey::PageDown:
+            return true;
+        default:
+            return false;
+        }
+        if (((input.key == MenuKey::Home) || (input.key == MenuKey::End)) &&
+            !std::ranges::contains(visible_positions_, Position{.entry = selected_entry_})) {
+            viewport_begin_ = {.entry = selected_entry_};
+        }
+        return true;
+    }
+
+    template <WidthPolicy Policy, MenuScrollPolicy Scrolling>
+    [[nodiscard]] auto Prepare(MenuTerminal auto &terminal,
+        const MenuViewport viewport, const MenuInput input) -> bool {
+        if (entries_.empty()) {
+            return true;
+        }
+        const auto paging = input.key == MenuKey::PageDown ? 1 :
+            (input.key == MenuKey::PageUp ? -1 : 0);
+        if (paging != 0) {
+            Scroll<Policy>(terminal, viewport, paging,
+                wil::safe_cast_failfast<std::size_t>(input.repeat) * viewport.rows);
+        }
+        const auto reveal_selection = (input.key == MenuKey::Up) ||
+            (input.key == MenuKey::Down) || (input.key == MenuKey::Resize) ||
+            (input.key == MenuKey::Redraw);
+        const auto target = Position{.entry = selected_entry_};
+        for (;;) {
+            if (!FillViewport<Policy>(terminal, viewport)) {
+                return false;
+            }
+            if (!reveal_selection || std::ranges::contains(visible_positions_, target)) {
+                break;
+            }
+            const auto previous_begin = viewport_begin_;
+            Scroll<Policy>(terminal, viewport, target < viewport_begin_ ? -1 : 1,
+                Scrolling == MenuScrollPolicy::Line ? 1 : viewport.rows);
+            if (viewport_begin_ == previous_begin) {
+                break;
+            }
+        }
+        if ((paging != 0) && !std::ranges::any_of(visible_positions_,
+                [this](const auto position) { return position.entry == selected_entry_; })) {
+            selected_entry_ = paging > 0 ?
+                visible_positions_.front().entry : visible_positions_.back().entry;
+        }
+        return true;
+    }
+
+    auto Render(FrameBuffer &frame, const MenuViewport viewport) const -> void {
+        const auto first_row = wil::safe_cast_failfast<std::size_t>(viewport.first_row - 1);
+        if (entries_.empty()) {
+            frame.rows.at(first_row) = {.text = "No entries are available.",
+                .clipping = FrameClipping::IfNeeded};
+        }
+        for (auto index = std::size_t{}; index < visible_positions_.size(); ++index) {
+            const auto position = visible_positions_.at(index);
+            const auto &layout = *entry_layouts_.at(position.entry);
+            frame.rows.at(first_row + index) = {
+                .text = std::format("{}{}{}",
+                    position.entry == selected_entry_ ? "> "sv : "  "sv,
+                    position.row == 0 ? ""sv : "  "sv,
+                    layout.rows.at(position.row)),
+                .reverse = position.entry == selected_entry_,
+                .clipping = layout.truncated &&
+                    ((position.row + 1) == layout.rows.size()) ?
+                        FrameClipping::Ellipsis : FrameClipping::None};
+        }
+        frame.rows.at(frame.rows.size() - kInformationRows) = MakeInformationLine(
+            std::array{"Up/Down: Select"sv, "Enter: Choose"sv, "Esc: Back"sv});
+        frame.rows.back() = [this] {
+            if (entries_.empty()) {
+                return MakeInformationLine(std::array{"Esc: Back"sv});
+            }
+            const auto position = std::format("Entry {} of {}", selected_entry_ + 1, entries_.size());
+            return MakeInformationLine(std::array{
+                std::string_view{position},
+                CanViewFullName() ? "1: View full name"sv : ""sv,
+                "PgUp/PgDn: Scroll"sv,
+                "Home/End: First/Last"sv,
+            });
+        }();
+    }
+
+private:
+    template <WidthPolicy Policy>
+    [[nodiscard]] auto EnsureLayout(MenuTerminal auto &terminal,
+        const MenuViewport viewport, const std::size_t entry) -> bool {
+        auto &layout = entry_layouts_.at(entry);
+        if (!layout) {
+            layout = LayoutText<Policy>(terminal, entries_[entry], viewport.size,
+                viewport.first_row, viewport.rows, kPreviewRows);
+        }
+        return layout.has_value();
+    }
+
+    template <WidthPolicy Policy>
+    [[nodiscard]] auto Advance(MenuTerminal auto &terminal, const MenuViewport viewport,
+        Position position, const int direction) -> Position {
+        if (direction > 0) {
+            if (EnsureLayout<Policy>(terminal, viewport, position.entry)) {
+                if ((position.row + 1) < entry_layouts_.at(position.entry)->rows.size()) {
+                    ++position.row;
+                } else if ((position.entry + 1) < entries_.size()) {
+                    position = {.entry = position.entry + 1};
+                }
+            }
+        } else if (position.row != 0) {
+            --position.row;
+        } else if ((position.entry != 0) &&
+            EnsureLayout<Policy>(terminal, viewport, position.entry - 1)) {
+            --position.entry;
+            position.row = entry_layouts_.at(position.entry)->rows.size() - 1;
+        }
+        return position;
+    }
+
+    template <WidthPolicy Policy>
+    auto Scroll(MenuTerminal auto &terminal, const MenuViewport viewport,
+        const int direction, const std::size_t rows) -> void {
+        for (auto count = std::size_t{}; count < rows; ++count) {
+            const auto next = Advance<Policy>(terminal, viewport, viewport_begin_, direction);
+            if (next == viewport_begin_) {
+                break;
+            }
+            viewport_begin_ = next;
+        }
+    }
+
+    template <WidthPolicy Policy>
+    [[nodiscard]] auto FillViewport(MenuTerminal auto &terminal, const MenuViewport viewport) -> bool {
+        visible_positions_.clear();
+        auto position = viewport_begin_;
+        for (auto row = 0; row < viewport.rows; ++row) {
+            if (!EnsureLayout<Policy>(terminal, viewport, position.entry)) {
+                return false;
+            }
+            visible_positions_.push_back(position);
+            const auto next = Advance<Policy>(terminal, viewport, position, 1);
+            if (next == position) {
+                break;
+            }
+            position = next;
+        }
+        return true;
+    }
+
+    std::span<const std::string> entries_;
+    std::size_t selected_entry_;
+    Position viewport_begin_;
+    std::vector<std::optional<TextLayout>> entry_layouts_;
+    std::vector<Position> visible_positions_;
+    int layout_width_ = 0;
+};
+
+// The full-name view lets the user read text omitted by an entry's preview.
+// Scrolling here moves within one name rather than selecting another entry.
+// Each opening binds the view and its cached rows to that entry's display text;
+// closing the view leaves the list's selection and scroll position intact.
+class FullNameView {
+public:
+    explicit FullNameView(const std::string_view text) noexcept : text_(text) {}
+
+    auto SetWidth(const int columns) noexcept -> void {
+        if (layout_width_ != columns) {
+            layout_.reset();
+            first_row_ = 0;
+            layout_width_ = columns;
+        }
+    }
+
+    auto InvalidateLayout() noexcept -> void { layout_width_ = 0; }
+
+    template <WidthPolicy Policy>
+    [[nodiscard]] auto Prepare(MenuTerminal auto &terminal, const MenuViewport viewport) -> bool {
+        if (!layout_) {
+            layout_ = LayoutText<Policy>(terminal, text_, viewport.size,
+                viewport.first_row, viewport.rows, std::numeric_limits<std::size_t>::max());
+        }
+        if (!layout_) {
+            return false;
+        }
+        first_row_ = std::min(first_row_, layout_->rows.size() - 1);
+        return true;
+    }
+
+    [[nodiscard]] auto Navigate(const MenuInput input, const int content_rows) -> bool {
+        const auto amount = wil::safe_cast_failfast<std::size_t>(input.repeat) *
+            ((input.key == MenuKey::PageUp) || (input.key == MenuKey::PageDown) ?
+                wil::safe_cast_failfast<std::size_t>(content_rows) : 1);
+        switch (input.key) {
+        case MenuKey::Up:
+        case MenuKey::PageUp:
+            first_row_ -= std::min(first_row_, amount);
+            break;
+        case MenuKey::Down:
+        case MenuKey::PageDown:
+            first_row_ += std::min(layout_->rows.size() - 1 - first_row_, amount);
+            break;
+        case MenuKey::Home:
+            first_row_ = 0;
+            break;
+        case MenuKey::End:
+            first_row_ = std::cmp_greater(layout_->rows.size(), content_rows) ?
+                layout_->rows.size() - content_rows : 0;
+            break;
+        default:
+            return false;
+        }
+        return true;
+    }
+
+    auto Render(FrameBuffer &frame, const MenuViewport viewport) const -> void {
+        const auto count = std::min(wil::safe_cast_failfast<std::size_t>(viewport.rows),
+            layout_->rows.size() - first_row_);
+        for (auto index = std::size_t{}; index < count; ++index) {
+            frame.rows.at(wil::safe_cast_failfast<std::size_t>(viewport.first_row - 1) + index) = {
+                .text = std::format("{}{}", (first_row_ + index) == 0 ? "  "sv : "    "sv,
+                    layout_->rows.at(first_row_ + index))};
+        }
+        frame.rows.at(frame.rows.size() - kInformationRows) = MakeInformationLine(
+            std::array{"Up/Down/PgUp/PgDn: Scroll"sv, "Home/End"sv, "Esc: Back"sv});
+        const auto information = layout_->oversized ?
+            std::string{"Enlarge the window to fit the next composed character."} :
+            std::format("Full name: lines {}-{} of {}", first_row_ + 1,
+                std::min(layout_->rows.size(), first_row_ + viewport.rows), layout_->rows.size());
+        frame.rows.back() = MakeInformationLine(std::array{std::string_view{information}});
+    }
+
+private:
+    std::string_view text_;
+    std::optional<TextLayout> layout_;
+    std::size_t first_row_ = 0;
+    int layout_width_ = 0;
+};
+
+// A frame contains everything that should be visible at once: the caller's
+// fixed header and footer, the active view, and that view's navigation hints.
+// Frame construction only fills memory. The adapter's `Flip` operation presents
+// the completed frame.
+[[nodiscard]] auto BuildMenuFrame(const MenuText &text,
+    const MenuViewport viewport, const auto &view) -> FrameBuffer {
+    auto frame = FrameBuffer{viewport.size};
+    for (auto index = std::size_t{}; index < text.header.size(); ++index) {
+        frame.rows.at(index) = {.text = text.header.at(index), .clipping = FrameClipping::IfNeeded};
+    }
+    for (auto index = std::size_t{}; index < text.footer.size(); ++index) {
+        frame.rows.at(frame.rows.size() - text.footer.size() - kInformationRows + index) = {
+            .text = text.footer.at(index), .clipping = FrameClipping::IfNeeded};
+    }
+    view.Render(frame, viewport);
+    return frame;
+}
+
+// `PresentMenu` prepares and displays one menu frame. Layout may need to write
+// text to measure wrapping, so the update lifetime covers both measurement and
+// presentation. Missing dimensions or unusable layout produce a message instead
+// of a selectable menu. Returning false keeps navigation suspended until the
+// caller requests another presentation by resizing, redrawing, or leaving the
+// full-name view; cancellation remains available in the input loop.
+template <WidthPolicy Policy, MenuScrollPolicy Scrolling>
+[[nodiscard]] auto PresentMenu(MenuTerminal auto &terminal, const MenuText &text,
+    MenuListView &list, FullNameView *const full_name,
+    std::optional<TerminalSize> &terminal_size, const MenuInput input) -> bool {
+    const auto update = terminal.BeginUpdate();
+    if (!terminal_size) {
+        terminal_size = terminal.QuerySize();
+    }
+    const auto show_message = [&](const std::span<const std::string_view> items) {
+        auto frame = FrameBuffer{terminal_size};
+        frame.rows.front() = MakeInformationLine(items);
+        std::ignore = terminal.template Flip<Policy>(frame);
+    };
+    if (!terminal_size) {
+        show_message(std::array{
+            "Terminal size unavailable."sv, "Ctrl+L: Retry"sv, "Esc: Back"sv});
+        return false;
+    }
+    const auto viewport = MakeMenuViewport(*terminal_size, text);
+    if (!viewport) {
+        show_message(std::array{"Enlarge the window."sv, "Esc: Back"sv});
+        return false;
+    }
+    list.SetWidth(viewport->size.columns);
+    if (full_name) {
+        full_name->SetWidth(viewport->size.columns);
+    }
+    if (!(full_name ? full_name->Prepare<Policy>(terminal, *viewport) :
+            list.Prepare<Policy, Scrolling>(terminal, *viewport, input))) {
+        show_message(kLayoutUnavailable);
+        return false;
+    }
+    return terminal.template Flip<Policy>(full_name ?
+        BuildMenuFrame(text, *viewport, *full_name) : BuildMenuFrame(text, *viewport, list));
+}
+
 }
 
 export namespace devicefs::terminal {
@@ -212,288 +593,55 @@ template <WidthPolicy Policy = WidthPolicy::AllModes,
     const std::span<const std::string_view> footer = {},
     const std::size_t initial_selection = 0) -> std::optional<std::size_t> {
     using namespace menu_detail;
-    const auto prepared_header = PrepareLines(header);
-    const auto prepared_entries = PrepareLines(entries);
-    const auto prepared_footer = PrepareLines(footer);
+    const auto text = MenuText{.header = PrepareLines(header),
+        .entries = PrepareLines(entries), .footer = PrepareLines(footer)};
     const auto screen = terminal.EnterMenu();
-    auto selected_entry = entries.empty() ? 0 : std::min(initial_selection, entries.size() - 1);
-    auto viewport_begin = Position{.entry = selected_entry};
-    auto entry_layouts = std::vector<std::optional<TextLayout>>(entries.size());
-    auto full_name_layout = std::optional<TextLayout>{};
-    auto showing_full_name = false;
-    auto first_detail_row = std::size_t{};
+    auto list = MenuListView{text.entries, initial_selection};
+    auto full_name = std::optional<FullNameView>{};
     auto terminal_size = std::optional<TerminalSize>{};
-    auto visible_positions = std::vector<Position>{};
-    const auto first_content_row = wil::safe_cast_failfast<int>(header.size()) + 1;
-    auto content_rows = 0;
-    auto layout_width = 0;
-
-    const auto draw_menu = [&](const int paging = 0, const std::size_t repeat = 1,
-        const bool reveal_selection = false) -> bool {
-        const auto update = terminal.BeginUpdate();
-        if (!terminal_size) {
-            terminal_size = terminal.QuerySize();
-        }
-        visible_positions.clear();
-        const auto show_message = [&](const std::span<const std::string_view> items) {
-            auto back_buffer = FrameBuffer{terminal_size};
-            back_buffer.rows.front() = MakeInformationLine(items);
-            std::ignore = terminal.template Flip<Policy>(back_buffer);
-        };
-        if (!terminal_size) {
-            show_message(std::array{
-                "Terminal size unavailable."sv, "Ctrl+L: Retry"sv, "Esc: Back"sv});
-            return false;
-        }
-        const auto fixed_rows = header.size() + footer.size() + 2;
-        if ((terminal_size->columns < kMinimumColumns) ||
-            (std::cmp_less_equal(terminal_size->rows, fixed_rows))) {
-            show_message(std::array{"Enlarge the window."sv, "Esc: Back"sv});
-            return false;
-        }
-        content_rows = terminal_size->rows - wil::safe_cast_failfast<int>(fixed_rows);
-        if (layout_width != terminal_size->columns) {
-            entry_layouts.assign(entries.size(), std::nullopt);
-            full_name_layout.reset();
-            viewport_begin.row = 0;
-            first_detail_row = 0;
-            layout_width = terminal_size->columns;
-        }
-        // Some labels need terminal writes to discover their line breaks. Those
-        // measurements can overwrite the list area, so the completed frame must
-        // restore those rows even when their intended contents have not changed.
-        const auto before_measure = [&] {
-            terminal.InvalidateFrameRows(first_content_row, content_rows);
-        };
-        const auto layout_entry = [&](const std::size_t index) -> bool {
-            auto &layout = entry_layouts.at(index);
-            if (!layout) {
-                layout = LayoutText<Policy>(terminal, prepared_entries.at(index), *terminal_size,
-                    first_content_row, content_rows, kPreviewRows, before_measure);
-            }
-            return layout.has_value();
-        };
-        const auto advance = [&](Position position, const int direction) {
-            if (direction > 0) {
-                if (layout_entry(position.entry)) {
-                    if ((position.row + 1) < entry_layouts.at(position.entry)->rows.size()) {
-                        ++position.row;
-                    } else if ((position.entry + 1) < entries.size()) {
-                        position = {.entry = position.entry + 1};
-                    }
-                }
-            } else if (position.row != 0) {
-                --position.row;
-            } else if ((position.entry != 0) && layout_entry(position.entry - 1)) {
-                --position.entry;
-                position.row = entry_layouts.at(position.entry)->rows.size() - 1;
-            }
-            return position;
-        };
-        const auto scroll = [&](const int direction, const std::size_t rows) {
-            for (auto count = std::size_t{}; count < rows; ++count) {
-                const auto next = advance(viewport_begin, direction);
-                if (next == viewport_begin) {
-                    break;
-                }
-                viewport_begin = next;
-            }
-        };
-        if (showing_full_name) {
-            if (!full_name_layout) {
-                full_name_layout = LayoutText<Policy>(terminal, prepared_entries.at(selected_entry),
-                    *terminal_size, first_content_row, content_rows,
-                    std::numeric_limits<std::size_t>::max(), before_measure);
-            }
-            if (!full_name_layout) {
-                show_message(kLayoutUnavailable);
-                return false;
-            }
-            first_detail_row = std::min(first_detail_row, full_name_layout->rows.size() - 1);
-        } else if (!entries.empty()) {
-            if (paging != 0) {
-                scroll(paging, repeat * content_rows);
-            }
-            const auto target = Position{.entry = selected_entry};
-            for (;;) {
-                visible_positions.clear();
-                auto position = viewport_begin;
-                for (auto row = 0; row < content_rows; ++row) {
-                    if (!layout_entry(position.entry)) {
-                        show_message(kLayoutUnavailable);
-                        return false;
-                    }
-                    visible_positions.push_back(position);
-                    const auto next = advance(position, 1);
-                    if (next == position) {
-                        break;
-                    }
-                    position = next;
-                }
-                if (!reveal_selection || std::ranges::contains(visible_positions, target)) {
-                    break;
-                }
-                const auto previous_begin = viewport_begin;
-                scroll(target < viewport_begin ? -1 : 1,
-                    Scrolling == MenuScrollPolicy::Line ? 1 : content_rows);
-                if (viewport_begin == previous_begin) {
-                    break;
-                }
-            }
-            if ((paging != 0) && !std::ranges::any_of(visible_positions,
-                    [selected_entry](const auto position) { return position.entry == selected_entry; })) {
-                selected_entry = paging > 0 ? visible_positions.front().entry : visible_positions.back().entry;
-            }
-        }
-        auto back_buffer = FrameBuffer{terminal_size};
-        for (auto index = std::size_t{}; index < header.size(); ++index) {
-            back_buffer.rows.at(index) = {.text = prepared_header.at(index),
-                .clipping = FrameClipping::IfNeeded};
-        }
-        if (showing_full_name) {
-            const auto count = std::min(wil::safe_cast_failfast<std::size_t>(content_rows),
-                full_name_layout->rows.size() - first_detail_row);
-            for (auto index = std::size_t{}; index < count; ++index) {
-                back_buffer.rows.at(header.size() + index) = {
-                    .text = std::format("{}{}",
-                        (first_detail_row + index) == 0 ? "  "sv : "    "sv,
-                        full_name_layout->rows.at(first_detail_row + index))};
-            }
-        } else if (entries.empty()) {
-            back_buffer.rows.at(header.size()) = {.text = "No entries are available.",
-                .clipping = FrameClipping::IfNeeded};
-        } else {
-            for (auto index = std::size_t{}; index < visible_positions.size(); ++index) {
-                const auto position = visible_positions.at(index);
-                const auto &layout = *entry_layouts.at(position.entry);
-                back_buffer.rows.at(header.size() + index) = {
-                    .text = std::format("{}{}{}",
-                        position.entry == selected_entry ? "> "sv : "  "sv,
-                        position.row == 0 ? ""sv : "  "sv,
-                        layout.rows.at(position.row)),
-                    .reverse = position.entry == selected_entry,
-                    .clipping = layout.truncated &&
-                        ((position.row + 1) == layout.rows.size()) ?
-                            FrameClipping::Ellipsis : FrameClipping::None};
-            }
-        }
-        for (auto index = std::size_t{}; index < footer.size(); ++index) {
-            back_buffer.rows.at(back_buffer.rows.size() - footer.size() - 2 + index) = {
-                .text = prepared_footer.at(index), .clipping = FrameClipping::IfNeeded};
-        }
-        back_buffer.rows.at(back_buffer.rows.size() - 2) = MakeInformationLine(showing_full_name ?
-            std::array{"Up/Down/PgUp/PgDn: Scroll"sv, "Home/End"sv, "Esc: Back"sv} :
-            std::array{"Up/Down: Select"sv, "Enter: Choose"sv, "Esc: Back"sv});
-        back_buffer.rows.back() = [&] {
-            if (showing_full_name) {
-                const auto information = full_name_layout->oversized ?
-                    std::string{"Enlarge the window to fit the next composed character."} :
-                    std::format("Full name: lines {}-{} of {}", first_detail_row + 1,
-                        std::min(full_name_layout->rows.size(), first_detail_row + content_rows),
-                        full_name_layout->rows.size());
-                return MakeInformationLine(std::array{std::string_view{information}});
-            }
-            if (entries.empty()) {
-                return MakeInformationLine(std::array{"Esc: Back"sv});
-            }
-            const auto position = std::format("Entry {} of {}", selected_entry + 1, entries.size());
-            return MakeInformationLine(std::array{
-                std::string_view{position},
-                entry_layouts.at(selected_entry) && entry_layouts.at(selected_entry)->truncated ?
-                    "1: View full name"sv : ""sv,
-                "PgUp/PgDn: Scroll"sv,
-                "Home/End: First/Last"sv,
-            });
-        }();
-        return terminal.template Flip<Policy>(back_buffer);
+    const auto present = [&](const MenuInput input) {
+        return PresentMenu<Policy, Scrolling>(terminal, text, list,
+            full_name ? &*full_name : nullptr, terminal_size, input);
     };
-
-    auto ready = draw_menu();
+    auto ready = present({MenuKey::Redraw});
     for (;;) {
         const auto input = terminal.ReadMenuInput();
         if ((input.key == MenuKey::Cancel) ||
-            ((input.key == MenuKey::Back) && !showing_full_name)) {
+            ((input.key == MenuKey::Back) && !full_name)) {
             return std::nullopt;
         }
         if ((input.key == MenuKey::Resize) || (input.key == MenuKey::Redraw)) {
             terminal_size.reset();
             if (input.key == MenuKey::Redraw) {
-                layout_width = 0;
+                list.InvalidateLayout();
+                if (full_name) {
+                    full_name->InvalidateLayout();
+                }
                 terminal.InvalidateFrame();
             }
-            ready = draw_menu(0, 1, !showing_full_name);
+            ready = present(input);
             continue;
         }
         if (input.key == MenuKey::Back) {
-            showing_full_name = false;
-            ready = draw_menu();
+            full_name.reset();
+            ready = present(input);
             continue;
         }
         if (!ready) {
             continue;
         }
-        const auto repeat = wil::safe_cast_failfast<std::size_t>(input.repeat);
-        auto paging = 0;
-        if (showing_full_name) {
-            const auto amount = repeat *
-                ((input.key == MenuKey::PageUp) || (input.key == MenuKey::PageDown) ?
-                    wil::safe_cast_failfast<std::size_t>(content_rows) : 1);
-            switch (input.key) {
-            case MenuKey::Up:
-            case MenuKey::PageUp:
-                first_detail_row -= std::min(first_detail_row, amount);
-                break;
-            case MenuKey::Down:
-            case MenuKey::PageDown:
-                first_detail_row += std::min(full_name_layout->rows.size() - 1 - first_detail_row, amount);
-                break;
-            case MenuKey::Home:
-                first_detail_row = 0;
-                break;
-            case MenuKey::End:
-                first_detail_row = std::cmp_greater(full_name_layout->rows.size(), content_rows) ?
-                    full_name_layout->rows.size() - content_rows : 0;
-                break;
-            default:
+        if (full_name) {
+            if (!full_name->Navigate(input, MakeMenuViewport(*terminal_size, text)->rows)) {
                 continue;
             }
-        } else if (!entries.empty()) {
-            if (input.key == MenuKey::Accept) {
-                return selected_entry;
-            }
-            if ((input.key == MenuKey::Details) && entry_layouts.at(selected_entry) &&
-                entry_layouts.at(selected_entry)->truncated) {
-                showing_full_name = true;
-                first_detail_row = 0;
-            } else if ((input.key == MenuKey::PageUp) || (input.key == MenuKey::PageDown)) {
-                paging = input.key == MenuKey::PageDown ? 1 : -1;
-            } else {
-                switch (input.key) {
-                case MenuKey::Up:
-                    selected_entry -= std::min(selected_entry, repeat);
-                    break;
-                case MenuKey::Down:
-                    selected_entry += std::min(entries.size() - 1 - selected_entry, repeat);
-                    break;
-                case MenuKey::Home:
-                    selected_entry = 0;
-                    break;
-                case MenuKey::End:
-                    selected_entry = entries.size() - 1;
-                    break;
-                default:
-                    continue;
-                }
-                if (((input.key == MenuKey::Home) || (input.key == MenuKey::End)) &&
-                    !std::ranges::contains(visible_positions, Position{.entry = selected_entry})) {
-                    viewport_begin = {.entry = selected_entry};
-                }
-            }
-        } else {
+        } else if ((input.key == MenuKey::Accept) && !text.entries.empty()) {
+            return list.SelectedIndex();
+        } else if ((input.key == MenuKey::Details) && list.CanViewFullName()) {
+            full_name.emplace(text.entries.at(list.SelectedIndex()));
+        } else if (!list.Navigate(input)) {
             continue;
         }
-        ready = draw_menu(paging, repeat,
-            (input.key == MenuKey::Up) || (input.key == MenuKey::Down));
+        ready = present(input);
     }
 }
 

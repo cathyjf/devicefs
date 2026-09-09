@@ -16,10 +16,11 @@ using namespace std::string_view_literals;
 
 export namespace devicefs::terminal {
 
-// FrameClipping selects whether presentation may shorten a row. None supplies
-// text already fitted by layout; IfNeeded shortens fixed headers and footers.
-// Ellipsis also marks a preview whose later rows were omitted, even if this
-// row fits.
+// `FrameClipping` selects how text may be shortened to fit one display row.
+// `None` means the caller has already fitted the text to that row. `IfNeeded`
+// allows the presenter to shorten the text and add an ellipsis. `Ellipsis`
+// always adds that marker, including when the row fits but the caller omitted
+// later text, such as the remainder of a preview.
 enum class FrameClipping { None, IfNeeded, Ellipsis };
 
 struct FrameLine {
@@ -40,9 +41,10 @@ struct FrameLine {
         .clipping = FrameClipping::IfNeeded};
 }
 
-// A back buffer describes the desired screen without sending terminal output.
-// Each element is one physical row; an empty element requests a blank row.
-// Text is prepared with PrepareTerminalText and contains no terminal commands.
+// `FrameBuffer` describes the desired screen without sending terminal output.
+// Each element is one physical row; empty text requests a blank row. The caller
+// uses `PrepareTerminalText` before storing text here so the rows contain no
+// terminal commands.
 // Missing dimensions allow the adapter to display a size-query failure message.
 struct FrameBuffer {
     std::optional<TerminalSize> size;
@@ -120,15 +122,15 @@ export namespace devicefs::terminal {
 // becomes shorter, its blank tail is erased through the right margin. The
 // comparison uses complete composed characters for every label.
 //
-// Cursor reports establish the width of a previously unseen group while that
-// group is first drawn. Recorded widths serve subsequent frames and layouts;
-// conservative width estimates determine clipping for unmeasured text. Fitted
-// rows use the caller's completed layout. Flip returns false if a cursor report
-// cannot establish a usable position; the affected row is retried on the next
-// frame. Terminal I/O exceptions propagate to the caller.
+// While drawing previously unseen groups, `Flip` uses cursor movement to measure
+// their widths. Recorded widths serve subsequent frames and layouts; upper
+// bounds on unmeasured widths determine where text may be shortened. Rows marked
+// `FrameClipping::None` rely on the caller's completed layout. `Flip` returns
+// false if a cursor report cannot establish a usable position; the affected row
+// is retried on the next frame. Terminal I/O exceptions propagate to the caller.
 //
-// One presenter belongs to one alternate-screen session.
-// A font or character-width-policy change requires Invalidate to discard those
+// The presenter retains measurements for one terminal session. A font or
+// character-width-policy change requires `Invalidate` to discard those
 // measurements. A window resize preserves widths but changes which text fits.
 class DeltaFramePresenter {
 public:
@@ -194,8 +196,10 @@ public:
         return complete;
     }
 
-    // Observed wrapping can temporarily write into the menu's viewport. These
-    // rows then have unknown contents and must be restored by the next Flip.
+    // `InvalidateRows` discards the cached contents of a range of screen rows,
+    // numbered from one. The next `Flip` repaints those rows even if their desired
+    // text has not changed. Callers use this when writing outside the presenter,
+    // for example when measuring how text wraps.
     auto InvalidateRows(const int first_row, const int count) -> void {
         const auto first = wil::safe_cast_failfast<std::size_t>(first_row - 1);
         const auto end = first + wil::safe_cast_failfast<std::size_t>(count);
@@ -234,9 +238,10 @@ private:
         const auto paint = [&](const MeasuredCluster &group, const bool final_group) -> bool {
             const auto old = previous ? std::ranges::find(previous->groups,
                 column, &DisplayedGroup::column) : std::vector<DisplayedGroup>::const_iterator{};
-            // A final-column report leaves the final cell's occupancy unknown.
-            // A previously final group needs another observation when more text
-            // follows, because that text needs an exact starting column.
+            // `uncertain_width` marks a group whose cursor report could not tell
+            // whether the last cell was filled. The cached ending column remains
+            // usable while the group is last in a row of the same width. If more
+            // text follows, another observation must find its starting column.
             const auto same_text = previous && (old != previous->groups.end()) &&
                 (old->text == group.text) && (old->end_column <= (columns + 1)) &&
                 (!old->uncertain_width || ((previous->columns == columns) && final_group));
@@ -244,10 +249,11 @@ private:
             auto uncertain_width = same_text && old->uncertain_width;
             if (!same_text || (previous->source.reverse != line.reverse)) {
                 const auto known = widths_.find(group.text);
-                // A report at the final column can mean either that the last
-                // cell is free or that wrapping is pending after filling it.
-                // Erasing an obsolete final cell before its replacement is drawn
-                // ensures that either outcome leaves the correct visible tail.
+                // The old row may have occupied the last cell. A replacement
+                // group's cursor report at that column cannot distinguish a free
+                // cell from a filled cell awaiting a wrap. Clearing the old cell
+                // before drawing the replacement leaves a blank tail when the
+                // replacement turns out to be narrower.
                 if (!same_text && (known == widths_.end()) &&
                     (group.width_bound >= (columns - column + 1)) &&
                     (old_end > columns)) {
@@ -262,10 +268,11 @@ private:
                         (observed->column < column) || (observed->column > columns)) {
                         return false;
                     }
-                    // MeasureText keeps adjacent zero-width text together with
-                    // a visible group. Another group in this fitted row needs
-                    // another cell, so a nonfinal group's last-column report
-                    // identifies a free cell rather than a pending wrap.
+                    // A group followed by more text in a fitted row must leave
+                    // room for that text. `MeasureText` attaches zero-width text
+                    // to visible groups, so each following group needs a cell.
+                    // A nonfinal group's last-column report therefore identifies
+                    // a free cell rather than a pending wrap.
                     if (!final_group || (observed->column < columns) ||
                         (group.width_bound < (columns - column + 1))) {
                         end_column = observed->column;

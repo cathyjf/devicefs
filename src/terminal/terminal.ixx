@@ -22,9 +22,9 @@ struct TerminalSize {
     int columns;
 };
 
-// A caller reserves space for a label by limiting its row count and choosing
-// the indentation of continuation lines. The first line begins at the current
-// cursor; later lines begin at `continuation_column`, counted from one.
+// `WrappingOptions` specifies the space in which `WriteWrappingText` may display
+// a label. The first line begins at the current cursor; later lines begin at
+// `continuation_column`, counted from one.
 // `size` gives the screen dimensions in character cells. `maximum_rows` counts
 // the first line and all continuations, up to the bottom of that screen.
 // `trailing_columns` reserves space at the end of the final permitted row for
@@ -36,15 +36,17 @@ struct WrappingOptions {
     int trailing_columns = 0;
 };
 
-// The writer batches text to reduce the number of cursor queries. A batch must
-// fit even when the terminal displays a character at its widest supported
-// setting, so these policies choose the width estimate used to form batches.
+// `WidthPolicy` selects the width estimate that `MeasureText` assigns to each
+// character group. `WriteWrappingText` uses those estimates to combine groups
+// into writes that fit on the current row, reducing the number of cursor queries.
+// The estimate must cover the width modes used by the displaying terminal.
 // `AllModes` covers the Graphemes, Wcswidth, and Console modes of Microsoft's
 // width detector. Console mode can give each part of a composed character its
 // own column, making this estimate much wider than the displayed composition.
 // A caller targeting Windows Terminal's Graphemes mode can instead select
 // `WindowsTerminalGraphemes`, which measures the composition as one group.
-// Both policies allow two columns for characters with ambiguous width.
+// Some characters have an ambiguous width that the terminal may render as one
+// or two columns. Both policies reserve two columns for those characters.
 enum class WidthPolicy {
     AllModes,
     WindowsTerminalGraphemes,

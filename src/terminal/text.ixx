@@ -22,12 +22,11 @@ using namespace std::string_view_literals;
 
 namespace devicefs::terminal {
 
-// Captured output and supplied labels can contain commands that move the cursor
-// or change terminal settings. `VtFilter` recognizes those commands and their
-// payloads so callers can omit them from displayed text. `Remove` processes
-// a byte buffer for log output; `Preserve` processes decoded Unicode code points
-// for label output. Decoding distinguishes U+009B, which starts a terminal
-// control sequence, from the byte 0x9B within an ordinary UTF-8 character.
+// `VtFilter` removes terminal commands from text, including commands that move
+// the cursor, change colors, or set the window title. The filter recognizes the
+// command boundaries and discards both the instructions and their payloads.
+// `Remove` filters a byte buffer in place. `Preserve` accepts one decoded Unicode
+// code point at a time so the caller can decide how to represent retained text.
 //
 // The filter retains unfinished commands between calls. A log reader reuses
 // one instance across its reads, while each label gets a separate instance;
@@ -36,12 +35,17 @@ namespace devicefs::terminal {
 // `src/modules/supervisor/logging_console.ixx`.
 export class VtFilter {
 public:
-    // Captured logs retain tabs and line feeds to preserve their line structure.
-    // Carriage returns and other ASCII controls are omitted, so CRLF becomes LF
-    // and carriage-return progress updates append text on the current line.
-    // The surviving bytes occupy the beginning of the caller's buffer;
-    // the returned view refers to that prefix. Non-ASCII bytes outside removed
-    // commands retain their original representation.
+    // `Remove` strips ESC-prefixed terminal commands and their payloads from
+    // `input`. Retained bytes are compacted in place, and the returned view covers
+    // that prefix of the caller's buffer. An unfinished command is remembered
+    // for the next call, allowing a command to span several input buffers.
+    //
+    // Ordinary text retains tabs and line feeds, but loses carriage returns
+    // and other ASCII controls. This suits captured logs: CRLF becomes LF, and
+    // carriage-return progress updates append instead of overwriting earlier
+    // output. Non-ASCII bytes outside commands pass through unchanged. This byte
+    // interface does not decode Unicode control characters; label preparation
+    // uses the decoded-code-point `Preserve` interface below.
     [[nodiscard]] auto Remove(const std::span<char8_t> input) noexcept {
         auto output_size = 0uz;
         for (const auto character : input) {
@@ -52,10 +56,12 @@ public:
         return std::u8string_view{input.data(), output_size};
     }
 
-    // Label preparation needs to distinguish commands from standalone controls
-    // such as tabs, because the caller chooses how to display those controls.
-    // A true result passes the code point to the caller for display; a false
-    // result identifies part of a terminal command to omit.
+    // `Preserve` processes one decoded code point and returns whether the caller
+    // should retain it. False identifies part of a terminal command to discard.
+    // True includes standalone controls such as tabs; `PrepareTerminalText`
+    // converts those controls to visible notation before displaying a label.
+    // Decoded input distinguishes U+009B, a command introducer, from the byte
+    // 0x9B occurring within an ordinary UTF-8 character.
     [[nodiscard]] auto Preserve(const char32_t character) noexcept -> bool {
         return Preserve<true>(character);
     }
@@ -71,13 +77,12 @@ private:
         StString,
     };
 
-    // The command parameters and string payloads belong to the terminal
-    // instruction, so filtering consumes them along with the command's
-    // introducer and terminator. Recognizing this sequence framing allows the
-    // filter to discard commands even when their particular operation is
-    // unknown. ECMA-48 defines the framing; xterm documents BEL as an additional
-    // terminator for Operating System Command (OSC) strings, which include
-    // title and hyperlink commands.
+    // This parser tracks whether each input value belongs to ordinary text or
+    // to a terminal command. A command can include parameters or a string
+    // payload, so recognizing its end is necessary to discard the entire command
+    // and resume retaining text afterward. ECMA-48 defines those boundaries;
+    // xterm also permits BEL to end an Operating System Command (OSC) string,
+    // as used for title and hyperlink commands.
     // https://ecma-international.org/publications-and-standards/standards/ecma-48/
     // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
     template <bool ForDisplay>
@@ -227,9 +232,8 @@ auto AppendDisplayCharacter(std::string &output,
         output.append(std::format("\\x{:02X}", character));
         return;
     }
-    // The label representation exposes these controls to the reader through
-    // their code-point numbers. The set contains C1 controls, Unicode line and
-    // paragraph separators, and all twelve Unicode directional controls.
+    // C1 controls and Unicode line, paragraph, and directional controls become
+    // visible code-point numbers so they cannot change the label's layout.
     // `PrepareTerminalText` documents how this policy affects legitimate names.
     if (((character >= U'\x80') && (character <= U'\x9f')) ||
         (character == U'\u061c') ||

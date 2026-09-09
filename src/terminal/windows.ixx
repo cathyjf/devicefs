@@ -89,9 +89,10 @@ public:
         presenter_.Invalidate();
     }
 
-    // A menu update measures text and draws its replacement frame. Synchronized
-    // output asks Terminal to retain the previous display during that work;
-    // `PresentFrame` releases the rendering hold when drawing is complete.
+    // `BeginUpdate` groups layout measurements and frame drawing into one
+    // display update. On terminals that support synchronized output, the request
+    // keeps the previous display visible during that work. `PresentFrame`
+    // releases the rendering hold when drawing is complete.
     // The guard also releases the hold if an operation throws. Windows Terminal
     // limits each hold to 100 ms, so a slower update can become visible early.
     // https://github.com/microsoft/terminal/blob/5a830b2bf7c053d5c7ac22208fe5a346cb5dd3dc/src/renderer/base/renderer.cpp#L191-L257
@@ -110,11 +111,11 @@ public:
         Write("\x1b[?2026l"sv);
     }
 
-    // The alternate screen gives the menu a viewport without scrollback and
-    // preserves the caller's screen for restoration. Terminal crops or extends
-    // this screen during resize, leaving the menu to lay out its new frame.
-    // This owner outlives frame updates and restores the caller's screen and
-    // cursor on selection, cancellation, or an exception.
+    // `EnterMenu` switches to an alternate screen without scrollback, preserving
+    // the caller's screen for restoration. The terminal crops or extends the
+    // alternate screen during resize, leaving the menu to lay out its new frame.
+    // The returned owner must outlive frame updates; its destruction restores
+    // the caller's screen and cursor on selection, cancellation, or an exception.
     // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#alternate-screen-buffer
     [[nodiscard]] auto EnterMenu() {
         presenter_ = DeltaFramePresenter{};
@@ -253,10 +254,10 @@ private:
         return record;
     }
 
-    // A VT query asks the displaying terminal to report its cursor position,
-    // screen size, or page-coupling mode. The reply arrives alongside user
-    // input. This operation recognizes the requested report and saves the other
-    // events for `ReadInput`, preserving their arrival order.
+    // `Query` sends a VT request and reads its cursor or size report from the
+    // console input buffer. Replies arrive alongside keyboard and resize events.
+    // The requested report is consumed here; other events remain available to
+    // `ReadInput` in their original arrival order.
     [[nodiscard]] auto Query(const std::string_view request,
         const std::string_view prefix, const std::string_view suffix,
         const std::size_t fields)
@@ -265,9 +266,9 @@ private:
         // regain control in that case. The timeout covers the whole query,
         // including time spent receiving keyboard input while awaiting a reply.
         constexpr auto kReplyTimeout = 5s;
-        // The reports contain at most three nonnegative decimal integers.
-        // Thirty digits, two separators, a three-byte introducer, and a two-byte
-        // terminator cover the largest report accepted by these queries.
+        // Cursor and size reports contain at most three nonnegative `int` values.
+        // Ten decimal digits per value, separators, and VT framing fit within
+        // this reply-length limit.
         constexpr auto kMaximumReplyLength = 37uz;
         auto records = std::vector<std::list<INPUT_RECORD>::iterator>{};
         records.reserve(kMaximumReplyLength);

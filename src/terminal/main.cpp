@@ -22,6 +22,7 @@ import <clocale>;
 import devicefs.terminal;
 import devicefs.terminal.menu;
 import devicefs.terminal.menu_tests;
+import devicefs.terminal.frame_tests;
 import devicefs.terminal.windows;
 
 using namespace std::string_view_literals;
@@ -415,19 +416,19 @@ private:
             Require(result.stop == WrappingStop::RowLimit,
                 "text after a possibly wide character overran the last row"sv);
         });
-    passed &= Test("the grapheme policy reserving a column for nonempty zero-width text"sv,
+    passed &= Test("zero-width prefixes staying with the following visible group"sv,
         [] {
-            constexpr auto replies = std::array{CursorPosition{1, 1}, CursorPosition{1, 2}};
+            constexpr auto replies = std::array{CursorPosition{1, 1}};
             auto terminal = ScriptedTerminal{replies};
             const auto result = WriteWrappingText<WidthPolicy::WindowsTerminalGraphemes>(
                 terminal, "\u200B·"sv,
                 WrappingOptions{.size = {1, 2},
                     .continuation_column = 1, .maximum_rows = 1});
-            CheckText(terminal.Output(), "\u200B"sv);
-            CheckText(result.remaining, "·"sv);
+            CheckText(terminal.Output(), "\u200B·"sv);
+            CheckText(result.remaining, ""sv);
             terminal.CheckRepliesConsumed();
-            Require(result.stop == WrappingStop::RowLimit,
-                "a zero-width group bypassed the final-row observation limit"sv);
+            Require(result.stop == WrappingStop::EndOfText,
+                "the zero-width prefix was separated from its fitting visible group"sv);
         });
     passed &= Test("an emoji variation selector remaining with its base in one write"sv,
         [] {
@@ -567,6 +568,7 @@ constexpr auto EXIT_FAILURE = 1;
     passed &= TestLoggingFilter();
     passed &= TestWrapping();
     passed &= TestMenu();
+    passed &= RunFrameTests();
     std::println("\nTerminal library self-tests {}.", passed ? "passed" : "failed");
     return passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -129,10 +129,12 @@ export template <WidthPolicy Policy = WidthPolicy::AllModes>
     // templates preserve the types and values without triggering that defect.
     auto wide_offset = std::size_t{};
     auto measured = std::vector<MeasuredCluster>{};
+    auto leading_zero_group = false;
     while (!remaining.empty()) {
         const auto cluster_begin = grapheme_end;
         std::ignore = detector.GraphemeNext(cluster, wide);
         grapheme_end += cluster.len;
+        auto grapheme_width = cluster.width;
         if constexpr (Policy == WidthPolicy::AllModes) {
             std::ignore = wcswidth.GraphemeNext(wcs_cluster, wide);
             wcs_end += wcs_cluster.len;
@@ -145,6 +147,7 @@ export template <WidthPolicy Policy = WidthPolicy::AllModes>
                 if (grapheme_end < wcs_end) {
                     std::ignore = detector.GraphemeNext(cluster, wide);
                     grapheme_end += cluster.len;
+                    grapheme_width += cluster.width;
                 } else {
                     std::ignore = wcswidth.GraphemeNext(wcs_cluster, wide);
                     wcs_end += wcs_cluster.len;
@@ -182,8 +185,28 @@ export template <WidthPolicy Policy = WidthPolicy::AllModes>
             wide_offset += wide_length;
             units += character <= U'\uffff' ? 1 : 2;
         }
+        const auto group_text = before.substr(0, before.size() - remaining.size());
+        // In grapheme mode, zero-width text shares a position with a visible
+        // character at the same cell. Attach a leading zero-width group to the
+        // following group, and a trailing one to the preceding group. Repainting
+        // either part then preserves the complete cell contents. AllModes already
+        // joins trailing zero-width text through its Wcswidth boundaries above.
+        if (!measured.empty() && (leading_zero_group ||
+                ((Policy == WidthPolicy::WindowsTerminalGraphemes) && (grapheme_width == 0)))) {
+            auto &previous = measured.back();
+            previous.text = std::string_view{previous.text.data(),
+                previous.text.size() + group_text.size()};
+            if constexpr (Policy == WidthPolicy::AllModes) {
+                previous.width_bound += width_bound;
+            } else if (leading_zero_group) {
+                previous.width_bound = width_bound;
+            }
+            leading_zero_group &= grapheme_width == 0;
+            continue;
+        }
+        leading_zero_group = measured.empty() && (grapheme_width == 0);
         measured.push_back({
-            .text = before.substr(0, before.size() - remaining.size()),
+            .text = group_text,
             .width_bound = width_bound,
         });
     }

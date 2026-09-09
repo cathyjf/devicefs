@@ -13,6 +13,7 @@ import <wil/resource.h>;
 import <wil/safecast.h>;
 import <wil/stl.h>;
 import devicefs.terminal;
+import devicefs.terminal.frame;
 import devicefs.terminal.menu;
 
 using namespace std::string_view_literals;
@@ -57,8 +58,9 @@ export namespace devicefs::terminal {
 
 // `WindowsConsole` supplies terminal output, cursor and size queries, and input
 // events for the Windows console attached to this process. Cursor positions and
-// dimensions come from VT replies, so layout uses the displaying terminal's
-// reports. Keyboard and resize events are available through `ReadInput`.
+// dimensions come from VT replies; the Windows console or its hosting terminal
+// supplies those reports. Keyboard and resize events are available through
+// `ReadInput`.
 //
 // The object opens the console handles and enables the modes needed for these
 // operations. Destruction restores the previous modes before closing the handles.
@@ -68,6 +70,24 @@ export namespace devicefs::terminal {
 class WindowsConsole {
 public:
     WindowsConsole() = default;
+
+    template <WidthPolicy Policy = WidthPolicy::AllModes>
+    [[nodiscard]] auto Flip(const FrameBuffer &frame) -> bool {
+        return presenter_.Flip<Policy>(*this, frame);
+    }
+
+    template <WidthPolicy Policy = WidthPolicy::AllModes>
+    [[nodiscard]] auto KnownTextWidths(const std::string_view text) const {
+        return presenter_.KnownTextWidths<Policy>(text);
+    }
+
+    auto InvalidateFrameRows(const int first_row, const int count) -> void {
+        presenter_.InvalidateRows(first_row, count);
+    }
+
+    auto InvalidateFrame() -> void {
+        presenter_.Invalidate();
+    }
 
     // A menu update measures text and draws its replacement frame. Synchronized
     // output asks Terminal to retain the previous display during that work;
@@ -97,6 +117,7 @@ public:
     // cursor on selection, cancellation, or an exception.
     // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#alternate-screen-buffer
     [[nodiscard]] auto EnterMenu() {
+        presenter_ = DeltaFramePresenter{};
         auto previous_cursor = CONSOLE_CURSOR_INFO{};
         if (!GetConsoleCursorInfo(output_.get(), &previous_cursor)) {
             throw std::system_error(std::bit_cast<int>(GetLastError()),
@@ -367,6 +388,7 @@ private:
                 ENABLE_VIRTUAL_TERMINAL_PROCESSING,
             0);
     std::list<INPUT_RECORD> pending_;
+    DeltaFramePresenter presenter_;
 };
 
 }

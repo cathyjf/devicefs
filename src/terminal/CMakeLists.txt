@@ -61,14 +61,14 @@ set(DEVICEFS_TERMINAL_ANALYSIS_TARGETS
 )
 if(DEVICEFS_TERMINAL_BUILD_TESTS)
     add_executable(devicefs-terminal-test
-        main.cpp
+        tests/main.cpp
     )
     if(WIN32)
         target_sources(devicefs-terminal-test PRIVATE
             "${DEVICEFS_ROOT}/src/resources/devicefs.manifest")
     endif()
     target_sources(devicefs-terminal-test PRIVATE
-        FILE_SET CXX_MODULES FILES menu_tests.ixx frame_tests.ixx
+        FILE_SET CXX_MODULES FILES tests/menu_tests.ixx tests/frame_tests.ixx
     )
     target_link_libraries(devicefs-terminal-test PRIVATE devicefs-terminal)
     target_include_directories(devicefs-terminal-test PRIVATE

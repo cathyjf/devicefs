@@ -20,6 +20,8 @@ import std;
 // The <clocale> header unit is needed for `LC_CTYPE`.
 import <clocale>;
 import devicefs.terminal;
+import devicefs.terminal.menu;
+import devicefs.terminal.menu_tests;
 import devicefs.terminal.windows;
 
 using namespace std::string_view_literals;
@@ -564,12 +566,14 @@ constexpr auto EXIT_FAILURE = 1;
     auto passed = TestTextPreparation();
     passed &= TestLoggingFilter();
     passed &= TestWrapping();
+    passed &= TestMenu();
     std::println("\nTerminal library self-tests {}.", passed ? "passed" : "failed");
     return passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 constexpr auto kHelp = R"(Usage:
   devicefs-terminal-test --self-test
+  devicefs-terminal-test --menu
   devicefs-terminal-test --text TEXT
   devicefs-terminal-test --file FILENAME
 
@@ -578,12 +582,53 @@ The text is filtered, wrapped, and indented by two columns after each wrap.
 Text begins at the current cursor position and uses the remaining screen rows.
 )"sv;
 
+[[nodiscard]] auto MenuDemo() -> int {
+    constexpr auto header = std::array{
+        "DeviceFs terminal menu demonstration"sv,
+        "Choose an entry to print its index."sv, ""sv};
+    auto entries = std::vector<std::string>{
+        "Installation", "Schedule backups", "Browse backups", "Open backup console",
+        "Accented names: café and naïve", "日本語 — é — 👩‍💻 — ©️",
+        "Embedded controls: daily\nbackup\tname\033[31m (displayed as text)",
+        [] {
+            auto name = std::string{};
+            for (auto section = 1; section <= 32; ++section) {
+                name.append(std::format(
+                    "[{:02}] abcdefghijklmnopqrstuvwxyz 0123456789; ", section));
+            }
+            return name + "— end of the complete name";
+        }(),
+    };
+    for (auto index = entries.size(); index < 40; ++index) {
+        entries.push_back(std::format("Example backup {:02}", index + 1));
+    }
+    auto labels = std::vector<std::string_view>{};
+    labels.reserve(entries.size());
+    for (const auto &entry : entries) {
+        labels.push_back(entry);
+    }
+    const auto selection = [&] {
+        auto terminal = WindowsConsole{};
+        return SelectMenuItem(terminal, header, labels);
+    }();
+    if (selection) {
+        std::println("Selected index: {}", *selection);
+    } else {
+        std::println("Menu cancelled.");
+    }
+    return EXIT_SUCCESS;
+}
+
 }
 
 auto main(const int argc, char *const argv[]) -> int {
     std::ignore = std::setlocale(LC_CTYPE, ".UTF8");
     const auto arguments = std::span{argv, argv + argc};
     try {
+        if ((arguments.size() == 2) &&
+            (std::string_view{arguments[1]} == "--menu"sv)) {
+            return MenuDemo();
+        }
         if ((arguments.size() == 2) &&
             (std::string_view{arguments[1]} == "--self-test"sv)) {
             return SelfTest();

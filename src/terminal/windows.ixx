@@ -13,6 +13,7 @@ import <wil/resource.h>;
 import <wil/safecast.h>;
 import <wil/stl.h>;
 import devicefs.terminal;
+import devicefs.terminal.menu;
 
 using namespace std::string_view_literals;
 using namespace std::chrono_literals;
@@ -68,6 +69,51 @@ class WindowsConsole {
 public:
     WindowsConsole() = default;
 
+    // A menu update measures text and draws its replacement frame. Synchronized
+    // output asks Terminal to retain the previous display during that work;
+    // `PresentFrame` releases the rendering hold when drawing is complete.
+    // The guard also releases the hold if an operation throws. Windows Terminal
+    // limits each hold to 100 ms, so a slower update can become visible early.
+    // https://github.com/microsoft/terminal/blob/5a830b2bf7c053d5c7ac22208fe5a346cb5dd3dc/src/renderer/base/renderer.cpp#L191-L257
+    [[nodiscard]] auto BeginUpdate() {
+        auto finish = wil::scope_exit([this] {
+            constexpr auto sequence = L"\x1b[?2026l"sv;
+            auto written = DWORD{};
+            std::ignore = WriteConsoleW(output_.get(), sequence.data(),
+                wil::safe_cast_failfast<DWORD>(sequence.size()), &written, nullptr);
+        });
+        Write("\x1b[?2026h"sv);
+        return finish;
+    }
+
+    auto PresentFrame() -> void {
+        Write("\x1b[?2026l"sv);
+    }
+
+    // The alternate screen gives the menu a viewport without scrollback and
+    // preserves the caller's screen for restoration. Terminal crops or extends
+    // this screen during resize, leaving the menu to lay out its new frame.
+    // This owner outlives frame updates and restores the caller's screen and
+    // cursor on selection, cancellation, or an exception.
+    // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#alternate-screen-buffer
+    [[nodiscard]] auto EnterMenu() {
+        auto previous_cursor = CONSOLE_CURSOR_INFO{};
+        if (!GetConsoleCursorInfo(output_.get(), &previous_cursor)) {
+            throw std::system_error(std::bit_cast<int>(GetLastError()),
+                std::system_category(), "could not read the console cursor visibility");
+        }
+        auto restore = wil::scope_exit([handle = output_.get(), previous_cursor] {
+            constexpr auto sequence = L"\x1b[?1049l"sv;
+            const auto length = wil::safe_cast_failfast<DWORD>(sequence.size());
+            auto written = DWORD{};
+            std::ignore = WriteConsoleW(
+                handle, sequence.data(), length, &written, nullptr);
+            std::ignore = SetConsoleCursorInfo(handle, &previous_cursor);
+        });
+        Write("\x1b[?1049h\x1b[?25l"sv);
+        return restore;
+    }
+
     auto Write(const std::string_view text) -> void {
         if (text.empty()) {
             return;
@@ -94,16 +140,16 @@ public:
     }
 
     [[nodiscard]] auto QueryCursor() -> std::optional<CursorPosition> {
-        const auto reply = Query("\x1b[6n"sv, 'R', 2);
-        if (!reply) {
+        const auto reply = Query("\x1b[6n"sv, "\x1b["sv, "R"sv, 2);
+        if (!reply || ((*reply)[0] < 1) || ((*reply)[1] < 1)) {
             return std::nullopt;
         }
         return CursorPosition{.row = (*reply)[0], .column = (*reply)[1]};
     }
 
     [[nodiscard]] auto QuerySize() -> std::optional<TerminalSize> {
-        const auto reply = Query("\x1b[18t"sv, 't', 3);
-        if (!reply || ((*reply)[0] != 8)) {
+        const auto reply = Query("\x1b[18t"sv, "\x1b["sv, "t"sv, 3);
+        if (!reply || ((*reply)[0] != 8) || ((*reply)[1] < 1) || ((*reply)[2] < 1)) {
             return std::nullopt;
         }
         return TerminalSize{.rows = (*reply)[1], .columns = (*reply)[2]};
@@ -121,6 +167,57 @@ public:
         return ReadConsoleRecord();
     }
 
+    [[nodiscard]] auto ReadMenuInput() -> MenuInput {
+        for (;;) {
+            const auto record = ReadInput();
+            if (record.EventType == WINDOW_BUFFER_SIZE_EVENT) {
+                return {.key = MenuKey::Resize};
+            }
+            if ((record.EventType != KEY_EVENT) || !record.Event.KeyEvent.bKeyDown) {
+                continue;
+            }
+            const auto &key = record.Event.KeyEvent;
+            const auto action = [&key]() -> std::optional<MenuKey> {
+                switch (key.wVirtualKeyCode) {
+                case VK_UP:
+                    return MenuKey::Up;
+                case VK_DOWN:
+                    return MenuKey::Down;
+                case VK_PRIOR:
+                    return MenuKey::PageUp;
+                case VK_NEXT:
+                    return MenuKey::PageDown;
+                case VK_HOME:
+                    return MenuKey::Home;
+                case VK_END:
+                    return MenuKey::End;
+                case VK_RETURN:
+                    return MenuKey::Accept;
+                case VK_ESCAPE:
+                    return MenuKey::Back;
+                default:
+                    break;
+                }
+                // Ctrl+C should cancel the menu instead of terminating the
+                // process. With processed input disabled, Ctrl+C arrives as
+                // ETX (0x03). Ctrl+L is form feed (0x0c) and requests a redraw.
+                switch (key.uChar.UnicodeChar) {
+                case L'\x03':
+                    return MenuKey::Cancel;
+                case L'\x0c':
+                    return MenuKey::Redraw;
+                case L'1':
+                    return MenuKey::Details;
+                default:
+                    return std::nullopt;
+                }
+            }();
+            if (action) {
+                return {.key = *action, .repeat = key.wRepeatCount};
+            }
+        }
+    }
+
 private:
     [[nodiscard]] auto ReadConsoleRecord() const -> INPUT_RECORD {
         auto record = INPUT_RECORD{};
@@ -135,22 +232,22 @@ private:
         return record;
     }
 
-    // A VT query asks the displaying terminal to report its cursor position or
-    // screen size. The reply arrives in the console input queue alongside user
+    // A VT query asks the displaying terminal to report its cursor position,
+    // screen size, or page-coupling mode. The reply arrives alongside user
     // input. This operation recognizes the requested report and saves the other
     // events for `ReadInput`, preserving their arrival order.
     [[nodiscard]] auto Query(const std::string_view request,
-        const char terminator, const std::size_t fields)
+        const std::string_view prefix, const std::string_view suffix,
+        const std::size_t fields)
         -> std::optional<std::array<int, 3>> {
         // Some terminals omit unsupported reports. A deadline lets the caller
         // regain control in that case. The timeout covers the whole query,
         // including time spent receiving keyboard input while awaiting a reply.
         constexpr auto kReplyTimeout = 5s;
-        // Cursor and size reports contain two or three positive decimal
-        // integers. Three 32-bit integers need at most 30 digits; adding two
-        // separators, ESC and '[', and the final command letter gives the
-        // longest report accepted by these queries.
-        constexpr auto kMaximumReplyLength = 35uz;
+        // The reports contain at most three nonnegative decimal integers.
+        // Thirty digits, two separators, a three-byte introducer, and a two-byte
+        // terminator cover the largest report accepted by these queries.
+        constexpr auto kMaximumReplyLength = 37uz;
         auto records = std::vector<std::list<INPUT_RECORD>::iterator>{};
         records.reserve(kMaximumReplyLength);
         auto reply = std::string{};
@@ -206,23 +303,28 @@ private:
             }
             records.push_back(position);
             reply.push_back(wil::safe_cast_failfast<char>(character));
-            if (((reply.size() == 2) && (character != L'[')) ||
-                ((reply.size() > 2) &&
-                 !((character >= L'0') && (character <= L'9')) &&
-                 (character != L';') && (character != terminator))) {
+            if (reply.size() <= prefix.size()) {
+                if (!prefix.starts_with(reply)) {
+                    discard_candidate();
+                }
+                continue;
+            }
+            if (!((character >= L'0') && (character <= L'9')) &&
+                (character != L';') && !suffix.contains(reply.back())) {
                 discard_candidate();
                 continue;
             }
-            if (character != terminator) {
+            if (!reply.ends_with(suffix)) {
                 continue;
             }
             auto values = std::array<int, 3>{};
-            auto body = std::string_view{reply}.substr(2, reply.size() - 3);
+            auto body = std::string_view{reply}.substr(
+                prefix.size(), reply.size() - prefix.size() - suffix.size());
             auto valid = true;
             for (auto index = 0uz; index < fields; ++index) {
                 const auto [end, error] = std::from_chars(
                     body.data(), body.data() + body.size(), values.at(index));
-                if ((error != std::errc{}) || (values.at(index) <= 0)) {
+                if ((error != std::errc{}) || (values.at(index) < 0)) {
                     valid = false;
                     break;
                 }

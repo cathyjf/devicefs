@@ -43,7 +43,7 @@ target_include_directories(windows-terminal-width PRIVATE
 
 add_library(devicefs-terminal STATIC)
 target_sources(devicefs-terminal PUBLIC
-    FILE_SET CXX_MODULES FILES terminal.ixx text.ixx windows.ixx
+    FILE_SET CXX_MODULES FILES terminal.ixx text.ixx menu.ixx windows.ixx
 )
 target_link_libraries(devicefs-terminal PRIVATE windows-terminal-width)
 target_include_directories(devicefs-terminal PRIVATE
@@ -58,6 +58,9 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
     add_executable(devicefs-terminal-test
         main.cpp
         "${DEVICEFS_ROOT}/src/resources/devicefs.manifest"
+    )
+    target_sources(devicefs-terminal-test PRIVATE
+        FILE_SET CXX_MODULES FILES menu_tests.ixx
     )
     target_link_libraries(devicefs-terminal-test PRIVATE devicefs-terminal)
     target_include_directories(devicefs-terminal-test PRIVATE

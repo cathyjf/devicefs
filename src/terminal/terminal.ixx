@@ -27,10 +27,13 @@ struct TerminalSize {
 // cursor; later lines begin at `continuation_column`, counted from one.
 // `size` gives the screen dimensions in character cells. `maximum_rows` counts
 // the first line and all continuations, up to the bottom of that screen.
+// `trailing_columns` reserves space at the end of the final permitted row for
+// a caller-supplied continuation marker, such as an ellipsis.
 struct WrappingOptions {
     TerminalSize size;
     int continuation_column = 1;
     int maximum_rows = 1;
+    int trailing_columns = 0;
 };
 
 // The writer batches text to reduce the number of cursor queries. A batch must
@@ -77,7 +80,7 @@ concept Terminal = requires(T &terminal, std::string_view text) {
 
 namespace devicefs::terminal {
 
-struct MeasuredCluster {
+export struct MeasuredCluster {
     std::string_view text;
     int width_bound;
 };
@@ -91,7 +94,7 @@ struct MeasuredCluster {
 // Microsoft's detector identifies groups in UTF-16. Decoding the original UTF-8
 // alongside those results locates the corresponding bytes, so the returned
 // views refer to the caller's original text.
-template <WidthPolicy Policy>
+export template <WidthPolicy Policy = WidthPolicy::AllModes>
 [[gsl::suppress("26496",
     justification:
         "The analyzer recommends const for locals that are unchanged in the "
@@ -220,21 +223,35 @@ template <WidthPolicy Policy>
 // prefix already displayed, because resizing may have moved earlier text.
 // Exceptions from terminal operations, text conversion, or allocation propagate
 // to the caller.
-export template <WidthPolicy Policy = WidthPolicy::AllModes>
+//
+// A caller that needs to revisit individual rows can supply `line_started`.
+// The callback receives the suffix beginning each displayed row; the first
+// notification precedes output, and later notifications identify observed or
+// explicitly positioned continuations. The result's `rows` counts the rows
+// actually written. These positions let a menu cache wrapped rows for scrolling.
+//
+// This overload accepts consecutive groups returned by `MeasureText`. Keeping
+// that measurement allows a caller to resume output across several pages with
+// one width calculation. The string overload below measures a label for a
+// single call. Both overloads borrow the original text's storage.
+export template <typename LineStarted = std::nullptr_t>
 [[nodiscard]] auto WriteWrappingText(
-    Terminal auto &terminal, const std::string_view prepared,
-    const WrappingOptions &options) -> WrappingResult {
-    const auto &[size, continuation_column, requested_rows] = options;
+    Terminal auto &terminal, const std::span<const MeasuredCluster> measured,
+    const WrappingOptions &options, const LineStarted &line_started = nullptr)
+    -> WrappingResult {
+    const auto prepared = measured.empty() ? ""sv : std::string_view{
+        measured.front().text.begin(), measured.back().text.end()};
+    const auto &[size, continuation_column, requested_rows, trailing_columns] = options;
     if ((size.rows < 1) || (size.columns < 1) ||
         (continuation_column < 1) || (continuation_column > size.columns) ||
-        (requested_rows < 1)) {
+        (requested_rows < 1) || (trailing_columns < 0) ||
+        (trailing_columns >= size.columns)) {
         return {.remaining = prepared, .rows = 0, .stop = WrappingStop::RedrawRequired};
     }
     if (prepared.empty()) {
         return {.remaining = prepared, .rows = 0, .stop = WrappingStop::EndOfText};
     }
 
-    const auto measured = MeasureText<Policy>(prepared);
     const auto start = terminal.QueryCursor();
     if (!start || (start->row < 1) || (start->row > size.rows) ||
         (start->column < 1) || (start->column > size.columns)) {
@@ -243,8 +260,14 @@ export template <WidthPolicy Policy = WidthPolicy::AllModes>
     const auto maximum_rows = std::min(requested_rows, size.rows - start->row + 1);
     const auto continuation_capacity = size.columns - continuation_column + 1;
     auto remaining = prepared;
-    auto clusters = std::span{measured};
+    auto clusters = measured;
     auto cursor = *start;
+    const auto notify_line = [&line_started](const std::string_view suffix) {
+        if constexpr (!std::is_null_pointer_v<LineStarted>) {
+            std::invoke(line_started, suffix);
+        }
+    };
+    notify_line(remaining);
     // The last column needs special handling when deciding whether more text
     // fits. With delayed wrapping, the terminal leaves the cursor in the filled
     // cell until the next printable character arrives. A report of that column
@@ -283,14 +306,22 @@ export template <WidthPolicy Policy = WidthPolicy::AllModes>
             if ((cursor.row - start->row + 1) == maximum_rows) {
                 return result(WrappingStop::RowLimit);
             }
+            if (((cursor.row - start->row + 2) == maximum_rows) &&
+                (clusters.front().width_bound > (continuation_capacity - trailing_columns))) {
+                return result(WrappingStop::RowLimit);
+            }
             ++cursor.row;
             cursor.column = continuation_column;
             terminal.Write(std::format("\x1b[{};{}H", cursor.row, cursor.column));
+            notify_line(remaining);
             margin = RightMargin::Available;
         }
 
         auto capacity = margin == RightMargin::Uncertain ? 0 :
             size.columns - cursor.column + 1;
+        if ((cursor.row - start->row + 1) == maximum_rows) {
+            capacity = std::max(0, capacity - trailing_columns);
+        }
         auto batch_size = std::size_t{};
         auto batch_clusters = std::size_t{};
         for (const auto &cluster : clusters) {
@@ -328,13 +359,21 @@ export template <WidthPolicy Policy = WidthPolicy::AllModes>
         if ((cursor.row - start->row + 1) == maximum_rows) {
             return result(WrappingStop::RowLimit);
         }
+        if (((cursor.row - start->row + 2) == maximum_rows) &&
+            (clusters.front().width_bound > (continuation_capacity - trailing_columns))) {
+            return result(WrappingStop::RowLimit);
+        }
 
+        const auto before = remaining;
         terminal.Write(clusters.front().text);
         remaining.remove_prefix(clusters.front().text.size());
         clusters = clusters.subspan(1);
         const auto observed = observe();
         if (!observed) {
             return result(WrappingStop::RedrawRequired);
+        }
+        if (observed->row != cursor.row) {
+            notify_line(before);
         }
         if ((observed->row != cursor.row) && (continuation_column > 1)) {
             // A continuation row needs indentation, but the terminal has already
@@ -362,6 +401,16 @@ export template <WidthPolicy Policy = WidthPolicy::AllModes>
         }
     }
     return result(WrappingStop::EndOfText);
+}
+
+export template <WidthPolicy Policy = WidthPolicy::AllModes,
+    typename LineStarted = std::nullptr_t>
+[[nodiscard]] auto WriteWrappingText(Terminal auto &terminal,
+    const std::string_view prepared, const WrappingOptions &options,
+    const LineStarted &line_started = nullptr) -> WrappingResult {
+    const auto measured = MeasureText<Policy>(prepared);
+    return WriteWrappingText(terminal, std::span<const MeasuredCluster>{measured},
+        options, line_started);
 }
 
 }

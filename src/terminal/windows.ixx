@@ -22,14 +22,14 @@ namespace devicefs::terminal::detail {
     const HANDLE handle, const DWORD enable, const DWORD disable) {
     auto previous = DWORD{};
     if (!GetConsoleMode(handle, &previous)) {
-        throw std::system_error(std::bit_cast<int>(GetLastError()),
+        throw std::system_error(GetLastError(),
             std::system_category(), "could not read the terminal's console mode");
     }
     auto restore = wil::scope_exit([handle, previous] {
         std::ignore = SetConsoleMode(handle, previous);
     });
     if (!SetConsoleMode(handle, (previous | enable) & ~disable)) {
-        throw std::system_error(std::bit_cast<int>(GetLastError()),
+        throw std::system_error(GetLastError(),
             std::system_category(), "could not enable terminal input or output");
     }
     return restore;
@@ -88,7 +88,7 @@ public:
         auto written = DWORD{};
         if (!WriteConsoleW(output_.get(), wide.data(), length,
                 &written, nullptr)) {
-            throw std::system_error(std::bit_cast<int>(GetLastError()),
+            throw std::system_error(GetLastError(),
                 std::system_category(), "could not write terminal text");
         }
         if (written != length) {
@@ -179,7 +179,7 @@ private:
     [[nodiscard]] auto RestoreScreenOnExit() {
         auto previous_cursor = CONSOLE_CURSOR_INFO{};
         if (!GetConsoleCursorInfo(output_.get(), &previous_cursor)) {
-            throw std::system_error(std::bit_cast<int>(GetLastError()),
+            throw std::system_error(GetLastError(),
                 std::system_category(), "could not read the console cursor visibility");
         }
         return wil::scope_exit([this, previous_cursor] {
@@ -192,7 +192,7 @@ private:
         auto record = INPUT_RECORD{};
         auto read = DWORD{};
         if (!ReadConsoleInputW(input_.get(), &record, 1, &read)) {
-            throw std::system_error(std::bit_cast<int>(GetLastError()),
+            throw std::system_error(GetLastError(),
                 std::system_category(), "could not read terminal input");
         }
         if (read != 1) {
@@ -230,7 +230,7 @@ private:
                 continue;
             }
             if (wait == WAIT_FAILED) {
-                throw std::system_error(std::bit_cast<int>(GetLastError()),
+                throw std::system_error(GetLastError(),
                     std::system_category(), "could not wait for a terminal reply");
             }
             const auto position = pending_.insert(pending_.end(), ReadConsoleRecord());

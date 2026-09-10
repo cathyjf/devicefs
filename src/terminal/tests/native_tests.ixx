@@ -59,7 +59,7 @@ class NativeInput {
 public:
     auto Disconnect() -> void {
         if (!FreeConsole()) {
-            throw std::system_error(std::bit_cast<int>(GetLastError()), std::system_category(),
+            throw std::system_error(GetLastError(), std::system_category(),
                 "could not detach the test process from its console");
         }
     }
@@ -67,7 +67,7 @@ public:
     [[nodiscard]] auto Modes() const {
         auto modes = std::array<DWORD, 2>{};
         if (!GetConsoleMode(input_.get(), &modes[0]) || !GetConsoleMode(output_.get(), &modes[1])) {
-            throw std::system_error(std::bit_cast<int>(GetLastError()), std::system_category(),
+            throw std::system_error(GetLastError(), std::system_category(),
                 "could not read the test console's input and output modes");
         }
         return modes;
@@ -77,7 +77,7 @@ public:
         auto written = DWORD{};
         if (!WriteConsoleInputW(input_.get(), records.data(),
                 FailFastCast<DWORD>(records.size()), &written)) {
-            throw std::system_error(std::bit_cast<int>(GetLastError()), std::system_category(),
+            throw std::system_error(GetLastError(), std::system_category(),
                 "could not supply test console events");
         }
         Require(written == records.size(), "console input accepted only some events"sv);

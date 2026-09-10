@@ -3,8 +3,6 @@
 
 module;
 
-#include "compat/gsl_suppress.h"
-
 #ifndef _MSC_VER
     #include <terminal/src/types/inc/CodepointWidthDetector.hpp>
 #endif
@@ -119,11 +117,6 @@ export struct MeasuredCluster {
 // alongside those results locates the corresponding bytes, so the returned
 // views refer to the caller's original text.
 export template <WidthPolicy Policy = WidthPolicy::AllModes>
-GSL_SUPPRESS("26496",
-    "The analyzer recommends const for locals that are unchanged in the "
-    "WindowsTerminalGraphemes instantiation. The AllModes instantiation "
-    "updates the same locals while finding group boundaries and summing "
-    "widths, so their declarations must permit those updates.")
 [[nodiscard]] auto MeasureText(const std::string_view prepared)
     -> std::vector<MeasuredCluster> {
     const auto wide = std::filesystem::path{prepared}.u16string();
@@ -136,15 +129,15 @@ GSL_SUPPRESS("26496",
     }
     auto detector = CodepointWidthDetector{};
     detector.SetAmbiguousWidth(2);
-    auto wcswidth = std::conditional_t<Policy == WidthPolicy::AllModes,
-        CodepointWidthDetector, std::monostate>{};
+    decltype(auto) wcswidth = std::conditional_t<Policy == WidthPolicy::AllModes,
+        CodepointWidthDetector, const std::monostate>{};
     if constexpr (Policy == WidthPolicy::AllModes) {
         wcswidth.Reset(TextMeasurementMode::Wcswidth);
     }
     auto cluster = GraphemeState{.beg = wide.data()};
-    auto wcs_cluster = GraphemeState{.beg = wide.data()};
+    decltype(auto) wcs_cluster = std::conditional_t<Policy == WidthPolicy::AllModes,
+        GraphemeState, const GraphemeState>{.beg = wide.data()};
     auto grapheme_end = 0;
-    auto wcs_end = 0;
     auto conversion = std::mbstate_t{};
     auto remaining = prepared;
     // MSVC 19.52.36725 crashes when an imported function template contains a
@@ -157,10 +150,11 @@ GSL_SUPPRESS("26496",
         const auto cluster_begin = grapheme_end;
         std::ignore = detector.GraphemeNext(cluster, wide);
         grapheme_end += cluster.len;
-        auto grapheme_width = cluster.width;
+        std::conditional_t<Policy == WidthPolicy::AllModes, int, const int>
+            grapheme_width = cluster.width;
         if constexpr (Policy == WidthPolicy::AllModes) {
             std::ignore = wcswidth.GraphemeNext(wcs_cluster, wide);
-            wcs_end += wcs_cluster.len;
+            auto wcs_end = cluster_begin + wcs_cluster.len;
             // Graphemes and Wcswidth can group the same text differently. A
             // write must contain the whole group recognized by either mode;
             // otherwise, the terminal could receive an accent or emoji modifier
@@ -178,7 +172,8 @@ GSL_SUPPRESS("26496",
             }
         }
         const auto before = remaining;
-        auto width_bound = Policy == WidthPolicy::WindowsTerminalGraphemes ?
+        std::conditional_t<Policy == WidthPolicy::AllModes, int, const int>
+            width_bound = Policy == WidthPolicy::WindowsTerminalGraphemes ?
             std::max(1, cluster.width) : 0;
         auto units = 0;
         while (units < (grapheme_end - cluster_begin)) {

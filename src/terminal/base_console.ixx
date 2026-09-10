@@ -57,19 +57,19 @@ public:
         self.Write(kEndUpdate);
     }
 
-    // EnterMenu switches to an alternate screen without scrollback, preserving
-    // the caller's screen for restoration. The terminal crops or extends the
-    // alternate screen during resize, leaving the menu to lay out its new frame.
-    // The returned owner must outlive frame updates and be destroyed before the
-    // console. Destruction restores the caller's screen and cursor on selection,
-    // cancellation, or an exception. Windows saves cursor shape and visibility
-    // through its console API; Unix preserves cursor visibility through VT.
-    // Each native adapter supplies the corresponding restoration guard.
+    // `EnterScreen` owns an interactive session on the alternate screen,
+    // preserving the invoking shell's screen and cursor until the owner is
+    // destroyed. Keep this owner alive across menu calls so each new frame is
+    // compared with the previous menu and can reuse its measured text widths.
+    // The owner must be destroyed before the console; exception unwinding then
+    // restores the screen through the same live connection. Windows preserves
+    // cursor shape and visibility through its console API, while Unix preserves
+    // cursor visibility through VT. The native adapter supplies that guard.
     // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#alternate-screen-buffer
-    [[nodiscard]] auto EnterMenu(this auto &self) {
+    [[nodiscard]] auto EnterScreen(this auto &self) {
         self.presenter_ = DeltaFramePresenter{};
         auto restore = self.RestoreScreenOnExit();
-        self.Write(self.kEnterMenu);
+        self.Write(self.kEnterScreen);
         return restore;
     }
 
@@ -90,7 +90,7 @@ public:
     }
 
 protected:
-    static constexpr auto kLeaveMenu = "\x1b[?1049l"sv;
+    static constexpr auto kLeaveScreen = "\x1b[?1049l"sv;
 
     // Ctrl+C arrives as ETX when native input processing is disabled, allowing
     // the menu to cancel normally. Ctrl+L requests a redraw, and 1 opens the

@@ -191,8 +191,8 @@ public:
 
 private:
     friend class BaseConsole;
-    static constexpr auto kEnterMenu = "\x1b[?1049h\x1b[?25s\x1b[?25l"sv;
-    static constexpr auto kLeaveMenu = "\x1b[0m\x1b[?25h\x1b[?25r\x1b[?1049l"sv;
+    static constexpr auto kEnterScreen = "\x1b[?1049h\x1b[?25s\x1b[?25l"sv;
+    static constexpr auto kLeaveScreen = "\x1b[0m\x1b[?25h\x1b[?25r\x1b[?1049l"sv;
 
 protected:
     auto WriteControlSequenceNoThrow(const std::string_view sequence) const noexcept -> void {
@@ -201,12 +201,12 @@ protected:
 
 private:
     // Saving private mode 25 on entry preserves cursor visibility on terminals
-    // supporting XTSAVE/XTRESTORE. Restoration first shows the cursor, then
+    // supporting `XTSAVE`/`XTRESTORE`. Restoration first shows the cursor, then
     // restores the saved setting; terminals that ignore those extensions are
-    // therefore left with a visible cursor when the menu ends.
+    // therefore left with a visible cursor when the interactive session ends.
     // https://invisible-mirror.net/xterm/ctlseqs/ctlseqs.html
     [[nodiscard]] auto RestoreScreenOnExit() {
-        return ScopeExit{[this] { WriteControlSequenceNoThrow(kLeaveMenu); }};
+        return ScopeExit{[this] { WriteControlSequenceNoThrow(kLeaveScreen); }};
     }
 
     [[nodiscard]] auto ReadWindowSize() const -> TerminalSize {

@@ -159,6 +159,12 @@ Long entries wrap, with their continuation lines indented beyond the first
 line's text. Scrolling counts displayed rows, so a multiline entry remains one
 selectable item even when only part of it fits in the viewport.
 
+The caller enters the alternate screen once with `EnterScreen` and keeps its
+returned owner alive across a sequence of menus. Each selection call leaves
+its last frame displayed. The next menu uses the same presenter and recorded
+widths, so shared headers, footers, and other unchanged text need no repainting.
+Destroying the owner restores the invoking shell's screen and cursor.
+
 Entry previews occupy at most eight rows. A longer name ends with `...`, and
 the footer offers **1: View full name**. That opens a scrolling view of the
 complete prepared text. Returning from the view preserves the menu selection
@@ -230,8 +236,10 @@ several levels:
 Applications can use `WindowsConsole` or `UnixConsole`, or provide an adapter
 that satisfies the relevant concept. A wrapping adapter needs only text output
 and cursor observation; menus add input, screen dimensions, presentation, and
-the associated lifetimes. The [menu demonstration](tests/main.cpp) shows a
-complete selection operation and how to scope the console around it.
+the associated lifetimes. The [menu demonstration](tests/main.cpp) opens a
+submenu for each main-menu entry within one screen lifetime. Escape returns
+to the main menu; choosing a submenu entry leaves the interactive session and
+prints that entry's index.
 
 The caller selects a UTF-8 `LC_CTYPE` locale before preparing or measuring text
 on GNU/Linux and macOS. The demonstration checks that selecting `C.UTF-8`
@@ -251,9 +259,10 @@ Windows text output converts UTF-8 to UTF-16 for `WriteConsoleW`, preserving
 the console code page shared with other programs.
 
 Scoped owners manage temporary input modes, the alternate screen, cursor
-restoration, and synchronized updates. Returning a selection, cancelling, or
-unwinding an exception releases those owners in the required order. I/O errors
-propagate to the caller, and restoration preserves an error already in flight.
+restoration, and synchronized updates. The screen owner outlives the menus
+displayed within its session and is destroyed before the console connection.
+Exception unwinding follows that same restoration order. I/O errors propagate
+to the caller, and restoration preserves an error already in flight.
 
 Terminal reports and keyboard input share an input channel. The adapters
 recognize fragmented replies and retain unrelated keys. Queries have a bounded

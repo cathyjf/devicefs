@@ -282,6 +282,7 @@ public:
                     input.Feed("\x03"sv);
                 }
             };
+            const auto screen = console.EnterScreen();
             Require(!SelectMenuItem(console, {}, std::array{"Installation"sv}),
                 "cancellation returned a selected entry"sv);
             Require(!output.contains("unavailable"sv), "cancellation painted recovery instructions"sv);
@@ -305,6 +306,7 @@ public:
         Require(input.Modes() == original_modes, "normal exit or cancellation changed terminal modes"sv);
         try {
             auto console = TestConsole{};
+            const auto screen = console.EnterScreen();
             console.on_write = [](const auto) { throw InjectedFailure{"injected output failure"}; };
             std::ignore = SelectMenuItem(console, {}, std::array{"Installation"sv});
             Require(false, "the output exception did not propagate"sv);
@@ -324,7 +326,7 @@ public:
         Require(console.QueryCursor() == CursorPosition{2, 3}, "a query could not recover after timeout"sv);
     });
 #ifdef _WIN32
-    passed &= Test("complete menu presentation and scrolling through native Console Host"sv, [&input] {
+    passed &= Test("successive menus and scrolling through native Console Host"sv, [&input] {
         auto console = MeasuringConsole<NativeConsole>{};
         const auto records = std::array{VK_DOWN, VK_END, VK_HOME, VK_RETURN} |
             std::views::transform([](const int key) {
@@ -347,16 +349,32 @@ public:
         const auto labels = entries | std::views::transform([](const auto &entry) {
             return std::string_view{entry};
         }) | std::ranges::to<std::vector>();
-        Require(SelectMenuItem(console, std::array{"Native menu measurements"sv}, labels) == 0,
-            "the native menu could not complete the scripted selection"sv);
+        {
+            const auto screen = console.EnterScreen();
+            constexpr auto header = std::array{"Native menu measurements"sv};
+            Require(SelectMenuItem(console, header, labels) == 0,
+                "the native menu could not complete the scripted selection"sv);
+            input.FeedRecords(std::span{records}.last(1));
+            Require(SelectMenuItem(console, header,
+                    std::array{"Backup 001"sv, "Backup 002"sv}) == 0,
+                "the second native menu could not select an entry on the same screen"sv);
+        }
         PrintMenuMeasurements(console.measurements);
-        Require(console.measurements.size() == records.size(), "native menu updates were not all measured"sv);
-        Require((console.measurements.at(0).cursor_queries > 0) &&
-            (console.measurements.at(2).cursor_queries > 0),
+        // Console Host can deliver a size event after entering the alternate
+        // screen. Separate those updates from the navigation supplied here so
+        // the assertions identify the intended menu transitions.
+        const auto navigation = console.measurements | std::views::filter([](const auto &update) {
+            return update.input != MenuKey::Resize;
+        }) | std::ranges::to<std::vector>();
+        Require(navigation.size() == (records.size() + 1),
+            "native menu updates were not all measured"sv);
+        Require((navigation.at(0).cursor_queries > 0) &&
+            (navigation.at(2).cursor_queries > 0),
             "the native menu did not measure unfamiliar text"sv);
-        Require((console.measurements.at(1).cursor_queries == 0) &&
-            (console.measurements.at(3).cursor_queries == 0),
-            "the native menu repeated measurements for cached text"sv);
+        Require((navigation.at(1).cursor_queries == 0) &&
+            (navigation.at(3).cursor_queries == 0) &&
+            (navigation.at(4).cursor_queries == 0),
+            "the native menus repeated measurements for cached text"sv);
     });
     passed &= Test("Windows console host emitting character-only cursor-reply events"sv, [] {
         auto console = NativeConsole{};
@@ -468,7 +486,7 @@ public:
         const auto start = std::chrono::steady_clock::now();
         try {
             auto console = TestConsole{};
-            const auto screen = console.EnterMenu();
+            const auto screen = console.EnterScreen();
             input.Disconnect();
             const auto output_failed = [&console] {
                 try {

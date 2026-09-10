@@ -29,8 +29,7 @@ struct MenuInput {
 enum class MenuScrollPolicy { Line, Page };
 
 // A menu needs the writer's output and cursor operations, screen dimensions,
-// and navigation events. `EnterMenu` returns an owner for the temporary screen;
-// destroying that owner restores the screen when selection ends or fails.
+// and navigation events. The caller owns the screen lifetime across menu calls.
 // `Flip` presents a completed back buffer. The adapter chooses how that frame
 // reaches the display. Layout sometimes measures text by writing to the
 // terminal; `BeginUpdate` owns that temporary work, and `InvalidateFrameRows`
@@ -40,7 +39,6 @@ concept MenuTerminal = FrameTerminal<T> && requires(T &terminal,
     const FrameBuffer &frame, const std::string_view text) {
     { terminal.QuerySize() } -> std::same_as<std::optional<TerminalSize>>;
     { terminal.ReadMenuInput() } -> std::same_as<MenuInput>;
-    { terminal.EnterMenu() } -> std::destructible;
     { terminal.BeginUpdate() } -> std::destructible;
     { terminal.template Flip<Policy>(frame) } -> std::same_as<bool>;
     { terminal.template KnownTextWidths<Policy>(text) } ->
@@ -611,7 +609,10 @@ export namespace devicefs::terminal {
 // to the adapter's `Flip` operation for presentation.
 //
 // The adapter and caller's strings must remain alive for this synchronous call.
-// The temporary screen is restored on selection, cancellation, or an exception.
+// With a native adapter, the caller retains the owner returned by `EnterScreen`
+// across menu calls. Returning leaves the last frame displayed so the next
+// menu's `Flip` can compare against it; destroying the screen owner restores
+// the invoking shell.
 // A missing layout report leaves a message and waits for resize, redraw, or
 // cancellation; terminal I/O exceptions propagate to the caller.
 template <WidthPolicy Policy = WidthPolicy::AllModes,
@@ -624,7 +625,6 @@ template <WidthPolicy Policy = WidthPolicy::AllModes,
     using namespace menu_detail;
     const auto text = MenuText{.header = PrepareLines(header),
         .entries = PrepareLines(entries), .footer = PrepareLines(footer)};
-    const auto screen = terminal.EnterMenu();
     auto list = MenuListView{text.entries, initial_selection};
     auto full_name = std::optional<FullNameView>{};
     const auto present = [&](const MenuInput input,

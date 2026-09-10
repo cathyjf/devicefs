@@ -26,7 +26,8 @@ struct MenuMeasurement {
 // output. Reaching the next input request completes the measurement; waiting
 // for the user is excluded. The initial measurement also includes preparation
 // of the labels and entry into the menu screen. Results remain in memory until
-// the caller has left the menu, so reporting cannot interfere with its drawing.
+// the caller has left the interactive screen, so reporting cannot interfere
+// with drawing or transitions between menus.
 template <MenuTerminal Console>
 class MeasuringConsole : public Console {
 public:
@@ -87,6 +88,7 @@ auto PrintMenuMeasurements(const std::span<const MenuMeasurement> measurements) 
             case MenuKey::Resize: return "Resize"sv;
             case MenuKey::Redraw: return "Redraw"sv;
             case MenuKey::Details: return "Full name"sv;
+            case MenuKey::Accept: return "Choose"sv;
             case MenuKey::Back: return "Back"sv;
             default: return "Input without a selection change"sv;
             }

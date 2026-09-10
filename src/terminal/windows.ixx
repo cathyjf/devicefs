@@ -163,7 +163,7 @@ public:
 
 private:
     friend class BaseConsole;
-    static constexpr auto kEnterMenu = "\x1b[?1049h\x1b[?25l"sv;
+    static constexpr auto kEnterScreen = "\x1b[?1049h\x1b[?25l"sv;
 
 protected:
     // These control sequences contain only ASCII, so WriteConsoleA can send
@@ -183,7 +183,7 @@ private:
                 std::system_category(), "could not read the console cursor visibility");
         }
         return wil::scope_exit([this, previous_cursor] {
-            WriteControlSequenceNoThrow(kLeaveMenu);
+            WriteControlSequenceNoThrow(kLeaveScreen);
             std::ignore = SetConsoleCursorInfo(output_.get(), &previous_cursor);
         });
     }

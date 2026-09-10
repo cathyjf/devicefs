@@ -659,6 +659,7 @@ constexpr auto kHelp = R"(Usage:
 With no arguments, display sample text in the attached console.
 The text is filtered, wrapped, and indented by two columns after each wrap.
 Text begins at the current cursor position and uses the remaining screen rows.
+--menu opens submenus; Escape returns to the parent or closes the main menu.
 --measure-menu reports each menu update's time and terminal traffic after exit.
 )"sv;
 
@@ -666,7 +667,7 @@ template <MenuTerminal Console = NativeConsole>
 [[nodiscard]] auto MenuDemo() -> int {
     constexpr auto header = std::array{
         "DeviceFs terminal menu demonstration"sv,
-        "Choose an entry to print its index."sv, ""sv};
+        "Choose an entry to open a submenu."sv, ""sv};
     auto entries = std::vector<std::string>{
         "Installation", "Schedule backups", "Browse backups", "Open backup console",
         "Accented names: café and naïve", "日本語 — é — 👩‍💻 — ©️",
@@ -694,7 +695,21 @@ template <MenuTerminal Console = NativeConsole>
     };
     const auto [selection, measurements] = [&] {
         auto terminal = Console{};
-        const auto selection = SelectMenuItem(terminal, header, labels);
+        const auto selection = [&terminal, &header, &labels]() -> std::optional<std::size_t> {
+            const auto screen = terminal.EnterScreen();
+            auto initial_selection = 0uz;
+            while (const auto entry = SelectMenuItem(terminal, header, labels, {}, initial_selection)) {
+                initial_selection = *entry;
+                const auto submenu_header = std::array{
+                    header.front(), "Choose an entry to print its index."sv, labels.at(*entry)};
+                constexpr auto submenu_entries = std::array{
+                    "First submenu option"sv, "Second submenu option"sv, "Third submenu option"sv};
+                if (const auto submenu_entry = SelectMenuItem(terminal, submenu_header, submenu_entries)) {
+                    return submenu_entry;
+                }
+            }
+            return std::nullopt;
+        }();
         if constexpr (std::same_as<Console, MeasuringConsole<NativeConsole>>) {
             return MenuResult{.selection = selection, .measurements = std::move(terminal.measurements)};
         } else {
@@ -702,7 +717,7 @@ template <MenuTerminal Console = NativeConsole>
         }
     }();
     if (selection) {
-        std::println("Selected index: {}", *selection);
+        std::println("Selected submenu index: {}", *selection);
     } else {
         std::println("Menu cancelled.");
     }

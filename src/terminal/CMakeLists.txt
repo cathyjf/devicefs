@@ -65,6 +65,13 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
     add_executable(devicefs-terminal-test
         tests/main.cpp
     )
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        # GCC 16.2 on macOS crashes in `mangle_decl` during `free_lang_data` when
+        # compiling this importer with LTO, pointing to `SetTerminalModeScoped`'s
+        # cleanup lambda. Compiling only this source without LTO avoids the crash.
+        # The other sources and the final link retain LTO.
+        set_property(SOURCE tests/main.cpp APPEND PROPERTY COMPILE_OPTIONS -fno-lto)
+    endif()
     if(WIN32)
         target_sources(devicefs-terminal-test PRIVATE
             "${DEVICEFS_ROOT}/src/resources/devicefs.manifest")

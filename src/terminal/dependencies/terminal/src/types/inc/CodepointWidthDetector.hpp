@@ -3,6 +3,12 @@
 
 #pragma once
 
+#ifdef __GNUC__
+    #define ATTRIBUTE_NOINLINE __attribute__((noinline))
+#else
+    #define ATTRIBUTE_NOINLINE __declspec(noinline)
+#endif
+
 import std;
 
 enum class TextMeasurementMode
@@ -70,7 +76,7 @@ private:
     bool _graphemePrevWcswidth(GraphemeState& s, const std::u16string_view& str) const noexcept;
     bool _graphemeNextConsole(GraphemeState& s, const std::u16string_view& str) noexcept;
     bool _graphemePrevConsole(GraphemeState& s, const std::u16string_view& str) noexcept;
-    __declspec(noinline)
+    ATTRIBUTE_NOINLINE
     int _checkFallbackViaCache(char32_t codepoint) noexcept;
 
     std::unordered_map<char32_t, int> _fallbackCache;

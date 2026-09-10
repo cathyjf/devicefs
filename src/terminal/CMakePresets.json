@@ -54,12 +54,20 @@
       },
       "cacheVariables": {
         "CMAKE_CXX_EXTENSIONS": false,
-        "CMAKE_CXX_FLAGS_INIT": "-stdlib=libc++ -fms-extensions",
+        "CMAKE_CXX_FLAGS_INIT": "-stdlib=libc++",
         "CMAKE_CXX_MODULE_STD": true,
         "CMAKE_EXPERIMENTAL_CXX_IMPORT_STD": "f35a9ac6-8463-4d38-8eec-5d6008153e7d"
       },
       "warnings": {
         "dev": false
+      }
+    },
+    {
+      "name": "unix-gcc",
+      "inherits": "unix",
+      "toolchainFile": "${sourceDir}/../unix/cmake/gcc-16.cmake",
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS_INIT": null
       }
     }
   ],
@@ -79,6 +87,11 @@
       "name": "unix",
       "configurePreset": "unix",
       "configuration": "Release"
+    },
+    {
+      "name": "unix-gcc",
+      "configurePreset": "unix-gcc",
+      "inherits": "unix"
     }
   ],
   "testPresets": [
@@ -99,6 +112,11 @@
       "name": "unix",
       "configurePreset": "unix",
       "inherits": "windows-x64"
+    },
+    {
+      "name": "unix-gcc",
+      "configurePreset": "unix-gcc",
+      "inherits": "unix"
     }
   ]
 }

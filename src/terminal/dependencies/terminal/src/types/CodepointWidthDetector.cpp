@@ -4,15 +4,17 @@
 #include "terminal_compat.h"
 #include "inc/CodepointWidthDetector.hpp"
 
-// I was trying to minimize dependencies in this code so that it's easier to port to other terminal applications.
-// That's why it doesn't use any of the GSL helpers and makes minimal use of the STL.
-#pragma warning(disable : 26446) // Prefer to use gsl::at() instead of unchecked subscript operator (bounds.4).
-#pragma warning(disable : 26472) // Don't use a static_cast for arithmetic conversions. Use brace initialization, gsl::narrow_cast or gsl::narrow (type.1).
+#ifdef _MSC_VER
+    // I was trying to minimize dependencies in this code so that it's easier to port to other terminal applications.
+    // That's why it doesn't use any of the GSL helpers and makes minimal use of the STL.
+    #pragma warning(disable : 26446) // Prefer to use gsl::at() instead of unchecked subscript operator (bounds.4).
+    #pragma warning(disable : 26472) // Don't use a static_cast for arithmetic conversions. Use brace initialization, gsl::narrow_cast or gsl::narrow (type.1).
 
-// On top of that, this code is optimized for processing input as fast as possible, so it's a little low-level.
-#pragma warning(disable : 26438) // Avoid 'goto' (es.76).
-#pragma warning(disable : 26481) // Don't use pointer arithmetic. Use span instead (bounds.1).
-#pragma warning(disable : 26482) // Only index into arrays using constant expressions (bounds.2).
+    // On top of that, this code is optimized for processing input as fast as possible, so it's a little low-level.
+    #pragma warning(disable : 26438) // Avoid 'goto' (es.76).
+    #pragma warning(disable : 26481) // Don't use pointer arithmetic. Use span instead (bounds.1).
+    #pragma warning(disable : 26482) // Only index into arrays using constant expressions (bounds.2).
+#endif
 
 // s_stage1/2/3/4 represents a multi-stage table, aka trie.
 // The highest bits of the codepoint are an index into s_stage1, which selects a row in s_stage2.
@@ -689,7 +691,7 @@ constexpr int ucdToCharacterWidth(const int val) noexcept
 
 // Decodes the next codepoint from the given UTF-16 string.
 // Returns the start of the next codepoint. Assumes `it < end`.
-[[msvc::forceinline]]
+ATTRIBUTE_FORCEINLINE
 constexpr const char16_t* utf16NextOrFFFD(const char16_t* it, const char16_t* end, char32_t& out)
 {
     __assume(it != nullptr);
@@ -722,7 +724,7 @@ constexpr const char16_t* utf16NextOrFFFD(const char16_t* it, const char16_t* en
 
 // Decodes the preceding codepoint from the given UTF-16 string.
 // Returns the start of the preceding codepoint. Assumes `it > beg`.
-[[msvc::forceinline]]
+ATTRIBUTE_FORCEINLINE
 constexpr const char16_t* utf16PrevOrFFFD(const char16_t* it, const char16_t* beg, char32_t& out)
 {
     __assume(it != nullptr);

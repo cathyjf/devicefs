@@ -14,6 +14,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+module;
+
+#include "compat/forceinline_compat.h"
+
 export module devicefs.terminal.text;
 
 import std;
@@ -226,7 +230,8 @@ private:
     State state_ = State::Text;
 };
 
-[[nodiscard, msvc::forceinline]]
+[[nodiscard]]
+ATTRIBUTE_FORCEINLINE
 constexpr auto TransformDecodingResult(
     const std::size_t result,
     [[maybe_unused]] const std::size_t input_size,
@@ -280,7 +285,8 @@ constexpr auto TransformDecodingResult(
 // `DecodeNextCodePoint` decodes the next UTF-8 character for label preparation
 // and width measurement.
 export
-[[nodiscard, msvc::forceinline]]
+[[nodiscard]]
+ATTRIBUTE_FORCEINLINE
 constexpr auto DecodeNextCodePoint(
     char32_t &output, const std::string_view input, std::mbstate_t &state) {
 #if !defined(__APPLE__)

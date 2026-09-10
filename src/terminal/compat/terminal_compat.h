@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include "forceinline_compat.h"
 #include <cstdint>
 
 #ifndef _MSC_VER

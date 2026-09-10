@@ -62,7 +62,7 @@ template <typename T>
 
 }
 
-export template <>
+template <>
 struct std::formatter<devicefs::terminal::formatting_detail::TextArgument>
     : std::formatter<std::string_view> {
     auto format(const devicefs::terminal::formatting_detail::TextArgument argument,
@@ -72,7 +72,7 @@ struct std::formatter<devicefs::terminal::formatting_detail::TextArgument>
     }
 };
 
-export template <>
+template <>
 struct std::formatter<devicefs::terminal::PreparedText>
     : std::formatter<std::string_view> {
     auto format(const devicefs::terminal::PreparedText &argument,

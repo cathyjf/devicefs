@@ -23,9 +23,6 @@ standard-library declarations through a precompiled header. The MSVC build
 imports `CodepointWidthDetector.hpp` as a header unit, while the Clang build
 includes the detector header textually. The compatibility header supplies
 Clang with the `<cwchar>` declarations needed by that textual inclusion.
-Clang's `-fms-extensions` option enables the source's `msvc::forceinline` and
-`__declspec(noinline)` annotations. For Clang, the compatibility header maps
-`__assume` to `__builtin_assume`, preserving the decoder's optimization assumptions.
 
 The component's [CMake configuration](../../CMakeLists.txt) builds the detector
 as a separate library with the project's analysis and compiler settings.

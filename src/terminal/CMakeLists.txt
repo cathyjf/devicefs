@@ -44,7 +44,7 @@ target_include_directories(windows-terminal-width PRIVATE
 
 add_library(devicefs-terminal STATIC)
 target_sources(devicefs-terminal PUBLIC
-    FILE_SET CXX_MODULES FILES terminal.ixx text.ixx frame.ixx menu.ixx safecast.ixx
+    FILE_SET CXX_MODULES FILES terminal.ixx text.ixx formatting.ixx layout.ixx frame.ixx drawing.ixx menu.ixx safecast.ixx
         scope_exit.ixx terminal_reports.ixx base_console.ixx
 )
 if(WIN32)

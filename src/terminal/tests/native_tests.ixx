@@ -283,7 +283,7 @@ public:
                 }
             };
             const auto screen = console.EnterScreen();
-            Require(!SelectMenuItem(console, {}, std::array{"Installation"sv}),
+            Require(!SelectTestMenuItem(console, {}, std::array{"Installation"sv}),
                 "cancellation returned a selected entry"sv);
             Require(!output.contains("unavailable"sv), "cancellation painted recovery instructions"sv);
         }
@@ -308,7 +308,7 @@ public:
             auto console = TestConsole{};
             const auto screen = console.EnterScreen();
             console.on_write = [](const auto) { throw InjectedFailure{"injected output failure"}; };
-            std::ignore = SelectMenuItem(console, {}, std::array{"Installation"sv});
+            std::ignore = SelectTestMenuItem(console, {}, std::array{"Installation"sv});
             Require(false, "the output exception did not propagate"sv);
         } catch (const InjectedFailure &) {
         }
@@ -352,10 +352,10 @@ public:
         {
             const auto screen = console.EnterScreen();
             constexpr auto header = std::array{"Native menu measurements"sv};
-            Require(SelectMenuItem(console, header, labels) == 0,
+            Require(SelectTestMenuItem(console, header, labels) == 0,
                 "the native menu could not complete the scripted selection"sv);
             input.FeedRecords(std::span{records}.last(1));
-            Require(SelectMenuItem(console, header,
+            Require(SelectTestMenuItem(console, header,
                     std::array{"Backup 001"sv, "Backup 002"sv}) == 0,
                 "the second native menu could not select an entry on the same screen"sv);
         }

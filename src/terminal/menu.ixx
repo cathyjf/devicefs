@@ -7,6 +7,9 @@ import std;
 import devicefs.terminal.safecast;
 import devicefs.terminal;
 import devicefs.terminal.frame;
+import devicefs.terminal.layout;
+import devicefs.terminal.drawing;
+import devicefs.terminal.formatting;
 
 using namespace std::string_view_literals;
 
@@ -36,13 +39,14 @@ enum class MenuScrollPolicy { Line, Page };
 // identifies the rows those measurements may overwrite.
 template <typename T, WidthPolicy Policy = WidthPolicy::AllModes>
 concept MenuTerminal = FrameTerminal<T> && requires(T &terminal,
-    const FrameBuffer &frame, const std::string_view text) {
+    const FrameBuffer &frame, const FrameLine &line, const std::string_view text) {
     { terminal.QuerySize() } -> std::same_as<std::optional<TerminalSize>>;
     { terminal.ReadMenuInput() } -> std::same_as<MenuInput>;
     { terminal.BeginUpdate() } -> std::destructible;
     { terminal.template Flip<Policy>(frame) } -> std::same_as<bool>;
     { terminal.template KnownTextWidths<Policy>(text) } ->
         std::same_as<std::optional<std::vector<MeasuredCluster>>>;
+    terminal.template MeasureFrameLine<Policy>(line, 1, TerminalSize{});
     { terminal.InvalidateFrameRows(1, 1) } -> std::same_as<void>;
     { terminal.InvalidateFrame() } -> std::same_as<void>;
 };
@@ -59,12 +63,6 @@ constexpr auto kInformationRows = 2;
 constexpr auto kLayoutUnavailable = std::array{
     "Layout unavailable."sv, "Ctrl+L: Redraw"sv, "Esc: Back"sv};
 
-struct TextLayout {
-    std::vector<std::string_view> rows;
-    bool truncated = false;
-    bool oversized = false;
-};
-
 struct Position {
     std::size_t entry = 0;
     std::size_t row = 0;
@@ -80,115 +78,7 @@ struct Position {
     return prepared;
 }
 
-auto MoveTo(Terminal auto &terminal, const int row, const int column) -> void {
-    constexpr auto kPositionCursor = "\x1b[{};{}H"sv;
-    terminal.Write(std::format(kPositionCursor, row, column));
-}
-
-// `LayoutText` divides an entry's text into the rows needed to display it in the
-// menu. The returned views identify each row within the supplied string, allowing
-// the menu to scroll through long names one displayed row at a time. `limit`
-// caps the number of rows in a preview; `truncated` records whether text remains.
-// The supplied string must outlive those views.
-//
-// Row boundaries depend on how the terminal renders Unicode text. Previously
-// measured character-group widths let this function calculate boundaries in
-// memory. If an upper bound on the entire text's width fits on one row, no
-// wrapping measurement is needed.
-// Otherwise, `WriteWrappingText` writes the text and observes the terminal's
-// wrapping. Measuring can overwrite the menu's content area, so that area is
-// marked for restoration when the completed frame is presented. If cursor
-// reports cannot establish the row boundaries, the function returns `std::nullopt`;
-// the menu then displays a message offering a redraw.
-template <WidthPolicy Policy>
-[[nodiscard]] auto LayoutText(MenuTerminal<Policy> auto &terminal,
-    const std::string_view text, const TerminalSize size,
-    const int first_row, const int available_rows, const std::size_t limit)
-    -> std::optional<TextLayout> {
-    auto layout = TextLayout{};
-    auto remaining = text;
-    if (text.empty()) {
-        layout.rows.push_back(text);
-        return layout;
-    }
-    if (const auto known_widths = terminal.template KnownTextWidths<Policy>(text)) {
-        auto groups = std::span<const MeasuredCluster>{*known_widths};
-        while (!groups.empty() && (layout.rows.size() < limit)) {
-            auto available_columns = size.columns -
-                (layout.rows.empty() ? kTextColumn : kContinuationColumn) + 1;
-            if (groups.front().width_bound > available_columns) {
-                layout.oversized = true;
-                break;
-            }
-            const auto row_begin = remaining;
-            while (!groups.empty() && (groups.front().width_bound <= available_columns)) {
-                available_columns -= groups.front().width_bound;
-                remaining.remove_prefix(groups.front().text.size());
-                groups = groups.subspan(1);
-            }
-            layout.rows.push_back(row_begin.substr(0, row_begin.size() - remaining.size()));
-        }
-        layout.truncated = !remaining.empty();
-        if (layout.rows.empty()) {
-            layout.rows.push_back(text.substr(0, 0));
-        }
-        return layout;
-    }
-    const auto measured = MeasureText<Policy>(text);
-    if ((limit != 0) && (std::ranges::fold_left(measured, 0,
-            [](const auto width, const auto &group) { return width + group.width_bound; }) <=
-            (size.columns - kTextColumn + 1))) {
-        layout.rows.push_back(text);
-        return layout;
-    }
-    auto clusters = std::span<const MeasuredCluster>{measured};
-    while (!remaining.empty() && (layout.rows.size() < limit)) {
-        if (layout.rows.empty()) {
-            terminal.InvalidateFrameRows(first_row, available_rows);
-        }
-        const auto measured_rows = layout.rows.size();
-        const auto rows_to_measure = std::min(
-            FailFastCast<std::size_t>(available_rows), limit - measured_rows);
-        MoveTo(terminal, first_row,
-            measured_rows == 0 ? kTextColumn : kContinuationColumn);
-        const auto result = WriteWrappingText(terminal, clusters,
-            WrappingOptions{.size = size,
-                .continuation_column = kContinuationColumn,
-                .maximum_rows = FailFastCast<int>(rows_to_measure)},
-            [&layout](const std::string_view suffix) {
-                layout.rows.push_back(suffix);
-            });
-        if (result.stop == WrappingStop::RedrawRequired) {
-            return std::nullopt;
-        }
-        layout.rows.resize(measured_rows + FailFastCast<std::size_t>(result.rows));
-        for (auto index = measured_rows; index < layout.rows.size(); ++index) {
-            const auto next_row_suffix = (index + 1) < layout.rows.size() ?
-                layout.rows.at(index + 1) : result.remaining;
-            layout.rows.at(index) = layout.rows.at(index).substr(
-                0, layout.rows.at(index).size() - next_row_suffix.size());
-        }
-        if (result.stop == WrappingStop::OversizedCluster) {
-            layout.oversized = true;
-            break;
-        }
-        if (remaining == result.remaining) {
-            break;
-        }
-        remaining = result.remaining;
-        while (!clusters.empty() && (clusters.front().text.data() != remaining.data())) {
-            clusters = clusters.subspan(1);
-        }
-    }
-    layout.truncated = !remaining.empty();
-    if (layout.rows.empty()) {
-        layout.rows.push_back(text.substr(0, 0));
-    }
-    return layout;
-}
-
 struct MenuText {
-    std::vector<std::string> header;
     std::vector<std::string> entries;
     std::vector<std::string> footer;
 };
@@ -199,15 +89,15 @@ struct MenuViewport {
     int rows;
 };
 
-[[nodiscard]] auto MakeMenuViewport(const TerminalSize size, const MenuText &text) noexcept
-    -> std::optional<MenuViewport> {
-    const auto fixed_rows = text.header.size() + text.footer.size() + kInformationRows;
-    if ((size.columns < kMinimumColumns) || (std::cmp_less_equal(size.rows, fixed_rows))) {
+[[nodiscard]] auto MakeMenuViewport(const TerminalSize size, const int first_row,
+    const MenuText &text) noexcept -> std::optional<MenuViewport> {
+    const auto fixed_rows = FailFastCast<int>(text.footer.size()) + kInformationRows;
+    if ((size.columns < kMinimumColumns) ||
+        ((size.rows - first_row + 1) <= fixed_rows)) {
         return std::nullopt;
     }
-    return MenuViewport{.size = size,
-        .first_row = FailFastCast<int>(text.header.size()) + 1,
-        .rows = size.rows - FailFastCast<int>(fixed_rows)};
+    return MenuViewport{.size = size, .first_row = first_row,
+        .rows = size.rows - first_row + 1 - fixed_rows};
 }
 
 // `MenuListView` manages selection and scrolling through the menu's entries.
@@ -215,7 +105,7 @@ struct MenuViewport {
 // different operation from selecting the next entry. Paging can leave only an
 // entry's continuation visible. Preview layouts belong to this view and are
 // calculated as scrolling encounters entries. `Prepare` finds the rows for the
-// next frame; `BuildFrame` returns a back buffer containing those rows and hints.
+// next frame; `Draw` writes those rows and hints into the complete frame.
 class MenuListView {
 public:
     MenuListView(const std::span<const std::string> entries, const std::size_t initial)
@@ -310,29 +200,29 @@ public:
         return true;
     }
 
-    [[nodiscard]] auto BuildFrame(const MenuViewport viewport) const -> FrameBuffer {
-        auto frame = FrameBuffer{viewport.size};
-        const auto first_row = FailFastCast<std::size_t>(viewport.first_row - 1);
+    auto Draw(auto &frame, const MenuViewport viewport) const -> void {
+        frame.MoveTo({.row = viewport.first_row});
         if (entries_.empty()) {
-            frame.rows.at(first_row) = {.text = "No entries are available.",
-                .clipping = FrameClipping::IfNeeded};
+            frame.WriteLine("No entries are available."sv);
         }
         for (auto index = std::size_t{}; index < visible_positions_.size(); ++index) {
             const auto position = visible_positions_.at(index);
             const auto &layout = *entry_layouts_.at(position.entry);
-            frame.rows.at(first_row + index) = {
-                .text = std::format("{}{}{}",
-                    position.entry == selected_entry_ ? "> "sv : "  "sv,
-                    position.row == 0 ? ""sv : "  "sv,
-                    layout.rows.at(position.row)),
-                .reverse = position.entry == selected_entry_,
-                .clipping = layout.truncated &&
-                    ((position.row + 1) == layout.rows.size()) ?
-                        FrameClipping::Ellipsis : FrameClipping::None};
+            frame.MoveTo({.row = viewport.first_row + FailFastCast<int>(index)});
+            frame.WriteLine("{}{}{}",
+                position.entry == selected_entry_ ? "> "sv : "  "sv,
+                position.row == 0 ? ""sv : "  "sv,
+                PreparedText{.text = std::string{layout.rows.at(position.row)}},
+                FrameLineOptions{.clipping = layout.truncated &&
+                        ((position.row + 1) == layout.rows.size()) ?
+                            FrameClipping::Ellipsis : FrameClipping::None,
+                    .highlight = position.entry == selected_entry_});
         }
-        frame.rows.at(frame.rows.size() - kInformationRows) = MakeInformationLine(
-            std::array{"Up/Down: Select"sv, "Enter: Choose"sv, "Esc: Back"sv});
-        frame.rows.back() = [this] {
+        frame.MoveTo({.row = viewport.size.rows - kInformationRows + 1});
+        frame.WriteLine("{}", MakeInformationLine(
+            std::array{"Up/Down: Select"sv, "Enter: Choose"sv, "Esc: Back"sv}));
+        frame.Write("\n"sv);
+        frame.WriteLine("{}", [this] {
             if (entries_.empty()) {
                 return MakeInformationLine(std::array{"Esc: Back"sv});
             }
@@ -343,8 +233,7 @@ public:
                 "PgUp/PgDn: Scroll"sv,
                 "Home/End: First/Last"sv,
             });
-        }();
-        return frame;
+        }());
     }
 
 private:
@@ -353,8 +242,12 @@ private:
         const MenuViewport viewport, const std::size_t entry) -> bool {
         auto &layout = entry_layouts_.at(entry);
         if (!layout) {
-            layout = LayoutText<Policy>(terminal, entries_[entry], viewport.size,
-                viewport.first_row, viewport.rows, kPreviewRows);
+            layout = LayoutText<Policy>(terminal, entries_[entry],
+                CursorPosition{.row = viewport.first_row,
+                    .column = kTextColumn},
+                WrappingOptions{.size = viewport.size,
+                    .continuation_column = kContinuationColumn,
+                    .maximum_rows = viewport.rows}, kPreviewRows);
         }
         return layout.has_value();
     }
@@ -439,8 +332,12 @@ public:
     template <WidthPolicy Policy>
     [[nodiscard]] auto Prepare(MenuTerminal<Policy> auto &terminal, const MenuViewport viewport) -> bool {
         if (!layout_) {
-            layout_ = LayoutText<Policy>(terminal, text_, viewport.size,
-                viewport.first_row, viewport.rows, std::numeric_limits<std::size_t>::max());
+            layout_ = LayoutText<Policy>(terminal, text_,
+                CursorPosition{.row = viewport.first_row,
+                    .column = kTextColumn},
+                WrappingOptions{.size = viewport.size,
+                    .continuation_column = kContinuationColumn,
+                    .maximum_rows = viewport.rows});
         }
         if (!layout_) {
             return false;
@@ -475,23 +372,25 @@ public:
         return true;
     }
 
-    [[nodiscard]] auto BuildFrame(const MenuViewport viewport) const -> FrameBuffer {
-        auto frame = FrameBuffer{viewport.size};
+    auto Draw(auto &frame, const MenuViewport viewport) const -> void {
         const auto count = std::min(FailFastCast<std::size_t>(viewport.rows),
             layout_->rows.size() - first_row_);
         for (auto index = std::size_t{}; index < count; ++index) {
-            frame.rows.at(FailFastCast<std::size_t>(viewport.first_row - 1) + index) = {
-                .text = std::format("{}{}", (first_row_ + index) == 0 ? "  "sv : "    "sv,
-                    layout_->rows.at(first_row_ + index))};
+            frame.MoveTo({.row = viewport.first_row + FailFastCast<int>(index)});
+            frame.WriteLine("{}{}",
+                (first_row_ + index) == 0 ? "  "sv : "    "sv,
+                PreparedText{.text = std::string{layout_->rows.at(first_row_ + index)}},
+                FrameLineOptions{.clipping = FrameClipping::None});
         }
-        frame.rows.at(frame.rows.size() - kInformationRows) = MakeInformationLine(
-            std::array{"Up/Down/PgUp/PgDn: Scroll"sv, "Home/End"sv, "Esc: Back"sv});
+        frame.MoveTo({.row = viewport.size.rows - kInformationRows + 1});
+        frame.WriteLine("{}", MakeInformationLine(
+            std::array{"Up/Down/PgUp/PgDn: Scroll"sv, "Home/End"sv, "Esc: Back"sv}));
+        frame.Write("\n"sv);
         const auto information = layout_->oversized ?
             std::string{"Enlarge the window to fit the next composed character."} :
             std::format("Full name: lines {}-{} of {}", first_row_ + 1,
                 std::min(layout_->rows.size(), first_row_ + viewport.rows), layout_->rows.size());
-        frame.rows.back() = MakeInformationLine(std::array{std::string_view{information}});
-        return frame;
+        frame.WriteLine("{}", MakeInformationLine(std::array{std::string_view{information}}));
     }
 
 private:
@@ -501,42 +400,26 @@ private:
     int layout_width_ = 0;
 };
 
-// A frame contains everything that should be visible at once: the caller's
-// fixed header and footer, the active view, and that view's navigation hints.
-// Frame construction only fills memory. The adapter's `Flip` operation presents
-// the completed frame.
-[[nodiscard]] auto BuildMenuFrame(const MenuText &text,
-    const MenuViewport viewport, const auto &view) -> FrameBuffer {
-    auto frame = view.BuildFrame(viewport);
-    for (auto index = std::size_t{}; index < text.header.size(); ++index) {
-        frame.rows.at(index) = {.text = text.header.at(index), .clipping = FrameClipping::IfNeeded};
-    }
-    for (auto index = std::size_t{}; index < text.footer.size(); ++index) {
-        frame.rows.at(frame.rows.size() - text.footer.size() - kInformationRows + index) = {
-            .text = text.footer.at(index), .clipping = FrameClipping::IfNeeded};
-    }
-    return frame;
-}
-
+template <typename T, WidthPolicy Policy>
 struct MenuPresentation {
     std::optional<TerminalSize> terminal_size;
-    bool ready;
+    std::optional<Frame<T, Policy>> header;
+    std::optional<MenuViewport> viewport;
 };
 
-// `PresentMenu` prepares and displays one menu frame. Layout may need to write
-// text to measure wrapping, so the update lifetime covers both measurement and
-// presentation. The result supplies the dimensions used and whether the menu is
-// ready for navigation. Cached dimensions avoid repeating a terminal query on
-// every key press; the caller omits them when a resize or redraw requires a fresh
-// query. Missing dimensions or unusable layout produce a message with `ready`
-// set to false. The input loop then waits for resizing, redrawing, leaving the
-// full-name view, or cancellation.
-template <WidthPolicy Policy, MenuScrollPolicy Scrolling>
-[[nodiscard]] auto PresentMenu(MenuTerminal<Policy> auto &terminal, const MenuText &text,
+// `PresentMenu` builds a complete frame around the active list or full-name
+// view. The header callback supplies the preceding content and the row where
+// the menu begins. A saved header avoids repeating that work on navigation;
+// resizing or explicit redrawing starts with a fresh header. `BeginUpdate`
+// covers both layout measurements and the completed frame's presentation.
+// The result retains the header and usable viewport for the next interaction.
+// Missing dimensions or layout reports produce recovery instructions instead.
+template <WidthPolicy Policy, MenuScrollPolicy Scrolling, typename T>
+[[nodiscard]] auto PresentMenu(T &terminal, auto &draw_header, const MenuText &text,
     MenuListView &list, const std::optional<std::reference_wrapper<FullNameView>> full_name,
-    const std::optional<TerminalSize> cached_size, const MenuInput input) -> MenuPresentation {
+    const MenuPresentation<T, Policy> &cached, const MenuInput input) -> MenuPresentation<T, Policy> {
     const auto update = terminal.BeginUpdate();
-    const auto terminal_size = cached_size ? cached_size : terminal.QuerySize();
+    const auto terminal_size = cached.terminal_size ? cached.terminal_size : terminal.QuerySize();
     const auto show_message = [&](const std::span<const std::string_view> items) {
         // Recovery instructions must be readable when cursor reports are
         // unavailable. Fit the message using width bounds, then send the
@@ -565,13 +448,26 @@ template <WidthPolicy Policy, MenuScrollPolicy Scrolling>
         terminal.InvalidateFrame();
         terminal.Write(std::format(kMessageScreen, message));
         terminal.PresentFrame();
-        return MenuPresentation{.terminal_size = terminal_size, .ready = false};
+        return MenuPresentation<T, Policy>{.terminal_size = terminal_size,
+            .header = std::nullopt, .viewport = std::nullopt};
     };
     if (!terminal_size) {
         return show_message(std::array{
             "Terminal size unavailable."sv, "Ctrl+L: Retry"sv, "Esc: Back"sv});
     }
-    const auto viewport = MakeMenuViewport(*terminal_size, text);
+    auto frame = [&] {
+        if (cached.header) {
+            return *cached.header;
+        }
+        auto header = Frame<T, Policy>{terminal, *terminal_size};
+        std::invoke(draw_header, header);
+        header.ClearFromCurrentRow();
+        return header;
+    }();
+    if (!frame.Ready()) {
+        return show_message(kLayoutUnavailable);
+    }
+    const auto viewport = MakeMenuViewport(*terminal_size, frame.CurrentRow(), text);
     if (!viewport) {
         return show_message(std::array{"Enlarge the window."sv, "Esc: Back"sv});
     }
@@ -583,22 +479,40 @@ template <WidthPolicy Policy, MenuScrollPolicy Scrolling>
             list.Prepare<Policy, Scrolling>(terminal, *viewport, input))) {
         return show_message(kLayoutUnavailable);
     }
-    if (!terminal.template Flip<Policy>(full_name ?
-            BuildMenuFrame(text, *viewport, full_name->get()) : BuildMenuFrame(text, *viewport, list))) {
+    const auto header = frame;
+    if (full_name) {
+        full_name->get().Draw(frame, *viewport);
+    } else {
+        list.Draw(frame, *viewport);
+    }
+    frame.MoveTo({.row = terminal_size->rows - FailFastCast<int>(text.footer.size()) -
+        kInformationRows + 1});
+    for (const auto &line : text.footer) {
+        frame.WriteLine("{}", PreparedText{.text = line});
+        frame.Write("\n"sv);
+    }
+    if (!frame.Ready() || !terminal.template Flip<Policy>(frame)) {
         return show_message(kLayoutUnavailable);
     }
-    return {.terminal_size = terminal_size, .ready = true};
+    return {.terminal_size = terminal_size, .header = header, .viewport = viewport};
 }
 
 }
 
 export namespace devicefs::terminal {
 
-// `SelectMenuItem` displays a scrolling list between fixed header and footer
-// lines, then returns the original index of the chosen entry. Escape or Ctrl+C
-// cancels selection. The caller supplies ordinary UTF-8 strings; the menu
-// prepares its own display copies so filtering cannot change entry identity.
-// An initial index beyond the list selects its last entry.
+// `SelectMenuItem` displays a scrolling list after caller-drawn content and
+// returns the original index of the chosen entry. Escape or Ctrl+C cancels
+// selection. `draw_header` receives the complete frame and leaves its cursor
+// at column one of the row where the menu should begin. Content before that
+// row remains in every menu frame; content from that row onward is replaced.
+// The callback runs initially and again on resize or explicit redraw, allowing
+// the caller to adapt its text to the frame's dimensions.
+//
+// Entry and footer strings are ordinary UTF-8; the menu prepares its own display
+// copies so filtering cannot change entry identity. The callback uses the
+// frame's formatted writing operations, which prepare string arguments for
+// display. An initial index beyond the list selects its last entry.
 //
 // Entries wrap with indented continuations. Previews occupy at most eight rows;
 // pressing 1 opens a scrolling view of a truncated name. Paging moves through
@@ -618,19 +532,18 @@ export namespace devicefs::terminal {
 template <WidthPolicy Policy = WidthPolicy::AllModes,
     MenuScrollPolicy Scrolling = MenuScrollPolicy::Line>
 [[nodiscard]] auto SelectMenuItem(MenuTerminal<Policy> auto &terminal,
-    const std::span<const std::string_view> header,
+    auto &&draw_header,
     const std::span<const std::string_view> entries,
     const std::span<const std::string_view> footer = {},
     const std::size_t initial_selection = 0) -> std::optional<std::size_t> try {
     using namespace menu_detail;
-    const auto text = MenuText{.header = PrepareLines(header),
-        .entries = PrepareLines(entries), .footer = PrepareLines(footer)};
+    const auto text = MenuText{.entries = PrepareLines(entries), .footer = PrepareLines(footer)};
     auto list = MenuListView{text.entries, initial_selection};
     auto full_name = std::optional<FullNameView>{};
     const auto present = [&](const MenuInput input,
-        const std::optional<TerminalSize> cached_size = std::nullopt) {
-        return PresentMenu<Policy, Scrolling>(terminal, text, list,
-            full_name.transform([](auto &view) { return std::ref(view); }), cached_size, input);
+        const MenuPresentation<std::remove_reference_t<decltype(terminal)>, Policy> &cached = {}) {
+        return PresentMenu<Policy, Scrolling>(terminal, draw_header, text, list,
+            full_name.transform([](auto &view) { return std::ref(view); }), cached, input);
     };
     auto presentation = present({MenuKey::Redraw});
     for (;;) {
@@ -652,14 +565,14 @@ template <WidthPolicy Policy = WidthPolicy::AllModes,
         }
         if (input.key == MenuKey::Back) {
             full_name.reset();
-            presentation = present(input, presentation.terminal_size);
+            presentation = present(input, presentation);
             continue;
         }
-        if (!presentation.ready) {
+        if (!presentation.viewport) {
             continue;
         }
         if (full_name) {
-            if (!full_name->Navigate(input, MakeMenuViewport(*presentation.terminal_size, text)->rows)) {
+            if (!full_name->Navigate(input, presentation.viewport->rows)) {
                 continue;
             }
         } else if ((input.key == MenuKey::Accept) && !text.entries.empty()) {
@@ -669,7 +582,7 @@ template <WidthPolicy Policy = WidthPolicy::AllModes,
         } else if (!list.Navigate(input)) {
             continue;
         }
-        presentation = present(input, presentation.terminal_size);
+        presentation = present(input, presentation);
     }
 } catch (const InputCancelled &) {
     return std::nullopt;

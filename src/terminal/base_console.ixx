@@ -30,6 +30,12 @@ public:
         return presenter_.KnownTextWidths<Policy>(text);
     }
 
+    template <WidthPolicy Policy = WidthPolicy::AllModes>
+    [[nodiscard]] auto MeasureFrameLine(this auto &self, const FrameLine &line,
+        const int row, const TerminalSize size) {
+        return self.presenter_.template MeasureLine<Policy>(self, line, row, size);
+    }
+
     auto InvalidateFrameRows(const int first_row, const int count) -> void {
         presenter_.InvalidateRows(first_row, count);
     }

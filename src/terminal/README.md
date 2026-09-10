@@ -117,10 +117,17 @@ the displaying terminal.
 
 ## Reusing observations to repaint less
 
-The application describes the desired screen in a `FrameBuffer`.
-`DeltaFramePresenter` turns that description into terminal output. It retains
-the previously displayed text, highlighting, and character-group positions,
+[`Frame`](drawing.ixx) lets an application compose the desired screen through text-writing
+operations and a cursor. Those operations build a `FrameBuffer`, which records
+the text and highlighting for each screen row. `DeltaFramePresenter` turns that
+description into terminal output. It retains the previously displayed text,
+highlighting, and character-group positions,
 then compares them with the next frame.
+
+Frame composition supports clipped lines, wrapped text, continuation indentation,
+and highlighting. Text formatting applies the library's control filtering to
+supplied labels. The [writing interface](drawing.ixx) documents the operations,
+their options, and how to resume text that did not fit.
 
 An unchanged group at the same columns needs no output. Changing a selection
 updates the affected highlighting; changing a digit in a status line can leave
@@ -153,8 +160,11 @@ visible. A different presentation implementation can use the same frames.
 
 ## Menus with readable long entries
 
-`SelectMenuItem` presents a list between caller-supplied header and footer
-lines. The selected entry has a `>` marker and reverse-video highlighting.
+[`SelectMenuItem`](menu.ixx) presents a list beneath an application-drawn header
+and above caller-supplied footer lines. The header can include a title,
+description, or other context composed through the same frame-writing interface.
+
+The selected entry has a `>` marker and reverse-video highlighting.
 Long entries wrap, with their continuation lines indented beyond the first
 line's text. Scrolling counts displayed rows, so a multiline entry remains one
 selectable item even when only part of it fits in the viewport.
@@ -164,6 +174,10 @@ returned owner alive across a sequence of menus. Each selection call leaves
 its last frame displayed. The next menu uses the same presenter and recorded
 widths, so shared headers, footers, and other unchanged text need no repainting.
 Destroying the owner restores the invoking shell's screen and cursor.
+
+Ordinary navigation reuses the composed header. Header, entries, and footer are
+presented together through frame comparison, so recalculating a header does
+not require repainting text whose display has not changed.
 
 Entry previews occupy at most eight rows. A longer name ends with `...`, and
 the footer offers **1: View full name**. That opens a scrolling view of the
@@ -230,8 +244,9 @@ several levels:
 |---|---|
 | [`PrepareTerminalText`](text.ixx) | Prepare a label for display, removing terminal commands and representing controls. |
 | [`MeasureText` and `WriteWrappingText`](terminal.ixx) | Group prepared text, establish width bounds, and display it across a bounded set of rows. |
+| [`Frame`](drawing.ixx) | Compose a screen through text-writing and cursor-positioning operations. |
 | [`FrameBuffer` and `DeltaFramePresenter`](frame.ixx) | Describe a complete screen and update the terminal to match it. |
-| [`SelectMenuItem`](menu.ixx) | Run a scrolling selection interface with headers, footers, and full-name inspection. |
+| [`SelectMenuItem`](menu.ixx) | Run a scrolling selection interface with a header callback, footer lines, and full-name inspection. |
 
 Applications can use `WindowsConsole` or `UnixConsole`, or provide an adapter
 that satisfies the relevant concept. A wrapping adapter needs only text output
@@ -245,8 +260,6 @@ The caller selects a UTF-8 `LC_CTYPE` locale before preparing or measuring text
 on GNU/Linux and macOS. The demonstration checks that selecting `C.UTF-8`
 succeeds; its Windows branch selects `.UTF8`. The Windows executable also uses
 the project's [UTF-8 process manifest](../resources/devicefs.manifest).
-Returned text views borrow their original storage; the module interfaces
-document the lifetimes required by each operation.
 
 ### Native I/O and recovery
 

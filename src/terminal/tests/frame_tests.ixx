@@ -7,6 +7,8 @@ import std;
 import devicefs.terminal;
 import devicefs.terminal.test_support;
 import devicefs.terminal.frame;
+import devicefs.terminal.drawing;
+import devicefs.terminal.formatting;
 
 using namespace std::string_view_literals;
 using namespace devicefs::terminal;
@@ -189,6 +191,34 @@ private:
     bool pending_wrap_ = false;
 };
 
+class DrawingConsole : public FrameConsole {
+public:
+    using FrameConsole::FrameConsole;
+
+    template <WidthPolicy Policy = WidthPolicy::AllModes>
+    [[nodiscard]] auto KnownTextWidths(const std::string_view text) const {
+        return presenter_.KnownTextWidths<Policy>(text);
+    }
+
+    template <WidthPolicy Policy = WidthPolicy::AllModes>
+    [[nodiscard]] auto MeasureFrameLine(const FrameLine &line, const int row,
+        const TerminalSize size) {
+        return presenter_.MeasureLine<Policy>(*this, line, row, size);
+    }
+
+    auto InvalidateFrameRows(const int row, const int count) -> void {
+        presenter_.InvalidateRows(row, count);
+    }
+
+    template <WidthPolicy Policy = WidthPolicy::AllModes>
+    [[nodiscard]] auto Flip(const FrameBuffer &frame) -> bool {
+        return presenter_.Flip<Policy>(*this, frame);
+    }
+
+private:
+    DeltaFramePresenter presenter_;
+};
+
 }
 
 export [[nodiscard]] auto RunFrameTests() -> bool {
@@ -356,6 +386,262 @@ export [[nodiscard]] auto RunFrameTests() -> bool {
         Require(presenter.Flip<WidthPolicy::WindowsTerminalGraphemes>(terminal, frame),
             "removing the zero-width suffix failed"sv);
         Require(terminal.Row(1) == "abcdef日", "tail erasure damaged the retained wide glyph"sv);
+    });
+    passed &= Test("frame line writes and explicit newlines remaining buffered until presentation"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 3, .columns = 12};
+        auto terminal = DrawingConsole{size};
+        auto frame = Frame{terminal, size};
+        frame.WriteLine("abcdefghijklmno");
+        frame.Write("\n");
+        frame.WriteLine("second");
+        frame.Write("\n");
+        Require(frame.Ready() && (frame.CurrentRow() == 3),
+            "explicit newlines did not position the next write on the third row"sv);
+        Require((terminal.writes == 0) && (terminal.queries == 0),
+            "line writes requested an endpoint that the following newline did not need"sv);
+        Require(terminal.Flip(frame) && (terminal.Row(1) == "abcdefghi..."sv) &&
+            (terminal.Row(2) == "second"sv) && terminal.Row(3).empty(),
+            "the clipped and complete rows were not presented as prepared"sv);
+    });
+    passed &= Test("ordinary frame writes continuing from the current position and wrapping"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 3, .columns = 6};
+        auto terminal = DrawingConsole{size};
+        auto frame = Frame{terminal, size};
+        Require(frame.Write("ab").stop == WrappingStop::EndOfText,
+            "the initial prefix was not accepted"sv);
+        Require((terminal.writes == 0) && (terminal.queries == 0),
+            "a fitting initial write measured its unused endpoint"sv);
+        const auto result = frame.Write("cdefghij");
+        Require(frame.Ready() && result.remaining.text.empty() &&
+            (result.stop == WrappingStop::EndOfText),
+            "ordinary continuation did not accept all the text"sv);
+        Require(terminal.Flip(frame) && (terminal.Row(1) == "abcdef"sv) &&
+            (terminal.Row(2) == "ghij"sv),
+            "ordinary continuation began at the wrong column or indented its wrap"sv);
+    });
+    passed &= Test("cached frame continuation indentation and a following explicit newline"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 3, .columns = 6};
+        auto terminal = DrawingConsole{size};
+        auto measured = FrameBuffer{size};
+        measured.rows.at(0).text = "abcde";
+        measured.rows.at(1).text = "fghij";
+        Require(terminal.Flip(measured), "the fixture could not establish character widths"sv);
+        terminal.ResetActivity();
+        auto frame = Frame{terminal, size};
+        frame.Write("ab");
+        const auto result = frame.Write("cdefghij",
+            FrameWriteOptions{.continuation_column = 3, .highlight = true});
+        frame.Write("\n");
+        frame.WriteLine("tail", FrameLineOptions{.highlight = true});
+        Require(frame.Ready() && result.remaining.text.empty() &&
+            (result.stop == WrappingStop::EndOfText) && (frame.CurrentRow() == 3),
+            "indented continuation or its following newline lost the writing position"sv);
+        Require((terminal.writes == 0) && (terminal.queries == 0),
+            "cached continuation widths caused another terminal observation"sv);
+        Require(terminal.Flip(frame) && (terminal.Row(1) == "abcdef"sv) &&
+            (terminal.Row(2) == "  ghij"sv) && (terminal.Row(3) == "tail"sv),
+            "the continuation indentation or subsequent row was incorrect"sv);
+        Require(terminal.AllReversed(),
+            "highlighting omitted a wrapped row or its indentation"sv);
+    });
+    passed &= Test("a clipped frame write preserving text before its current column"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 2, .columns = 10};
+        auto terminal = DrawingConsole{size};
+        auto frame = Frame{terminal, size};
+        frame.WriteLine("123456789");
+        frame.WriteLine("ABCD");
+        frame.Write("\n");
+        frame.WriteLine("after");
+        Require(frame.Ready() && terminal.Flip(frame),
+            "the clipped continuation could not be presented"sv);
+        Require((terminal.Row(1) == "123456789."sv) && (terminal.Row(2) == "after"sv),
+            "the clipped write's ellipsis replaced text preceding the write"sv);
+    });
+    passed &= Test("a complete Unicode group remaining intact in a frame write"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 2, .columns = 24};
+        auto terminal = DrawingConsole{size};
+        auto frame = Frame{terminal, size};
+        const auto text = "日本 é 👩‍💻"sv;
+        const auto result = frame.Write("{}", text);
+        frame.Write("\n");
+        Require(result.remaining.text.empty() && (result.stop == WrappingStop::EndOfText) &&
+            (terminal.writes == 0) && (terminal.queries == 0),
+            "fitting Unicode text was shortened or measured before presentation"sv);
+        Require(terminal.Flip(frame) && (terminal.Row(1) == text),
+            "a frame write altered a complete composed character"sv);
+    });
+    passed &= Test("a frame's filled final row returning the unwritten suffix without a redraw failure"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 1, .columns = 4};
+        auto terminal = DrawingConsole{size};
+        auto frame = Frame{terminal, size};
+        frame.Write("abcd");
+        const auto result = frame.Write("e");
+        Require(frame.Ready() && (result.stop == WrappingStop::RowLimit) &&
+            (result.remaining.text == "e"sv),
+            "ordinary row exhaustion was reported as a failed layout or consumed the suffix"sv);
+        Require(terminal.Flip(frame) && (terminal.Row(1) == "abcd"sv),
+            "writing after a full final row damaged the retained text"sv);
+    });
+    passed &= Test("copying a header frame and replacing later rows through drawing operations"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 3, .columns = 20};
+        auto terminal = DrawingConsole{size};
+        auto header = Frame{terminal, size};
+        header.WriteLine("Header");
+        header.Write("\n");
+        header.WriteLine("discarded");
+        auto frame = header;
+        frame.MoveTo({2, 1});
+        frame.ClearFromCurrentRow();
+        frame.WriteLine("replacement");
+        Require((terminal.writes == 0) && (terminal.queries == 0),
+            "copying and replacing whole rows required terminal I/O"sv);
+        Require(terminal.Flip(frame) && (terminal.Row(1) == "Header"sv) &&
+            (terminal.Row(2) == "replacement"sv) && terminal.Row(3).empty(),
+            "replacing later rows changed the header or retained discarded text"sv);
+        Require(terminal.Flip(header) && (terminal.Row(2) == "discarded"sv),
+            "editing the copied frame changed the original frame"sv);
+    });
+    passed &= Test("format-string newlines creating rows while argument newlines remain visible text"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 4, .columns = 32};
+        auto terminal = DrawingConsole{size};
+        auto frame = Frame{terminal, size};
+        const auto result = frame.Write("First\n{}\n{}", "second\nline", '\n');
+        frame.Write("\n");
+        frame.WriteLine("{}", std::string{"fourth\nline"});
+        Require(frame.Ready() && result.remaining.text.empty() &&
+            (result.stop == WrappingStop::EndOfText) && (frame.CurrentRow() == 4),
+            "supplied newlines moved the writing position or stopped the formatted output"sv);
+        Require(terminal.Flip(frame) && (terminal.Row(1) == "First"sv) &&
+            (terminal.Row(2) == "second\\nline"sv) && (terminal.Row(3) == "\\n"sv) &&
+            (terminal.Row(4) == "fourth\\nline"sv),
+            "format-string line feeds and argument line feeds were not distinguished on screen"sv);
+    });
+    passed &= Test("string objects, views, pointers, and arrays sharing preparation before frame formatting"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 2, .columns = 80};
+        auto terminal = DrawingConsole{size};
+        auto frame = Frame{terminal, size};
+        const auto string = std::string{"string\nvalue"};
+        constexpr auto view = "view\nvalue"sv;
+        constexpr auto pointer = "pointer\nvalue";
+        constexpr auto &array = "array\nvalue";
+        frame.WriteLine("{}|{}|{}|{}", string, view, pointer, array);
+        frame.Write("\n");
+        frame.WriteLine("{}", "before\x1b[2Jafter\x1b]0;title\x07" "end");
+        Require(terminal.Flip(frame) &&
+            (terminal.Row(1) == "string\\nvalue|view\\nvalue|pointer\\nvalue|array\\nvalue"sv) &&
+            (terminal.Row(2) == "beforeafterend"sv),
+            "an argument representation bypassed preparation or a supplied VT command affected the frame"sv);
+    });
+    passed &= Test("frame formatting applying numeric formats and string alignment and precision"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 2, .columns = 32};
+        auto terminal = DrawingConsole{size};
+        auto frame = Frame{terminal, size};
+        frame.WriteLine("|{:>8.4}|{:04}|{:.2f}|", "alphabet", 7, 2.5);
+        frame.Write("\n");
+        frame.WriteLine("|{:>4}|{:.3}|", '\n', "a\nb");
+        Require(terminal.Flip(frame) && (terminal.Row(1) == "|    alph|0007|2.50|"sv) &&
+            (terminal.Row(2) == "|  \\n|a\\n|"sv),
+            "formatting did not apply numeric formats or string specifications after preparation"sv);
+    });
+    passed &= Test("an unwritten formatted suffix owning its text and resuming without double preparation"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 1, .columns = 6};
+        auto terminal = DrawingConsole{size};
+        const auto first = [&terminal, size] {
+            auto frame = Frame{terminal, size};
+            const auto result = frame.Write("{}", std::string{"prefix\nrest"});
+            Require(frame.Ready() && (result.stop == WrappingStop::RowLimit) &&
+                terminal.Flip(frame) && (terminal.Row(1) == "prefix"sv),
+                "the initial page did not stop after its fitting prefix"sv);
+            return result;
+        }();
+        Require(first.remaining.text == "\\nrest"sv,
+            "the returned suffix did not survive the formatted text and initial frame"sv);
+        auto frame = Frame{terminal, size};
+        const auto resumed = frame.Write("{}", first.remaining);
+        Require(frame.Ready() && resumed.remaining.text.empty() &&
+            (resumed.stop == WrappingStop::EndOfText) && terminal.Flip(frame) &&
+            (terminal.Row(1) == "\\nrest"sv),
+            "resuming prepared output escaped its visible control notation a second time"sv);
+    });
+    passed &= Test("a line write's explicit newline positioning subsequent text at column one"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 3, .columns = 16};
+        auto terminal = DrawingConsole{size};
+        auto frame = Frame{terminal, size};
+        frame.WriteLine("hello\n");
+        frame.WriteLine("world");
+        frame.Write("!");
+        Require(frame.Ready() && (frame.CurrentRow() == 2) && terminal.Flip(frame) &&
+            (terminal.Row(1) == "hello"sv) && (terminal.Row(2) == "world!"sv) &&
+            terminal.Row(3).empty(),
+            "WriteLine misplaced an explicit newline or added an implicit newline before appended text"sv);
+    });
+    passed &= Test("each explicit line being clipped independently instead of wrapping its overflow"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 3, .columns = 8};
+        auto terminal = DrawingConsole{size};
+        auto frame = Frame{terminal, size};
+        const auto result = frame.WriteLine("abcdefghijklm\n1234567890\nlast");
+        Require(frame.Ready() && result.remaining.text.empty() &&
+            (result.stop == WrappingStop::EndOfText) && terminal.Flip(frame) &&
+            (terminal.Row(1) == "abcde..."sv) && (terminal.Row(2) == "12345..."sv) &&
+            (terminal.Row(3) == "last"sv),
+            "clipped overflow was returned as unprocessed text or occupied a later logical line"sv);
+    });
+    passed &= Test("leading, consecutive, and trailing newlines preserving blank rows in line writes"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 6, .columns = 16};
+        auto terminal = DrawingConsole{size};
+        auto frame = Frame{terminal, size};
+        frame.WriteLine("\nAlpha\n\nBeta\n");
+        frame.WriteLine("tail");
+        Require(frame.Ready() && (frame.CurrentRow() == 5) && terminal.Flip(frame) &&
+            terminal.Row(1).empty() && (terminal.Row(2) == "Alpha"sv) &&
+            terminal.Row(3).empty() && (terminal.Row(4) == "Beta"sv) &&
+            (terminal.Row(5) == "tail"sv) && terminal.Row(6).empty(),
+            "a leading, consecutive, or trailing newline was lost or an implicit newline was added"sv);
+    });
+    passed &= Test("line writes distinguishing format newlines from string and character data"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 3, .columns = 24};
+        auto terminal = DrawingConsole{size};
+        auto frame = Frame{terminal, size};
+        frame.WriteLine("{}\n{}", "top\nvalue", '\n');
+        Require(frame.Ready() && (frame.CurrentRow() == 2) && terminal.Flip(frame) &&
+            (terminal.Row(1) == "top\\nvalue"sv) && (terminal.Row(2) == "\\n"sv) &&
+            terminal.Row(3).empty(),
+            "argument data changed the row layout or the format string's newline was displayed as text"sv);
+    });
+    passed &= Test("trailing frame options applying highlighting and clipping after formatted arguments"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 2, .columns = 12};
+        auto terminal = DrawingConsole{size};
+        auto frame = Frame{terminal, size};
+        constexpr auto options = FrameLineOptions{
+            .clipping = FrameClipping::Ellipsis, .highlight = true};
+        frame.WriteLine("{}", PreparedText{.text = "name\\n"}, options);
+        frame.Write("\n");
+        frame.Write("{} {}", "next", 7, FrameWriteOptions{.highlight = true});
+        Require(frame.Ready() && terminal.Flip(frame) && terminal.AllReversed() &&
+            (terminal.Row(1) == "name\\n..."sv) && (terminal.Row(2) == "next 7"sv),
+            "trailing options were formatted as data or failed to apply the requested row policy"sv);
+    });
+    passed &= Test("line writes returning later unprocessed lines while discarding clipped overflow"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 1, .columns = 8};
+        auto terminal = DrawingConsole{size};
+        auto frame = Frame{terminal, size};
+        const auto first = frame.WriteLine("abcdefghijk\n\n{}", "last\nvalue");
+        Require(frame.Ready() && (first.stop == WrappingStop::RowLimit) && (first.rows == 1) &&
+            (first.remaining.text == "\nlast\\nvalue"sv) && terminal.Flip(frame) &&
+            (terminal.Row(1) == "abcde..."sv),
+            "the remainder lost an unprocessed blank line or retained deliberately clipped overflow"sv);
+        const auto subsequent = frame.WriteLine("still waiting");
+        Require((subsequent.stop == WrappingStop::RowLimit) && (subsequent.rows == 0) &&
+            (subsequent.remaining.text == "still waiting"sv),
+            "a line write starting below the frame consumed its input or reported completion"sv);
+        constexpr auto resumed_size = TerminalSize{.rows = 2, .columns = 16};
+        terminal.Resize(resumed_size);
+        auto resumed = Frame{terminal, resumed_size};
+        const auto last = resumed.WriteLine("{}", first.remaining);
+        Require(last.remaining.text.empty() && (last.stop == WrappingStop::EndOfText) &&
+            terminal.Flip(resumed) && terminal.Row(1).empty() &&
+            (terminal.Row(2) == "last\\nvalue"sv),
+            "resuming the line remainder lost the blank row or prepared its data twice"sv);
     });
     return passed;
 }

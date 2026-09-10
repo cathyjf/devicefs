@@ -7,6 +7,7 @@ import std;
 import devicefs.terminal.scope_exit;
 import devicefs.terminal.safecast;
 import devicefs.terminal;
+import devicefs.terminal.formatting;
 
 using namespace std::string_view_literals;
 
@@ -23,18 +24,21 @@ struct FrameLine {
     std::string text;
     bool reverse = false;
     FrameClipping clipping = FrameClipping::None;
+    // A clipped append must fit its ellipsis after the preceding text.
+    // `clipping_column` is the first column available to that appended write,
+    // so reserving ellipsis space never replaces the preceding text.
+    int clipping_column = 1;
     auto operator==(const FrameLine &) const -> bool = default;
 };
 
-// MakeInformationLine builds a footer or status row from separate pieces of
-// prepared terminal text. Empty pieces omit optional information without
-// leaving extra separators. The completed row is clipped when space is limited.
+// `MakeInformationLine` joins separate pieces of prepared terminal text for a
+// footer or status line. Empty pieces omit optional information without leaving
+// extra separators. The result can be passed directly as a formatting argument.
 [[nodiscard]] auto MakeInformationLine(const std::span<const std::string_view> items,
-    const std::string_view separator = "    "sv) -> FrameLine {
+    const std::string_view separator = "    "sv) -> PreparedText {
     return {.text = items |
         std::views::filter([](const auto item) { return !item.empty(); }) |
-        std::views::join_with(separator) | std::ranges::to<std::string>(),
-        .clipping = FrameClipping::IfNeeded};
+        std::views::join_with(separator) | std::ranges::to<std::string>()};
 }
 
 // `FrameBuffer` describes the desired screen without sending terminal output.
@@ -92,10 +96,12 @@ public:
         if (!pending_.empty()) {
             terminal_.Write(pending_);
             pending_.clear();
+            sent = true;
         }
     }
 
     bool written = false;
+    bool sent = false;
 
 private:
     T &terminal_;
@@ -225,6 +231,45 @@ public:
         widths_.clear();
     }
 
+    // A following write on the same row needs the endpoint of preceding text.
+    // `MeasureLine` applies the presenter's clipping policy and returns the
+    // fitted groups with their columns. Cached widths complete this calculation
+    // in memory. A required observation flushes the measurement to the terminal,
+    // and the next `Flip` restores that row's intended contents.
+    template <WidthPolicy Policy = WidthPolicy::AllModes>
+    [[nodiscard]] auto MeasureLine(Terminal auto &terminal, const FrameLine &line,
+        const int row, const TerminalSize size)
+        -> std::optional<frame_detail::DisplayedRow> {
+        using namespace frame_detail;
+        auto output = FrameOutput{terminal};
+        auto measured = PaintRow<Policy>(output, line, row, size.columns, std::nullopt);
+        if (output.sent) {
+            InvalidateRows(row, 1);
+            output.Flush();
+        }
+        if (!measured || measured->groups.empty() ||
+            !measured->groups.back().uncertain_width || (row == size.rows)) {
+            return measured;
+        }
+        // A last-column report can mean a free cell or a pending wrap. A space
+        // distinguishes those states by wrapping only in the latter case. The
+        // last screen row retains the uncertainty because probing could scroll.
+        InvalidateRows(row, 2);
+        terminal.Write(" "sv);
+        const auto observed = terminal.QueryCursor();
+        if (!observed ||
+            !(((observed->row == row) && (observed->column == size.columns)) ||
+                ((observed->row == (row + 1)) &&
+                    (observed->column == std::min(2, size.columns))))) {
+            return std::nullopt;
+        }
+        auto &last = measured->groups.back();
+        last.end_column = size.columns + (observed->row != row ? 1 : 0);
+        last.uncertain_width = false;
+        widths_.insert_or_assign(last.text, last.end_column - last.column);
+        return measured;
+    }
+
 private:
     template <WidthPolicy Policy>
     [[nodiscard]] auto PaintRow(Terminal auto &output, const FrameLine &line,
@@ -328,13 +373,13 @@ private:
                     const auto known = widths_.find(group.text);
                     const auto width = known == widths_.end() ? group.width_bound : known->second;
                     if (width > remaining) {
-                        return std::min(3, columns);
+                        return std::min(3, std::max(0, columns - line.clipping_column + 1));
                     }
                     remaining -= width;
                 }
                 return 0;
             }
-            return std::min(3, columns);
+            return std::min(3, std::max(0, columns - line.clipping_column + 1));
         }();
         for (auto index = std::size_t{}; index < groups.size(); ++index) {
             const auto &group = groups.at(index);

@@ -665,9 +665,11 @@ Text begins at the current cursor position and uses the remaining screen rows.
 
 template <MenuTerminal Console = NativeConsole>
 [[nodiscard]] auto MenuDemo() -> int {
-    constexpr auto header = std::array{
-        "DeviceFs terminal menu demonstration"sv,
-        "Choose an entry to open a submenu."sv, ""sv};
+    constexpr auto title = "DeviceFs terminal menu demonstration"sv;
+    const auto draw_header = [title](auto &frame) {
+        frame.Write("{}", title);
+        frame.Write("\nChoose an entry to open a submenu.\n\n"sv);
+    };
     auto entries = std::vector<std::string>{
         "Installation", "Schedule backups", "Browse backups", "Open backup console",
         "Accented names: café and naïve", "日本語 — é — 👩‍💻 — ©️",
@@ -695,16 +697,21 @@ template <MenuTerminal Console = NativeConsole>
     };
     const auto [selection, measurements] = [&] {
         auto terminal = Console{};
-        const auto selection = [&terminal, &header, &labels]() -> std::optional<std::size_t> {
+        const auto selection = [&terminal, &draw_header, &labels, title]() -> std::optional<std::size_t> {
             const auto screen = terminal.EnterScreen();
             auto initial_selection = 0uz;
-            while (const auto entry = SelectMenuItem(terminal, header, labels, {}, initial_selection)) {
+            while (const auto entry = SelectMenuItem(terminal, draw_header, labels, {}, initial_selection)) {
                 initial_selection = *entry;
-                const auto submenu_header = std::array{
-                    header.front(), "Choose an entry to print its index."sv, labels.at(*entry)};
+                const auto draw_submenu_header = [title,
+                    label = labels.at(*entry)](auto &frame) {
+                    frame.Write("{}", title);
+                    frame.Write("\nChoose an entry to print its index.\n"sv);
+                    frame.WriteLine("{}", label);
+                    frame.Write("\n"sv);
+                };
                 constexpr auto submenu_entries = std::array{
                     "First submenu option"sv, "Second submenu option"sv, "Third submenu option"sv};
-                if (const auto submenu_entry = SelectMenuItem(terminal, submenu_header, submenu_entries)) {
+                if (const auto submenu_entry = SelectMenuItem(terminal, draw_submenu_header, submenu_entries)) {
                     return submenu_entry;
                 }
             }

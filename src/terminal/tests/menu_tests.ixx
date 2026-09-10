@@ -9,6 +9,7 @@ import devicefs.terminal.safecast;
 import devicefs.terminal;
 import devicefs.terminal.test_support;
 import devicefs.terminal.frame;
+import devicefs.terminal.layout;
 import devicefs.terminal.menu;
 import devicefs.terminal.menu_measurements;
 
@@ -77,6 +78,12 @@ public:
     template <WidthPolicy Policy = WidthPolicy::AllModes>
     [[nodiscard]] auto KnownTextWidths(const std::string_view text) const {
         return presenter_.KnownTextWidths<Policy>(text);
+    }
+
+    template <WidthPolicy Policy = WidthPolicy::AllModes>
+    [[nodiscard]] auto MeasureFrameLine(this auto &self, const FrameLine &line,
+        const int row, const TerminalSize size) {
+        return self.presenter_.template MeasureLine<Policy>(self, line, row, size);
     }
 
     auto InvalidateFrameRows(const int first_row, const int count) -> void {
@@ -296,6 +303,19 @@ public:
     std::vector<FrameBuffer> submitted_frames;
 };
 
+// These layout cases use ASCII and Japanese groups whose known widths equal
+// their one- and two-column estimates. Supplying those cached measurements
+// lets the tests check layout decisions without drawing the text first.
+class CachedWidthMenuConsole : public MenuConsole {
+public:
+    using MenuConsole::MenuConsole;
+
+    template <WidthPolicy Policy = WidthPolicy::AllModes>
+    [[nodiscard]] auto KnownTextWidths(const std::string_view text) const {
+        return std::optional{MeasureText<Policy>(text)};
+    }
+};
+
 constexpr auto kHeader = std::array{"Menu regression test"sv};
 static_assert(MenuTerminal<MenuConsole, WidthPolicy::WindowsTerminalGraphemes>);
 constexpr auto kEntries = std::array{"Alpha"sv, "Bravo"sv, "Charlie"sv, "Delta"sv};
@@ -321,7 +341,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
         const auto labels = entries | std::views::transform([](const auto &entry) {
             return std::string_view{entry};
         }) | std::ranges::to<std::vector>();
-        Require(SelectMenuItem(terminal, kHeader, labels) == 0,
+        Require(SelectTestMenuItem(terminal, kHeader, labels) == 0,
             "measuring the menu changed its selection"sv);
         PrintMenuMeasurements(terminal.measurements);
         Require(terminal.measurements.size() == input.size(), "a menu update was not measured"sv);
@@ -333,6 +353,95 @@ export [[nodiscard]] auto TestMenu() -> bool {
                 "cached selection, scrolling, or resizing queried character widths again"sv);
         }
     });
+    passed &= Test("header callbacks rerunning for resize and redraw while navigation reuses their drawing"sv, [] {
+        constexpr auto input = std::array{
+            MenuInput{MenuKey::Down}, MenuInput{MenuKey::Up}, MenuInput{MenuKey::Resize},
+            MenuInput{MenuKey::Down}, MenuInput{MenuKey::Redraw}, MenuInput{MenuKey::Accept}};
+        auto terminal = MenuConsole{input};
+        const auto screen = terminal.EnterScreen();
+        terminal.resize_to = TerminalSize{.rows = 8, .columns = 90};
+        auto calls = 0;
+        Require(SelectMenuItem(terminal, [&calls](auto &frame) {
+            frame.WriteLine("Header generation {}", ++calls);
+            frame.Write("\n"sv);
+        }, kEntries) == 1, "rebuilding the header changed the selected entry"sv);
+        Require(calls == 3,
+            "the header callback did not run exactly for initial display, resize, and redraw"sv);
+        constexpr auto generations = std::array{1, 1, 1, 2, 2, 3};
+        Require(terminal.frames.size() == generations.size(),
+            "the menu did not present a frame for each expected input"sv);
+        for (auto index = 0uz; index < generations.size(); ++index) {
+            Require(terminal.frames.at(index).starts_with(
+                    std::format("Header generation {}\n", generations.at(index))),
+                std::format("input {} reused or rebuilt the wrong header", index));
+        }
+    });
+    passed &= Test("a naturally wrapped header moving the menu down when the window narrows"sv, [] {
+        constexpr auto heading = "The backup console uses a header that adapts to window width."sv;
+        constexpr auto input = std::array{MenuInput{MenuKey::Resize}, MenuInput{MenuKey::Accept}};
+        auto terminal = MenuConsole{input, {.rows = 10, .columns = 80}};
+        const auto screen = terminal.EnterScreen();
+        terminal.resize_to = TerminalSize{.rows = 10, .columns = 40};
+        auto menu_rows = std::vector<int>{};
+        Require(SelectMenuItem(terminal, [&menu_rows, heading](auto &frame) {
+            frame.Write("{}", heading);
+            frame.Write("\n"sv);
+            menu_rows.push_back(frame.CurrentRow());
+        }, kEntries) == 0, "wrapping the header changed the selected entry"sv);
+        Require(menu_rows == std::vector{2, 3},
+            "the header did not leave the menu after its one-row and two-row layouts"sv);
+        Require(terminal.frames.front().starts_with(std::format("{}\n> Alpha\n", heading)),
+            "the initial menu did not begin immediately after the header"sv);
+        Require((terminal.Row(1) == heading.substr(0, 40)) &&
+            (terminal.Row(2) == heading.substr(40)) && (terminal.Row(3) == "> Alpha"sv),
+            "the narrowed menu overlapped the wrapped header or left a gap below it"sv);
+    });
+    passed &= Test("a menu preserving callback content above its cursor and replacing all content below"sv, [] {
+        constexpr auto entries = std::array{"Alpha"sv, "Bravo"sv};
+        constexpr auto input = std::array{MenuInput{MenuKey::Down}, MenuInput{MenuKey::Accept}};
+        auto terminal = MenuConsole{input};
+        const auto screen = terminal.EnterScreen();
+        Require(SelectMenuItem(terminal, [](auto &frame) {
+            frame.WriteLine("Preserved heading"sv);
+            frame.Write("\n"sv);
+            frame.WriteLine("Preserved context"sv);
+            for (const auto row : std::array{4, 6, 8}) {
+                frame.MoveTo({row, 1});
+                frame.WriteLine("Discarded content"sv);
+            }
+            frame.MoveTo({3, 1});
+        }, entries) == 1, "the callback's cursor changed entry identity"sv);
+        for (const auto &frame : terminal.frames) {
+            Require(frame.starts_with("Preserved heading\nPreserved context\n"sv) &&
+                !frame.contains("Discarded content"sv),
+                "the menu lost its preceding content or retained content below its starting row"sv);
+        }
+        Require((terminal.Row(3) == "  Alpha"sv) && (terminal.Row(4) == "> Bravo"sv) &&
+            terminal.Row(5).empty() && terminal.Row(6).empty() &&
+            terminal.Row(7).starts_with("Up/Down: Select"sv) &&
+            terminal.Row(8).starts_with("Entry 2 of 2"sv),
+            "the menu did not replace its complete remaining frame area"sv);
+    });
+    passed &= Test("a header callback exception discarding measurement output and releasing screen ownership"sv, [] {
+        auto terminal = MenuConsole{std::span<const MenuInput>{}};
+        terminal.Write("Original screen"sv);
+        auto received_failure = false;
+        try {
+            const auto screen = terminal.EnterScreen();
+            std::ignore = SelectMenuItem(terminal, [](auto &frame) {
+                frame.WriteLine("Unpublished"sv);
+                frame.Write(" header"sv);
+                throw std::logic_error{"the test header callback failed"};
+            }, kEntries);
+        } catch (const std::logic_error &error) {
+            received_failure = std::string_view{error.what()} == "the test header callback failed"sv;
+        }
+        Require(received_failure, "the header callback's exception did not reach the caller"sv);
+        Require((terminal.cursor_query_calls > 0) && (terminal.Row(1) == "Original screen"sv),
+            "the failed callback published its measured header or did not exercise measurement"sv);
+        Require(!terminal.active && !terminal.updating && (terminal.screen_exits == 1),
+            "header failure did not release the caller's screen and update owners exactly once"sv);
+    });
     passed &= Test("successive menus sharing a screen, cached widths, and unchanged frame contents"sv, [] {
         constexpr auto footer = std::array{"Fixed footer"sv};
         constexpr auto submenu = std::array{"Delta"sv, "Charlie"sv, "Bravo"sv, "Alpha"sv};
@@ -341,15 +450,15 @@ export [[nodiscard]] auto TestMenu() -> bool {
         auto terminal = MenuConsole{input};
         {
             const auto screen = terminal.EnterScreen();
-            const auto selection = SelectMenuItem(terminal, kHeader, kEntries, footer, 1);
+            const auto selection = SelectTestMenuItem(terminal, kHeader, kEntries, footer, 1);
             Require(selection == 1, "the first menu returned the wrong entry"sv);
             Require(terminal.active && (terminal.screen_exits == 0),
                 "returning a selection restored the normal screen"sv);
-            Require(!SelectMenuItem(terminal, kHeader, submenu, footer),
+            Require(!SelectTestMenuItem(terminal, kHeader, submenu, footer),
                 "Back selected an entry in the submenu"sv);
-            Require(SelectMenuItem(terminal, kHeader, kEntries, footer, *selection) == selection,
+            Require(SelectTestMenuItem(terminal, kHeader, kEntries, footer, *selection) == selection,
                 "returning to the parent menu lost its selected entry"sv);
-            Require(!SelectMenuItem(terminal, kHeader, kEntries, footer, *selection),
+            Require(!SelectTestMenuItem(terminal, kHeader, kEntries, footer, *selection),
                 "Ctrl+C selected an entry in the repeated menu"sv);
             Require(terminal.active && (terminal.screen_entries == 1) && (terminal.screen_exits == 0),
                 "a menu transition changed the caller's screen lifetime"sv);
@@ -459,7 +568,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
         constexpr auto input = std::array{MenuInput{MenuKey::Down}, MenuInput{MenuKey::Accept}};
         auto terminal = CapturingMenuConsole{input};
         const auto screen = terminal.EnterScreen();
-        Require(SelectMenuItem(terminal, kHeader, kEntries, footer) == 1,
+        Require(SelectTestMenuItem(terminal, kHeader, kEntries, footer) == 1,
             "the menu could not select an entry through the frame-capturing adapter"sv);
         Require((terminal.write_calls == 0) && (terminal.cursor_query_calls == 0),
             "the menu painted terminal text instead of submitting its prepared frame"sv);
@@ -536,7 +645,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
             MenuInput{MenuKey::Down, 2}, MenuInput{MenuKey::Up}, MenuInput{MenuKey::Accept}};
         auto terminal = MenuConsole{input};
         const auto screen = terminal.EnterScreen();
-        Require(SelectMenuItem(terminal, kHeader, kEntries) == 1,
+        Require(SelectTestMenuItem(terminal, kHeader, kEntries) == 1,
             "Down, Down, Up did not select the second entry"sv);
         Require(terminal.frames.back().contains("> Bravo"sv),
             "the selected entry was not marked on screen"sv);
@@ -551,7 +660,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
             MenuInput{MenuKey::Accept}};
         auto terminal = MenuConsole{input};
         const auto screen = terminal.EnterScreen();
-        Require(SelectMenuItem(terminal, kHeader, kEntries, footer) == 0,
+        Require(SelectTestMenuItem(terminal, kHeader, kEntries, footer) == 0,
             "visible Home and End navigation did not return to the first entry"sv);
         const auto expected_rows = std::array{
             std::set<int>{}, std::set{2, 4, 8}, std::set{3, 4, 8},
@@ -597,7 +706,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
             MenuInput{MenuKey::Down}, MenuInput{MenuKey::Up}, MenuInput{MenuKey::Accept}};
         auto terminal = MenuConsole{input, {.rows = 6, .columns = 120}};
         const auto screen = terminal.EnterScreen();
-        Require(SelectMenuItem(terminal, kHeader, entries, {}, 8) == 8,
+        Require(SelectTestMenuItem(terminal, kHeader, entries, {}, 8) == 8,
             "returning from entry ten did not select entry nine"sv);
         Require(terminal.frames.at(1).contains(
                 "Entry 10 of 10    PgUp/PgDn: Scroll    Home/End: First/Last"sv),
@@ -613,7 +722,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
             MenuInput{MenuKey::Down}, MenuInput{MenuKey::Up}, MenuInput{MenuKey::Accept}};
         auto terminal = MenuConsole{input, {.rows = 13, .columns = 80}};
         const auto screen = terminal.EnterScreen();
-        Require(SelectMenuItem(terminal, kHeader, entries, footer) == 0,
+        Require(SelectTestMenuItem(terminal, kHeader, entries, footer) == 0,
             "returning to the wrapped entry changed its index"sv);
         const auto expected_rows = std::set{2, 3, 4, 5, 6, 7, 8, 9, 10, 13};
         for (const auto index : std::array{1, 2}) {
@@ -642,7 +751,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
             MenuInput{MenuKey::PageDown}, MenuInput{MenuKey::Accept}};
         auto terminal = MenuConsole{input, {.rows = 7, .columns = 40}};
         const auto screen = terminal.EnterScreen();
-        Require(SelectMenuItem(terminal, kHeader, entries, footer) == 3,
+        Require(SelectTestMenuItem(terminal, kHeader, entries, footer) == 3,
             "Page Down did not reach the final entry"sv);
         Require((terminal.Row(1) == kHeader.front()) && (terminal.Row(5) == footer.front()),
             "scrolling changed the fixed header or footer"sv);
@@ -673,7 +782,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
                 MenuInput{MenuKey::Up}, MenuInput{MenuKey::Accept}};
             auto terminal = MenuConsole{input, {.rows = 7, .columns = 40}};
             const auto screen = terminal.EnterScreen();
-            Require(SelectMenuItem<WidthPolicy::AllModes, Scroll>(
+            Require(SelectTestMenuItem<WidthPolicy::AllModes, Scroll>(
                     terminal, kHeader, entries, footer) == 1,
                 "scrolling changed the original index selected by the arrow keys"sv);
             for (auto index = std::size_t{1}; index < terminal.frames.size(); ++index) {
@@ -721,7 +830,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
                 MenuInput{MenuKey::Up, 2}, MenuInput{MenuKey::Accept}};
             auto terminal = MenuConsole{input, {.rows = 6, .columns = 20}};
             const auto screen = terminal.EnterScreen();
-            Require(SelectMenuItem<WidthPolicy::AllModes, Scroll>(terminal, kHeader, entries) == 1,
+            Require(SelectTestMenuItem<WidthPolicy::AllModes, Scroll>(terminal, kHeader, entries) == 1,
                 "returning to the wrapped entry changed its original index"sv);
             Require(terminal.frames.at(1).contains(first_down),
                 std::format("scrolling past a wrapped entry counted entries instead of displayed rows; "
@@ -750,7 +859,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
             MenuInput{MenuKey::Accept}};
         auto terminal = MenuConsole{input};
         const auto screen = terminal.EnterScreen();
-        Require(SelectMenuItem(terminal, kHeader, kEntries) == 0,
+        Require(SelectTestMenuItem(terminal, kHeader, kEntries) == 0,
             "repeated navigation crossed a list boundary"sv);
         Require(terminal.frames.at(1).contains("> Delta"sv),
             "the repeated Down key did not stop at the final entry"sv);
@@ -760,7 +869,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
             MenuInput{MenuKey::Home}, MenuInput{MenuKey::End}, MenuInput{MenuKey::Accept}};
         auto terminal = MenuConsole{input};
         const auto screen = terminal.EnterScreen();
-        Require(SelectMenuItem(terminal, kHeader, kEntries, {}, 2) == 3,
+        Require(SelectTestMenuItem(terminal, kHeader, kEntries, {}, 2) == 3,
             "End did not select the final entry"sv);
         Require(terminal.frames.at(1).contains("> Alpha"sv),
             "Home did not select the first entry"sv);
@@ -770,7 +879,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
             MenuInput{MenuKey::Accept}, MenuInput{MenuKey::Cancel}};
         auto terminal = MenuConsole{input};
         const auto screen = terminal.EnterScreen();
-        Require(!SelectMenuItem(terminal, kHeader, {}), "an empty menu selected an entry"sv);
+        Require(!SelectTestMenuItem(terminal, kHeader, {}), "an empty menu selected an entry"sv);
         Require(terminal.frames.front().contains("No entries are available."sv),
             "the empty menu did not explain why nothing could be selected"sv);
         Require(terminal.active, "cancellation released the caller's screen"sv);
@@ -779,7 +888,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
         constexpr auto input = std::array{MenuInput{MenuKey::Back}};
         auto terminal = MenuConsole{input, {.rows = 2, .columns = 20}};
         const auto screen = terminal.EnterScreen();
-        Require(!SelectMenuItem(terminal, kHeader, kEntries),
+        Require(!SelectTestMenuItem(terminal, kHeader, kEntries),
             "Back did not cancel the unusably small menu"sv);
     });
     passed &= Test("paging by wrapped rows retaining a partly visible selection"sv, [] {
@@ -790,7 +899,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
             MenuInput{MenuKey::PageDown}, MenuInput{MenuKey::Accept}};
         auto terminal = MenuConsole{input, {.rows = 7, .columns = 40}};
         const auto screen = terminal.EnterScreen();
-        Require(SelectMenuItem(terminal, kHeader, entries, footer) == 0,
+        Require(SelectTestMenuItem(terminal, kHeader, entries, footer) == 0,
             "paging replaced a selected entry whose continuation remained visible"sv);
         Require(terminal.frames.back().contains(">   A"sv),
             "the wrapped continuation was not displayed with its selection marker"sv);
@@ -803,7 +912,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
             MenuInput{MenuKey::PageDown, 65535}, MenuInput{MenuKey::Accept}};
         auto terminal = MenuConsole{input};
         const auto screen = terminal.EnterScreen();
-        Require(SelectMenuItem(terminal, kHeader, kEntries) == 3,
+        Require(SelectTestMenuItem(terminal, kHeader, kEntries) == 3,
             "repeated Page Down did not select the final entry"sv);
         Require(terminal.frames.back().contains("> Delta"sv),
             "the final entry was not visible after repeated Page Down"sv);
@@ -818,7 +927,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
             MenuInput{MenuKey::Back}, MenuInput{MenuKey::Accept}};
         auto terminal = MenuConsole{input, {.rows = 9, .columns = 80}};
         const auto screen = terminal.EnterScreen();
-        Require(SelectMenuItem(terminal, kHeader, entries, footer) == 0,
+        Require(SelectTestMenuItem(terminal, kHeader, entries, footer) == 0,
             "returning from the full-name view changed the selection"sv);
         Require(terminal.frames.front().contains("1: View full name"sv),
             "the truncated preview did not offer the full-name view"sv);
@@ -848,7 +957,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
             MenuInput{MenuKey::Back}, MenuInput{MenuKey::Accept}};
         auto terminal = MenuConsole{input, {.rows = 9, .columns = 80}};
         const auto screen = terminal.EnterScreen();
-        Require(SelectMenuItem(terminal, kHeader, entries) == 1,
+        Require(SelectTestMenuItem(terminal, kHeader, entries) == 1,
             "returning from the second full name changed the selected entry's original index"sv);
         Require(terminal.frames.at(1).contains("FIRST-NAME"sv),
             "the first full-name view did not show the first entry"sv);
@@ -890,7 +999,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
             auto terminal = MenuConsole{input};
             const auto screen = terminal.EnterScreen();
             terminal.cursor_reports_available = false;
-            Require(!SelectMenuItem(terminal, kHeader, kEntries),
+            Require(!SelectTestMenuItem(terminal, kHeader, kEntries),
                 "the menu did not accept cancellation after a failed frame"sv);
             Require(terminal.Row(1) == "Layout unavailable.    Ctrl+L: Redraw    Esc: Back"sv,
                 "the failed frame did not display the recovery instructions"sv);
@@ -911,7 +1020,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
         auto terminal = MenuConsole{input};
         const auto screen = terminal.EnterScreen();
         terminal.cursor_reports_available = false;
-        Require(!SelectMenuItem(terminal, kHeader, entries),
+        Require(!SelectTestMenuItem(terminal, kHeader, entries),
             "failed layout measurement did not allow cancellation"sv);
         Require((terminal.cursor_query_calls == 1) &&
             (terminal.Row(1) == "Layout unavailable.    Ctrl+L: Redraw    Esc: Back"sv),
@@ -923,7 +1032,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
         auto terminal = MenuConsole{input, {.rows = 8, .columns = 12}};
         const auto screen = terminal.EnterScreen();
         terminal.fail_next_cursor_query = true;
-        Require(SelectMenuItem(terminal, header, kEntries) == 0,
+        Require(SelectTestMenuItem(terminal, header, kEntries) == 0,
             "an unavailable cursor report changed the selected entry"sv);
         Require(!terminal.frames.front().contains("abcdefghi..."sv),
             "the test's unavailable cursor report did not interrupt header clipping"sv);
@@ -936,7 +1045,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
         auto terminal = MenuConsole{input};
         const auto screen = terminal.EnterScreen();
         terminal.resize_to = TerminalSize{.rows = 8, .columns = 90};
-        Require(SelectMenuItem(terminal, kHeader, kEntries) == 0,
+        Require(SelectTestMenuItem(terminal, kHeader, kEntries) == 0,
             "widening changed the selected entry"sv);
         Require((terminal.clears.at(1) == 0) && terminal.touched_rows.at(1).empty() &&
             (terminal.presentations.at(1) == 0),
@@ -950,7 +1059,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
             auto terminal = MenuConsole{input};
             const auto screen = terminal.EnterScreen();
             terminal.resize_to = TerminalSize{.rows = 8, .columns = columns};
-            Require(!SelectMenuItem(terminal, kHeader, kEntries),
+            Require(!SelectTestMenuItem(terminal, kHeader, kEntries),
                 std::format("the {}-column menu did not allow cancellation", columns));
             Require(!terminal.Row(1).empty() &&
                 std::cmp_less_equal(terminal.Row(1).size(), columns),
@@ -969,7 +1078,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
         auto terminal = MenuConsole{input};
         const auto screen = terminal.EnterScreen();
         terminal.resize_to = TerminalSize{.rows = 9, .columns = 80};
-        Require(SelectMenuItem(terminal, kHeader, kEntries, footer) == 0,
+        Require(SelectTestMenuItem(terminal, kHeader, kEntries, footer) == 0,
             "increasing menu height changed the selected entry"sv);
         Require((terminal.clears.at(1) == 0) &&
             (terminal.touched_rows.at(1) == std::set{6, 7, 8, 9}) &&
@@ -987,7 +1096,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
         auto terminal = MenuConsole{input, {.rows = 8, .columns = 80}};
         const auto screen = terminal.EnterScreen();
         terminal.resize_to = TerminalSize{.rows = 8, .columns = 40};
-        Require(SelectMenuItem(terminal, kHeader, entries, {}, 1) == 1,
+        Require(SelectTestMenuItem(terminal, kHeader, entries, {}, 1) == 1,
             "resizing changed the selected entry"sv);
         Require(terminal.frames.back().contains("END-OF-NAME"sv),
             "the narrowed viewport lost the end of a fitting label"sv);
@@ -1005,7 +1114,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
         auto received_failure = false;
         try {
             const auto screen = terminal.EnterScreen();
-            std::ignore = SelectMenuItem(terminal, kHeader, kEntries);
+            std::ignore = SelectTestMenuItem(terminal, kHeader, kEntries);
         } catch (const InputFailure &) {
             received_failure = true;
         }
@@ -1019,7 +1128,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
         auto received_failure = false;
         try {
             const auto screen = terminal.EnterScreen();
-            std::ignore = SelectMenuItem(terminal, kHeader, kEntries);
+            std::ignore = SelectTestMenuItem(terminal, kHeader, kEntries);
         } catch (const OutputFailure &) {
             received_failure = true;
         }
@@ -1030,6 +1139,78 @@ export [[nodiscard]] auto TestMenu() -> bool {
             "a failed hidden drawing changed the displayed screen"sv);
         Require(terminal.QueryCursor() == CursorPosition{1, 16},
             "discarding the failed frame did not restore the original output cursor"sv);
+    });
+    passed &= Test("a zero-row text layout retaining all input without terminal output"sv, [] {
+        auto terminal = MenuConsole{std::span<const MenuInput>{}};
+        constexpr auto options = WrappingOptions{.size = {.rows = 3, .columns = 8}};
+        for (const auto text : std::array{""sv, "unwritten"sv}) {
+            const auto layout = LayoutText(terminal, text, {1, 1}, options, 0);
+            Require(layout && layout->rows.empty() &&
+                (layout->truncated == !text.empty()) && !layout->oversized,
+                "a zero-row limit consumed text or returned a display row"sv);
+        }
+        Require((terminal.write_calls == 0) && (terminal.cursor_query_calls == 0) &&
+            (terminal.frame_row_invalidations == 0),
+            "a zero-row layout accessed the terminal"sv);
+    });
+    passed &= Test("invalid text-layout coordinates and scratch areas requesting recovery before output"sv, [] {
+        auto terminal = MenuConsole{std::span<const MenuInput>{}};
+        constexpr auto options = WrappingOptions{.size = {.rows = 3, .columns = 8}};
+        for (const auto start : std::array{
+                CursorPosition{0, 1}, CursorPosition{4, 1},
+                CursorPosition{1, 0}, CursorPosition{1, 9}}) {
+            Require(!LayoutText(terminal, "text"sv, start, options, 1),
+                std::format("text layout accepted row {}, column {} outside its screen",
+                    start.row, start.column));
+        }
+        for (const auto &invalid : std::array{
+                WrappingOptions{.size = {.rows = 0, .columns = 8}},
+                WrappingOptions{.size = {.rows = 3, .columns = 0}},
+                WrappingOptions{.size = {.rows = 3, .columns = 8}, .maximum_rows = 0},
+                WrappingOptions{.size = {.rows = 3, .columns = 8}, .maximum_rows = -1},
+                WrappingOptions{.size = {.rows = 3, .columns = 8}, .maximum_rows = 4},
+                WrappingOptions{.size = {.rows = 3, .columns = 8}, .continuation_column = 0},
+                WrappingOptions{.size = {.rows = 3, .columns = 8}, .continuation_column = 9},
+                WrappingOptions{.size = {.rows = 3, .columns = 8}, .trailing_columns = -1},
+                WrappingOptions{.size = {.rows = 3, .columns = 8}, .trailing_columns = 8}}) {
+            Require(!LayoutText(terminal, "text"sv, {1, 1}, invalid, 1),
+                "text layout accepted unusable dimensions or row capacities"sv);
+        }
+        Require(!LayoutText(terminal, "text"sv, {3, 1},
+                {.size = {.rows = 3, .columns = 8}, .maximum_rows = 2}, 1),
+            "the scratch area was allowed to extend below the screen"sv);
+        Require((terminal.write_calls == 0) && (terminal.cursor_query_calls == 0) &&
+            (terminal.frame_row_invalidations == 0),
+            "an invalid layout accessed the terminal before reporting recovery"sv);
+    });
+    passed &= Test("a cached wide group wrapping from a partly occupied first row"sv, [] {
+        auto terminal = CachedWidthMenuConsole{std::span<const MenuInput>{}};
+        const auto layout = LayoutText<WidthPolicy::WindowsTerminalGraphemes>(terminal,
+            "日abc"sv, {1, 5}, {.size = {.rows = 3, .columns = 5},
+                .continuation_column = 2, .maximum_rows = 3}, 3);
+        Require(layout && (layout->rows == std::vector{""sv, "日ab"sv, "c"sv}) &&
+            !layout->truncated && !layout->oversized,
+            "the first group was rejected or placed in the partly occupied first row"sv);
+        Require((terminal.write_calls == 0) && (terminal.cursor_query_calls == 0),
+            "cached group widths required a terminal measurement"sv);
+    });
+    passed &= Test("continuation indentation and a reserved tail applying to the final logical row"sv, [] {
+        constexpr auto options = WrappingOptions{.size = {.rows = 2, .columns = 5},
+            .continuation_column = 2, .maximum_rows = 2, .trailing_columns = 2};
+        const auto check_layout = [&](auto &terminal) {
+            const auto layout = LayoutText(terminal, "abcdefghij"sv, {1, 3}, options, 3);
+            Require(layout && (layout->rows == std::vector{"abc"sv, "defg"sv, "hi"sv}) &&
+                layout->truncated && !layout->oversized,
+                "the final-row reservation shortened an earlier row or consumed the omitted suffix"sv);
+        };
+        auto cached = CachedWidthMenuConsole{std::span<const MenuInput>{}, options.size};
+        check_layout(cached);
+        Require((cached.write_calls == 0) && (cached.cursor_query_calls == 0),
+            "cached layout performed terminal I/O"sv);
+        auto measured = MenuConsole{std::span<const MenuInput>{}, options.size};
+        check_layout(measured);
+        Require(measured.cursor_query_calls > 0,
+            "the uncached case did not exercise observed wrapping across scratch pages"sv);
     });
     return passed;
 }

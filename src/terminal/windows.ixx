@@ -12,8 +12,8 @@ import devicefs.terminal.base_console;
 import devicefs.terminal.menu;
 import devicefs.terminal.safecast;
 import devicefs.terminal.reports;
+import devicefs.terminal.vt;
 
-using namespace std::string_view_literals;
 using namespace wil::literals;
 
 namespace devicefs::terminal::detail {
@@ -163,11 +163,9 @@ public:
 
 private:
     friend class BaseConsole;
-    // DECSET 1049 saves the cursor and enters a cleared alternate screen.
-    // DECRST 25 (DECTCEM) hides the cursor while the menu is displayed.
-    // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-The-Alternate-Screen-Buffer
-    // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-visibility
-    static constexpr auto kEnterScreen = "\x1b[?1049h\x1b[?25l"sv;
+
+    static constexpr auto kEnterScreen =
+        vt::Concatenate<vt::kEnterAlternateScreen, vt::kHideCursor>();
 
 protected:
     // These control sequences contain only ASCII, so WriteConsoleA can send
@@ -187,7 +185,7 @@ private:
                 std::system_category(), "could not read the console cursor visibility");
         }
         return wil::scope_exit([this, previous_cursor] {
-            WriteControlSequenceNoThrow(kLeaveScreen);
+            WriteControlSequenceNoThrow(vt::kLeaveAlternateScreen);
             std::ignore = SetConsoleCursorInfo(output_.get(), &previous_cursor);
         });
     }

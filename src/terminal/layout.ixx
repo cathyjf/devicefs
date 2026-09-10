@@ -6,8 +6,7 @@ export module devicefs.terminal.layout;
 import std;
 import devicefs.terminal;
 import devicefs.terminal.safecast;
-
-using namespace std::string_view_literals;
+import devicefs.terminal.vt;
 
 export namespace devicefs::terminal {
 
@@ -121,11 +120,7 @@ template <WidthPolicy Policy = WidthPolicy::AllModes>
         const auto measured_rows = layout.rows.size();
         const auto rows_to_measure = std::min(
             FailFastCast<std::size_t>(scratch_rows), limit - measured_rows);
-        // CUP (`CSI row;column H`) positions the cursor at the measurement's
-        // starting cell. Both coordinates are one-based.
-        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
-        constexpr auto kPositionCursor = "\x1b[{};{}H"sv;
-        terminal.Write(std::format(kPositionCursor, start.row,
+        terminal.Write(vt::MoveCursor(start.row,
             measured_rows == 0 ? start.column : options.continuation_column));
         const auto result = WriteWrappingText(terminal, clusters,
             WrappingOptions{.size = options.size,

@@ -8,6 +8,7 @@ import devicefs.terminal.scope_exit;
 import devicefs.terminal.safecast;
 import devicefs.terminal;
 import devicefs.terminal.formatting;
+import devicefs.terminal.vt;
 
 using namespace std::string_view_literals;
 
@@ -66,26 +67,6 @@ concept FrameTerminal = Terminal<T> && requires(T &terminal) {
 }
 
 namespace devicefs::terminal::frame_detail {
-
-// CUP (`CSI row;column H`) positions the cursor using one-based coordinates.
-// https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
-constexpr auto kPositionCursor = "\x1b[{};{}H"sv;
-// ECH (`CSI count X`) replaces cells with spaces without moving the cursor.
-// https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#text-modification
-constexpr auto kEraseCells = "\x1b[{}X"sv;
-// EL (`CSI K`, default parameter 0) erases from the cursor through the row's end.
-// https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#text-modification
-constexpr auto kEraseToEndOfLine = "\x1b[K"sv;
-// SGR 0 (`CSI 0 m`) resets text attributes, including reverse video.
-// https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#text-formatting
-constexpr auto kResetAttributes = "\x1b[0m"sv;
-// SGR 7 (`CSI 7 m`) swaps foreground and background for selection highlighting.
-// https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#text-formatting
-constexpr auto kReverseAttributes = "\x1b[7m"sv;
-// SGR 0 resets attributes; ED 2 erases the display; CUP with omitted parameters
-// places the cursor at row 1, column 1. Erasure alone does not move the cursor.
-// https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences
-constexpr auto kClearScreen = "\x1b[0m\x1b[2J\x1b[H"sv;
 
 // FrameOutput collects a flip's drawing commands in a string. A cursor query
 // flushes those commands first because the report must reflect preceding
@@ -179,7 +160,7 @@ public:
         auto failed = ScopeExit{[this] { Invalidate(); }};
         auto output = FrameOutput{terminal};
         if (!initialized_ || !frame.size) {
-            output.Write(kClearScreen);
+            output.Write(vt::kClearScreen);
             displayed_.assign(frame.rows.size(), DisplayedRow{});
         }
         // Reducing the height can remove top rows and move text upward. Rows
@@ -227,7 +208,7 @@ public:
             }
         }
         if (output.written) {
-            output.Write(kResetAttributes);
+            output.Write(vt::kResetAttributes);
             output.Flush();
             if (complete) {
                 terminal.PresentFrame();
@@ -313,13 +294,13 @@ private:
         auto written_reverse = std::optional<bool>{};
         const auto move = [&](const int column) {
             if (written_column != column) {
-                output.Write(std::format(kPositionCursor, row, column));
+                output.Write(vt::MoveCursor(row, column));
                 written_column = column;
             }
         };
         const auto highlight = [&](const bool reverse) {
             if (written_reverse != reverse) {
-                output.Write(reverse ? kReverseAttributes : kResetAttributes);
+                output.Write(reverse ? vt::kReverseVideo : vt::kResetAttributes);
                 written_reverse = reverse;
             }
         };
@@ -327,7 +308,7 @@ private:
             if (count > 0) {
                 move(column);
                 highlight(false);
-                output.Write(std::format(kEraseCells, count));
+                output.Write(vt::EraseCells(count));
             }
         };
         auto column = 1;
@@ -444,7 +425,7 @@ private:
         if (column < std::min(old_end, columns + 1)) {
             move(column);
             highlight(false);
-            output.Write(kEraseToEndOfLine);
+            output.Write(vt::kEraseToEndOfLine);
         }
         return next;
     }

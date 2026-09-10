@@ -9,8 +9,8 @@ import devicefs.terminal.frame;
 import devicefs.terminal.menu;
 import devicefs.terminal.reports;
 import devicefs.terminal.scope_exit;
+import devicefs.terminal.vt;
 
-using namespace std::string_view_literals;
 using namespace std::chrono_literals;
 
 export namespace devicefs::terminal {
@@ -53,14 +53,14 @@ public:
     // https://github.com/microsoft/terminal/blob/5a830b2bf7c053d5c7ac22208fe5a346cb5dd3dc/src/renderer/base/renderer.cpp#L191-L257
     [[nodiscard]] auto BeginUpdate(this auto &self) {
         auto finish = ScopeExit{[&self] {
-            self.WriteControlSequenceNoThrow(kEndUpdate);
+            self.WriteControlSequenceNoThrow(vt::kEndSynchronizedUpdate);
         }};
-        self.Write(kBeginUpdate);
+        self.Write(vt::kBeginSynchronizedUpdate);
         return finish;
     }
 
     auto PresentFrame(this auto &self) -> void {
-        self.Write(kEndUpdate);
+        self.Write(vt::kEndSynchronizedUpdate);
     }
 
     // `EnterScreen` owns an interactive session on the alternate screen,
@@ -96,11 +96,6 @@ public:
     }
 
 protected:
-    // DECRST 1049 (`CSI ? 1049 l`) returns to the normal screen and restores
-    // the cursor saved when the alternate screen was entered.
-    // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-The-Alternate-Screen-Buffer
-    static constexpr auto kLeaveScreen = "\x1b[?1049l"sv;
-
     // Ctrl+C arrives as ETX when native input processing is disabled, allowing
     // the menu to cancel normally. Ctrl+L requests a redraw, and 1 opens the
     // selected entry's full text. Native navigation keys are decoded separately.
@@ -119,15 +114,6 @@ protected:
     }
 
 private:
-    // BSU (`CSI ? 2026 h`) begins a synchronized update: the terminal processes
-    // output while keeping the previous rendered frame visible.
-    // https://github.com/contour-terminal/vt-extensions/blob/master/synchronized-output.md
-    static constexpr auto kBeginUpdate = "\x1b[?2026h"sv;
-    // ESU (`CSI ? 2026 l`) ends the synchronized update, allowing the terminal
-    // to display the accumulated changes.
-    // https://github.com/contour-terminal/vt-extensions/blob/master/synchronized-output.md
-    static constexpr auto kEndUpdate = "\x1b[?2026l"sv;
-
     // Queries consume their reports while retaining interspersed user input.
     // Some terminals omit unsupported reports, so the deadline covers the whole
     // query, including time spent receiving other input. Native receivers keep

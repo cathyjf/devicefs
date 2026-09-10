@@ -10,6 +10,7 @@ module;
 export module devicefs.terminal;
 
 import std;
+import devicefs.terminal.vt;
 #ifdef _MSC_VER
     import <terminal/src/types/inc/CodepointWidthDetector.hpp>;
 #endif
@@ -368,10 +369,7 @@ export template <typename LineStarted = std::nullptr_t>
             }
             ++cursor.row;
             cursor.column = continuation_column;
-            // CUP (`CSI row;column H`) starts the continuation at its indented
-            // column on the next row, using one-based coordinates.
-            // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
-            terminal.Write(std::format("\x1b[{};{}H", cursor.row, cursor.column));
+            terminal.Write(vt::MoveCursor(cursor.row, cursor.column));
             notify_line(remaining);
             margin = RightMargin::Available;
         }
@@ -443,8 +441,6 @@ export template <typename LineStarted = std::nullptr_t>
             // shifted text. The group's width bound reserved enough space for
             // this shift. Microsoft's text-modification reference defines ICH:
             // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#text-modification
-            // CUP is `CSI row;column H`; ICH is `CSI count @`.
-            // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
             if (observed->column > (continuation_capacity + 1)) {
                 return result(WrappingStop::RedrawRequired);
             }
@@ -452,9 +448,9 @@ export template <typename LineStarted = std::nullptr_t>
                 RightMargin::Filled : RightMargin::Available;
             cursor = {.row = observed->row, .column = margin == RightMargin::Filled ?
                 size.columns : observed->column + (continuation_column - 1)};
-            terminal.Write(std::format("\x1b[{};1H\x1b[{}@\x1b[{};{}H",
-                cursor.row, continuation_column - 1,
-                cursor.row, cursor.column));
+            terminal.Write(std::format("{}{}{}", vt::MoveCursor(cursor.row, 1),
+                vt::InsertCharacters(continuation_column - 1),
+                vt::MoveCursor(cursor.row, cursor.column)));
         } else {
             cursor = *observed;
             margin = cursor.column == size.columns ?

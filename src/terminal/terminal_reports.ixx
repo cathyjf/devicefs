@@ -5,6 +5,7 @@ export module devicefs.terminal.reports;
 
 import std;
 import devicefs.terminal.safecast;
+import devicefs.terminal.vt;
 
 using namespace std::string_view_literals;
 
@@ -20,11 +21,8 @@ constexpr auto kReportPrefix = "\x1b["sv;
 constexpr auto kMaximumReportLength = 37uz;
 
 [[nodiscard]] constexpr auto ReportRequest(const TerminalReport report) noexcept {
-    // DSR 6 (`CSI 6 n`) requests a cursor position, answered by `CSI row;column R`.
-    // XTWINOPS 18 (`CSI 18 t`) requests text-area dimensions, answered by
-    // `CSI 8;rows;columns t`. The report coordinates and dimensions are in cells.
-    // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-    return report == TerminalReport::Cursor ? "\x1b[6n"sv : "\x1b[18t"sv;
+    return report == TerminalReport::Cursor ?
+        vt::kRequestCursorPosition : vt::kRequestTextAreaSize;
 }
 
 [[nodiscard]] constexpr auto ReportSuffix(const TerminalReport report) noexcept {

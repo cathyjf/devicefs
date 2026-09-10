@@ -23,6 +23,7 @@ import devicefs.terminal.menu;
 import devicefs.terminal.reports;
 import devicefs.terminal.safecast;
 import devicefs.terminal.scope_exit;
+import devicefs.terminal.vt;
 
 using namespace std::string_view_literals;
 using namespace std::chrono_literals;
@@ -193,15 +194,11 @@ public:
 
 private:
     friend class BaseConsole;
-    // DECSET 1049 saves the cursor and enters a cleared alternate screen.
-    // XTSAVE (`CSI ? 25 s`) saves cursor visibility; DECRST 25 then hides it.
-    // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-    static constexpr auto kEnterScreen = "\x1b[?1049h\x1b[?25s\x1b[?25l"sv;
-    // SGR 0 resets attributes. DECSET 25 shows the cursor, then XTRESTORE
-    // (`CSI ? 25 r`) restores its saved visibility where supported. DECRST 1049
-    // returns to the normal screen and restores the cursor saved on entry.
-    // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-    static constexpr auto kLeaveScreen = "\x1b[0m\x1b[?25h\x1b[?25r\x1b[?1049l"sv;
+
+    static constexpr auto kEnterScreen = vt::Concatenate<
+        vt::kEnterAlternateScreen, vt::kSaveCursorVisibility, vt::kHideCursor>();
+    static constexpr auto kLeaveScreen = vt::Concatenate<vt::kResetAttributes,
+        vt::kShowCursor, vt::kRestoreCursorVisibility, vt::kLeaveAlternateScreen>();
 
 protected:
     auto WriteControlSequenceNoThrow(const std::string_view sequence) const noexcept -> void {

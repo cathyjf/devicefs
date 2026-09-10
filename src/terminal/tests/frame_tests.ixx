@@ -131,8 +131,8 @@ public:
         cursor_moves = 0;
         attribute_changes = 0;
     }
-    auto Resize(const TerminalSize size) -> void {
-        const auto removed_rows = std::max(0, size_.rows - size.rows);
+    auto Resize(const TerminalSize size, const std::optional<int> removed_top_rows = std::nullopt) -> void {
+        const auto removed_rows = removed_top_rows.value_or(std::max(0, size_.rows - size.rows));
         auto retained = decltype(cells_){};
         for (auto &[position, cell] : cells_) {
             const auto row = position.first - removed_rows;
@@ -340,6 +340,47 @@ export [[nodiscard]] auto RunFrameTests() -> bool {
             "height reduction discarded character-width measurements"sv);
         Require(terminal.screen_erases == 0,
             "height reduction cleared the screen before repainting"sv);
+    });
+    passed &= Test("height reduction restoring a message while preserving the blank rows below it"sv, [] {
+        for (const auto removed_rows : {0, 1, 2, 3}) {
+            auto terminal = FrameConsole{{.rows = 6, .columns = 24}};
+            auto presenter = DeltaFramePresenter{};
+            auto frame = FrameBuffer{TerminalSize{.rows = 6, .columns = 24}};
+            frame.rows.front().text = "Enlarge the window.";
+            Require(presenter.Flip(terminal, frame), "the initial message could not be displayed"sv);
+            terminal.Resize({.rows = 3, .columns = 24}, removed_rows);
+            terminal.ResetActivity();
+            auto resized = FrameBuffer{TerminalSize{.rows = 3, .columns = 24}};
+            resized.rows.front() = frame.rows.front();
+            Require(presenter.Flip(terminal, resized) &&
+                (terminal.Row(1) == "Enlarge the window."sv) &&
+                terminal.Row(2).empty() && terminal.Row(3).empty(),
+                std::format("removing {} top rows lost the message or left misplaced text", removed_rows));
+            Require((terminal.writes == 1) && (terminal.queries == 0) &&
+                (terminal.screen_erases == 0) &&
+                std::ranges::all_of(terminal.erased, [](const auto &cell) { return cell.first == 1; }),
+                "restoring the message repainted its blank rows or cleared the screen"sv);
+        }
+    });
+    passed &= Test("height reduction repainting shifted text through the last occupied row"sv, [] {
+        for (const auto removed_rows : {0, 1, 2, 3}) {
+            auto terminal = FrameConsole{{.rows = 7, .columns = 24}};
+            auto presenter = DeltaFramePresenter{};
+            auto frame = FrameBuffer{TerminalSize{.rows = 7, .columns = 24}};
+            frame.rows.front().text = "Heading";
+            frame.rows.at(2).text = "Lower text";
+            Require(presenter.Flip(terminal, frame), "the original text could not be displayed"sv);
+            terminal.Resize({.rows = 4, .columns = 24}, removed_rows);
+            terminal.ResetActivity();
+            auto resized = FrameBuffer{TerminalSize{.rows = 4, .columns = 24}};
+            resized.rows.front().text = "Heading";
+            Require(presenter.Flip(terminal, resized) && (terminal.Row(1) == "Heading"sv) &&
+                terminal.Row(2).empty() && terminal.Row(3).empty() && terminal.Row(4).empty(),
+                std::format("removing {} top rows left shifted text in the blank area", removed_rows));
+            Require(std::ranges::none_of(terminal.erased,
+                    [](const auto &cell) { return cell.first == 4; }),
+                "the unchanged blank final row was erased"sv);
+        }
     });
     passed &= Test("a narrow ambiguous-width character beside the right margin"sv, [] {
         auto terminal = FrameConsole{{.rows = 2, .columns = 8}};

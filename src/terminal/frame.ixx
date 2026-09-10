@@ -169,11 +169,23 @@ public:
             output.Write(kClearScreen);
             displayed_.assign(frame.rows.size(), DisplayedRow{});
         }
-        // Reducing the height can remove rows from the top of the terminal.
-        // Every surviving row may therefore have moved, so the complete frame
-        // must be repainted. Character widths remain valid for that repaint.
+        // Reducing the height can remove top rows and move text upward. Rows
+        // through the last occupied row therefore need repainting. The blank
+        // area below that row remains blank after an upward shift. Preserve
+        // that area when every row is known and the text was drawn at the
+        // current width; otherwise discard all saved rows.
+        // https://github.com/microsoft/terminal/blob/main/src/buffer/out/textBuffer.cpp#L1022-L1042
         if (frame.rows.size() < displayed_.size()) {
-            std::ranges::fill(displayed_, std::nullopt);
+            const auto redraw_end = [&] {
+                if (!frame.size || !std::ranges::all_of(displayed_, [&](const auto &row) {
+                        return row && (row->groups.empty() || (row->columns == frame.size->columns));
+                    })) {
+                    return displayed_.end();
+                }
+                return std::find_if(displayed_.rbegin(), displayed_.rend(),
+                    [](const auto &row) { return !row->groups.empty(); }).base();
+            }();
+            std::fill(displayed_.begin(), redraw_end, std::nullopt);
         }
         displayed_.resize(frame.rows.size(), DisplayedRow{});
         auto complete = true;

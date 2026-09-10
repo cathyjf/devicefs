@@ -502,7 +502,14 @@ template <WidthPolicy Policy, MenuScrollPolicy Scrolling, typename T>
     }
     const auto viewport = MakeMenuViewport(*terminal_size, frame.CurrentRow(), text);
     if (!viewport) {
-        return show_message(std::array{"Enlarge the window."sv, "Esc: Back"sv});
+        constexpr auto instructions = std::array{"Enlarge the window."sv, "Esc: Back"sv};
+        auto message = Frame<T, Policy>{terminal, *terminal_size};
+        message.WriteLine("{}", MakeInformationLine(instructions));
+        if (!terminal.template Flip<Policy>(message)) {
+            return show_message(instructions);
+        }
+        return MenuPresentation<T, Policy>{.terminal_size = terminal_size,
+            .header = std::nullopt, .viewport = std::nullopt};
     }
     list.SetWidth(viewport->size.columns);
     if (full_name) {

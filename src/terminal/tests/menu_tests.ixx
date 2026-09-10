@@ -980,6 +980,44 @@ export [[nodiscard]] auto TestMenu() -> bool {
         Require(!SelectTestMenuItem(terminal, kHeader, kEntries),
             "Back did not cancel the unusably small menu"sv);
     });
+    passed &= Test("a small-window message submitted as a complete frame"sv, [] {
+        constexpr auto input = std::array{MenuInput{MenuKey::Back}};
+        auto terminal = CapturingMenuConsole{input, {.rows = 2, .columns = 40}};
+        const auto screen = terminal.EnterScreen();
+        Require(!SelectTestMenuItem(terminal, kHeader, kEntries),
+            "Back did not cancel the small-window frame"sv);
+        Require(terminal.submitted_frames.size() == 1,
+            "the small-window message bypassed the adapter's Flip operation"sv);
+        const auto &frame = terminal.submitted_frames.front();
+        Require((frame.rows.size() == 2) && frame.rows.back().text.empty() &&
+            (frame.rows.front().text == "Enlarge the window.    Esc: Back"sv),
+            "the replacement frame omitted its instructions or blank rows"sv);
+        Require((terminal.write_calls == 0) && (terminal.cursor_query_calls == 0),
+            "constructing the small-window frame wrote directly to the terminal"sv);
+    });
+    passed &= Test("entering and leaving a small-window message through delta presentation"sv, [] {
+        constexpr auto input = std::array{MenuInput{MenuKey::Resize}, MenuInput{MenuKey::Back},
+            MenuInput{MenuKey::Resize}, MenuInput{MenuKey::Accept}};
+        for (const auto &small_size : std::array{
+                TerminalSize{.rows = 8, .columns = 11}, TerminalSize{.rows = 2, .columns = 80}}) {
+            auto terminal = MenuConsole{input};
+            const auto screen = terminal.EnterScreen();
+            terminal.resize_to = small_size;
+            Require(!SelectTestMenuItem(terminal, kHeader, kEntries),
+                "Back did not cancel the resized menu"sv);
+            Require(terminal.frames.back().starts_with("Enlarge "sv),
+                "the small window did not replace the menu with its instructions"sv);
+            terminal.resize_to = TerminalSize{.rows = 8, .columns = 80};
+            Require(SelectTestMenuItem(terminal, kHeader, kEntries) == 0,
+                "enlarging the window did not restore the selectable menu"sv);
+            Require(terminal.clears == std::vector<std::size_t>{1, 0, 0, 0},
+                "a transition to or from the small-window message cleared the whole screen"sv);
+            Require((terminal.presentations.at(2) == 0) && terminal.touched_rows.at(2).empty(),
+                "reopening the same small-window message repainted its unchanged frame"sv);
+            Require(terminal.frames.front() == terminal.frames.back(),
+                "enlarging the window failed to restore the complete menu"sv);
+        }
+    });
     passed &= Test("paging by wrapped rows retaining a partly visible selection"sv, [] {
         const auto long_name = std::string(160, 'A');
         const auto entries = std::array{std::string_view{long_name}, "Second"sv, "Third"sv};
@@ -1153,6 +1191,8 @@ export [[nodiscard]] auto TestMenu() -> bool {
             Require(!terminal.Row(1).empty() &&
                 std::cmp_less_equal(terminal.Row(1).size(), columns),
                 std::format("the resize message escaped its {}-column row", columns));
+            Require(terminal.clears.at(1) == 0,
+                std::format("resizing to {} columns cleared the whole screen", columns));
             for (auto row = 2; row <= 8; ++row) {
                 Require(terminal.Row(row).empty(),
                     std::format("resizing to {} columns left old menu text on row {}", columns, row));

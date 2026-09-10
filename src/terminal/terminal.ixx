@@ -54,6 +54,24 @@ struct WrappingOptions {
     int continuation_column = 1;
     int maximum_rows = 1;
     int trailing_columns = 0;
+
+    // Layout and writing share these preconditions for row counts and column
+    // arithmetic. Negative counts cannot be used as array sizes, and column
+    // calculations require a positive origin and a nonnegative reservation.
+    auto CheckPreconditions() const -> void {
+        if (maximum_rows < 0) {
+            throw std::invalid_argument(std::format(
+                "maximum_rows must be nonnegative; received {}", maximum_rows));
+        }
+        if (continuation_column < 1) {
+            throw std::invalid_argument(std::format(
+                "continuation_column must be positive; received {}", continuation_column));
+        }
+        if (trailing_columns < 0) {
+            throw std::invalid_argument(std::format(
+                "trailing_columns must be nonnegative; received {}", trailing_columns));
+        }
+    }
 };
 
 // `WidthPolicy` selects the width estimate that `MeasureText` assigns to each
@@ -282,15 +300,13 @@ export template <typename LineStarted = std::nullptr_t>
     const auto prepared = measured.empty() ? ""sv : std::string_view{
         measured.front().text.begin(), measured.back().text.end()};
     const auto &[size, continuation_column, requested_rows, trailing_columns] = options;
-    if ((size.rows < 1) || (size.columns < 1) ||
-        (continuation_column < 1) || (continuation_column > size.columns) ||
-        (requested_rows < 1) || (trailing_columns < 0) ||
-        (trailing_columns >= size.columns)) {
-        return {.remaining = prepared, .rows = 0, .stop = WrappingStop::RedrawRequired};
-    }
     if (prepared.empty()) {
         return {.remaining = prepared, .rows = 0, .stop = WrappingStop::EndOfText};
     }
+    if ((size.rows < 1) || (size.columns < 1) || (requested_rows == 0)) {
+        return {.remaining = prepared, .rows = 0, .stop = WrappingStop::RowLimit};
+    }
+    options.CheckPreconditions();
 
     const auto start = terminal.QueryCursor();
     if (!start || (start->row < 1) || (start->row > size.rows) ||
@@ -298,7 +314,7 @@ export template <typename LineStarted = std::nullptr_t>
         return {.remaining = prepared, .rows = 0, .stop = WrappingStop::RedrawRequired};
     }
     const auto maximum_rows = std::min(requested_rows, size.rows - start->row + 1);
-    const auto continuation_capacity = size.columns - continuation_column + 1;
+    const auto continuation_capacity = std::max(0, size.columns - continuation_column + 1);
     auto remaining = prepared;
     auto clusters = measured;
     auto cursor = *start;

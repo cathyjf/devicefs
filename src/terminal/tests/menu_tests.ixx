@@ -87,7 +87,7 @@ public:
     }
 
     auto InvalidateFrameRows(const int first_row, const int count) -> void {
-        ++frame_row_invalidations;
+        invalidated_rows.emplace_back(first_row, count);
         presenter_.InvalidateRows(first_row, count);
     }
 
@@ -261,7 +261,7 @@ public:
     std::size_t write_calls = 0;
     std::size_t cursor_query_calls = 0;
     mutable std::size_t size_query_calls = 0;
-    std::size_t frame_row_invalidations = 0;
+    std::vector<std::pair<int, int>> invalidated_rows;
     std::optional<TerminalSize> resize_to;
     std::vector<std::string> frames;
     std::vector<std::size_t> presentations;
@@ -1103,7 +1103,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
         Require((terminal.clears.at(1) == 0) && !terminal.touched_rows.at(1).contains(1) &&
             terminal.touched_rows.at(1).contains(4),
             "narrowing repainted the fixed header or omitted the label's new continuation row"sv);
-        Require(terminal.frame_row_invalidations == 1,
+        Require(terminal.invalidated_rows.size() == 1,
             "resizing rewrote the viewport to measure a name whose widths were already cached"sv);
         Require(std::ranges::all_of(terminal.presentations,
                 [](const auto count) { return count == 1; }),
@@ -1150,38 +1150,93 @@ export [[nodiscard]] auto TestMenu() -> bool {
                 "a zero-row limit consumed text or returned a display row"sv);
         }
         Require((terminal.write_calls == 0) && (terminal.cursor_query_calls == 0) &&
-            (terminal.frame_row_invalidations == 0),
+            terminal.invalidated_rows.empty(),
             "a zero-row layout accessed the terminal"sv);
     });
-    passed &= Test("invalid text-layout coordinates and scratch areas requesting recovery before output"sv, [] {
+    passed &= Test("empty text-layout areas retaining input without measuring or invalidating rows"sv, [] {
+        auto terminal = MenuConsole{std::span<const MenuInput>{}};
+        const auto check_empty = [&terminal](const CursorPosition start, const WrappingOptions &options) {
+            for (const auto text : std::array{""sv, "unwritten"sv}) {
+                const auto layout = LayoutText(terminal, text, start, options, 1);
+                Require(layout && layout->rows.empty() &&
+                    (layout->truncated == !text.empty()) && !layout->oversized,
+                    "an empty drawing area consumed text or requested recovery instead of returning no rows"sv);
+            }
+        };
+        for (const auto &options : std::array{
+                WrappingOptions{.size = {.rows = 0, .columns = 8}},
+                WrappingOptions{.size = {.rows = -1, .columns = 8}},
+                WrappingOptions{.size = {.rows = 3, .columns = 0}},
+                WrappingOptions{.size = {.rows = 3, .columns = -1}},
+                WrappingOptions{.size = {.rows = 3, .columns = 8}, .maximum_rows = 0}}) {
+            check_empty({1, 1}, options);
+        }
+        for (const auto start : std::array{CursorPosition{4, 1}, CursorPosition{1, 9}}) {
+            check_empty(start, {.size = {.rows = 3, .columns = 8}});
+        }
+        Require((terminal.write_calls == 0) && (terminal.cursor_query_calls == 0) &&
+            terminal.invalidated_rows.empty(),
+            "an empty layout accessed the terminal or invalidated display rows"sv);
+    });
+    passed &= Test("invalid layout coordinates and negative capacities being rejected before terminal access"sv, [] {
         auto terminal = MenuConsole{std::span<const MenuInput>{}};
         constexpr auto options = WrappingOptions{.size = {.rows = 3, .columns = 8}};
-        for (const auto start : std::array{
-                CursorPosition{0, 1}, CursorPosition{4, 1},
-                CursorPosition{1, 0}, CursorPosition{1, 9}}) {
-            Require(!LayoutText(terminal, "text"sv, start, options, 1),
-                std::format("text layout accepted row {}, column {} outside its screen",
-                    start.row, start.column));
+        for (const auto &[start, invalid] : std::array{
+                std::pair{CursorPosition{0, 1}, options},
+                std::pair{CursorPosition{-1, 1}, options},
+                std::pair{CursorPosition{1, 0}, options},
+                std::pair{CursorPosition{1, -1}, options},
+                std::pair{CursorPosition{1, 1}, WrappingOptions{
+                    .size = options.size, .maximum_rows = -1}},
+                std::pair{CursorPosition{1, 1}, WrappingOptions{
+                    .size = options.size, .continuation_column = 0}},
+                std::pair{CursorPosition{1, 1}, WrappingOptions{
+                    .size = options.size, .continuation_column = -1}},
+                std::pair{CursorPosition{1, 1}, WrappingOptions{
+                    .size = options.size, .trailing_columns = -1}}}) {
+            auto rejected = false;
+            try {
+                std::ignore = LayoutText(terminal, "text"sv, start, invalid, 1);
+            } catch (const std::invalid_argument &) {
+                rejected = true;
+            }
+            Require(rejected, std::format(
+                "layout accepted start ({}, {}), maximum_rows {}, continuation_column {}, trailing_columns {}",
+                start.row, start.column, invalid.maximum_rows,
+                invalid.continuation_column, invalid.trailing_columns));
         }
-        for (const auto &invalid : std::array{
-                WrappingOptions{.size = {.rows = 0, .columns = 8}},
-                WrappingOptions{.size = {.rows = 3, .columns = 0}},
-                WrappingOptions{.size = {.rows = 3, .columns = 8}, .maximum_rows = 0},
-                WrappingOptions{.size = {.rows = 3, .columns = 8}, .maximum_rows = -1},
-                WrappingOptions{.size = {.rows = 3, .columns = 8}, .maximum_rows = 4},
-                WrappingOptions{.size = {.rows = 3, .columns = 8}, .continuation_column = 0},
-                WrappingOptions{.size = {.rows = 3, .columns = 8}, .continuation_column = 9},
-                WrappingOptions{.size = {.rows = 3, .columns = 8}, .trailing_columns = -1},
-                WrappingOptions{.size = {.rows = 3, .columns = 8}, .trailing_columns = 8}}) {
-            Require(!LayoutText(terminal, "text"sv, {1, 1}, invalid, 1),
-                "text layout accepted unusable dimensions or row capacities"sv);
-        }
-        Require(!LayoutText(terminal, "text"sv, {3, 1},
-                {.size = {.rows = 3, .columns = 8}, .maximum_rows = 2}, 1),
-            "the scratch area was allowed to extend below the screen"sv);
         Require((terminal.write_calls == 0) && (terminal.cursor_query_calls == 0) &&
-            (terminal.frame_row_invalidations == 0),
-            "an invalid layout accessed the terminal before reporting recovery"sv);
+            terminal.invalidated_rows.empty(),
+            "invalid layout arguments reached terminal output, observation, or invalidation"sv);
+    });
+    passed &= Test("an oversized scratch-row allowance reusing only the remaining physical rows"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 3, .columns = 8};
+        auto terminal = MenuConsole{std::span<const MenuInput>{}, size};
+        const auto layout = LayoutText(terminal, "abcdefghijklmnopqrstuvwxyz"sv, {2, 1},
+            {.size = size, .maximum_rows = 20});
+        Require(layout && (layout->rows == std::vector{"abcdefgh"sv, "ijklmnop"sv, "qrstuvwx"sv, "yz"sv}) &&
+            !layout->truncated && !layout->oversized,
+            "a large scratch allowance rejected or truncated text that fits across reused pages"sv);
+        Require((terminal.cursor_query_calls > 0) &&
+            (terminal.invalidated_rows == std::vector{std::pair{2, 2}}),
+            "uncached layout did not measure within and invalidate exactly the remaining screen rows"sv);
+    });
+    passed &= Test("unused continuation indentation beyond the window allowing fitting first-row text"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 3, .columns = 8};
+        const auto check_layout = [size](auto &terminal) {
+            const auto layout = LayoutText(terminal, "fits"sv, {1, 1},
+                {.size = size, .continuation_column = 20});
+            Require(layout && (layout->rows == std::vector{"fits"sv}) &&
+                !layout->truncated && !layout->oversized,
+                "an unused continuation column prevented text from fitting on its first row"sv);
+            Require((terminal.write_calls == 0) && (terminal.cursor_query_calls == 0) &&
+                terminal.invalidated_rows.empty(),
+                "fitting text required measurement despite known widths or a fitting width bound"sv);
+        };
+        auto cached = CachedWidthMenuConsole{std::span<const MenuInput>{}, size};
+        check_layout(cached);
+        auto measured = MenuConsole{std::span<const MenuInput>{}, size};
+        check_layout(measured);
     });
     passed &= Test("a cached wide group wrapping from a partly occupied first row"sv, [] {
         auto terminal = CachedWidthMenuConsole{std::span<const MenuInput>{}};

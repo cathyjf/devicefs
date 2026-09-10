@@ -367,19 +367,20 @@ private:
             if (line.clipping == FrameClipping::None) {
                 return 0;
             }
+            const auto ellipsis_columns = std::min(3, std::max(0, columns - line.clipping_column + 1));
             if (line.clipping == FrameClipping::IfNeeded) {
                 auto remaining = columns;
                 for (const auto &group : groups) {
                     const auto known = widths_.find(group.text);
                     const auto width = known == widths_.end() ? group.width_bound : known->second;
                     if (width > remaining) {
-                        return std::min(3, std::max(0, columns - line.clipping_column + 1));
+                        return ellipsis_columns;
                     }
                     remaining -= width;
                 }
                 return 0;
             }
-            return std::min(3, std::max(0, columns - line.clipping_column + 1));
+            return ellipsis_columns;
         }();
         for (auto index = std::size_t{}; index < groups.size(); ++index) {
             const auto &group = groups.at(index);

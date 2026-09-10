@@ -31,6 +31,12 @@ concept LayoutTerminal = Terminal<T> && requires(T &terminal, const std::string_
 // An optional `row_limit` caps the layout's total rows;
 // `options.trailing_columns` reserves space on that final row, and `truncated`
 // records omitted text. Without a row limit, the complete text is laid out.
+// An empty drawing area returns zero rows. An empty label occupies one blank
+// row when a drawing area is available.
+// The measurement area is capped at the bottom of the screen. Starting
+// coordinates are positive; `WrappingOptions::CheckPreconditions` documents
+// the row-count and column-arithmetic preconditions. Violations that reach
+// those calculations throw `std::invalid_argument`.
 //
 // Previously measured character-group widths establish row boundaries in
 // memory. Text whose complete width bound fits on one row also needs no output.
@@ -46,42 +52,39 @@ template <WidthPolicy Policy = WidthPolicy::AllModes>
     const WrappingOptions &options, const std::optional<std::size_t> row_limit = std::nullopt)
     -> std::optional<TextLayout> {
     const auto limit = row_limit.value_or(std::numeric_limits<std::size_t>::max());
-    if (limit == 0) {
+    if ((limit == 0) || (options.size.rows < 1) || (options.size.columns < 1) ||
+        (options.maximum_rows == 0) ||
+        (start.row > options.size.rows) || (start.column > options.size.columns)) {
         return TextLayout{.rows = {}, .truncated = !text.empty()};
     }
-    if ((options.size.rows < 1) || (options.size.columns < 1) ||
-        (start.row < 1) || (start.row > options.size.rows) ||
-        (start.column < 1) || (start.column > options.size.columns) ||
-        (options.maximum_rows < 1) ||
-        (options.maximum_rows > (options.size.rows - start.row + 1)) ||
-        (options.continuation_column < 1) ||
-        (options.continuation_column > options.size.columns) ||
-        (options.trailing_columns < 0) || (options.trailing_columns >= options.size.columns)) {
-        return std::nullopt;
+    if (text.empty()) {
+        return TextLayout{.rows = {text}};
     }
+    if ((start.row < 1) || (start.column < 1)) {
+        throw std::invalid_argument(std::format(
+            "text layout requires a positive starting row and column; received row {}, column {}",
+            start.row, start.column));
+    }
+    options.CheckPreconditions();
+    const auto scratch_rows = std::min(options.maximum_rows, options.size.rows - start.row + 1);
     auto layout = TextLayout{};
     auto remaining = text;
-    if (text.empty()) {
-        layout.rows.push_back(text);
-        return layout;
-    }
     if (const auto known_widths = terminal.template KnownTextWidths<Policy>(text)) {
+        const auto continuation_capacity =
+            std::max(0, options.size.columns - options.continuation_column + 1);
         auto groups = std::span<const MeasuredCluster>{*known_widths};
         while (!groups.empty() && (layout.rows.size() < limit)) {
-            auto available_columns = options.size.columns -
-                (layout.rows.empty() ? start.column : options.continuation_column) + 1;
+            auto available_columns = layout.rows.empty() ?
+                options.size.columns - start.column + 1 : continuation_capacity;
             const auto final_row = (layout.rows.size() + 1) == limit;
             if (final_row) {
                 available_columns -= options.trailing_columns;
             }
             if (groups.front().width_bound > available_columns) {
-                if (final_row && (groups.front().width_bound <=
-                        (options.size.columns - options.continuation_column + 1))) {
+                if (final_row && (groups.front().width_bound <= continuation_capacity)) {
                     break;
                 }
-                if (layout.rows.empty() &&
-                    (groups.front().width_bound <=
-                        (options.size.columns - options.continuation_column + 1))) {
+                if (layout.rows.empty() && (groups.front().width_bound <= continuation_capacity)) {
                     layout.rows.push_back(text.substr(0, 0));
                     continue;
                 }
@@ -113,11 +116,11 @@ template <WidthPolicy Policy = WidthPolicy::AllModes>
     auto clusters = std::span<const MeasuredCluster>{measured};
     while (!remaining.empty() && (layout.rows.size() < limit)) {
         if (layout.rows.empty()) {
-            terminal.InvalidateFrameRows(start.row, options.maximum_rows);
+            terminal.InvalidateFrameRows(start.row, scratch_rows);
         }
         const auto measured_rows = layout.rows.size();
         const auto rows_to_measure = std::min(
-            FailFastCast<std::size_t>(options.maximum_rows), limit - measured_rows);
+            FailFastCast<std::size_t>(scratch_rows), limit - measured_rows);
         constexpr auto kPositionCursor = "\x1b[{};{}H"sv;
         terminal.Write(std::format(kPositionCursor, start.row,
             measured_rows == 0 ? start.column : options.continuation_column));

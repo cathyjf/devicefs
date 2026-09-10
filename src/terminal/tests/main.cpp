@@ -524,19 +524,45 @@ static_assert(Terminal<ScriptedTerminal> && !FrameTerminal<ScriptedTerminal>);
         Require(result.stop == WrappingStop::RedrawRequired,
             "a missing cursor report did not request a redraw"sv);
     });
-    passed &= Test("a window too small for the supplied area leaving the display alone"sv,
-        [] {
+    for (const auto &test_case : std::array{
+            std::pair{"zero allowed rows"sv, WrappingOptions{
+                .size = {1, 2}, .continuation_column = 3, .maximum_rows = 0}},
+            std::pair{"zero screen rows"sv, WrappingOptions{.size = {0, 8}}},
+            std::pair{"negative screen rows"sv, WrappingOptions{.size = {-1, 8}}},
+            std::pair{"zero screen columns"sv, WrappingOptions{.size = {3, 0}}},
+            std::pair{"negative screen columns"sv, WrappingOptions{.size = {3, -1}}}}) {
+        passed &= Test(std::format("{} returning retained text without terminal access", test_case.first),
+            [options = test_case.second] {
+                for (const auto text : std::array{""sv, "abcdefgh"sv}) {
+                    auto terminal = ScriptedTerminal{std::span<const CursorPosition>{}};
+                    const auto result = WriteWrappingText(terminal, text, options);
+                    Require(terminal.writes.empty(), "an empty area caused output"sv);
+                    CheckText(result.remaining, text);
+                    Require(result.rows == 0, "unwritten text occupied a row"sv);
+                    Require(result.stop == (text.empty() ? WrappingStop::EndOfText : WrappingStop::RowLimit),
+                        "an empty area did not distinguish completed empty text from retained input"sv);
+                }
+            });
+    }
+    passed &= Test("invalid wrapping capacities being rejected before cursor observation"sv, [] {
+        for (const auto &options : std::array{
+                WrappingOptions{.size = {3, 8}, .maximum_rows = -1},
+                WrappingOptions{.size = {3, 8}, .continuation_column = 0},
+                WrappingOptions{.size = {3, 8}, .continuation_column = -1},
+                WrappingOptions{.size = {3, 8}, .trailing_columns = -1}}) {
             auto terminal = ScriptedTerminal{std::span<const CursorPosition>{}};
-            constexpr auto text = "abcdefgh"sv;
-            const auto result = WriteWrappingText(terminal, text,
-                WrappingOptions{.size = {1, 2},
-                    .continuation_column = 3, .maximum_rows = 0});
-            Require(terminal.writes.empty(), "an unusable area caused output"sv);
-            CheckText(result.remaining, text);
-            Require(result.rows == 0, "unwritten text occupied a row"sv);
-            Require(result.stop == WrappingStop::RedrawRequired,
-                "an unusable area did not request a new layout"sv);
-        });
+            auto rejected = false;
+            try {
+                std::ignore = WriteWrappingText(terminal, "text"sv, options);
+            } catch (const std::invalid_argument &) {
+                rejected = true;
+            }
+            Require(rejected, std::format(
+                "wrapping accepted maximum_rows {}, continuation_column {}, trailing_columns {}",
+                options.maximum_rows, options.continuation_column, options.trailing_columns));
+            Require(terminal.writes.empty(), "invalid wrapping options caused output"sv);
+        }
+    });
     passed &= Test("redrawing the original text after obtaining a narrower window"sv, [] {
         constexpr auto text = "abcdefgh"sv;
         constexpr auto first_reply = std::array{CursorPosition{1, 1}, CursorPosition{2, 2}};

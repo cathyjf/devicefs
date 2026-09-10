@@ -23,9 +23,18 @@ constexpr auto kCaseCount = 2048uz;
 [[nodiscard]] auto GeneratedInputs() {
     constexpr auto fragments = std::array{
         "ordinary text"sv, "日本語 — é — 👩‍💻 — ©️"sv,
+        // CAN/SUB cancel commands; ESC starts one. `ESC [` is CSI; `ESC ]` is
+        // OSC; `ESC P/X/^/_` introduce DCS/SOS/PM/APC strings. `ESC \` is ST,
+        // their terminator; BEL can also terminate OSC.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         "\0\t\n\r\\"sv, "\x18\x1a"sv, "\x1b"sv, "\x1b["sv,
         "\x1b]"sv, "\x1bP"sv, "\x1bX"sv, "\x1b^"sv, "\x1b_"sv,
+        // CSI suffixes: SGR 31 selects red, DECRST 25 hides the cursor, and
+        // SGR 38:2::1:2:3 selects RGB foreground (1, 2, 3).
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         "\x1b\\"sv, "\a"sv, "31m"sv, "?25l"sv, "38:2::1:2:3m"sv,
+        // UTF-8 encodings of the C1 forms of CSI, OSC, ST, and DCS, respectively.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         "\u009b"sv, "\u009d"sv, "\u009c"sv, "\u0090"sv,
         "\u061c\u200e\u202e\u2066\u2069"sv, "\u2028\u2029"sv,
         "\xc0\xaf"sv, "\xed\xa0\x80"sv, "\xf4\x90\x80\x80"sv,
@@ -70,6 +79,8 @@ export [[nodiscard]] auto TestGeneratedText() -> bool {
         for (const auto &[index, input] : std::views::enumerate(inputs)) {
             try {
                 const auto prepared = PrepareTerminalText(input);
+                // CAN (0x18) cancels an unfinished command so the suffix is display text.
+                // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
                 Require(PrepareTerminalText(input + "\x18" "VISIBLE_END").ends_with("VISIBLE_END"sv),
                     "sequence cancellation did not restore ordinary label text"sv);
                 auto remaining = std::string_view{prepared};

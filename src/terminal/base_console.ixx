@@ -96,6 +96,9 @@ public:
     }
 
 protected:
+    // DECRST 1049 (`CSI ? 1049 l`) returns to the normal screen and restores
+    // the cursor saved when the alternate screen was entered.
+    // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-The-Alternate-Screen-Buffer
     static constexpr auto kLeaveScreen = "\x1b[?1049l"sv;
 
     // Ctrl+C arrives as ETX when native input processing is disabled, allowing
@@ -116,7 +119,13 @@ protected:
     }
 
 private:
+    // BSU (`CSI ? 2026 h`) begins a synchronized update: the terminal processes
+    // output while keeping the previous rendered frame visible.
+    // https://github.com/contour-terminal/vt-extensions/blob/master/synchronized-output.md
     static constexpr auto kBeginUpdate = "\x1b[?2026h"sv;
+    // ESU (`CSI ? 2026 l`) ends the synchronized update, allowing the terminal
+    // to display the accumulated changes.
+    // https://github.com/contour-terminal/vt-extensions/blob/master/synchronized-output.md
     static constexpr auto kEndUpdate = "\x1b[?2026l"sv;
 
     // Queries consume their reports while retaining interspersed user input.

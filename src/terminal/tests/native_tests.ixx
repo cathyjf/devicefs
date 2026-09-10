@@ -224,6 +224,9 @@ public:
 [[nodiscard]] auto TestNativeInput(NativeInput &input) -> bool {
     const auto original_modes = input.Modes();
     auto passed = Test("native update measurements counting begin, presentation, and guard output"sv, [&] {
+        // BSU (`CSI ? 2026 h`) begins a synchronized update. ESU (`CSI ? 2026 l`)
+        // ends it, once for presentation and once more when the guard is destroyed.
+        // https://github.com/contour-terminal/vt-extensions/blob/master/synchronized-output.md
         constexpr auto update_sequences = "\x1b[?2026h\x1b[?2026l\x1b[?2026l"sv;
         auto console = MeasuringConsole<NativeConsole>{};
         {
@@ -244,6 +247,9 @@ public:
         console.on_write = [&](const auto text) {
             Require(text == detail::ReportRequest(detail::TerminalReport::Cursor),
                 "unexpected query"sv);
+            // CPR (`CSI row;column R`) reports (4, 9), split after the semicolon.
+            // Ctrl+L precedes the report and the `1` shortcut follows it.
+            // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
             input.Feed("\x0c\x1b[4;"sv);
             remainder = std::async(std::launch::async, [&] {
                 std::this_thread::sleep_for(10ms);
@@ -267,6 +273,8 @@ public:
                 "cancellation waited for the query timeout"sv);
         }
         Require(console.ReadMenuInput().key == MenuKey::Redraw, "cancellation consumed another key"sv);
+        // CPR reports row 7, column 8 after the cancelled query.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
         console.on_write = [&](const auto) { input.Feed("\x1b[7;8R"sv); };
         Require(console.QueryCursor() == CursorPosition{7, 8}, "a later query inherited cancellation"sv);
     });
@@ -277,6 +285,9 @@ public:
             console.on_write = [&](const auto text) {
                 output.append(text);
                 if (text == detail::ReportRequest(detail::TerminalReport::Size)) {
+                    // XTWINOPS replies `CSI 8;rows;columns t`: 24 rows, 80 columns.
+                    // The other branch supplies Ctrl+C to cancel the size query.
+                    // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
                     input.Feed(cancel_size ? "\x03"sv : "\x1b[8;24;80t"sv);
                 } else if (text == detail::ReportRequest(detail::TerminalReport::Cursor)) {
                     input.Feed("\x03"sv);
@@ -290,6 +301,8 @@ public:
     });
     passed &= Test("native cancellation queued after a completed report"sv, [&] {
         auto console = TestConsole{};
+        // CPR (`CSI 4;9 R`) reports the cursor, followed by Ctrl+C (ETX, 0x03).
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
         console.on_write = [&](const auto) { input.Feed("\x1b[4;9R\x03"sv); };
         Require(console.QueryCursor() == CursorPosition{4, 9}, "the first report was lost"sv);
         console.on_write = {};
@@ -319,9 +332,13 @@ public:
         const auto start = std::chrono::steady_clock::now();
         Require(!console.QueryCursor(), "a missing report produced a cursor position"sv);
         Require(std::chrono::steady_clock::now() - start < 8s, "the query exceeded its deadline"sv);
+        // A late CPR reports row 1, column 1; Ctrl+L follows as ordinary input.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
         input.Feed("\x1b[1;1R\x0c"sv);
         Require(console.ReadMenuInput().key == MenuKey::Redraw,
             "a late report was interpreted as a menu shortcut"sv);
+        // CPR reports row 2, column 3 in response to the next query.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
         console.on_write = [&](const auto) { input.Feed("\x1b[2;3R"sv); };
         Require(console.QueryCursor() == CursorPosition{2, 3}, "a query could not recover after timeout"sv);
     });
@@ -402,6 +419,8 @@ public:
         auto resize = INPUT_RECORD{.EventType = WINDOW_BUFFER_SIZE_EVENT};
         resize.Event.WindowBufferSizeEvent.dwSize = {90, 30};
         console.on_write = [&](const auto) {
+            // CPR (`CSI 4;9 R`) is split around unrelated native input records.
+            // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
             input.Feed("\x1b[4;"sv);
             input.FeedRecords(std::array{key, resize});
             input.Feed("9R"sv);
@@ -413,6 +432,8 @@ public:
             (retained.wVirtualScanCode == 80) && (retained.uChar.UnicodeChar == L'界') &&
             (retained.dwControlKeyState == SHIFT_PRESSED), "the saved key event changed"sv);
         Require(console.ReadMenuInput().key == MenuKey::Resize, "the resize event was lost"sv);
+        // CPR (`CSI 1;1 R`) is split around a key event and followed by Ctrl+L.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
         input.Feed("\x1b[1;"sv);
         input.FeedRecords(std::array{key});
         input.Feed("1R\x0c"sv);
@@ -428,9 +449,15 @@ public:
             auto console = TestConsole{};
             auto remainder = [&input, fragmented] {
                 if (!fragmented) {
+                    // CPR (`CSI 12;34 R`) contains an inserted Ctrl+C, then
+                    // Ctrl+L follows the report as the next command to the menu.
+                    // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
                     input.Feed("\x1b[12;\x03" "34R\x0c"sv);
                     return std::future<void>{};
                 }
+                // The same CPR (`CSI 12;34 R`) arrives in separate fragments,
+                // with Ctrl+C between the row and column and Ctrl+L afterward.
+                // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
                 input.Feed("\x1b[12;"sv);
                 return std::async(std::launch::async, [&input] {
                     std::this_thread::sleep_for(10ms);
@@ -468,6 +495,8 @@ public:
     });
     passed &= Test("Unix fragmented navigation and a lone Escape"sv, [&] {
         auto console = TestConsole{};
+        // The Down key is `CSI B` in normal cursor-key mode, split after `ESC [`.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-PC-Style-Function-Keys
         input.Feed("\x1b["sv);
         auto remainder = std::async(std::launch::async, [&] {
             std::this_thread::sleep_for(10ms);
@@ -475,6 +504,8 @@ public:
         });
         Require(console.ReadMenuInput().key == MenuKey::Down, "a fragmented arrow became Escape"sv);
         remainder.get();
+        // A standalone ESC (0x1B) represents the Escape key rather than a sequence.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         input.Feed("\x1b"sv);
         const auto escape_started = std::chrono::steady_clock::now();
         Require(console.ReadMenuInput().key == MenuKey::Back, "a lone Escape did not produce Back"sv);

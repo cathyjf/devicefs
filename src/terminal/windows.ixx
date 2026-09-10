@@ -163,6 +163,10 @@ public:
 
 private:
     friend class BaseConsole;
+    // DECSET 1049 saves the cursor and enters a cleared alternate screen.
+    // DECRST 25 (DECTCEM) hides the cursor while the menu is displayed.
+    // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-The-Alternate-Screen-Buffer
+    // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-visibility
     static constexpr auto kEnterScreen = "\x1b[?1049h\x1b[?25l"sv;
 
 protected:

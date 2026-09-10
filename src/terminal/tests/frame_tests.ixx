@@ -36,6 +36,10 @@ public:
         ++writes;
         bytes += text.size();
         while (!text.empty()) {
+            // CSI (`ESC [`) introduces CUP (`H`), ED (`J`), EL (`K`), ECH (`X`),
+            // and SGR (`m`), the positioning, erasure, and attribute commands
+            // implemented by this test terminal.
+            // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences
             if (text.starts_with("\x1b["sv)) {
                 text.remove_prefix(2);
                 const auto end = text.find_first_of("HJKXmhl"sv);
@@ -72,6 +76,8 @@ public:
                 }
                 continue;
             }
+            // ESC (0x1B) marks the next command after ordinary display text.
+            // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
             const auto end = text.find('\x1b');
             const auto printed = text.substr(0, end);
             for (const auto &group : MeasureText<WidthPolicy::WindowsTerminalGraphemes>(printed)) {
@@ -272,6 +278,8 @@ export [[nodiscard]] auto RunFrameTests() -> bool {
         std::ignore = presenter.Flip(terminal, frame);
         // A console relay can place text beyond the end reported to the
         // application. The next shorter frame must leave that tail blank too.
+        // CUP places the injected `t)` at row 1, column 14.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
         terminal.Write("\x1b[1;14Ht)"sv);
         terminal.ResetActivity();
         frame.rows.at(0).text = "日本";
@@ -567,6 +575,10 @@ export [[nodiscard]] auto RunFrameTests() -> bool {
         constexpr auto &array = "array\nvalue";
         frame.WriteLine("{}|{}|{}|{}", string, view, pointer, array);
         frame.Write("\n");
+        // ED 2 erases the display; OSC 0 sets the icon/window title and ends
+        // here with BEL. Both commands must disappear from the formatted data.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#text-modification
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         frame.WriteLine("{}", "before\x1b[2Jafter\x1b]0;title\x07" "end");
         Require(terminal.Flip(frame) &&
             (terminal.Row(1) == "string\\nvalue|view\\nvalue|pointer\\nvalue|array\\nvalue"sv) &&

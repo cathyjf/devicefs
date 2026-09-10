@@ -101,6 +101,13 @@ public:
         auto &screen = updating ? hidden_ : displayed_;
         auto wrote_text = false;
         while (!text.empty()) {
+            // CSI (`ESC [`) introduces CUP (`H`), ED (`J`), EL (`K`), ECH (`X`),
+            // SGR (`m`), and ICH (`@`). These position the cursor, erase cells,
+            // change attributes, or insert spaces in the simulated screen.
+            // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences
+            // Private-mode `h`/`l` commands include synchronized output 2026.
+            // The update guard controls frame publication in this test terminal.
+            // https://github.com/contour-terminal/vt-extensions/blob/master/synchronized-output.md
             if (text.front() == '\x1b') {
                 Require(text.starts_with("\x1b["sv), "unexpected escape command"sv);
                 text.remove_prefix(2);

@@ -67,11 +67,24 @@ concept FrameTerminal = Terminal<T> && requires(T &terminal) {
 
 namespace devicefs::terminal::frame_detail {
 
+// CUP (`CSI row;column H`) positions the cursor using one-based coordinates.
+// https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
 constexpr auto kPositionCursor = "\x1b[{};{}H"sv;
+// ECH (`CSI count X`) replaces cells with spaces without moving the cursor.
+// https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#text-modification
 constexpr auto kEraseCells = "\x1b[{}X"sv;
+// EL (`CSI K`, default parameter 0) erases from the cursor through the row's end.
+// https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#text-modification
 constexpr auto kEraseToEndOfLine = "\x1b[K"sv;
+// SGR 0 (`CSI 0 m`) resets text attributes, including reverse video.
+// https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#text-formatting
 constexpr auto kResetAttributes = "\x1b[0m"sv;
+// SGR 7 (`CSI 7 m`) swaps foreground and background for selection highlighting.
+// https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#text-formatting
 constexpr auto kReverseAttributes = "\x1b[7m"sv;
+// SGR 0 resets attributes; ED 2 erases the display; CUP with omitted parameters
+// places the cursor at row 1, column 1. Erasure alone does not move the cursor.
+// https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences
 constexpr auto kClearScreen = "\x1b[0m\x1b[2J\x1b[H"sv;
 
 // FrameOutput collects a flip's drawing commands in a string. A cursor query

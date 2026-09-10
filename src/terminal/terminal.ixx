@@ -368,6 +368,9 @@ export template <typename LineStarted = std::nullptr_t>
             }
             ++cursor.row;
             cursor.column = continuation_column;
+            // CUP (`CSI row;column H`) starts the continuation at its indented
+            // column on the next row, using one-based coordinates.
+            // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
             terminal.Write(std::format("\x1b[{};{}H", cursor.row, cursor.column));
             notify_line(remaining);
             margin = RightMargin::Available;
@@ -440,6 +443,8 @@ export template <typename LineStarted = std::nullptr_t>
             // shifted text. The group's width bound reserved enough space for
             // this shift. Microsoft's text-modification reference defines ICH:
             // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#text-modification
+            // CUP is `CSI row;column H`; ICH is `CSI count @`.
+            // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
             if (observed->column > (continuation_capacity + 1)) {
                 return result(WrappingStop::RedrawRequired);
             }

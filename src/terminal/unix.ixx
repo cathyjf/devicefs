@@ -172,6 +172,8 @@ public:
                     unix_detail::kInputPollInterval);
                 continue;
             }
+            // ESC (0x1B) begins a terminal sequence; a lone ESC is the Escape key.
+            // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
             if (pending_.front() == '\x1b') {
                 if (const auto action = ReadEscape()) {
                     return {.key = *action};
@@ -191,7 +193,14 @@ public:
 
 private:
     friend class BaseConsole;
+    // DECSET 1049 saves the cursor and enters a cleared alternate screen.
+    // XTSAVE (`CSI ? 25 s`) saves cursor visibility; DECRST 25 then hides it.
+    // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
     static constexpr auto kEnterScreen = "\x1b[?1049h\x1b[?25s\x1b[?25l"sv;
+    // SGR 0 resets attributes. DECSET 25 shows the cursor, then XTRESTORE
+    // (`CSI ? 25 r`) restores its saved visibility where supported. DECRST 1049
+    // returns to the normal screen and restores the cursor saved on entry.
+    // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
     static constexpr auto kLeaveScreen = "\x1b[0m\x1b[?25h\x1b[?25r\x1b[?1049l"sv;
 
 protected:
@@ -344,6 +353,9 @@ private:
                 return MenuKey::Cancel;
             }
             if (pending_.size() > 1) {
+                // Navigation keys start with CSI (`ESC [`) or SS3 (`ESC O`),
+                // depending on normal or application cursor-key mode.
+                // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-PC-Style-Function-Keys
                 if ((pending_[1] != '[') && (pending_[1] != 'O')) {
                     pending_.erase(0, 1);
                     return MenuKey::Back;

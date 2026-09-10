@@ -80,6 +80,9 @@ auto CheckText(const std::string_view actual, const std::string_view expected)
         TextCase{"embedded NUL and other ASCII controls"sv,
             "a\0\a\b\v\f\030\032\177z"sv,
             "a\\x00\\x07\\x08\\x0B\\x0C\\x18\\x1A\\x7Fz"sv},
+        // UTF-8 encodes NEL (U+0085), RI (U+008D), and ST (U+009C) below.
+        // These are Next Line, Reverse Index, and String Terminator.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         TextCase{"decoded C1 controls and a stray string terminator"sv,
             "a\302\205\302\215\302\234z"sv,
             "a\\u{0085}\\u{008D}\\u{009C}z"sv},
@@ -89,32 +92,67 @@ auto CheckText(const std::string_view actual, const std::string_view expected)
             "\\u{061C}\\u{200E}\\u{200F}\\u{2028}\\u{2029}\\u{202A}"
             "\\u{202B}\\u{202C}\\u{202D}\\u{202E}\\u{2066}\\u{2067}"
             "\\u{2068}\\u{2069}"sv},
+        // DECRST 25 hides the cursor; SGR 38:2::10:20:30 selects foreground
+        // RGB (10, 20, 30); SGR 0 resets attributes. All begin with CSI (`ESC [`).
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         TextCase{"CSI commands with private markers and colon parameters"sv,
             "a\033[?25l\033[38:2::10:20:30mb\033[0m"sv, "ab"sv},
+        // UTF-8 C2 9B encodes CSI (U+009B); SGR 31 selects red and SGR 0 resets.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         TextCase{"decoded C1 CSI commands"sv,
             "a\xC2\x9B" "31mb\xC2\x9B" "0m"sv, "ab"sv},
+        // OSC 2 (`ESC ] 2 ; title`) sets the window title. The two copies use
+        // its permitted BEL and ST (`ESC \`) terminators, respectively.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         TextCase{"OSC titles terminated by BEL or ST"sv,
             "a\033]2;hidden\a\033]2;hidden\033\\b"sv, "ab"sv},
+        // OSC 8 starts a hyperlink with a URI and closes it with an empty URI.
+        // Both commands end with ST (`ESC \`); `label` is ordinary display text.
+        // https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda
         TextCase{"OSC hyperlinks retaining their visible label"sv,
             "\033]8;;https://example.invalid\033\\label\033]8;;\033\\"sv,
             "label"sv},
+        // `ESC P/X/^/_` introduce Device Control String, Start of String,
+        // Privacy Message, and Application Program Command. ST (`ESC \`)
+        // terminates each payload; the embedded BEL does not terminate DCS.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         TextCase{"DCS, SOS, PM, and APC strings"sv,
             "a\033Ppayload\a\033\\\033Xpayload\033\\"
             "\033^payload\033\\\033_payload\033\\b"sv, "ab"sv},
+        // UTF-8 encodes the C1 DCS/SOS/OSC/PM/APC introducers (U+0090/0098/009D/
+        // 009E/009F) and ST (U+009C). OSC uses BEL as its terminator here.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         TextCase{"decoded C1 control strings and terminators"sv,
             "a\302\220payload\302\234\302\230payload\302\234"
             "\302\235payload\a\302\236payload\302\234"
             "\302\237payload\302\234b"sv, "ab"sv},
+        // DECSC (`ESC 7`) saves the cursor; DECRC (`ESC 8`) restores it;
+        // `ESC ( B` designates ASCII as G0; RIS (`ESC c`) resets the terminal.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         TextCase{"other ESC commands and character-set selection"sv,
             "a\x1b" "7\x1b" "8\x1b(B\x1b" "cb"sv, "ab"sv},
+        // CAN (0x18) cancels incomplete SGR 31; SUB (0x1A) cancels an unfinished
+        // OSC (`ESC ]`) payload. The test resumes ordinary text after each.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         TextCase{"CAN and SUB cancelling pending commands"sv,
             "a\033[31\030b\033]hidden\032c"sv, "abc"sv},
+        // SGR 31 (`CSI 31 m`, red foreground) contains intervening HT/LF/DEL
+        // controls before its parameter and final byte are complete.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         TextCase{"embedded controls remaining inside discarded commands"sv,
             "a\033[3\t\n\x7f" "1mb"sv, "ab"sv},
+        // An unfinished OSC payload is followed by SGR 31 (`CSI 31 m`, red).
+        // Its ESC replaces the pending command in the filter's parser.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         TextCase{"a fresh ESC replacing a pending command"sv,
             "a\033]hidden\033[31mb"sv, "ab"sv},
+        // OSC (`ESC ]`) starts a payload with no terminating BEL or ST.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         TextCase{"an unfinished command ending with its label"sv,
             "a\033]unterminated"sv, "a"sv},
+        // CSI (`ESC [`) accepts intermediate bytes 0x20-0x2F; the following
+        // non-ASCII letter deliberately violates that sequence grammar.
+        // https://ecma-international.org/wp-content/uploads/ECMA-48_5th_edition_june_1991.pdf (section 5.4)
         TextCase{"a malformed command returning to ordinary text"sv,
             "a\033[ éb"sv, "aéb"sv},
         TextCase{"invalid UTF-8 bytes becoming visible notation"sv,
@@ -126,6 +164,9 @@ auto CheckText(const std::string_view actual, const std::string_view expected)
             "\ud7ff\ue000\U0010ffff"sv, "\ud7ff\ue000\U0010ffff"sv},
         TextCase{"an incomplete UTF-8 sequence at the end of a label"sv,
             "a\360\237"sv, "a\\xF0\\x9F"sv},
+        // OSC (`ESC ]`) ends with BEL; DCS (`ESC P`) ends with ST (`ESC \`).
+        // Their payloads deliberately contain invalid UTF-8 bytes.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         TextCase{"invalid bytes remaining inside discarded payloads"sv,
             "a\033]hidden\377\a\033P\300\257\033\\b"sv, "ab"sv},
         TextCase{"an empty label"sv, ""sv, ""sv},
@@ -137,6 +178,8 @@ auto CheckText(const std::string_view actual, const std::string_view expected)
         });
     }
     passed &= Test("separate labels having independent command state"sv, [] {
+        // OSC (`ESC ]`) begins a payload that is deliberately left unterminated.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         CheckText(PrepareTerminalText("before\033]unfinished"sv), "before"sv);
         CheckText(PrepareTerminalText("next label"sv), "next label"sv);
     });
@@ -146,12 +189,22 @@ auto CheckText(const std::string_view actual, const std::string_view expected)
 [[nodiscard]] auto TestLoggingFilter() -> bool {
     return Test("the copied logging filter across every byte split"sv, [] {
         constexpr auto cases = std::array{
+            // SGR 31/0 selects red/resets attributes; OSC 2 sets the title and
+            // ends with BEL; DCS ends with ST (`ESC \`). C2 9B is UTF-8 for CSI,
+            // retained by the byte-oriented logging interface.
+            // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
             std::pair{
                 "A\tB\r\n\033[31mred\033[0m\033]2;hidden\aZ"
                 "\033Pignored\033\\Q Л 😀 \377 \302\233"sv,
                 "A\tB\nredZQ Л 😀 \377 \302\233"sv},
+            // SGR 31 (`CSI 31 m`) selects red, with HT/LF inserted in the sequence.
+            // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
             std::pair{"a\033[\t\n31m b"sv, "a\t\n b"sv},
+            // CAN cancels an OSC payload; SUB cancels an incomplete SGR 31.
+            // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
             std::pair{"a\033]hidden\030b\033[31\032c"sv, "abc"sv},
+            // OSC (`ESC ]`) begins a payload with no terminator.
+            // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
             std::pair{"a\033]unfinished"sv, "a"sv},
         };
         const auto copy_bytes = [](const std::string_view bytes) {
@@ -292,8 +345,12 @@ static_assert(Terminal<ScriptedTerminal> && !FrameTerminal<ScriptedTerminal>);
                     .continuation_column = 3, .maximum_rows = 9});
             const auto output = terminal.Output();
             CheckText(PrepareTerminalText(output), "abcdefgh"sv);
+            // CUP moves to row 2, column 1; ICH inserts two indentation spaces.
+            // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences
             Require(output.contains("\033[2;1H\033[2@"sv),
                 "two spaces were not inserted at the start of the wrapped row"sv);
+            // CUP moves to row 2, column 4, after the indented character.
+            // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
             Require(output.contains("\033[2;4H"sv),
                 "the cursor did not advance past the indented character"sv);
             terminal.CheckRepliesConsumed();
@@ -308,6 +365,9 @@ static_assert(Terminal<ScriptedTerminal> && !FrameTerminal<ScriptedTerminal>);
             const auto result = WriteWrappingText(terminal, "abcde"sv,
                 WrappingOptions{.size = {10, 5},
                     .continuation_column = 3, .maximum_rows = 8});
+            // CUP moves to (row 4, column 1), ICH inserts two spaces, and CUP
+            // moves to (row 4, column 4) before the remaining text is written.
+            // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences
             CheckText(terminal.Output(), "abc\033[4;1H\033[2@\033[4;4Hde"sv);
             terminal.CheckRepliesConsumed();
             Require(result.remaining.empty(), "part of the label was omitted"sv);
@@ -324,6 +384,9 @@ static_assert(Terminal<ScriptedTerminal> && !FrameTerminal<ScriptedTerminal>);
             const auto result = WriteWrappingText(terminal, "abc"sv,
                 WrappingOptions{.size = {10, 5},
                     .continuation_column = 3, .maximum_rows = 8});
+            // CUP moves to (row 4, column 1), ICH inserts two spaces, and CUP
+            // moves to (row 4, column 4) before text resumes after the pending wrap.
+            // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences
             CheckText(terminal.Output(), "a\033[4;1H\033[2@\033[4;4Hbc"sv);
             terminal.CheckRepliesConsumed();
             Require(result.remaining.empty(), "part of the label was omitted"sv);
@@ -409,6 +472,9 @@ static_assert(Terminal<ScriptedTerminal> && !FrameTerminal<ScriptedTerminal>);
             CheckText(PrepareTerminalText(output), text);
             Require(std::ranges::count(terminal.writes, "👩‍👩‍👧‍👦"sv) == 1,
                 "the family emoji was not submitted intact at the right margin"sv);
+            // CUP moves to (row 2, column 1), ICH inserts two spaces, and CUP
+            // moves to (row 2, column 5), after the two-column emoji.
+            // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences
             Require(output.contains("\033[2;1H\033[2@\033[2;5H"sv),
                 "two spaces were not inserted before the wrapped two-column emoji"sv);
             terminal.CheckRepliesConsumed();
@@ -470,6 +536,8 @@ static_assert(Terminal<ScriptedTerminal> && !FrameTerminal<ScriptedTerminal>);
                     .continuation_column = 5, .maximum_rows = 9});
             const auto output = terminal.Output();
             CheckText(PrepareTerminalText(output), "abcdefg"sv);
+            // CUP moves to row 3, column 5 for the next indented continuation.
+            // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
             Require(output.contains("\033[3;5H"sv),
                 "continuation text did not move past the row filled by indentation"sv);
             terminal.CheckRepliesConsumed();
@@ -613,27 +681,48 @@ constexpr auto EXIT_FAILURE = 1;
         std::u32string_view retained;
     };
     const auto cases = std::array{
+        // CPR (`CSI row;column R`) reports row 12, column 34 between two keys.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
         ReportCase{"cursor reply surrounded by keyboard input"sv,
             U"a\x1b[12;34Rb"sv, detail::TerminalReport::Cursor,
             std::array{12, 34, 0}, U"ab"sv},
+        // `CSI B` is the Down key in normal cursor-key mode. XTWINOPS replies
+        // with `CSI 8;rows;columns t`, here describing 24 rows and 80 columns.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         ReportCase{"size reply following an arrow key"sv,
             U"\x1b[B\x1b[8;24;80t"sv, detail::TerminalReport::Size,
             std::array{8, 24, 80}, U"\x1b[B"sv},
+        // An incomplete CPR is followed by `CSI 3;4 R`, a complete cursor report.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
         ReportCase{"a new escape replacing an incomplete reply"sv,
             U"\x1b[12;\x1b[3;4R"sv, detail::TerminalReport::Cursor,
             std::array{3, 4, 0}, U"\x1b[12;"sv},
+        // CPR (`CSI row;column R`) is deliberately missing its final `R`.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
         ReportCase{"an incomplete reply remaining available as input"sv,
             U"\x1b[12;34"sv, detail::TerminalReport::Cursor,
             std::nullopt, U"\x1b[12;34"sv},
+        // CPR requires decimal coordinates. The first reply instead contains
+        // a non-ASCII character; the following `CSI 5;6 R` is valid.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
         ReportCase{"non-ASCII input invalidating a candidate reply"sv,
             U"\x1b[12;\u1234R\x1b[5;6R"sv, detail::TerminalReport::Cursor,
             std::array{5, 6, 0}, U"\x1b[12;\u1234R"sv},
+        // CPR (`CSI row;column R`) first supplies a row outside `int` range,
+        // then a valid report for row 5, column 6.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
         ReportCase{"an overflowing report preceding a valid reply"sv,
             U"\x1b[2147483648;1R\x1b[5;6R"sv, detail::TerminalReport::Cursor,
             std::array{5, 6, 0}, U"\x1b[2147483648;1R"sv},
+        // XTWINOPS reports a 24-by-80 text area (`CSI 8;24;80 t`) before the
+        // requested CPR (`CSI 5;6 R`). Only the cursor report belongs to the query.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         ReportCase{"a report for another query remaining available as input"sv,
             U"\x1b[8;24;80t\x1b[5;6R"sv, detail::TerminalReport::Cursor,
             std::array{5, 6, 0}, U"\x1b[8;24;80t"sv},
+        // The first CPR (`CSI row;column R`) exceeds the parser's length limit
+        // with leading zeros; the following report supplies row 5, column 6.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
         ReportCase{"an overlong candidate preceding a valid reply"sv,
             U"\x1b[00000000000000000000000000000000000001;1R\x1b[5;6R"sv,
             detail::TerminalReport::Cursor, std::array{5, 6, 0},
@@ -699,6 +788,8 @@ template <MenuTerminal Console = NativeConsole>
     auto entries = std::vector<std::string>{
         "Installation", "Schedule backups", "Browse backups", "Open backup console",
         "Accented names: café and naïve", "日本語 — é — 👩‍💻 — ©️",
+        // SGR 31 (`CSI 31 m`) requests red foreground; label preparation removes it.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#text-formatting
         "Embedded controls: daily\nbackup\tname\033[31m (displayed as text)",
         [] {
             auto name = std::string{};

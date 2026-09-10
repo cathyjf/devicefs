@@ -483,6 +483,9 @@ template <WidthPolicy Policy, MenuScrollPolicy Scrolling, typename T>
                 message.append(FailFastCast<std::size_t>(marker_width), '.');
             }
         }
+        // SGR 0 resets attributes, ED 2 erases the display, and CUP with omitted
+        // coordinates returns to row 1, column 1 before writing the message.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences
         constexpr auto kMessageScreen = "\x1b[0m\x1b[2J\x1b[H{}"sv;
         terminal.InvalidateFrame();
         terminal.Write(std::format(kMessageScreen, message));

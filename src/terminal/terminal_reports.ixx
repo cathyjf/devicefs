@@ -12,15 +12,24 @@ export namespace devicefs::terminal::detail {
 
 enum class TerminalReport { Cursor, Size };
 
+// ESC followed by `[` is the seven-bit Control Sequence Introducer (CSI),
+// which begins both cursor-position and window-size reports.
+// https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
 constexpr auto kReportPrefix = "\x1b["sv;
 // Three decimal `int` values, their separators, and VT framing fit in 37 bytes.
 constexpr auto kMaximumReportLength = 37uz;
 
 [[nodiscard]] constexpr auto ReportRequest(const TerminalReport report) noexcept {
+    // DSR 6 (`CSI 6 n`) requests a cursor position, answered by `CSI row;column R`.
+    // XTWINOPS 18 (`CSI 18 t`) requests text-area dimensions, answered by
+    // `CSI 8;rows;columns t`. The report coordinates and dimensions are in cells.
+    // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
     return report == TerminalReport::Cursor ? "\x1b[6n"sv : "\x1b[18t"sv;
 }
 
 [[nodiscard]] constexpr auto ReportSuffix(const TerminalReport report) noexcept {
+    // CPR ends with `R`; the XTWINOPS text-area-size reply ends with `t`.
+    // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
     return report == TerminalReport::Cursor ? "R"sv : "t"sv;
 }
 
@@ -77,6 +86,8 @@ public:
 
     [[nodiscard]] auto Push(const char32_t character, const Position position)
         -> std::optional<std::array<int, 3>> {
+        // ESC (0x1B) starts a new candidate for the seven-bit CSI report prefix.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
         if (character == U'\x1b') {
             text_ = "\x1b";
             positions_.clear();

@@ -87,6 +87,10 @@ private:
     // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
     template <bool ForDisplay>
     [[nodiscard]] auto Preserve(const char32_t character) noexcept -> bool {
+        // OSC permits BEL (0x07) as a terminator; ST (U+009C, or `ESC \`)
+        // terminates control strings generally. ESC (0x1B) starts a new escape
+        // command, including the seven-bit ST that ends the discarded payload.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         if ((state_ == State::OscString) || (state_ == State::StString)) {
             if (IsSequenceCancellation(character) ||
                 ((state_ == State::OscString) && (character == U'\x07')) ||
@@ -97,6 +101,8 @@ private:
             }
             return false;
         }
+        // ESC (0x1B) introduces the seven-bit escape-command forms parsed below.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         if (character == U'\x1b') {
             state_ = State::Escape;
             return false;
@@ -114,6 +120,12 @@ private:
             }
         }
         if constexpr (ForDisplay) {
+            // C1 forms: U+009B is CSI (Control Sequence Introducer); U+009D is
+            // OSC (Operating System Command). The string introducers U+0090,
+            // U+0098, U+009E, and U+009F are respectively DCS (Device Control
+            // String), SOS (Start of String), PM (Privacy Message), and APC
+            // (Application Program Command).
+            // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
             switch (character) {
             case U'\x9b':
                 state_ = State::ControlSequence;
@@ -139,6 +151,10 @@ private:
             return true;
 
         case State::Escape:
+            // Seven-bit forms: `ESC [` is CSI, `ESC ]` is OSC, `ESC P` is DCS,
+            // `ESC X` is SOS, `ESC ^` is PM, and `ESC _` is APC. These introduce
+            // the same command or payload types as the C1 forms above.
+            // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
             switch (character) {
             case U'[':
                 state_ = State::ControlSequence;
@@ -202,6 +218,8 @@ private:
 
     [[nodiscard]] static constexpr auto IsSequenceCancellation(
         const char32_t character) noexcept -> bool {
+        // CAN (0x18) and SUB (0x1A) cancel an unfinished escape/control sequence.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         return (character == U'\x18') || (character == U'\x1a');
     }
 

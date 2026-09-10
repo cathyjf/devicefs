@@ -355,7 +355,6 @@ public:
     auto SetWidth(const int columns) noexcept -> void {
         if (layout_width_ != columns) {
             layout_.reset();
-            first_row_ = 0;
             layout_width_ = columns;
         }
     }
@@ -375,7 +374,9 @@ public:
         if (!layout_) {
             return false;
         }
-        first_row_ = std::min(first_row_, layout_->rows.size() - 1);
+        const auto after_position = std::ranges::upper_bound(layout_->rows, text_offset_, {},
+            [this](const auto row) { return row.data() - text_.data(); });
+        first_row_ = FailFastCast<std::size_t>(after_position - layout_->rows.begin() - 1);
         return true;
     }
 
@@ -402,6 +403,7 @@ public:
         default:
             return false;
         }
+        text_offset_ = layout_->rows.at(first_row_).data() - text_.data();
         return true;
     }
 
@@ -430,6 +432,10 @@ private:
     std::string_view text_;
     std::optional<TextLayout> layout_;
     std::size_t first_row_ = 0;
+    // Preserve the reader's position across changes in line wrapping. Navigation
+    // saves the byte offset of the top row; rewrapping finds the row containing
+    // that offset. Keeping the offset unchanged during resizing prevents drift.
+    std::ptrdiff_t text_offset_ = 0;
     int layout_width_ = 0;
 };
 

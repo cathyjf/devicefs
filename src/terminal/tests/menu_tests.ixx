@@ -235,6 +235,10 @@ public:
         }
         const auto input = input_.front();
         input_ = input_.subspan(1);
+        if ((input.key == MenuKey::Resize) && !resize_sequence.empty()) {
+            resize_to = resize_sequence.front();
+            resize_sequence = resize_sequence.subspan(1);
+        }
         if ((input.key == MenuKey::Resize) && resize_to) {
             size_ = *resize_to;
             std::erase_if(displayed_.lines, [this](const auto &line) {
@@ -263,6 +267,7 @@ public:
     mutable std::size_t size_query_calls = 0;
     std::vector<std::pair<int, int>> invalidated_rows;
     std::optional<TerminalSize> resize_to;
+    std::span<const TerminalSize> resize_sequence;
     std::vector<std::string> frames;
     std::vector<std::size_t> presentations;
     std::vector<std::set<int>> touched_rows;
@@ -1073,6 +1078,58 @@ export [[nodiscard]] auto TestMenu() -> bool {
                 [](const auto count) { return count == 1; }),
             "opening, scrolling, or closing the full-name view published a partial frame"sv);
     });
+    for (const auto columns : std::array{40, 110}) {
+        passed &= Test(std::format(
+            "full-name reading position surviving rewrapping between 80 and {} columns", columns), [&] {
+            const auto long_name = [] {
+                auto text = std::string{};
+                for (auto index = 0; index < 100; ++index) {
+                    text += std::format("[{:03}] abcdefghijklmnopqrstuvwxyz;", index);
+                }
+                return text;
+            }();
+            const auto entries = std::array{std::string_view{long_name}};
+            constexpr auto original_size = TerminalSize{.rows = 9, .columns = 80};
+            const auto resized = TerminalSize{.rows = 9, .columns = columns};
+            const auto sizes = std::array{
+                resized, original_size, resized, original_size, resized,
+                TerminalSize{.rows = 2, .columns = 10}, resized};
+            constexpr auto input = std::array{
+                MenuInput{MenuKey::Details}, MenuInput{MenuKey::Down, 4},
+                MenuInput{MenuKey::Resize}, MenuInput{MenuKey::Resize},
+                MenuInput{MenuKey::Resize}, MenuInput{MenuKey::Down},
+                MenuInput{MenuKey::Resize}, MenuInput{MenuKey::Resize},
+                MenuInput{MenuKey::Resize}, MenuInput{MenuKey::Resize},
+                MenuInput{MenuKey::Back}, MenuInput{MenuKey::Accept}};
+            auto terminal = CapturingMenuConsole{input, original_size};
+            terminal.resize_sequence = sizes;
+            const auto screen = terminal.EnterScreen();
+            Require(SelectTestMenuItem(terminal, kHeader, entries) == 0,
+                "resizing the full name changed the selected entry"sv);
+            const auto top_text = [&terminal](const std::size_t frame) {
+                // The header occupies row one. Every scrolled full-name row
+                // starts with four indentation spaces before the name's text.
+                return std::string_view{terminal.submitted_frames.at(frame).rows.at(1).text}.substr(4);
+            };
+            const auto original_position = long_name.find(top_text(2));
+            const auto resized_position = long_name.find(top_text(3));
+            Require((original_position != std::string::npos) && (original_position > 0) &&
+                (resized_position <= original_position) &&
+                (original_position < resized_position + top_text(3).size()),
+                "the resized top row did not contain the previous reading position"sv);
+            Require((top_text(4) == top_text(2)) && (top_text(5) == top_text(3)),
+                "repeated width changes moved the reading position backward"sv);
+            const auto navigated_position = long_name.find(top_text(6));
+            const auto restored_position = long_name.find(top_text(7));
+            Require((navigated_position == resized_position + top_text(5).size()) &&
+                (restored_position <= navigated_position) &&
+                (navigated_position < restored_position + top_text(7).size()) &&
+                (top_text(8) == top_text(6)),
+                "navigation after rewrapping did not establish a new reading position"sv);
+            Require(top_text(10) == top_text(8),
+                "recovering from an unusably small window lost the reading position"sv);
+        });
+    }
     passed &= Test("opening another full name using that entry's text"sv, [] {
         const auto first_name = std::format("FIRST-NAME {}", std::string(650, 'A'));
         const auto second_name = std::format("SECOND-NAME {}", std::string(650, 'B'));

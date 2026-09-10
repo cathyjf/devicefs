@@ -168,6 +168,13 @@ public:
         if (entries_.empty()) {
             return true;
         }
+        if (initial_viewport_pending_) {
+            if (!PrepareInitialViewport<Policy>(terminal, viewport)) {
+                return false;
+            }
+            initial_viewport_pending_ = false;
+            return true;
+        }
         const auto paging = input.key == MenuKey::PageDown ? 1 :
             (input.key == MenuKey::PageUp ? -1 : 0);
         if (paging != 0) {
@@ -237,6 +244,31 @@ public:
     }
 
 private:
+    // The initial menu view displays every entry when the complete list fits.
+    // Otherwise, center the selected entry's preview. If exact centering is
+    // impossible, leave one more row below the preview than above it. Near
+    // either end of the list, shift the view to fill the available rows.
+    template <WidthPolicy Policy>
+    [[nodiscard]] auto PrepareInitialViewport(MenuTerminal<Policy> auto &terminal,
+        const MenuViewport viewport) -> bool {
+        if (!EnsureLayout<Policy>(terminal, viewport, selected_entry_)) {
+            return false;
+        }
+        viewport_begin_ = {.entry = selected_entry_};
+        const auto available_rows = FailFastCast<std::size_t>(viewport.rows);
+        const auto selected_rows = entry_layouts_.at(selected_entry_)->rows.size();
+        Scroll<Policy>(terminal, viewport, -1,
+            (available_rows - std::min(available_rows, selected_rows)) / 2);
+        if (!FillViewport<Policy>(terminal, viewport)) {
+            return false;
+        }
+        if ((visible_positions_.size() < available_rows) && (viewport_begin_ != Position{})) {
+            Scroll<Policy>(terminal, viewport, -1, available_rows - visible_positions_.size());
+            return FillViewport<Policy>(terminal, viewport);
+        }
+        return true;
+    }
+
     template <WidthPolicy Policy>
     [[nodiscard]] auto EnsureLayout(MenuTerminal<Policy> auto &terminal,
         const MenuViewport viewport, const std::size_t entry) -> bool {
@@ -308,6 +340,7 @@ private:
     Position viewport_begin_;
     std::vector<std::optional<TextLayout>> entry_layouts_;
     std::vector<Position> visible_positions_;
+    bool initial_viewport_pending_ = true;
     int layout_width_ = 0;
 };
 
@@ -513,6 +546,9 @@ export namespace devicefs::terminal {
 // copies so filtering cannot change entry identity. The callback uses the
 // frame's formatted writing operations, which prepare string arguments for
 // display. An initial index beyond the list selects its last entry.
+// On the first rendering, a list that fits is shown in full. Longer lists
+// center the selected preview, with any extra row below it, and shift the
+// viewport at the list boundaries to use the available space.
 //
 // Entries wrap with indented continuations. Previews occupy at most eight rows;
 // pressing 1 opens a scrolling view of a truncated name. Paging moves through

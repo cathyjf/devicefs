@@ -319,6 +319,10 @@ public:
 constexpr auto kHeader = std::array{"Menu regression test"sv};
 static_assert(MenuTerminal<MenuConsole, WidthPolicy::WindowsTerminalGraphemes>);
 constexpr auto kEntries = std::array{"Alpha"sv, "Bravo"sv, "Charlie"sv, "Delta"sv};
+constexpr auto kPositionEntries = std::array{
+    "Entry 00"sv, "Entry 01"sv, "Entry 02"sv, "Entry 03"sv,
+    "Entry 04"sv, "Entry 05"sv, "Entry 06"sv, "Entry 07"sv,
+    "Entry 08"sv, "Entry 09"sv, "Entry 10"sv, "Entry 11"sv};
 
 }
 
@@ -466,7 +470,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
         Require(!terminal.active && (terminal.screen_exits == 1),
             "destroying the caller's owner did not restore the screen exactly once"sv);
         for (const auto index : std::array{1uz, 2uz}) {
-            Require(terminal.touched_rows.at(index) == std::set{2, 4, 5, 8},
+            Require(terminal.touched_rows.at(index) == std::set{2, 3, 4, 5, 8},
                 std::format("menu transition {} repainted shared text or missed a changed row", index));
             Require((terminal.clears.at(index) == 0) && (terminal.presentations.at(index) == 1),
                 std::format("menu transition {} cleared the screen or presented an incomplete frame", index));
@@ -650,6 +654,91 @@ export [[nodiscard]] auto TestMenu() -> bool {
         Require(terminal.frames.back().contains("> Bravo"sv),
             "the selected entry was not marked on screen"sv);
         Require(terminal.active, "accepting an entry released the caller's screen"sv);
+    });
+    passed &= Test("initial selection displaying every entry when the complete menu fits"sv, [] {
+        constexpr auto input = std::array{MenuInput{MenuKey::Accept}};
+        for (const auto viewport_rows : {4, 5}) {
+            for (const auto initial : {2uz, 99uz}) {
+                auto terminal = MenuConsole{input, {.rows = viewport_rows + 3, .columns = 80}};
+                const auto screen = terminal.EnterScreen();
+                const auto selected = std::min(initial, kEntries.size() - 1);
+                Require(SelectTestMenuItem(terminal, kHeader, kEntries, {}, initial) == selected,
+                    "initial placement changed the selected entry"sv);
+                for (auto index = 0uz; index < kEntries.size(); ++index) {
+                    Require(terminal.Row(FailFastCast<int>(index) + 2) ==
+                        std::format("{}{}", index == selected ? "> "sv : "  "sv, kEntries.at(index)),
+                        std::format("a fitting menu omitted or misplaced entry {} with initial selection {}",
+                            index, initial));
+                }
+            }
+        }
+    });
+    passed &= Test("initial selection centered in odd and even viewports and bounded by both list ends"sv, [] {
+        struct Example {
+            int viewport_rows;
+            std::size_t selected;
+            std::size_t first;
+        };
+        constexpr auto examples = std::array{
+            Example{1, 5, 5}, Example{5, 5, 3}, Example{6, 5, 3},
+            Example{5, 0, 0}, Example{5, 1, 0}, Example{5, 10, 7}, Example{5, 11, 7}};
+        constexpr auto input = std::array{MenuInput{MenuKey::Accept}};
+        for (const auto &example : examples) {
+            auto terminal = MenuConsole{input, {.rows = example.viewport_rows + 3, .columns = 80}};
+            const auto screen = terminal.EnterScreen();
+            Require(SelectTestMenuItem(terminal, kHeader, kPositionEntries, {}, example.selected) ==
+                example.selected, "centering changed the selected entry"sv);
+            for (auto offset = 0; offset < example.viewport_rows; ++offset) {
+                const auto entry = example.first + FailFastCast<std::size_t>(offset);
+                Require(terminal.Row(offset + 2) == std::format("{}{}",
+                    entry == example.selected ? "> "sv : "  "sv, kPositionEntries.at(entry)),
+                    std::format("selection {} in a {}-row viewport misplaced entry {}",
+                        example.selected, example.viewport_rows, entry));
+            }
+        }
+    });
+    passed &= Test("initial placement centering a wrapped selection between displayed rows"sv, [] {
+        constexpr auto entries = std::array{
+            "zero"sv, "abcdefghijk"sv, "ABCDEFGHIJKLMNO"sv,
+            "after"sv, "last"sv, "extra"sv, "more"sv};
+        constexpr auto input = std::array{MenuInput{MenuKey::Accept}};
+        auto terminal = MenuConsole{input, {.rows = 8, .columns = 12}};
+        const auto screen = terminal.EnterScreen();
+        Require(SelectTestMenuItem(terminal, kHeader, entries, {}, 2) == 2,
+            "centering a wrapped preview changed the selected entry"sv);
+        constexpr auto expected = std::array{
+            "    k"sv, "> ABCDEFGHIJ"sv, ">   KLMNO"sv, "  after"sv, "  last"sv};
+        for (auto index = 0uz; index < expected.size(); ++index) {
+            Require(terminal.Row(FailFastCast<int>(index) + 2) == expected.at(index),
+                std::format("centering the wrapped preview produced the wrong text on row {}", index + 2));
+        }
+    });
+    passed &= Test("an initial selection taller than the viewport displaying its first row"sv, [] {
+        constexpr auto entries = std::array{"before"sv,
+            "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"sv, "after"sv};
+        constexpr auto input = std::array{MenuInput{MenuKey::Accept}};
+        auto terminal = MenuConsole{input, {.rows = 6, .columns = 12}};
+        const auto screen = terminal.EnterScreen();
+        Require(SelectTestMenuItem(terminal, kHeader, entries, {}, 1) == 1,
+            "a tall initial preview changed the selected entry"sv);
+        Require((terminal.Row(2) == "> abcdefghij"sv) &&
+            (terminal.Row(3) == ">   klmnopqr"sv) && (terminal.Row(4) == ">   stuvwxyz"sv),
+            "initial placement skipped the beginning of a preview taller than the viewport"sv);
+    });
+    passed &= Test("initial centering followed by ordinary navigation, resize, and redraw"sv, [] {
+        constexpr auto input = std::array{MenuInput{MenuKey::Down}, MenuInput{MenuKey::Resize},
+            MenuInput{MenuKey::Redraw}, MenuInput{MenuKey::Accept}};
+        auto terminal = MenuConsole{input};
+        terminal.resize_to = TerminalSize{.rows = 9, .columns = 90};
+        const auto screen = terminal.EnterScreen();
+        Require(SelectTestMenuItem(terminal, kHeader, kPositionEntries, {}, 5) == 6,
+            "subsequent menu updates changed the selected entry"sv);
+        for (const auto &frame : terminal.frames) {
+            Require(frame.starts_with("Menu regression test\n  Entry 03\n  Entry 04\n"sv),
+                "navigation, resizing, or redrawing moved the viewport to recenter the selection"sv);
+        }
+        Require((terminal.Row(5) == "> Entry 06"sv) && (terminal.Row(7) == "  Entry 08"sv),
+            "the resized menu did not extend its existing viewport"sv);
     });
     passed &= Test("visible selections repainting only changed rows and status"sv, [] {
         constexpr auto footer = std::array{"Fixed footer"sv};

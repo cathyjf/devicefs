@@ -30,7 +30,7 @@ using namespace std::chrono_literals;
 namespace devicefs::terminal::unix_detail {
 
 constexpr auto kInputPollInterval = 100ms;
-constexpr auto kEscapeTimeout = 100ms;
+constexpr auto kEscapeTimeout = 30ms;
 
 [[nodiscard]] auto OpenTerminal() -> int {
     const auto descriptor = open("/dev/tty", O_RDWR | O_NOCTTY | O_CLOEXEC);

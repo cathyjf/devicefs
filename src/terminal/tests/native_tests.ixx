@@ -476,7 +476,15 @@ public:
         Require(console.ReadMenuInput().key == MenuKey::Down, "a fragmented arrow became Escape"sv);
         remainder.get();
         input.Feed("\x1b"sv);
+        const auto escape_started = std::chrono::steady_clock::now();
         Require(console.ReadMenuInput().key == MenuKey::Back, "a lone Escape did not produce Back"sv);
+        std::println("Lone Escape: {:.3f} ms", std::chrono::duration<double, std::milli>{
+            std::chrono::steady_clock::now() - escape_started}.count());
+        input.Feed("\r"sv);
+        const auto enter_started = std::chrono::steady_clock::now();
+        Require(console.ReadMenuInput().key == MenuKey::Accept, "Enter did not produce Accept"sv);
+        std::println("Enter: {:.3f} ms", std::chrono::duration<double, std::milli>{
+            std::chrono::steady_clock::now() - enter_started}.count());
     });
 #endif
     passed &= Test("native terminal disconnection reporting I/O errors and preserving the primary failure"sv, [&] {

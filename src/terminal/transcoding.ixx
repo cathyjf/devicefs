@@ -5,16 +5,16 @@ module;
 
 #include "compat/gsl_suppress.h"
 
-// simdutf's header imports `std` through its code-unit definitions. An import
+// The preamble imports `std` through its code-unit definitions. An import
 // supplied by an included file must precede the named module declaration.
 // https://eel.is/c++draft/cpp.import#2
-#include "simdutf/simdutf.h"
-#undef char16_t
-#undef char32_t
+#include "compat/simdutf_preamble.h"
 
 export module devicefs.terminal.transcoding;
 
 import std;
+
+#include "simdutf/combined.h"
 
 namespace devicefs::terminal::detail {
 

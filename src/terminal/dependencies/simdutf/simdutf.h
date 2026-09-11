@@ -2,27 +2,7 @@
 /* begin file include/simdutf.h */
 #ifndef SIMDUTF_H
 #define SIMDUTF_H
-
-// simdutf needs integer-constant and feature-test macros as well as the
-// declarations imported by `utf_code_units.h`. GCC reports redefinitions when
-// these headers follow the import, so the headers are included first.
-// https://gcc.gnu.org/onlinedocs/gcc/C_002b_002b-Modules.html
-#include <cstdint>
-#include <version>
-#include "utf_code_units.h"
-
-using std::size_t;
-using std::ptrdiff_t;
-using std::memcpy;
-using std::memmove;
-using std::memset;
-using std::memcmp;
-using std::strlen;
-
-// The substitutions also apply to `simdutf.cpp` after its header inclusion.
-// Other consumers undefine both macros immediately after including this header.
-#define char16_t devicefs::terminal::utf16_code_unit
-#define char32_t devicefs::terminal::utf32_code_unit
+#include <cstring>
 
 /* begin file include/simdutf/compiler_check.h */
 #ifndef SIMDUTF_COMPILER_CHECK_H
@@ -83,6 +63,13 @@ using std::strlen;
 /* begin file include/simdutf/portability.h */
 #ifndef SIMDUTF_PORTABILITY_H
 #define SIMDUTF_PORTABILITY_H
+
+
+#include <cfloat>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #ifndef _WIN32
   // strcasecmp, strncasecmp
   #include <strings.h>
@@ -96,6 +83,7 @@ using std::strlen;
 #endif
 
 #if SIMDUTF_CPLUSPLUS20
+  #include <version>
   #if __cpp_concepts >= 201907L && __cpp_lib_span >= 202002L &&                \
       !defined(SIMDUTF_SPAN_DISABLED)
     #define SIMDUTF_SPAN 1
@@ -172,6 +160,12 @@ using std::strlen;
   #endif // __clang__
 #endif   // _MSC_VER
 
+#ifdef SIMDUTF_REGULAR_VISUAL_STUDIO
+  // https://en.wikipedia.org/wiki/C_alternative_tokens
+  // This header should have no effect, except maybe
+  // under Visual Studio.
+  #include <iso646.h>
+#endif
 
 #if (defined(__x86_64__) || defined(_M_AMD64)) && !defined(_M_ARM64EC)
   #define SIMDUTF_IS_X86_64 1
@@ -438,6 +432,8 @@ using std::strlen;
 // Sometimes logging is useful, but we want it disabled by default
 // and free of any logging code in release builds.
 #ifdef SIMDUTF_LOGGING
+  #include <cstdlib>
+  #include <iostream>
   #define simdutf_log(msg)                                                     \
     std::cout << "[" << __FUNCTION__ << "]: " << msg << std::endl              \
               << "\t" << __FILE__ << ":" << __LINE__ << std::endl;
@@ -618,10 +614,12 @@ using std::strlen;
 /* begin file include/simdutf/encoding_types.h */
 #ifndef SIMDUTF_ENCODING_TYPES_H
 #define SIMDUTF_ENCODING_TYPES_H
+#include <string_view>
 
 #if !defined(SIMDUTF_NO_STD_TEXT_ENCODING) &&                                  \
     defined(__cpp_lib_text_encoding) && __cpp_lib_text_encoding >= 202306L
   #define SIMDUTF_HAS_STD_TEXT_ENCODING 1
+  #include <text_encoding>
 #endif
 
 namespace simdutf {
@@ -805,6 +803,7 @@ from_std_encoding_native(const std::text_encoding &enc) noexcept {
 /* begin file include/simdutf/error.h */
 #ifndef SIMDUTF_ERROR_H
 #define SIMDUTF_ERROR_H
+#include <string_view>
 
 namespace simdutf {
 
@@ -966,6 +965,12 @@ enum {
 /* begin file include/simdutf/implementation.h */
 #ifndef SIMDUTF_IMPLEMENTATION_H
 #define SIMDUTF_IMPLEMENTATION_H
+#if !defined(SIMDUTF_NO_THREADS)
+  #include <atomic>
+#endif
+#ifdef SIMDUTF_INTERNAL_TESTS
+  #include <vector>
+#endif
 /* begin file include/simdutf/internal/isadetection.h */
 /* From
 https://github.com/endorno/pytorch/blob/master/torch/lib/TH/generic/simd/simd.h
@@ -1014,6 +1019,9 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #ifndef SIMDutf_INTERNAL_ISADETECTION_H
 #define SIMDutf_INTERNAL_ISADETECTION_H
+
+#include <cstdint>
+#include <cstdlib>
 #if defined(_MSC_VER)
   #include <intrin.h>
 #elif (defined(HAVE_GCC_GET_CPUID) && defined(USE_GCC_GET_CPUID)) ||           \
@@ -1297,6 +1305,15 @@ static inline uint32_t detect_supported_architectures() {
 
 #endif // SIMDutf_INTERNAL_ISADETECTION_H
 /* end file include/simdutf/internal/isadetection.h */
+
+#include <string_view>
+#if SIMDUTF_SPAN
+  #include <concepts>
+  #include <type_traits>
+  #include <span>
+  #include <tuple>
+  #include <utility> // for std::unreachable
+#endif
 // The following defines are conditionally enabled/disabled during amalgamation.
 // By default all features are enabled, regular code shouldn't check them. Only
 // when user code really relies of a selected subset, it's good to verify these
@@ -1346,6 +1363,8 @@ constexpr std::size_t min(const T &a, const U &b) = delete;
 /* begin file include/simdutf/constexpr_ptr.h */
 #ifndef SIMDUTF_CONSTEXPR_PTR_H
 #define SIMDUTF_CONSTEXPR_PTR_H
+
+#include <cstddef>
 
 namespace simdutf {
 namespace detail {
@@ -1608,6 +1627,8 @@ template <endianness big_endian> constexpr uint16_t swap_if_needed(uint16_t c) {
 #ifndef SIMDUTF_ASCII_H
 #define SIMDUTF_ASCII_H
 
+#include <cstring>
+
 namespace simdutf {
 namespace scalar {
 namespace {
@@ -1696,6 +1717,8 @@ validate_with_errors(InputPtr data, size_t len) noexcept {
 #ifndef SIMDUTF_ATOMIC_UTIL_H
 #define SIMDUTF_ATOMIC_UTIL_H
 #if SIMDUTF_ATOMIC_REF
+  #include <atomic>
+  #include <cstring>
 namespace simdutf {
 namespace scalar {
 
@@ -1912,6 +1935,8 @@ simdutf_constexpr23 size_t convert(InputPtr data, size_t len,
 /* begin file include/simdutf/scalar/latin1_to_utf8/latin1_to_utf8.h */
 #ifndef SIMDUTF_LATIN1_TO_UTF8_H
 #define SIMDUTF_LATIN1_TO_UTF8_H
+
+#include <cstring>
 
 namespace simdutf {
 namespace scalar {
@@ -2328,6 +2353,8 @@ simdutf_constexpr23 void to_well_formed_utf16(const char16_t *input, size_t len,
 #ifndef SIMDUTF_UTF16_TO_LATIN1_H
 #define SIMDUTF_UTF16_TO_LATIN1_H
 
+#include <cstring> // for std::memcpy
+
 namespace simdutf {
 namespace scalar {
 namespace {
@@ -2611,6 +2638,8 @@ simdutf_constexpr23 size_t convert_valid(const char16_t *data, size_t len,
 /* begin file include/simdutf/scalar/utf16_to_utf8/utf16_to_utf8.h */
 #ifndef SIMDUTF_UTF16_TO_UTF8_H
 #define SIMDUTF_UTF16_TO_UTF8_H
+
+#include <cstring>
 
 namespace simdutf {
 namespace scalar {
@@ -2909,6 +2938,8 @@ simdutf_constexpr23 size_t convert_with_replacement(const char16_t *data,
 #ifndef SIMDUTF_VALID_UTF16_TO_UTF8_H
 #define SIMDUTF_VALID_UTF16_TO_UTF8_H
 
+#include <cstring>
+
 namespace simdutf {
 namespace scalar {
 namespace {
@@ -3086,6 +3117,8 @@ utf16_length_from_utf32(const char32_t *p, size_t len) {
 #ifndef SIMDUTF_UTF32_TO_LATIN1_H
 #define SIMDUTF_UTF32_TO_LATIN1_H
 
+#include <cstring>
+
 namespace simdutf {
 namespace scalar {
 namespace {
@@ -3155,6 +3188,8 @@ inline simdutf_constexpr23 result convert_with_errors(const char32_t *data,
 /* begin file include/simdutf/scalar/utf32_to_latin1/valid_utf32_to_latin1.h */
 #ifndef SIMDUTF_VALID_UTF32_TO_LATIN1_H
 #define SIMDUTF_VALID_UTF32_TO_LATIN1_H
+
+#include <cstring>
 
 namespace simdutf {
 namespace scalar {
@@ -3357,6 +3392,8 @@ simdutf_constexpr23 size_t convert_valid(const char32_t *data, size_t len,
 #ifndef SIMDUTF_UTF32_TO_UTF8_H
 #define SIMDUTF_UTF32_TO_UTF8_H
 
+#include <cstring>
+
 namespace simdutf {
 namespace scalar {
 namespace {
@@ -3501,6 +3538,8 @@ simdutf_constexpr23 result convert_with_errors(InputPtr data, size_t len,
 #ifndef SIMDUTF_VALID_UTF32_TO_UTF8_H
 #define SIMDUTF_VALID_UTF32_TO_UTF8_H
 
+#include <cstring>
+
 namespace simdutf {
 namespace scalar {
 namespace {
@@ -3574,6 +3613,8 @@ simdutf_constexpr23 size_t convert_valid(InputPtr data, size_t len,
 /* begin file include/simdutf/scalar/utf8.h */
 #ifndef SIMDUTF_UTF8_H
 #define SIMDUTF_UTF8_H
+
+#include <cstring>
 
 namespace simdutf {
 namespace scalar {
@@ -3904,6 +3945,8 @@ trim_partial_utf8(InputPtr input, size_t length) {
 #ifndef SIMDUTF_UTF8_TO_LATIN1_H
 #define SIMDUTF_UTF8_TO_LATIN1_H
 
+#include <cstring>
+
 namespace simdutf {
 namespace scalar {
 namespace {
@@ -4131,6 +4174,8 @@ inline result rewind_and_convert_with_errors(size_t prior_bytes,
 #ifndef SIMDUTF_VALID_UTF8_TO_LATIN1_H
 #define SIMDUTF_VALID_UTF8_TO_LATIN1_H
 
+#include <cstring>
+
 namespace simdutf {
 namespace scalar {
 namespace {
@@ -4219,6 +4264,8 @@ simdutf_constexpr23 size_t convert_valid(InputPtr data, size_t len,
 /* begin file include/simdutf/scalar/utf8_to_utf16/utf8_to_utf16.h */
 #ifndef SIMDUTF_UTF8_TO_UTF16_H
 #define SIMDUTF_UTF8_TO_UTF16_H
+
+#include <cstring>
 
 namespace simdutf {
 namespace scalar {
@@ -4563,6 +4610,8 @@ inline result rewind_and_convert_with_errors(size_t prior_bytes,
 #ifndef SIMDUTF_VALID_UTF8_TO_UTF16_H
 #define SIMDUTF_VALID_UTF8_TO_UTF16_H
 
+#include <cstring>
+
 namespace simdutf {
 namespace scalar {
 namespace {
@@ -4670,6 +4719,8 @@ simdutf_constexpr23 size_t convert_valid(InputPtr data, size_t len,
 /* begin file include/simdutf/scalar/utf8_to_utf32/utf8_to_utf32.h */
 #ifndef SIMDUTF_UTF8_TO_UTF32_H
 #define SIMDUTF_UTF8_TO_UTF32_H
+
+#include <cstring>
 
 namespace simdutf {
 namespace scalar {
@@ -4970,6 +5021,8 @@ inline result rewind_and_convert_with_errors(size_t prior_bytes,
 /* begin file include/simdutf/scalar/utf8_to_utf32/valid_utf8_to_utf32.h */
 #ifndef SIMDUTF_VALID_UTF8_TO_UTF32_H
 #define SIMDUTF_VALID_UTF8_TO_UTF32_H
+
+#include <cstring>
 
 namespace simdutf {
 namespace scalar {
@@ -9071,6 +9124,7 @@ find(const char16_t *start, const char16_t *end, char16_t character) noexcept {
 /* begin file include/simdutf/base64_tables.h */
 #ifndef SIMDUTF_BASE64_TABLES_H
 #define SIMDUTF_BASE64_TABLES_H
+#include <cstdint>
 
 namespace simdutf {
 namespace {
@@ -9959,6 +10013,10 @@ static_assert(to_base64_url_value[uint8_t('_')] == 63,
 /* begin file include/simdutf/scalar/base64.h */
 #ifndef SIMDUTF_BASE64_H
 #define SIMDUTF_BASE64_H
+
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 
 namespace simdutf {
 namespace scalar {
@@ -13864,6 +13922,8 @@ get_active_implementation();
 #define SIMDUTF_BASE64_IMPLEMENTATION_H
 
 // this is not part of the public api
+
+#include <type_traits> // for is_same
 
 namespace simdutf {
 

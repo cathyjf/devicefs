@@ -46,24 +46,27 @@ target_include_directories(windows-terminal-width PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/dependencies"
 )
 
-add_library(simdutf ${DEVICEFS_TERMINAL_LIBRARY_TYPE}
-    dependencies/simdutf/simdutf.cpp
+set(SIMDUTF_GENERATED_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/simdutf/combined.h")
+add_custom_command(
+    OUTPUT "${SIMDUTF_GENERATED_HEADER}"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DSOURCE_DIRECTORY=${CMAKE_CURRENT_SOURCE_DIR}/dependencies/simdutf"
+        "-DOUTPUT=${SIMDUTF_GENERATED_HEADER}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateSimdutf.cmake"
+    DEPENDS
+        dependencies/simdutf/simdutf.h
+        dependencies/simdutf/simdutf.cpp
+        compat/simdutf_preamble.h
+        cmake/GenerateSimdutf.cmake
+    VERBATIM
 )
-target_include_directories(simdutf PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/compat")
-target_include_directories(simdutf SYSTEM PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/simdutf/include"
-)
-if(MSVC)
-    # MSBuild shares the standard-library IFC between these targets. Its analysis
-    # data must be generated for the first-party modules that also import `std`.
-    set_target_properties(simdutf PROPERTIES VS_GLOBAL_RunCodeAnalysis true)
-    target_compile_definitions(simdutf PRIVATE _MSVC_STL_HARDENING=1)
-    target_compile_options(simdutf PRIVATE
-        /permissive- /EHsc /utf-8 /guard:cf /guard:ehcont /sdl
-    )
-endif()
+add_custom_target(generate-simdutf DEPENDS "${SIMDUTF_GENERATED_HEADER}")
 
 add_library(devicefs-terminal ${DEVICEFS_TERMINAL_LIBRARY_TYPE})
+add_dependencies(devicefs-terminal generate-simdutf)
+target_include_directories(devicefs-terminal SYSTEM PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"
+)
 target_sources(devicefs-terminal PUBLIC
     FILE_SET CXX_MODULES FILES
         base_console.ixx
@@ -85,7 +88,7 @@ if(WIN32)
 else()
     target_sources(devicefs-terminal PUBLIC FILE_SET CXX_MODULES FILES unix.ixx)
 endif()
-target_link_libraries(devicefs-terminal PRIVATE windows-terminal-width simdutf)
+target_link_libraries(devicefs-terminal PRIVATE windows-terminal-width)
 target_include_directories(devicefs-terminal PRIVATE
     "${DEVICEFS_ROOT}/src/modules/include"
 )
@@ -110,7 +113,6 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
     target_link_libraries(devicefs-terminal-test PRIVATE
         devicefs-terminal
         windows-terminal-width
-        simdutf
     )
     target_include_directories(devicefs-terminal-test PRIVATE
         "${DEVICEFS_ROOT}/src/modules/include"

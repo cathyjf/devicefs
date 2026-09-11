@@ -3,13 +3,20 @@
 
 module;
 
+// Waiting on a terminal descriptor above `FD_SETSIZE - 1` requires Apple's
+// extended `pselect` wrapper. The ordinary wrapper rejects `nfds > FD_SETSIZE`
+// with `EINVAL` before calling the kernel. Defining `_DARWIN_UNLIMITED_SELECT`
+// makes `<sys/select.h>` select the `$DARWIN_EXTSN` symbol, whose wrapper omits
+// that check and passes the descriptor count and sets to the kernel.
+// Symbol selection:
+//   https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/select.h
+// Wrapper implementations:
+//   https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/select-base.c
+#define _DARWIN_UNLIMITED_SELECT
+
 #include <cerrno>
 #include <fcntl.h>
-#ifdef __APPLE__
-    #include <sys/select.h>
-#else
-    #include <poll.h>
-#endif
+#include <sys/select.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -238,42 +245,42 @@ private:
     // interprets it. Interrupted waits retry against the original deadline.
     [[nodiscard]] auto ReceiveUntil(const std::chrono::steady_clock::time_point deadline)
         -> bool {
-#ifdef __APPLE__
-        if (descriptor_ >= FD_SETSIZE) {
-            throw std::runtime_error(std::format(
-                "controlling-terminal descriptor {} exceeds pselect's maximum descriptor {}",
-                descriptor_, FD_SETSIZE - 1));
-        }
-#endif
+        // `pselect` reads a bitmap sized by `descriptor_ + 1`. An array of
+        // `fd_set` objects supplies enough bits for high-numbered descriptors.
+        // Each `FD_SET` operates within one element; concatenating the elements
+        // extends the bitmap using the platform's own bit layout.
+        // Linux:
+        //   https://man7.org/linux/man-pages/man2/select.2.html#NOTES
+        // Apple:
+        //   https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/sys_generic.c#L1227-L1250
+        // Each element represents `FD_SETSIZE` consecutive descriptors. Its
+        // storage must therefore occupy exactly that many bits: any padding
+        // would shift the following element's bits, making `pselect` watch
+        // different descriptors from those selected by `FD_SET`.
+        static_assert(
+            (sizeof(fd_set) * std::numeric_limits<unsigned char>::digits) == FD_SETSIZE);
+        auto readable = std::vector<fd_set>{(descriptor_ / FD_SETSIZE) + 1uz};
+        FD_SET(descriptor_ % FD_SETSIZE, &readable.back());
         for (;;) {
             const auto remaining = deadline - std::chrono::steady_clock::now();
             if (remaining <= remaining.zero()) {
                 return false;
             }
-#ifdef __APPLE__
             // `ReceiveUntil` waits for readable input only until the supplied
             // deadline, so a missing terminal reply cannot block a query
             // indefinitely. For `/dev/tty`, macOS `poll` reports `POLLNVAL`.
             // `pselect` supports this device and waits up to the given timeout.
             // https://www.gnu.org/software/gnulib/manual/html_node/poll.html
-            const auto result = [descriptor = descriptor_, remaining] {
+            const auto result = [descriptor = descriptor_, remaining, &readable] {
                 const auto duration = std::chrono::ceil<std::chrono::nanoseconds>(remaining);
                 const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
                 const auto timeout = timespec{
                     .tv_sec = seconds.count(),
                     .tv_nsec = (duration - seconds).count(),
                 };
-                auto readable = fd_set{};
-                FD_SET(descriptor, &readable);
                 return pselect(
-                    descriptor + 1, &readable, nullptr, nullptr, &timeout, nullptr);
+                    descriptor + 1, readable.data(), nullptr, nullptr, &timeout, nullptr);
             }();
-#else
-            auto readiness = pollfd{.fd = descriptor_, .events = POLLIN, .revents = 0};
-            const auto result = poll(&readiness, 1,
-                std::chrono::ceil<std::chrono::duration<int, std::milli>>(
-                    remaining).count());
-#endif
             if (result < 0) {
                 if (errno == EINTR) {
                     continue;
@@ -284,12 +291,6 @@ private:
             if (result == 0) {
                 return false;
             }
-#ifndef __APPLE__
-            if ((readiness.revents & POLLNVAL) != 0) {
-                throw std::system_error(std::make_error_code(std::errc::bad_file_descriptor),
-                    "could not wait for controlling-terminal input");
-            }
-#endif
             auto bytes = std::array<char, 4096>{};
             const auto count = read(descriptor_, bytes.data(), bytes.size());
             if (count < 0) {

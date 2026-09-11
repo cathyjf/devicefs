@@ -25,15 +25,14 @@ export module devicefs.supervisor.process_diagnostics;
 import std;
 import <devicefs/windows_imports.h>;
 import devicefs.supervisor.logging_console;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 [[gsl::suppress("type.1",
     justification: "ProcessCommandLineInformation is NT process information class 60.")]]
 constexpr auto kProcessCommandLineInformation =
     static_cast<PROCESSINFOCLASS>(60);
-
-[[nodiscard]] auto Utf8(const std::wstring_view value) {
-    return std::filesystem::path{value}.string();
-}
 
 [[nodiscard]] auto ProcessCommandLine(const HANDLE process) {
     auto bytes = ULONG{};
@@ -92,8 +91,8 @@ auto LogJobProcesses(Log &log, const HANDLE job) noexcept {
             log.Write(
                 "backup-supervisor: terminating '{}' "
                 "(PID {}, command line '{}')",
-                Utf8(entry.szExeFile), entry.th32ProcessID,
-                command_line.empty() ? "unavailable" : Utf8(command_line));
+                Transcode<std::string>(entry.szExeFile), entry.th32ProcessID,
+                command_line.empty() ? "unavailable" : Transcode<std::string>(command_line));
         } while (Process32NextW(snapshot.get(), &entry));
     } catch (const std::exception &error) {
         log.TryWrite(

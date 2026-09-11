@@ -30,6 +30,9 @@ import devicefs.supervisor.installation;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.temporary_paths;
 import devicefs.supervisor.vshadow;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 namespace internal {
 
@@ -68,7 +71,7 @@ struct DeviceFsStartRequest {
 
 [[nodiscard]] auto StartDeviceFs(
     const DeviceFsStartRequest &request) {
-    const auto supervisor = CurrentExecutablePath().string();
+    const auto supervisor = Transcode<std::string>(CurrentExecutablePath().native());
     auto stop_event_name = std::format(
         "Global\\devicefs-stop-{}", UniqueName());
     auto arguments = std::vector<std::string>{
@@ -199,7 +202,7 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
             throw std::runtime_error(std::format(
                 "devicefs exited with code {} before creating readiness path '{}'",
                 ProcessExitCode(devicefs.process.hProcess),
-                devicefs.readiness_path.string()));
+                Transcode<std::string>(devicefs.readiness_path.native())));
         }
         const auto cancelled = WaitForSingleObject(cancellation_event, 0);
         if (cancelled == WAIT_FAILED) {
@@ -216,7 +219,7 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
         if (std::chrono::steady_clock::now() >= deadline) {
             throw std::runtime_error(std::format(
                 "devicefs did not create readiness path '{}' within {} seconds",
-                devicefs.readiness_path.string(),
+                Transcode<std::string>(devicefs.readiness_path.native()),
                 std::chrono::duration_cast<std::chrono::seconds>(
                     DeviceFsProcess::kStartTimeout).count()));
         }

@@ -40,6 +40,9 @@ import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.winrt_apartment;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 #undef stderr
 #undef stdout
@@ -104,15 +107,15 @@ function prompt {
     const auto &...arguments) -> bool {
     const auto supervisor = InstalledExecutablePath();
     try {
-        auto command = std::filesystem::path{wil::ArgvToCommandLine(
-            std::array{supervisor.string(), arguments...})}.wstring();
+        auto command = Transcode<std::wstring>(wil::ArgvToCommandLine(
+            std::array{Transcode<std::string>(supervisor.native()), arguments...}));
         if (const auto exit_code = RunInternalWindowsAccountProcess(
                 username, supervisor, std::move(command));
             exit_code != 0) {
             devicefs::WriteToStream(devicefs::stderr,
                 "backup-supervisor: {} for user '{}' failed with exit code "
                 "0x{:08x}; continuing console launch\n",
-                description, winrt::to_string(username), exit_code);
+                description, Transcode<std::string>(username), exit_code);
             return false;
         }
     } catch (const std::system_error &error) {
@@ -122,7 +125,7 @@ function prompt {
         devicefs::WriteToStream(devicefs::stderr,
             "backup-supervisor: {} for user '{}' failed "
             "(Windows error 0x{:08x}): {}; continuing console launch\n",
-            description, winrt::to_string(username),
+            description, Transcode<std::string>(username),
             std::bit_cast<DWORD>(error.code().value()), error.what());
         if (error.code().value() == ERROR_FILE_NOT_FOUND) {
             devicefs::WriteToStream(devicefs::stderr,
@@ -178,9 +181,9 @@ function prompt {
     // installed supervisor as that account, and wait for it to finish before
     // returning the executable to the interactive-console launcher.
     if (!TryRunConsolePreparation(username,
-            std::format("MSIX registration of '{}'", winrt::to_string(package_family)),
+            std::format("MSIX registration of '{}'", Transcode<std::string>(package_family)),
             std::string{kRegisterMsixOption},
-            winrt::to_string(selected.Id().FullName()))) {
+            Transcode<std::string>(selected.Id().FullName()))) {
         return std::nullopt;
     }
     return std::filesystem::path(location.c_str()) / executable;
@@ -197,7 +200,7 @@ function prompt {
             "(error 0x{:08x}): {}; trying the next console option\n",
             application,
             ExplicitWin32Error::FromHresult(error.code()).value,
-            winrt::to_string(error.message()));
+            Transcode<std::string>(error.message()));
         return std::nullopt;
     }
 }
@@ -243,10 +246,10 @@ export auto EnsurePowerShellProfile() {
     profile.flush();
     if (!profile) {
         throw std::runtime_error(std::format(
-            "could not write the PowerShell profile '{}'", path.string()));
+            "could not write the PowerShell profile '{}'", Transcode<std::string>(path.native())));
     }
     devicefs::WriteToStream(devicefs::stdout,
-        "backup-supervisor: created PowerShell profile '{}'\n", path.string());
+        "backup-supervisor: created PowerShell profile '{}'\n", Transcode<std::string>(path.native()));
 }
 
 export auto EnsureConsoleMsixRegistration(const wil::zwstring_view package_full_name) {
@@ -281,9 +284,9 @@ export auto EnsureConsoleMsixRegistration(const wil::zwstring_view package_full_
         throw std::invalid_argument(std::format(
             "MSIX package '{}' does not belong to the allowed PowerShell family '{}' "
             "or Windows Terminal family '{}'",
-            winrt::to_string(package_full_name),
-            winrt::to_string(kPowerShellPackageFamily),
-            winrt::to_string(kTerminalPackageFamily)));
+            Transcode<std::string>(package_full_name),
+            Transcode<std::string>(kPowerShellPackageFamily),
+            Transcode<std::string>(kTerminalPackageFamily)));
     }
 
     const auto apartment = WinrtApartment{
@@ -298,7 +301,7 @@ export auto EnsureConsoleMsixRegistration(const wil::zwstring_view package_full_
     }();
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: ensuring MSIX package '{}' is registered for user '{}'\n",
-        winrt::to_string(package_full_name), user_name);
+        Transcode<std::string>(package_full_name), user_name);
     try {
         const auto manager =
             winrt::Windows::Management::Deployment::PackageManager{};
@@ -315,7 +318,7 @@ export auto EnsureConsoleMsixRegistration(const wil::zwstring_view package_full_
     }
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: MSIX package '{}' is registered for user '{}'\n",
-        winrt::to_string(package_full_name), user_name);
+        Transcode<std::string>(package_full_name), user_name);
 }
 
 export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) -> int {
@@ -371,14 +374,14 @@ export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) ->
             // arguments, so escape any semicolons in a custom PowerShell path
             // before applying ordinary Windows command-line quoting. See
             // <https://github.com/microsoft/terminal/blob/main/src/cascadia/TerminalApp/AppCommandlineArgs.cpp>.
-            const auto terminal_shell = powershell->string() |
+            const auto terminal_shell = Transcode<std::string>(powershell->native()) |
                 std::views::split(';') | std::views::join_with("\\;"sv) |
                 std::ranges::to<std::string>();
             const auto arguments = std::array{
-                terminal->string(), "-w"s, "new"s, "new-tab"s, "--"s, terminal_shell,
+                Transcode<std::string>(terminal->native()), "-w"s, "new"s, "new-tab"s, "--"s, terminal_shell,
             };
             const auto command =
-                std::filesystem::path{wil::ArgvToCommandLine(arguments)}.wstring();
+                Transcode<std::wstring>(wil::ArgvToCommandLine(arguments));
             const auto status = try_shell(*terminal, command);
             if (status) {
                 return 0;

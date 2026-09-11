@@ -238,6 +238,7 @@ target_link_libraries(vss-descriptor-dump PRIVATE
 )
 
 add_subdirectory(src/terminal)
+target_link_libraries(devicefs-common PUBLIC devicefs-terminal)
 
 add_executable(backup-supervisor
     src/main.cpp

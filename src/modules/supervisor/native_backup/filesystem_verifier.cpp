@@ -32,6 +32,9 @@ import :privileges;
 import :vhdx_attachment;
 import devicefs.common;
 import devicefs.stream_writer;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 #undef stderr
 #undef stdout
@@ -2787,7 +2790,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             internal::DeviceFsStartRequest{
                 .sources = sources,
                 .mount_target =
-                    internal::TemporaryDeviceFsViewPath().string(),
+                    Transcode<std::string>(internal::TemporaryDeviceFsViewPath().native()),
                 .vhdx = true,
             })};
     if (!internal::WaitForDeviceFs(
@@ -2850,7 +2853,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                         L"  VHDX file: {}\n"
                         L"  Attached volume: {}\n"
                         L"  Traversal workers: {}\n",
-                        std::filesystem::path{device}.wstring(),
+                        Transcode<std::wstring>(device),
                         vhdx_path.native(), view.Root(),
                         kVerificationWorkerCount);
                     const auto root = std::wstring{view.Root()};
@@ -2868,8 +2871,8 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                             "(Windows error {})",
                             inventory->issues.size(),
                             OperationName(first.key.operation),
-                            std::filesystem::path{DisplayPath(
-                                first.key.path)}.string(),
+                            Transcode<std::string>(DisplayPath(
+                                first.key.path)),
                             first.failure.error)};
                     }
                     state.SetPhase(VerificationPhase::Detaching);

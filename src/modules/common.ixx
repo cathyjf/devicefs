@@ -20,6 +20,9 @@ export module devicefs.common;
 
 import std;
 import <windows.h>;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 export struct ExplicitWin32Error final {
     DWORD value;
@@ -55,7 +58,7 @@ template <class Argument>
 [[nodiscard]] decltype(auto) AdaptWinErrorFormatArgument(
     Argument &&argument) noexcept(!kIsWideStringView<Argument>) {
     if constexpr (kIsWideStringView<Argument>) {
-        return std::filesystem::path{argument}.string();
+        return Transcode<std::string>(argument);
     } else {
         [[gsl::suppress("26445",
             justification:

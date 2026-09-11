@@ -38,6 +38,9 @@ import :vhdx_attachment;
 import devicefs.common;
 import devicefs.stream_writer;
 import devicefs.supervisor.temporary_paths;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 using namespace std::string_view_literals;
 
@@ -267,7 +270,7 @@ auto WaitForViewSession(
     auto devicefs = internal::DeviceFsChild{
         internal::StartDeviceFs(internal::DeviceFsStartRequest{
             .sources = source,
-            .mount_target = devicefs_mount.string(),
+            .mount_target = Transcode<std::string>(devicefs_mount.native()),
             .rpc_password = std::string_view{
                 rpc_password->data(), rpc_password->size()},
             .vhdx = true,

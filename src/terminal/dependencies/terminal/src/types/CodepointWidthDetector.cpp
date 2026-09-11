@@ -692,7 +692,7 @@ constexpr int ucdToCharacterWidth(const int val) noexcept
 // Decodes the next codepoint from the given UTF-16 string.
 // Returns the start of the next codepoint. Assumes `it < end`.
 ATTRIBUTE_FORCEINLINE
-constexpr const char16_t* utf16NextOrFFFD(const char16_t* it, const char16_t* end, char32_t& out)
+constexpr const utf16_code_unit* utf16NextOrFFFD(const utf16_code_unit* it, const utf16_code_unit* end, char32_t& out)
 {
     __assume(it != nullptr);
     __assume(end != nullptr);
@@ -725,7 +725,7 @@ constexpr const char16_t* utf16NextOrFFFD(const char16_t* it, const char16_t* en
 // Decodes the preceding codepoint from the given UTF-16 string.
 // Returns the start of the preceding codepoint. Assumes `it > beg`.
 ATTRIBUTE_FORCEINLINE
-constexpr const char16_t* utf16PrevOrFFFD(const char16_t* it, const char16_t* beg, char32_t& out)
+constexpr const utf16_code_unit* utf16PrevOrFFFD(const utf16_code_unit* it, const utf16_code_unit* beg, char32_t& out)
 {
     __assume(it != nullptr);
     __assume(beg != nullptr);
@@ -756,7 +756,7 @@ constexpr const char16_t* utf16PrevOrFFFD(const char16_t* it, const char16_t* be
 }
 
 // Returns `reset` if `ptr` is outside the range [beg, end). Otherwise, it returns `ptr` unmodified.
-constexpr const char16_t* resetIfOutOfRange(const char16_t* beg, const char16_t* end, const char16_t* reset, const char16_t* ptr)
+constexpr const utf16_code_unit* resetIfOutOfRange(const utf16_code_unit* beg, const utf16_code_unit* end, const utf16_code_unit* reset, const utf16_code_unit* ptr)
 {
     auto ret = ptr;
     // This uses individual if-assignments to get the compiler to emit conditional moves.
@@ -778,7 +778,7 @@ CodepointWidthDetector& CodepointWidthDetector::Singleton() noexcept
     return s_codepointWidthDetector;
 }
 
-bool CodepointWidthDetector::GraphemeNext(GraphemeState& s, const std::u16string_view& str) noexcept
+bool CodepointWidthDetector::GraphemeNext(GraphemeState& s, const std::basic_string_view<utf16_code_unit>& str) noexcept
 {
     if (_mode == TextMeasurementMode::Graphemes)
     {
@@ -791,7 +791,7 @@ bool CodepointWidthDetector::GraphemeNext(GraphemeState& s, const std::u16string
     return _graphemeNextConsole(s, str);
 }
 
-bool CodepointWidthDetector::GraphemePrev(GraphemeState& s, const std::u16string_view& str) noexcept
+bool CodepointWidthDetector::GraphemePrev(GraphemeState& s, const std::basic_string_view<utf16_code_unit>& str) noexcept
 {
     if (_mode == TextMeasurementMode::Graphemes)
     {
@@ -806,7 +806,7 @@ bool CodepointWidthDetector::GraphemePrev(GraphemeState& s, const std::u16string
 
 // Parses the next grapheme cluster from the given string. The algorithm largely follows "UAX #29: Unicode Text Segmentation",
 // but takes some mild liberties. Returns false if the end of the string was reached. Updates `s` with the cluster.
-bool CodepointWidthDetector::_graphemeNext(GraphemeState& s, const std::u16string_view& str) const noexcept
+bool CodepointWidthDetector::_graphemeNext(GraphemeState& s, const std::basic_string_view<utf16_code_unit>& str) const noexcept
 {
     const auto beg = str.data();
     const auto end = beg + str.size();
@@ -903,7 +903,7 @@ bool CodepointWidthDetector::_graphemeNext(GraphemeState& s, const std::u16strin
 // Parses the preceding grapheme cluster from the given string. The algorithm largely follows "UAX #29: Unicode Text Segmentation",
 // but takes some mild liberties. Returns false if the end of the string was reached. Updates `s` with the cluster.
 // This code is identical to _graphemeNext() but with the order of operations reversed since we're iterating backwards.
-bool CodepointWidthDetector::_graphemePrev(GraphemeState& s, const std::u16string_view& str) const noexcept
+bool CodepointWidthDetector::_graphemePrev(GraphemeState& s, const std::basic_string_view<utf16_code_unit>& str) const noexcept
 {
     const auto beg = str.data();
     const auto end = beg + str.size();
@@ -1001,7 +1001,7 @@ bool CodepointWidthDetector::_graphemePrev(GraphemeState& s, const std::u16strin
 // Such terminals have no actual notion of graphemes or joining characters, but do know zero-width characters.
 // During cursor navigation they'll skip over such zero-width characters to reach the target column.
 // In effect this means, that a non-zero-width character gets clustered with any number of following zero-width characters.
-bool CodepointWidthDetector::_graphemeNextWcswidth(GraphemeState& s, const std::u16string_view& str) const noexcept
+bool CodepointWidthDetector::_graphemeNextWcswidth(GraphemeState& s, const std::basic_string_view<utf16_code_unit>& str) const noexcept
 {
     const auto beg = str.data();
     const auto end = beg + str.size();
@@ -1067,7 +1067,7 @@ bool CodepointWidthDetector::_graphemeNextWcswidth(GraphemeState& s, const std::
 // Such terminals have no actual notion of graphemes or joining characters, but do know zero-width characters.
 // During cursor navigation they'll skip over such zero-width characters to reach the target column.
 // In effect this means, that a non-zero-width character gets clustered with any number of following zero-width characters.
-bool CodepointWidthDetector::_graphemePrevWcswidth(GraphemeState& s, const std::u16string_view& str) const noexcept
+bool CodepointWidthDetector::_graphemePrevWcswidth(GraphemeState& s, const std::basic_string_view<utf16_code_unit>& str) const noexcept
 {
     const auto beg = str.data();
     const auto end = beg + str.size();
@@ -1127,7 +1127,7 @@ bool CodepointWidthDetector::_graphemePrevWcswidth(GraphemeState& s, const std::
 
 // Implements a clustering algorithm that behaves similar to the old conhost.
 // It even asks the text renderer how wide ambiguous width characters are instead of defaulting to 1 (or 2).
-bool CodepointWidthDetector::_graphemeNextConsole(GraphemeState& s, const std::u16string_view& str) noexcept
+bool CodepointWidthDetector::_graphemeNextConsole(GraphemeState& s, const std::basic_string_view<utf16_code_unit>& str) noexcept
 {
     const auto beg = str.data();
     const auto end = beg + str.size();
@@ -1173,7 +1173,7 @@ bool CodepointWidthDetector::_graphemeNextConsole(GraphemeState& s, const std::u
 
 // Implements a clustering algorithm that behaves similar to the old conhost.
 // It even asks the text renderer how wide ambiguous width characters are instead of defaulting to 1 (or 2).
-bool CodepointWidthDetector::_graphemePrevConsole(GraphemeState& s, const std::u16string_view& str) noexcept
+bool CodepointWidthDetector::_graphemePrevConsole(GraphemeState& s, const std::basic_string_view<utf16_code_unit>& str) noexcept
 {
     const auto beg = str.data();
     const auto end = beg + str.size();
@@ -1233,17 +1233,17 @@ try
         return it->second;
     }
 
-    char16_t buf[2];
+    utf16_code_unit buf[2];
     size_t len;
     if (codepoint <= 0xffff)
     {
-        buf[0] = static_cast<char16_t>(codepoint);
+        buf[0] = static_cast<utf16_code_unit>(codepoint);
         len = 1;
     }
     else
     {
-        buf[0] = static_cast<char16_t>((codepoint >> 10) + 0xD7C0);
-        buf[1] = static_cast<char16_t>((codepoint & 0x3ff) | 0xDC00);
+        buf[0] = static_cast<utf16_code_unit>((codepoint >> 10) + 0xD7C0);
+        buf[1] = static_cast<utf16_code_unit>((codepoint & 0x3ff) | 0xDC00);
         len = 2;
     }
 
@@ -1282,7 +1282,7 @@ void CodepointWidthDetector::SetAmbiguousWidth(const int width) noexcept
 // - pfnFallback - the function to use as the fallback method.
 // Return Value:
 // - <none>
-void CodepointWidthDetector::SetFallbackMethod(std::function<bool(const std::u16string_view&)> pfnFallback) noexcept
+void CodepointWidthDetector::SetFallbackMethod(std::function<bool(const std::basic_string_view<utf16_code_unit>&)> pfnFallback) noexcept
 {
     _pfnFallbackMethod = std::move(pfnFallback);
 }

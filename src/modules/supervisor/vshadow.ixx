@@ -22,6 +22,9 @@ import std;
 import <vshadow/shadow.h>;
 import <devicefs/windows_imports.h>;
 import devicefs.stream_writer;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 export namespace devicefs::vshadow {
 
@@ -143,9 +146,9 @@ class Backup {
                 snapshot_devices)) {
             snapshot_set.snapshots.push_back({
                 .identifier = identifier,
-                .original_volume = std::filesystem::path{
-                    original_volume}.string(),
-                .device = std::filesystem::path{device}.string(),
+                .original_volume = Transcode<std::string>(
+                    original_volume),
+                .device = Transcode<std::string>(device),
             });
         }
 
@@ -204,9 +207,9 @@ export namespace devicefs::vshadow {
                     snapshot_set_identifier, original_volume, device);
                 properties = SnapshotProperties{
                     .snapshot_set_identifier = snapshot_set_identifier,
-                    .original_volume = std::filesystem::path{
-                        original_volume}.string(),
-                    .device = std::filesystem::path{device}.string(),
+                    .original_volume = Transcode<std::string>(
+                        original_volume),
+                    .device = Transcode<std::string>(device),
                 };
             } catch (const HRESULT) {
                 // One unavailable old snapshot does not affect the others.
@@ -227,7 +230,7 @@ export namespace devicefs::vshadow {
         auto canonical_volumes = volumes |
             std::views::transform([](const std::string &volume) {
                 return GetUniqueVolumeNameForPath(
-                    std::filesystem::path{volume}.wstring(), true);
+                    Transcode<std::wstring>(volume), true);
             }) |
             std::ranges::to<std::vector<std::wstring>>();
 

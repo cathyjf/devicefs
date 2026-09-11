@@ -24,6 +24,9 @@ import std;
 import <devicefs/windows_imports.h>;
 import devicefs.common;
 import devicefs.terminal.text;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 using namespace std::string_view_literals;
 
@@ -71,7 +74,7 @@ public:
             if (read != DWORD{sizeof(last)}) {
                 throw std::runtime_error(std::format(
                     "the read from backup supervisor log '{}' was incomplete",
-                    path.string()));
+                    Transcode<std::string>(path.native())));
             }
             if (last != '\n') {
                 WriteRaw(last == '\r'

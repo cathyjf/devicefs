@@ -1,6 +1,19 @@
 /* auto-generated on 2026-09-10 22:05:17 -0400. Do not edit! */
 /* begin file src/simdutf.cpp */
+#include <climits>
 #include "simdutf/simdutf.h"
+
+#ifdef _MSC_VER
+// ASCII expansion writes one UTF-16 or UTF-32 code unit for each input byte.
+// In `store_ascii_as_utf16` and `store_ascii_as_utf32`, `sizeof(simd8<T>)`
+// therefore gives the number of destination elements produced by one chunk.
+// Pointer arithmetic already scales that count by the destination element size.
+// C6305 mistakes this input-byte count for a destination-byte count.
+#pragma warning(disable : 6305)
+#endif
+
+using std::printf;
+using std::getenv;
 
 /* begin file src/encoding_types.cpp */
 
@@ -81,7 +94,6 @@ namespace simdutf {
 /* begin file src/tables/utf8_to_utf16_tables.h */
 #ifndef SIMDUTF_UTF8_TO_UTF16_TABLES_H
 #define SIMDUTF_UTF8_TO_UTF16_TABLES_H
-#include <cstdint>
 
 namespace simdutf {
 namespace {
@@ -2140,8 +2152,6 @@ template <typename T> T clear_least_significant_bit(T x) {
 /* begin file src/simdutf/arm64/simd.h */
 #ifndef SIMDUTF_ARM64_SIMD_H
 #define SIMDUTF_ARM64_SIMD_H
-
-#include <type_traits>
 
 namespace simdutf {
 namespace arm64 {
@@ -7127,8 +7137,6 @@ simdutf_really_inline int trailing_zeroes(uint64_t input_num) {
 #ifndef SIMDUTF_PPC64_SIMD_H
 #define SIMDUTF_PPC64_SIMD_H
 
-#include <type_traits>
-
 namespace simdutf {
 namespace ppc64 {
 namespace {
@@ -9694,8 +9702,6 @@ template <uint32_t x> constexpr __m128i lsx_splat_u32_aux() {
 #ifndef SIMDUTF_LASX_BITMANIPULATION_H
 #define SIMDUTF_LASX_BITMANIPULATION_H
 
-#include <limits>
-
 namespace simdutf {
 namespace lasx {
 namespace {
@@ -11200,8 +11206,6 @@ template <uint32_t x> constexpr __m128i lsx_splat_u32_aux() {
 #ifndef SIMDUTF_LSX_BITMANIPULATION_H
 #define SIMDUTF_LSX_BITMANIPULATION_H
 
-#include <limits>
-
 namespace simdutf {
 namespace lsx {
 namespace {
@@ -12390,8 +12394,6 @@ public:
 #ifndef SIMDUTF_FALLBACK_BITMANIPULATION_H
 #define SIMDUTF_FALLBACK_BITMANIPULATION_H
 
-#include <limits>
-
 namespace simdutf {
 namespace fallback {
 namespace {} // unnamed namespace
@@ -12412,69 +12414,25 @@ SIMDUTF_POP_DISABLE_WARNINGS
 #endif
 
 // The scalar routines should be included once.
-#if SIMDUTF_FEATURE_ASCII
-#endif // SIMDUTF_FEATURE_ASCII
-#if SIMDUTF_FEATURE_UTF8 || SIMDUTF_FEATURE_DETECT_ENCODING
-#endif // SIMDUTF_FEATURE_UTF8 || SIMDUTF_FEATURE_DETECT_ENCODING
 #if SIMDUTF_FEATURE_UTF16 || SIMDUTF_FEATURE_DETECT_ENCODING ||                \
     (SIMDUTF_FEATURE_UTF8 && SIMDUTF_FEATURE_LATIN1)
 #endif // SIMDUTF_FEATURE_UTF16 || SIMDUTF_FEATURE_DETECT_ENCODING ||
        // (SIMDUTF_FEATURE_UTF8 && SIMDUTF_FEATURE_LATIN1)
-#if SIMDUTF_FEATURE_UTF32 || SIMDUTF_FEATURE_DETECT_ENCODING
-#endif // SIMDUTF_FEATURE_UTF32 || SIMDUTF_FEATURE_DETECT_ENCODING
-#if SIMDUTF_FEATURE_LATIN1
-#endif // SIMDUTF_FEATURE_LATIN1
-#if SIMDUTF_FEATURE_BASE64
-#endif // SIMDUTF_FEATURE_BASE64
 
-#if SIMDUTF_FEATURE_UTF8 && SIMDUTF_FEATURE_UTF32
-#endif // SIMDUTF_FEATURE_UTF8 && SIMDUTF_FEATURE_UTF32
 
-#if SIMDUTF_FEATURE_UTF16 && SIMDUTF_FEATURE_UTF32
-#endif // SIMDUTF_FEATURE_UTF16 && SIMDUTF_FEATURE_UTF32
 
-#if SIMDUTF_FEATURE_UTF8 && SIMDUTF_FEATURE_UTF16
-#endif // SIMDUTF_FEATURE_UTF8 && SIMDUTF_FEATURE_UTF16
 
-#if SIMDUTF_FEATURE_UTF16 && SIMDUTF_FEATURE_UTF32
-#endif // SIMDUTF_FEATURE_UTF16 && SIMDUTF_FEATURE_UTF32
 
 #if SIMDUTF_FEATURE_UTF8 &&                                                    \
     (SIMDUTF_FEATURE_UTF16 || SIMDUTF_FEATURE_UTF32 || SIMDUTF_FEATURE_LATIN1)
 #endif // SIMDUTF_FEATURE_UTF8 && (SIMDUTF_FEATURE_UTF16 ||
        // SIMDUTF_FEATURE_UTF32 || SIMDUTF_FEATURE_LATIN1)
 
-#if SIMDUTF_FEATURE_UTF8 || SIMDUTF_FEATURE_UTF32
-#endif // SIMDUTF_FEATURE_UTF8 || SIMDUTF_FEATURE_UTF32
 
-#if SIMDUTF_FEATURE_UTF8 && SIMDUTF_FEATURE_LATIN1
-#endif // SIMDUTF_FEATURE_UTF8 && SIMDUTF_FEATURE_LATIN1
-#if SIMDUTF_FEATURE_UTF16 && SIMDUTF_FEATURE_LATIN1
-#endif // SIMDUTF_FEATURE_UTF16 && SIMDUTF_FEATURE_LATIN1
-#if SIMDUTF_FEATURE_UTF32 && SIMDUTF_FEATURE_LATIN1
-#endif // SIMDUTF_FEATURE_UTF32 && SIMDUTF_FEATURE_LATIN1
 
-#if SIMDUTF_FEATURE_UTF8 && SIMDUTF_FEATURE_LATIN1
-#endif // SIMDUTF_FEATURE_UTF8 && SIMDUTF_FEATURE_LATIN1
-#if SIMDUTF_FEATURE_UTF16 && SIMDUTF_FEATURE_LATIN1
-#endif // SIMDUTF_FEATURE_UTF16 && SIMDUTF_FEATURE_LATIN1
-#if SIMDUTF_FEATURE_UTF32 && SIMDUTF_FEATURE_LATIN1
-#endif // SIMDUTF_FEATURE_UTF32 && SIMDUTF_FEATURE_LATIN1
 
-#if SIMDUTF_FEATURE_UTF8 && SIMDUTF_FEATURE_LATIN1
-#endif // SIMDUTF_FEATURE_UTF8 && SIMDUTF_FEATURE_LATIN1
-#if SIMDUTF_FEATURE_UTF16 && SIMDUTF_FEATURE_LATIN1
-#endif // SIMDUTF_FEATURE_UTF16 && SIMDUTF_FEATURE_LATIN1
-#if SIMDUTF_FEATURE_UTF32 && SIMDUTF_FEATURE_LATIN1
-#endif // SIMDUTF_FEATURE_UTF32 && SIMDUTF_FEATURE_LATIN1
 
 /* begin file src/implementation.cpp */
-#include <climits>
-#include <initializer_list>
-#include <type_traits>
-#if SIMDUTF_ATOMIC_REF
-  #include <array>
-#endif
 
 // The macro SIMDUTF_USE_STATIC_INITIALIZATION, when set to 1, means that we
 // will use translation-unit-scope variables to hold our implementations.
@@ -22946,8 +22904,6 @@ const char16_t *implementation::find(const char16_t *start, const char16_t *end,
 #endif
 #if SIMDUTF_IMPLEMENTATION_ICELAKE
 /* begin file src/icelake/implementation.cpp */
-#include <tuple>
-#include <utility>
 
 /* begin file src/simdutf/icelake/begin.h */
 // redefining SIMDUTF_IMPLEMENTATION to "icelake"
@@ -27953,15 +27909,12 @@ simdutf_really_inline const char16_t *util_find(const char16_t *start,
 /* end file src/icelake/icelake_find.inl.cpp */
 #endif // SIMDUTF_FEATURE_BASE64
 
-#include <cstdint>
-
 } // namespace
 } // namespace icelake
 } // namespace simdutf
 
 #if SIMDUTF_FEATURE_UTF8 && SIMDUTF_FEATURE_UTF32
 /* begin file src/generic/utf32.h */
-#include <limits>
 
 namespace simdutf {
 namespace icelake {
@@ -34868,7 +34821,6 @@ struct validating_transcoder {
 } // namespace simdutf
 /* end file src/generic/utf8_to_utf32/utf8_to_utf32.h */
 /* begin file src/generic/utf32.h */
-#include <limits>
 
 namespace simdutf {
 namespace haswell {
@@ -42318,7 +42270,6 @@ const result validate_utf16_as_ascii_with_errors(const char16_t *input,
 
 #if SIMDUTF_FEATURE_UTF32 || SIMDUTF_FEATURE_DETECT_ENCODING
 /* begin file src/generic/utf32.h */
-#include <limits>
 
 namespace simdutf {
 namespace ppc64 {
@@ -50913,7 +50864,6 @@ struct validating_transcoder {
 } // namespace simdutf
 /* end file src/generic/utf8_to_utf32/utf8_to_utf32.h */
 /* begin file src/generic/utf32.h */
-#include <limits>
 
 namespace simdutf {
 namespace westmere {
@@ -59707,7 +59657,6 @@ const result validate_utf16_as_ascii_with_errors(const char16_t *input,
 
 #if SIMDUTF_FEATURE_UTF32
 /* begin file src/generic/utf32.h */
-#include <limits>
 
 namespace simdutf {
 namespace lasx {
@@ -66681,7 +66630,6 @@ const result validate_utf16_as_ascii_with_errors(const char16_t *input,
 
 #if SIMDUTF_FEATURE_UTF32
 /* begin file src/generic/utf32.h */
-#include <limits>
 
 namespace simdutf {
 namespace lsx {
@@ -68082,21 +68030,6 @@ simdutf_warn_unused size_t implementation::binary_length_from_base64(
 #ifndef SIMDUTF_C_H
 #define SIMDUTF_C_H
 
-#include <stddef.h>
-#include <stdbool.h>
-#include <stdint.h>
-
-#ifdef __has_include
-  #if __has_include(<uchar.h>)
-    #include <uchar.h>
-  #else // __has_include(<uchar.h>)
-    #define char16_t uint16_t
-    #define char32_t uint32_t
-  #endif // __has_include(<uchar.h>)
-#else    // __has_include(<uchar.h>)
-  #define char16_t uint16_t
-  #define char32_t uint32_t
-#endif // __has_include
 
 #ifdef __cplusplus
 extern "C" {

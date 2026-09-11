@@ -72,6 +72,41 @@ export auto TestTranscoding() -> bool {
             std::u16string_view{from_pointer} == u"hello"sv,
             "a supported string input was converted incorrectly"sv);
     });
+    passed &= Test("native wide text preserving Unicode and embedded NULs in both directions"sv, [] {
+        constexpr auto utf8 = "café 日本語 👩‍💻\0\U00010000\U0010ffff"sv;
+        constexpr auto wide = L"café 日本語 👩‍💻\0\U00010000\U0010ffff"sv;
+        CheckConversion(utf8, wide);
+        CheckConversion(wide, utf8);
+        CheckConversion(wide, wide);
+        CheckConversion(wide, u"café 日本語 👩‍💻\0\U00010000\U0010ffff"sv);
+        CheckConversion(U"café 日本語 👩‍💻\0\U00010000\U0010ffff"sv, wide);
+        CheckConversion(std::wstring_view{}, std::string_view{});
+        CheckRejected<char>(L"\xd800"sv);
+        CheckRejected<wchar_t>("\xed\xa0\x80"sv);
+    });
+    passed &= Test("transcoding directly into requested string and allocator types"sv, [] {
+        const auto wide = Transcode<std::wstring>("café\0👩‍💻"sv);
+        Require(wide == L"café\0👩‍💻"sv,
+            "requested wide string lost Unicode or embedded NULs"sv);
+        Require(Transcode<std::string>(wide) == "café\0👩‍💻"sv,
+            "requested narrow string changed the text"sv);
+        const auto allocated = Transcode<std::pmr::u8string>(wide);
+        static_assert(std::same_as<decltype(allocated), const std::pmr::u8string>);
+        Require(allocated == u8"café\0👩‍💻"sv,
+            "conversion into the requested allocator changed the text"sv);
+        for (const auto length : {0uz, 1uz, 255uz, 256uz, 4096uz}) {
+            const auto input = std::wstring(length, L'界');
+            const auto encoded = Transcode<std::pmr::u8string>(input);
+            Require(Transcode<std::wstring>(encoded) == input,
+                "requested string round trip failed across a storage boundary"sv);
+        }
+        try {
+            const auto invalid = Transcode<std::wstring>("\xf4\x90\x80\x80"sv);
+            throw std::runtime_error(std::format(
+                "malformed UTF-8 produced {} wide code units", invalid.size()));
+        } catch (const std::invalid_argument &) {
+        }
+    });
     passed &= Test("transcoding and moving results around the inline storage boundary"sv, [] {
         for (const auto length : {0uz, 1uz, 254uz, 255uz, 256uz, 257uz, 4096uz}) {
             const auto input = std::string(length, 'x');
@@ -93,14 +128,18 @@ export auto TestTranscoding() -> bool {
         auto utf8 = std::string{};
         auto utf16 = std::u16string{};
         auto utf32 = std::u32string{};
+        auto wide = std::wstring{};
         for (auto repetitions = 0; repetitions < 100; ++repetitions) {
             utf8 += "a日本語👩‍💻é";
             utf16 += u"a日本語👩‍💻é";
             utf32 += U"a日本語👩‍💻é";
+            wide += L"a日本語👩‍💻é";
             CheckConversion(std::string_view{utf8}, std::u16string_view{utf16});
             CheckConversion(std::u16string_view{utf16}, std::string_view{utf8});
             CheckConversion(std::string_view{utf8}, std::u32string_view{utf32});
             CheckConversion(std::u32string_view{utf32}, std::string_view{utf8});
+            CheckConversion(std::wstring_view{wide}, std::string_view{utf8});
+            CheckConversion(std::string_view{utf8}, std::wstring_view{wide});
         }
     });
     passed &= Test("transcoding rejecting malformed UTF-8, UTF-16 and UTF-32"sv, [] {
@@ -121,6 +160,19 @@ export auto TestTranscoding() -> bool {
             CheckRejected<char>(invalid);
             CheckRejected<char16_t>(invalid);
             CheckRejected<char32_t>(invalid);
+        }
+    });
+    passed &= Test("native wide input rejecting invalid code units in scalar and SIMD conversions"sv, []<typename Wide = wchar_t> {
+        for (const auto length : {0uz, 1uz, 15uz, 16uz, 31uz, 32uz, 255uz, 256uz}) {
+            auto text = std::basic_string<Wide>(length, L'a');
+            text += Wide{0xd800};
+            CheckRejected<char>(std::basic_string_view{text});
+            if constexpr (std::numeric_limits<Wide>::is_signed) {
+                text.back() = Wide{-1};
+                CheckRejected<char>(std::basic_string_view{text});
+                CheckRejected<char16_t>(std::basic_string_view{text});
+                CheckRejected<Wide>(std::basic_string_view{text});
+            }
         }
     });
     return passed;

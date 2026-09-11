@@ -42,19 +42,21 @@ add_library(windows-terminal-width ${DEVICEFS_TERMINAL_LIBRARY_TYPE}
     dependencies/terminal/src/types/CodepointWidthDetector.cpp
 )
 target_include_directories(windows-terminal-width PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/dependencies"
-)
-target_include_directories(windows-terminal-width PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/compat"
+    "${CMAKE_CURRENT_SOURCE_DIR}/dependencies"
 )
 
 add_library(simdutf ${DEVICEFS_TERMINAL_LIBRARY_TYPE}
     dependencies/simdutf/simdutf.cpp
 )
+target_include_directories(simdutf PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/compat")
 target_include_directories(simdutf SYSTEM PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/simdutf/include"
 )
 if(MSVC)
+    # MSBuild shares the standard-library IFC between these targets. Its analysis
+    # data must be generated for the first-party modules that also import `std`.
+    set_target_properties(simdutf PROPERTIES VS_GLOBAL_RunCodeAnalysis true)
     target_compile_definitions(simdutf PRIVATE _MSVC_STL_HARDENING=1)
     target_compile_options(simdutf PRIVATE
         /permissive- /EHsc /utf-8 /guard:cf /guard:ehcont /sdl

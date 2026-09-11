@@ -43,6 +43,10 @@ import devicefs.vhdx_viewer;
 import devicefs.filesystem_measurement;
 #endif
 
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
+
 export namespace devicefs {
 
 template <typename DeviceType>
@@ -183,14 +187,14 @@ auto Usage(const auto output) noexcept {
             result.help = true;
         } else if (arg == "--mount") {
             result.mount.value =
-                std::filesystem::path{next(i)}.wstring();
+                Transcode<std::wstring>(next(i));
         } else if (arg == "--read-user") {
             result.read_user = next(i);
         } else if (arg == "--stop-event") {
             result.stop_event = next(i);
         } else if (arg == "--map") {
             result.mappings.push_back({
-                .name = std::filesystem::path{next(i)}.wstring(),
+                .name = Transcode<std::wstring>(next(i)),
                 .device = std::string{next(i)},
             });
         } else if (arg == "--cache") {
@@ -224,12 +228,12 @@ auto Usage(const auto output) noexcept {
             (name.find_first_of(L"/\\:") != std::wstring_view::npos)) {
             throw std::invalid_argument(std::format(
                 "invalid filename '{}' in --map #{}",
-                std::filesystem::path{name}.string(), i + 1));
+                Transcode<std::string>(name), i + 1));
         }
         if (!names.emplace(Lowercase(name)).second) {
             throw std::invalid_argument(std::format(
                 "duplicate filename '{}' in --map #{}",
-                std::filesystem::path{name}.string(), i + 1));
+                Transcode<std::string>(name), i + 1));
         }
     }
     if (!result.mappings.empty()) {
@@ -774,7 +778,7 @@ auto RunWithDevices(
             "devicefs: mounted {} device(s) at {}; read access: {}; "
             "stop event: {}\n",
             options.mappings.size(),
-            std::filesystem::path{options.mount.value}.string(),
+            Transcode<std::string>(options.mount.value),
             options.read_user, options.stop_event);
         if (WaitForSingleObject(stop_event.get(), INFINITE) == WAIT_FAILED) {
             wait_error = GetLastError();

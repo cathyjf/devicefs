@@ -38,6 +38,9 @@ import devicefs.stream_writer;
 import devicefs.supervisor.https_download;
 import devicefs.supervisor.temporary_paths;
 import devicefs.supervisor.winrt_apartment;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 #undef GetObject
 #undef stderr
@@ -137,11 +140,11 @@ auto VerifyWinFspMsi(const std::filesystem::path &path) {
         const auto digest = algorithm.HashData(FileIO::ReadBufferAsync(file).get());
         if (!CryptographicBuffer::Compare(digest,
                 CryptographicBuffer::DecodeFromHexString(
-                    winrt::to_hstring(kWinFspSha256)))) {
+                    Transcode<std::wstring>(kWinFspSha256)))) {
             throw std::runtime_error(std::format(
                 "WinFsp MSI '{}' has SHA-256 {}; expected {}",
-                path.string(),
-                winrt::to_string(CryptographicBuffer::EncodeToHexString(digest)),
+                Transcode<std::string>(path.native()),
+                Transcode<std::string>(CryptographicBuffer::EncodeToHexString(digest)),
                 kWinFspSha256));
         }
     } catch (const winrt::hresult_error &error) {
@@ -185,7 +188,7 @@ auto EnsureWinFsp() -> bool {
     try {
         const auto client = winrt::Windows::Web::Http::HttpClient{};
         const auto bytes = DownloadFile(client,
-            winrt::Windows::Foundation::Uri{winrt::to_hstring(url)}, destination);
+            winrt::Windows::Foundation::Uri{Transcode<std::wstring>(url)}, destination);
         devicefs::WriteToStream(devicefs::stdout,
             "backup-supervisor: downloaded '{}' ({:.2f} MiB)\n",
             name, bytes / (1024.0 * 1024.0));
@@ -240,15 +243,15 @@ auto InstallWslPackage() -> bool {
             }
             throw std::runtime_error(std::format(
                 "WSL release '{}' from '{}' has no MSI with suffix '{}'",
-                winrt::to_string(release.GetNamedString(L"tag_name")),
-                winrt::to_string(releases_url), winrt::to_string(suffix)));
+                Transcode<std::string>(release.GetNamedString(L"tag_name")),
+                Transcode<std::string>(releases_url), Transcode<std::string>(suffix)));
         }();
         const auto name = package.GetNamedString(L"name");
         const auto download_url = Uri{package.GetNamedString(L"browser_download_url")};
         if (download_url.SchemeName() != L"https") {
             throw std::runtime_error(std::format(
                 "WSL MSI '{}' has a download URL that does not use HTTPS: '{}'",
-                winrt::to_string(name), winrt::to_string(download_url.AbsoluteUri())));
+                Transcode<std::string>(name), Transcode<std::string>(download_url.AbsoluteUri())));
         }
 
         const auto directory = TemporaryDirectory{
@@ -265,7 +268,7 @@ auto InstallWslPackage() -> bool {
             std::wstring_view{name}, bytes / (1024.0 * 1024.0));
 
         return InstallMsi(destination,
-            std::format("WSL MSI '{}'", winrt::to_string(name)));
+            std::format("WSL MSI '{}'", Transcode<std::string>(name)));
     } catch (const winrt::hresult_error &error) {
         WinError("could not acquire or install the WSL package from '{}': {}",
             releases_url, std::wstring_view{error.message()},

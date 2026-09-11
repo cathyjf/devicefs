@@ -45,6 +45,9 @@ import devicefs.supervisor.installation;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.temporary_paths;
 import devicefs.supervisor.winrt_apartment;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 #undef stderr
 #undef stdout
@@ -127,7 +130,7 @@ auto SetDefaultTokenAcl() {
         WinError("could not open WSL registrations to find distribution '{}'",
             distribution, ExplicitWin32Error::FromHresult(result));
     }
-    const auto requested = std::filesystem::path{distribution}.wstring();
+    const auto requested = Transcode<std::wstring>(distribution);
     auto iterator = wil::reg::key_heap_string_nothrow_iterator{registrations.get()};
     for (; !iterator.at_end(); ++iterator) {
         auto name = wil::unique_cotaskmem_string{};
@@ -209,7 +212,7 @@ auto ExtractArchiveMember(
     // their archive paths. The layer therefore remains a tar archive for WSL
     // to unpack with Linux filesystem semantics.
     RunCommand(std::array{
-        tar.string(), "-xOf"s, archive.string(), "--"s, std::string{member},
+        Transcode<std::string>(tar.native()), "-xOf"s, Transcode<std::string>(archive.native()), "--"s, std::string{member},
     }, file.get());
 }
 
@@ -228,7 +231,7 @@ auto ExtractArchiveMember(
             image, layers.Size());
         return std::nullopt;
     }
-    return winrt::to_string(layers.GetObjectAt(0).GetNamedString(L"digest"));
+    return Transcode<std::string>(layers.GetObjectAt(0).GetNamedString(L"digest"));
 }
 
 [[nodiscard]] auto ReadOciLayerDigest(
@@ -243,19 +246,19 @@ auto ExtractArchiveMember(
         auto file = std::ifstream{path, std::ios::binary};
         if (!file.is_open()) {
             throw std::runtime_error(std::format(
-                "could not open OCI metadata '{}'", path.string()));
+                "could not open OCI metadata '{}'", Transcode<std::string>(path.native())));
         }
         const auto source = std::string{std::istreambuf_iterator<char>{file}, {}};
         if (file.bad()) {
             throw std::runtime_error(std::format(
-                "could not read OCI metadata '{}'", path.string()));
+                "could not read OCI metadata '{}'", Transcode<std::string>(path.native())));
         }
-        return winrt::Windows::Data::Json::JsonObject::Parse(winrt::to_hstring(source));
+        return winrt::Windows::Data::Json::JsonObject::Parse(Transcode<std::wstring>(source));
     };
     try {
         const auto manifests = read_metadata("index.json").GetNamedArray(L"manifests");
-        return OciLayerDigest(read_metadata(BlobMember(winrt::to_string(
-            manifests.GetObjectAt(0).GetNamedString(L"digest")))), archive.string());
+        return OciLayerDigest(read_metadata(BlobMember(Transcode<std::string>(
+            manifests.GetObjectAt(0).GetNamedString(L"digest")))), Transcode<std::string>(archive.native()));
     } catch (const winrt::hresult_error &error) {
         WinError("could not read OCI image metadata from '{}': {}",
             std::wstring_view{archive.native()}, std::wstring_view{error.message()},
@@ -291,7 +294,7 @@ auto ExtractArchiveMember(
     constexpr auto image_tag = L"latest"sv;
     const auto repository = std::format(L"{}/{}", github_username, image_name);
     const auto repository_url = std::format(L"https://{}/v2/{}", registry_host, repository);
-    const auto image = winrt::to_string(std::format(
+    const auto image = Transcode<std::string>(std::format(
         L"{}/{}:{}", registry_host, repository, image_tag));
     const auto architecture = NativeMachineArchitecture() == IMAGE_FILE_MACHINE_ARM64
         ? L"arm64"sv : L"amd64"sv;
@@ -300,7 +303,7 @@ auto ExtractArchiveMember(
         RO_INIT_MULTITHREADED};
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: querying OCI image '{}' for linux/{}\n",
-        image, winrt::to_string(architecture));
+        image, Transcode<std::string>(architecture));
     const auto client = [&] {
         try {
             const auto client = HttpClient{};
@@ -343,11 +346,11 @@ auto ExtractArchiveMember(
                 }
                 return std::pair{Uri{std::format(
                     L"{}/blobs/{}", repository_url,
-                    std::wstring_view{winrt::to_hstring(*digest)})}, *digest};
+                    std::wstring_view{Transcode<std::wstring>(*digest)})}, *digest};
             }
             throw std::runtime_error(std::format(
                 "OCI image '{}' has no suitable linux/{} manifest",
-                image, winrt::to_string(architecture)));
+                image, Transcode<std::string>(architecture)));
         } catch (const winrt::hresult_error &error) {
             WinError("could not read OCI image metadata for '{}': {}",
                 image, std::wstring_view{error.message()},
@@ -363,7 +366,7 @@ auto ExtractArchiveMember(
     }
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: downloading the linux/{} root filesystem from '{}'\n",
-        winrt::to_string(architecture), image);
+        Transcode<std::string>(architecture), image);
     const auto bytes = DownloadFile(client, layer_url, rootfs);
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: downloaded the root filesystem from '{}' ({:.2f} MiB)\n",
@@ -383,8 +386,8 @@ auto ReplaceDistribution(
             "could not find the imported WSL distribution '{}'", replacement));
     }
     const auto retired = std::format("devicefs-old-{}", UniqueName());
-    const auto retired_name = std::filesystem::path{retired}.wstring();
-    const auto canonical_name = std::filesystem::path{distribution}.wstring();
+    const auto retired_name = Transcode<std::wstring>(retired);
+    const auto canonical_name = Transcode<std::wstring>(distribution);
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: replacing WSL distribution '{}' with '{}'\n",
         distribution, replacement);
@@ -414,7 +417,7 @@ auto ReplaceDistribution(
         "backup-supervisor: unregistering old WSL distribution '{}'\n", retired);
     try {
         RunCommand(std::array{
-            executable.string(), "--unregister"s, retired,
+            Transcode<std::string>(executable.native()), "--unregister"s, retired,
         }, GetStdHandle(STD_OUTPUT_HANDLE));
     } catch (const std::runtime_error &error) {
         devicefs::WriteToStream(devicefs::stderr,
@@ -432,7 +435,7 @@ auto ReplaceDistribution(
     } catch (const std::filesystem::filesystem_error &error) {
         devicefs::WriteToStream(devicefs::stderr,
             "backup-supervisor: could not remove old WSL distribution directory '{}': {}\n",
-            previous_directory.string(), error.what());
+            Transcode<std::string>(previous_directory.native()), error.what());
     }
 }
 
@@ -489,14 +492,14 @@ export [[nodiscard]] auto MaterializeOci(
         const auto archive = std::filesystem::absolute(*oci);
         devicefs::WriteToStream(devicefs::stdout,
             "backup-supervisor: reading OCI image '{}' for WSL distribution '{}'\n",
-            archive.string(), distribution);
+            Transcode<std::string>(archive.native()), distribution);
         const auto layer = ReadOciLayerDigest(tar, archive, temporary.Path());
         if (!layer) {
             return std::nullopt;
         }
         devicefs::WriteToStream(devicefs::stdout,
             "backup-supervisor: extracting the root filesystem from '{}'\n",
-            archive.string());
+            Transcode<std::string>(archive.native()));
         ExtractArchiveMember(tar, archive, BlobMember(*layer), rootfs);
         return layer;
     }();
@@ -537,10 +540,10 @@ export [[nodiscard]] auto MaterializeOci(
     }
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: importing WSL1 distribution '{}' into '{}'\n",
-        import_name, installation.string());
+        import_name, Transcode<std::string>(installation.native()));
     RunCommand(std::array{
-        executable.string(), "--import"s, import_name,
-        installation.string(), rootfs.string(), "--version"s, "1"s,
+        Transcode<std::string>(executable.native()), "--import"s, import_name,
+        Transcode<std::string>(installation.native()), Transcode<std::string>(rootfs.native()), "--version"s, "1"s,
     }, GetStdHandle(STD_OUTPUT_HANDLE));
     // The layer digest identifies the imported filesystem for subsequent update
     // checks. Record it only after WSL reports a successful import. Failure to
@@ -553,7 +556,7 @@ export [[nodiscard]] auto MaterializeOci(
         if (!digest_file) {
             devicefs::WriteToStream(devicefs::stderr,
                 "backup-supervisor: could not record OCI layer digest in '{}'\n",
-                digest_path.string());
+                Transcode<std::string>(digest_path.native()));
         }
     }
     if (previous) {

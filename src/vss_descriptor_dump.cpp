@@ -21,6 +21,9 @@ import std;
 import devicefs.svi_extents;
 import devicefs.stream_writer;
 import devicefs.vss_block_descriptors;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 namespace {
 
@@ -89,7 +92,7 @@ auto Usage(const auto output) noexcept {
 }
 
 [[nodiscard]] auto ParseGuid(const std::string_view value) {
-    auto text = std::filesystem::path{value}.wstring();
+    auto text = Transcode<std::wstring>(value);
     if (!text.starts_with(L'{')) {
         text = std::format(L"{{{}}}", text);
     }

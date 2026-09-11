@@ -3,18 +3,58 @@
 
 module;
 
-#include <simdutf/simdutf.h>
 #include "compat/gsl_suppress.h"
 
 export module devicefs.terminal.transcoding;
 
-import std;
+#include "simdutf/simdutf.h"
+#undef char16_t
+#undef char32_t
 
 namespace devicefs::terminal::detail {
 
 template <typename Character>
 concept UtfCharacter = std::same_as<Character, char> || std::same_as<Character, char8_t> ||
-    std::same_as<Character, char16_t> || std::same_as<Character, char32_t>;
+    std::same_as<Character, char16_t> || std::same_as<Character, char32_t> ||
+    std::same_as<Character, wchar_t>;
+
+// Our simdutf adaptation uses `wchar_t` for the matching encoding.
+// The other C++ character type of that width needs a value-copy adapter;
+// native wide strings are passed directly to simdutf.
+template <typename Character>
+using SimdUnit = std::conditional_t<sizeof(Character) == 2, utf16_code_unit,
+    std::conditional_t<sizeof(Character) == 4, utf32_code_unit, Character>>;
+
+template <typename Allocator, typename Character>
+using ReboundString = std::basic_string<Character, std::char_traits<Character>,
+    typename std::allocator_traits<Allocator>::template rebind_alloc<Character>>;
+
+template <typename Allocator, UtfCharacter Input>
+[[nodiscard]] auto UtfInput(const std::basic_string_view<Input> input)
+    noexcept(std::same_as<Input, SimdUnit<Input>>) {
+    if constexpr (!std::same_as<Input, SimdUnit<Input>>) {
+        return ReboundString<Allocator, SimdUnit<Input>>(input.begin(), input.end());
+    } else {
+        return input;
+    }
+}
+
+// simdutf's UTF-8 functions accept `char*` and `const char*`. C++ permits
+// reading and writing an object's bytes through a `char*`, so these functions
+// can read or write our `char8_t` buffers through the converted pointers.
+// https://eel.is/c++draft/basic.lval#11
+template <typename Character>
+GSL_SUPPRESS("26490",
+    "Accessing a `char8_t` buffer through a `char*` is permitted by C++'s "
+    "rule allowing access to an object's bytes through a `char` glvalue.")
+[[nodiscard]] auto SimdData(Character *data) noexcept {
+    if constexpr (std::same_as<std::remove_const_t<Character>, char8_t>) {
+        using Byte = std::conditional_t<std::is_const_v<Character>, const char, char>;
+        return reinterpret_cast<Byte *>(data);
+    } else {
+        return data;
+    }
+}
 
 // simdutf writes into caller-owned storage. UTF-8 input needs at most one output
 // code unit per byte. UTF-16 to UTF-32 also cannot grow in code-unit count.
@@ -22,54 +62,61 @@ concept UtfCharacter = std::same_as<Character, char> || std::same_as<Character, 
 template <UtfCharacter Output, UtfCharacter Input>
 [[nodiscard]] constexpr auto TranscodedCapacity(const std::basic_string_view<Input> input) noexcept {
     if constexpr (sizeof(Output) == 1 && sizeof(Input) == 2) {
-        return simdutf::utf8_length_from_utf16(std::span{input});
+        return simdutf::utf8_length_from_utf16(SimdData(input.data()), input.size());
     } else if constexpr (sizeof(Output) == 1 && sizeof(Input) == 4) {
-        return simdutf::utf8_length_from_utf32(std::span{input});
+        return simdutf::utf8_length_from_utf32(SimdData(input.data()), input.size());
     } else if constexpr (sizeof(Output) == 2 && sizeof(Input) == 4) {
-        return simdutf::utf16_length_from_utf32(std::span{input});
+        return simdutf::utf16_length_from_utf32(SimdData(input.data()), input.size());
     } else {
         return input.size();
     }
 }
 
-template <UtfCharacter Output, UtfCharacter Input>
+template <typename Allocator = std::allocator<std::byte>, UtfCharacter Output, UtfCharacter Input>
 [[nodiscard]] auto ConvertText(const std::basic_string_view<Input> input,
     const std::span<Output> output) -> std::size_t {
-    const auto result = [&] {
-        if constexpr (sizeof(Input) == 1 && sizeof(Output) == 2) {
-            return simdutf::convert_utf8_to_utf16_with_errors(std::span{input}, output);
-        } else if constexpr (sizeof(Input) == 1 && sizeof(Output) == 4) {
-            return simdutf::convert_utf8_to_utf32_with_errors(std::span{input}, output);
-        } else if constexpr (sizeof(Input) == 2 && sizeof(Output) == 1) {
-            return simdutf::convert_utf16_to_utf8_with_errors(std::span{input}, output);
-        } else if constexpr (sizeof(Input) == 2 && sizeof(Output) == 4) {
-            return simdutf::convert_utf16_to_utf32_with_errors(std::span{input}, output);
-        } else if constexpr (sizeof(Input) == 4 && sizeof(Output) == 1) {
-            return simdutf::convert_utf32_to_utf8_with_errors(std::span{input}, output);
-        } else if constexpr (sizeof(Input) == 4 && sizeof(Output) == 2) {
-            return simdutf::convert_utf32_to_utf16_with_errors(std::span{input}, output);
-        } else {
-            const auto validated = [&] {
-                if constexpr (sizeof(Input) == 1) {
-                    return simdutf::validate_utf8_with_errors(std::span{input});
-                } else if constexpr (sizeof(Input) == 2) {
-                    return simdutf::validate_utf16_with_errors(std::span{input});
-                } else {
-                    return simdutf::validate_utf32_with_errors(std::span{input});
+    if constexpr (!std::same_as<Output, SimdUnit<Output>>) {
+        auto units = ReboundString<Allocator, SimdUnit<Output>>(output.size(), SimdUnit<Output>{});
+        const auto count = ConvertText(input, std::span{units});
+        std::copy_n(units.begin(), count, output.begin());
+        return count;
+    } else {
+        const auto result = [&]<typename... Arguments>(Arguments... arguments) {
+            if constexpr (sizeof(Input) == 1 && sizeof(Output) == 2) {
+                return simdutf::convert_utf8_to_utf16_with_errors(arguments...);
+            } else if constexpr (sizeof(Input) == 1 && sizeof(Output) == 4) {
+                return simdutf::convert_utf8_to_utf32_with_errors(arguments...);
+            } else if constexpr (sizeof(Input) == 2 && sizeof(Output) == 1) {
+                return simdutf::convert_utf16_to_utf8_with_errors(arguments...);
+            } else if constexpr (sizeof(Input) == 2 && sizeof(Output) == 4) {
+                return simdutf::convert_utf16_to_utf32_with_errors(arguments...);
+            } else if constexpr (sizeof(Input) == 4 && sizeof(Output) == 1) {
+                return simdutf::convert_utf32_to_utf8_with_errors(arguments...);
+            } else if constexpr (sizeof(Input) == 4 && sizeof(Output) == 2) {
+                return simdutf::convert_utf32_to_utf16_with_errors(arguments...);
+            } else {
+                const auto validated = [&] {
+                    if constexpr (sizeof(Input) == 1) {
+                        return simdutf::validate_utf8_with_errors(SimdData(input.data()), input.size());
+                    } else if constexpr (sizeof(Input) == 2) {
+                        return simdutf::validate_utf16_with_errors(SimdData(input.data()), input.size());
+                    } else {
+                        return simdutf::validate_utf32_with_errors(SimdData(input.data()), input.size());
+                    }
+                }();
+                if (validated.error == simdutf::SUCCESS) {
+                    std::memcpy(output.data(), input.data(), input.size() * sizeof(Input));
                 }
-            }();
-            if (validated.error == simdutf::SUCCESS) {
-                std::memcpy(output.data(), input.data(), input.size() * sizeof(Input));
+                return validated;
             }
-            return validated;
+        }(SimdData(input.data()), input.size(), SimdData(output.data()));
+        if (result.error != simdutf::SUCCESS) {
+            throw std::invalid_argument(std::format(
+                "could not transcode UTF-{} input at code-unit offset {}: {}",
+                sizeof(Input) * 8, result.count, simdutf::error_to_string(result.error)));
         }
-    }();
-    if (result.error != simdutf::SUCCESS) {
-        throw std::invalid_argument(std::format(
-            "could not transcode UTF-{} input at code-unit offset {}: {}",
-            sizeof(Input) * 8, result.count, simdutf::error_to_string(result.error)));
+        return result.count;
     }
-    return result.count;
 }
 
 }
@@ -81,8 +128,8 @@ export namespace devicefs::terminal {
 // borrows the result's storage, which remains valid until the owner is moved or
 // destroyed. Results are movable; a string constructed from the view copies the
 // text. A moved-from result contains an empty, null-terminated string.
-// Conversions whose capacity estimate fits 256 code units, including the final
-// NUL, use inline storage. Larger conversions allocate their buffer on the heap.
+// Results whose capacity estimate fits 256 code units, including the final
+// NUL, use inline storage. Larger results allocate their buffer on the heap.
 template <detail::UtfCharacter Character>
 class TranscodedText {
 public:
@@ -90,7 +137,9 @@ public:
     GSL_SUPPRESS("26495",
         "Conversion initializes the output prefix and its terminator before any "
         "read. The unused tail of `inline_` is never read, including when moving.")
-    explicit TranscodedText(const std::basic_string_view<Input> input) {
+    explicit TranscodedText(const std::basic_string_view<Input> text) {
+        const auto units = detail::UtfInput<std::allocator<Character>>(text);
+        const auto input = std::basic_string_view{units};
         const auto capacity = input.empty() ? 0 : detail::TranscodedCapacity<Character>(input);
         if (capacity >= (std::numeric_limits<std::size_t>::max() / sizeof(Character))) {
             throw std::length_error("transcoded text and its terminator exceed the allocation limit");
@@ -134,14 +183,33 @@ private:
 };
 
 // `Transcode<Output>(text)` converts a string, string view, or null-terminated
-// string into an owning `TranscodedText<Output>`. `char` and `char8_t` mean UTF-8;
+// string. A character type as `Output` returns an owning `TranscodedText<Output>`;
+// a `basic_string` type returns that string type. `char` and `char8_t` mean UTF-8;
 // `char16_t` and `char32_t` mean native-endian UTF-16 and UTF-32. Conversion is
 // independent of the locale. Malformed input throws `std::invalid_argument`
 // identifying the offending code-unit offset. String views and strings preserve
 // embedded NULs; pointers and literals end at their first NUL.
-template <detail::UtfCharacter Output>
+// A 16-bit `wchar_t` means UTF-16; a 32-bit `wchar_t` means UTF-32.
+// For a `basic_string` result, any temporary code-unit buffers use that string
+// type's allocator, including for secure allocators.
+template <typename Output>
+    requires detail::UtfCharacter<Output> || requires { typename Output::value_type; }
 [[nodiscard]] auto Transcode(const auto &text) {
-    return TranscodedText<Output>{std::basic_string_view{text}};
+    const auto input = std::basic_string_view{text};
+    if constexpr (detail::UtfCharacter<Output>) {
+        return TranscodedText<Output>{input};
+    } else {
+        using Character = typename Output::value_type;
+        using Allocator = typename Output::allocator_type;
+        const auto units = detail::UtfInput<Allocator>(input);
+        const auto source = std::basic_string_view{units};
+        const auto capacity = source.empty() ? 0 : detail::TranscodedCapacity<Character>(source);
+        auto result = Output(capacity, Character{});
+        if (!source.empty()) {
+            result.resize(detail::ConvertText<Allocator>(source, std::span{result}));
+        }
+        return result;
+    }
 }
 
 }

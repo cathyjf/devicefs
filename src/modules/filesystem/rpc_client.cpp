@@ -43,6 +43,9 @@ import :internal;
 import devicefs.common;
 import devicefs.rpc_constants;
 import devicefs.stream_writer;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 namespace internal {
 auto CheckNt(NTSTATUS, wil::zstring_view) -> void;
@@ -66,7 +69,7 @@ constexpr auto kTcpUsername = "devicefs"sv;
 }
 
 [[nodiscard]] auto MakeRpcBinding(const std::string_view binding) {
-    auto string_binding = std::filesystem::path{binding}.wstring();
+    auto string_binding = Transcode<std::wstring>(binding);
     auto result = wil::unique_rpc_binding{};
     const auto error = RpcBindingFromStringBindingW(
         string_binding.data(), result.put());
@@ -81,8 +84,7 @@ constexpr auto kTcpUsername = "devicefs"sv;
     static const auto binding = [] {
         auto endpoint = std::wstring{};
         const auto error = wil::GetEnvironmentVariableW(
-            std::filesystem::path{
-                devicefs::rpc::kEndpointEnvironmentVariable}.c_str(),
+            Transcode<wchar_t>(devicefs::rpc::kEndpointEnvironmentVariable).data(),
             endpoint);
         if (FAILED(error)) {
             WinError("could not obtain RPC block-device endpoint from environment variable '{}'",
@@ -96,7 +98,7 @@ constexpr auto kTcpUsername = "devicefs"sv;
         }
         return MakeRpcBinding(std::format(
             "{}:[{}]", devicefs::rpc::kProtocolSequence,
-            std::filesystem::path{endpoint}.string()));
+            Transcode<std::string>(endpoint)));
     }();
     return binding;
 }

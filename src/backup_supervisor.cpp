@@ -30,6 +30,9 @@ import devicefs.supervisor.materialize_oci;
 import devicefs.supervisor.native_backup;
 import devicefs.supervisor.process_diagnostics;
 import devicefs.supervisor.vshadow;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 namespace {
 
@@ -73,7 +76,7 @@ constexpr auto kOrchestrateOption = "--orchestrate"sv;
         const auto error = GetLastError();
         if (error == ERROR_SHARING_VIOLATION) {
             throw std::runtime_error(std::format(
-                "a backup is already running; lock file: '{}'", path.string()));
+                "a backup is already running; lock file: '{}'", Transcode<std::string>(path.native())));
         }
         WinError("could not open the backup lock file '{}'",
             std::wstring_view{path.native()},
@@ -157,7 +160,7 @@ struct BackupProcess {
 [[nodiscard]] auto StartOrchestrator(Log &log) {
     auto console = LoggingConsole(log);
     auto job = CreateChildJob();
-    const auto supervisor = CurrentExecutablePath().string();
+    const auto supervisor = Transcode<std::string>(CurrentExecutablePath().native());
     const auto arguments = std::array{
         std::string_view{supervisor}, kOrchestrateOption};
     auto command = wil::ArgvToCommandLine(arguments);
@@ -740,8 +743,8 @@ struct SelectiveViewOptions {
                     "  Volume ID: {}\n"
                     "    Snapshot ID: {}\n"
                     "    Device: {}\n",
-                    winrt::to_string(winrt::to_hstring(volume_identifier)),
-                    winrt::to_string(
+                    Transcode<std::string>(winrt::to_hstring(volume_identifier)),
+                    Transcode<std::string>(
                         winrt::to_hstring(snapshot.snapshot_identifier)),
                     snapshot.device);
             }
@@ -942,7 +945,7 @@ auto BackupSupervisorMain(
                     "{} requires exactly one PACKAGE_FULL_NAME", kRegisterMsixOption));
             }
             EnsureConsoleMsixRegistration(
-                std::filesystem::path{arguments[1]}.wstring());
+                Transcode<std::wstring>(arguments[1]));
             return 0;
         }
         if (option == kMaterializeOciOption) {

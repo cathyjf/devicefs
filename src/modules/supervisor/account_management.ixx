@@ -41,6 +41,9 @@ import std;
 import devicefs.common;
 import devicefs.stream_writer;
 import devicefs.supervisor.process_launch;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 using namespace std::string_view_literals;
 using namespace wil::literals;
@@ -460,7 +463,7 @@ export [[nodiscard]] auto ResetBackupAccountPassword(
         throw std::runtime_error(std::format(
             "refusing to reset the password for backup account '{}' "
             "because it is an administrator",
-            std::filesystem::path{username.c_str()}.string()));
+            Transcode<std::string>(username.c_str())));
     }
 
     auto mutex = [] {
@@ -601,13 +604,13 @@ auto EnsureMaterializedWslDistribution(
     const std::string_view distribution,
     const std::filesystem::path &installed_executable) {
     const auto arguments = std::array{
-        installed_executable.string(), std::string{kMaterializeOciOption},
+        Transcode<std::string>(installed_executable.native()), std::string{kMaterializeOciOption},
         std::string{distribution},
     };
-    auto command = std::filesystem::path{wil::ArgvToCommandLine(arguments)}.wstring();
+    auto command = Transcode<std::wstring>(wil::ArgvToCommandLine(arguments));
     devicefs::WriteToStream(devicefs::stdout,
         L"backup-supervisor: preparing WSL distribution '{}' as internal Windows account '{}'\n",
-        std::filesystem::path{distribution}.native(),
+        Transcode<std::wstring>(distribution),
         std::wstring_view{username.c_str(), username.size()});
     const auto exit_code = RunInternalWindowsAccountProcess(
         username, installed_executable, std::move(command));

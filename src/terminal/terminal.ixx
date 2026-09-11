@@ -226,7 +226,7 @@ export template <WidthPolicy Policy = WidthPolicy::AllModes>
         }
         return measured;
     }
-    const auto wide = Transcode<char16_t>(prepared);
+    const auto wide = Transcode<utf16_code_unit>(prepared);
     // Windows Terminal's detector uses int for cluster lengths and intermediate
     // width sums. Each UTF-16 code unit can contribute at most two columns to
     // those sums, even when the final composed character is much narrower.
@@ -293,7 +293,7 @@ export template <WidthPolicy Policy = WidthPolicy::AllModes>
             const auto wide_length = character <= U'\uffff' ?
                 std::size_t{1} : std::size_t{2};
             if constexpr (Policy == WidthPolicy::AllModes) {
-                const auto scalar = std::u16string_view{wide}.substr(wide_offset, wide_length);
+                const auto scalar = std::basic_string_view<utf16_code_unit>{wide}.substr(wide_offset, wide_length);
                 auto scalar_state = GraphemeState{.beg = scalar.data()};
                 std::ignore = detector.GraphemeNext(scalar_state, scalar);
                 // The AllModes estimate reserves space for every component of

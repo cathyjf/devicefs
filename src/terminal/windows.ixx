@@ -78,7 +78,7 @@ public:
         // shared with other programs. Microsoft's WriteConsole documentation
         // describes the separate encodings accepted by the A and W functions:
         // https://learn.microsoft.com/en-us/windows/console/writeconsole
-        const auto wide = Transcode<char16_t>(text);
+        const auto wide = Transcode<wchar_t>(text);
         if (wide.size() > std::numeric_limits<DWORD>::max()) {
             throw std::length_error(std::format(
                 "terminal text has {} UTF-16 code units; WriteConsoleW's "

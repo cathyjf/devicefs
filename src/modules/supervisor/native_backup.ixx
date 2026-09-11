@@ -33,6 +33,9 @@ import devicefs.supervisor.configuration;
 import devicefs.supervisor.launch_powershell;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.vshadow;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 export constexpr auto kCancelledExitCode = internal::kCancelledExitCode;
 
@@ -84,7 +87,7 @@ namespace internal {
                 "process is still serving it, stop that process. Otherwise, "
                 "inspect and move the existing file or directory aside. "
                 "Then retry the backup with this path absent or empty.",
-                mount_target.string()));
+                Transcode<std::string>(mount_target.native())));
         }
         std::filesystem::remove(mount_target);
     }
@@ -175,6 +178,6 @@ export [[nodiscard]] auto RunBackupConsole() -> int {
         throw std::runtime_error(
             "--backup-console does not support invocation as LocalSystem");
     }
-    return LaunchPowerShell(std::filesystem::path{ReadBackupConfiguration(
-        ResolvePersistentPaths().configuration).windows_username}.wstring());
+    return LaunchPowerShell(Transcode<std::wstring>(ReadBackupConfiguration(
+        ResolvePersistentPaths().configuration).windows_username));
 }

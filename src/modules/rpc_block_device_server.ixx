@@ -35,6 +35,9 @@ import std;
 import devicefs.common;
 import devicefs.filesystem;
 import devicefs.rpc_constants;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 export namespace devicefs {
 
@@ -82,8 +85,8 @@ class RpcBlockDeviceServer {
         }
         active_.emplace(*this);
 
-        auto protocol_sequence = std::filesystem::path{
-            devicefs::rpc::kProtocolSequence}.wstring();
+        auto protocol_sequence = Transcode<std::wstring>(
+            devicefs::rpc::kProtocolSequence);
         const auto protocol_status = RpcServerUseProtseqEpW(
             protocol_sequence.data(),
             RPC_C_PROTSEQ_MAX_REQS_DEFAULT,

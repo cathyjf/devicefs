@@ -27,6 +27,9 @@ export module devicefs.supervisor.https_download;
 import std;
 import devicefs.common;
 import devicefs.stream_writer;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 #undef stderr
 #undef stdout
@@ -52,7 +55,7 @@ export [[nodiscard]] auto DownloadFile(
         response.EnsureSuccessStatusCode();
         const auto content_length = response.Content().Headers().ContentLength();
         const auto total = content_length ? content_length.Value() : 0;
-        const auto name = destination.filename().string();
+        const auto name = Transcode<std::string>(destination.filename().native());
         const auto progress = AsyncOperationProgressHandler<std::uint64_t, std::uint64_t>{
             [total, name, next = std::make_shared<std::atomic<std::uint64_t>>(1)](
                 const auto &, const std::uint64_t received) noexcept {

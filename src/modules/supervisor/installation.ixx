@@ -30,6 +30,9 @@ import devicefs.common;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
 import devicefs.supervisor.configuration;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 using namespace std::string_view_literals;
 using namespace wil::literals;
@@ -163,7 +166,7 @@ auto EnsureDirectory(
         const auto error = GetLastError();
         if (error == ERROR_SHARING_VIOLATION) {
             throw std::runtime_error(std::format(
-                "a backup is already running; lock file: '{}'", path.string()));
+                "a backup is already running; lock file: '{}'", Transcode<std::string>(path.native())));
         }
         WinError("could not open or create the backup lock file '{}'",
             std::wstring_view{path.native()},
@@ -226,14 +229,14 @@ auto InstallExecutable(
     if (!destination_exists) {
         auto attributes = security.Attributes();
         auto destination_file = wil::unique_hfile(CreateFileA(
-            destination.string().c_str(), 0, 0, &attributes,
+            Transcode<std::string>(destination.native()).c_str(), 0, 0, &attributes,
             CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
         if (!destination_file) {
             WinError("could not create the installed backup supervisor '{}'",
                 std::wstring_view{destination.native()});
         }
     }
-    if (!CopyFileA(source.string().c_str(), destination.string().c_str(), FALSE)) {
+    if (!CopyFileA(Transcode<std::string>(source.native()).c_str(), Transcode<std::string>(destination.native()).c_str(), FALSE)) {
         WinError("could not copy backup supervisor '{}' to '{}'",
             std::wstring_view{source.native()},
             std::wstring_view{destination.native()});
@@ -352,9 +355,9 @@ export auto InstallService(
         CurrentExecutablePath(), installed_executable, executable_security);
     const auto configuration = ReadBackupConfiguration(persistent.configuration);
     EnsureInternalWindowsAccountAndEnvironment(
-        std::filesystem::path{configuration.windows_username}.wstring(),
+        Transcode<std::wstring>(configuration.windows_username),
         configuration.wsl.distribution, installed_executable, persistent.wsl);
-    const auto installed_executable_text = installed_executable.string();
+    const auto installed_executable_text = Transcode<std::string>(installed_executable.native());
     const auto binary_path = wil::ArgvToCommandLine(std::array{
         std::string_view(installed_executable_text),
         kRunServiceOption,

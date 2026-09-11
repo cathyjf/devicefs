@@ -33,6 +33,9 @@ import devicefs.supervisor.embedded_artifacts;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.temporary_paths;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 namespace internal {
 
@@ -97,7 +100,7 @@ constexpr auto kWslCreationFlags = DWORD{
         .hStdOutput = child_handles[1].get(),
         .hStdError = child_handles[2].get(),
     };
-    auto wide_command = std::filesystem::path{command}.wstring();
+    auto wide_command = Transcode<std::wstring>(command);
     if (wide_command.length() > 1024) {
         // CreateProcessWithLogonW supports a maximum command line length of
         // 1024 characters. A longer command line will cause
@@ -327,14 +330,14 @@ struct WslProcess {
     const HANDLE standard_output,
     const HANDLE standard_error) {
     const auto wsl_path = WslExecutablePath();
-    const auto wsl_path_text = wsl_path.string();
+    const auto wsl_path_text = Transcode<std::string>(wsl_path.native());
     auto argument_views = std::vector<std::string_view>{wsl_path_text};
     argument_views.append_range(arguments);
     auto command = wil::ArgvToCommandLine(argument_views);
     const auto wsl_directory = wsl_path.parent_path();
     const auto windows_username =
-        std::filesystem::path{
-            configuration.windows_username}.wstring();
+        Transcode<std::wstring>(
+            configuration.windows_username);
     if (!RunningAsLocalSystem()) {
         auto result = WslProcess{};
         result.process = StartWslWithLogon(
@@ -396,7 +399,7 @@ struct WslProcess {
                 nullptr, nullptr, TRUE,
                 kWslCreationFlags | CREATE_BREAKAWAY_FROM_JOB |
                     EXTENDED_STARTUPINFO_PRESENT,
-                environment.get(), wsl_directory.string().c_str(), startup, process);
+                environment.get(), Transcode<std::string>(wsl_directory.native()).c_str(), startup, process);
         },
         "could not start WSL as the configured account");
     return result;
@@ -676,8 +679,8 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
         "/tmp/devicefs-{}", UniqueName());
     auto pid_file = std::format("{}.pid", control_path);
     auto stop_file = std::format("{}.stop", control_path);
-    const auto computer_name = std::filesystem::path{
-        wil::GetEnvironmentVariableW<std::wstring>(L"COMPUTERNAME")}.string();
+    const auto computer_name = Transcode<std::string>(
+        wil::GetEnvironmentVariableW<std::wstring>(L"COMPUTERNAME"));
     auto arguments = std::vector<std::string_view>{
         pid_file, stop_file, computer_name};
     if (parallel_images) {

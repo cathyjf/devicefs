@@ -25,6 +25,9 @@ import <devicefs/windows_imports.h>;
 import <winrt/Windows.Data.Json.h>;
 import <winrt/Windows.Foundation.Collections.h>;
 import devicefs.supervisor.winrt_apartment;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 using namespace std::string_view_literals;
 
@@ -80,35 +83,6 @@ using winrt::Windows::Data::Json::JsonValueType;
     if (std::ranges::contains(result, L'\0')) {
         ConfigurationError(member, "must not contain a null character");
     }
-    return result;
-}
-
-template <typename String>
-[[nodiscard]] auto ToUtf8(
-    const winrt::hstring &value,
-    const std::string_view member) {
-    const auto size = WideCharToMultiByte(
-        CP_UTF8, WC_ERR_INVALID_CHARS, value.c_str(), -1,
-        nullptr, 0, nullptr, nullptr);
-    if (size == 0) {
-        throw std::runtime_error(std::format(
-            "could not convert configuration member '{}' to UTF-8", member));
-    }
-    static_assert(std::in_range<typename String::size_type>(
-        std::numeric_limits<int>::max()));
-    auto result = String(
-        wil::safe_cast_failfast<typename String::size_type>(size),
-        typename String::value_type{});
-    void *const output = result.data();
-    const auto converted = WideCharToMultiByte(
-        CP_UTF8, WC_ERR_INVALID_CHARS, value.c_str(), -1,
-        static_cast<char *>(output),
-        size, nullptr, nullptr);
-    if (converted != size) {
-        throw std::runtime_error(std::format(
-            "could not convert configuration member '{}' to UTF-8", member));
-    }
-    result.pop_back();
     return result;
 }
 
@@ -521,25 +495,25 @@ struct FieldReader {
     auto operator()(const Utf8TextDestination<String> &destination) const
         -> void {
         destination.Get(configuration.get()) =
-            ToUtf8<String>(ReadString(value.get(), member), member);
+            Transcode<String>(ReadString(value.get(), member));
     }
 
     auto operator()(const WindowsUsernameDestination &destination) const
         -> void {
-        destination.Get(configuration.get()) = ToUtf8<std::string>(
-            ReadString(value.get(), member), member);
+        destination.Get(configuration.get()) = Transcode<std::string>(
+            ReadString(value.get(), member));
     }
 
     auto operator()(
         const OptionalStringDestination &destination) const -> void {
-        destination.Get(configuration.get()) = ToUtf8<std::string>(
-            ReadString(value.get(), member), member);
+        destination.Get(configuration.get()) = Transcode<std::string>(
+            ReadString(value.get(), member));
     }
 
     auto operator()(
         const OptionalUtf8StringDestination &destination) const -> void {
-        destination.Get(configuration.get()) = ToUtf8<std::u8string>(
-            ReadString(value.get(), member), member);
+        destination.Get(configuration.get()) = Transcode<std::u8string>(
+            ReadString(value.get(), member));
     }
 
     auto operator()(
@@ -578,8 +552,8 @@ struct FieldReader {
         if (json_value.ValueType() != JsonValueType::Object) {
             ConfigurationError(member, "must be an object");
         }
-        destination.Get(configuration.get()) = ToUtf8<SecureUtf8String>(
-            json_value.GetObject().Stringify(), member);
+        destination.Get(configuration.get()) = Transcode<SecureUtf8String>(
+            json_value.GetObject().Stringify());
     }
 
     auto operator()(
@@ -599,7 +573,7 @@ struct FieldReader {
                     "must not contain an empty string");
             }
             destination.Get(configuration.get()).emplace_back(
-                ToUtf8<std::string>(text, member));
+                Transcode<std::string>(text));
         }
     }
 
@@ -680,28 +654,28 @@ struct WslFieldReader {
         : configuration(configuration), value(value), member(member) {}
 
     auto operator()(const WslDistributionDestination &) const -> void {
-        configuration.get().distribution = ToUtf8<std::string>(
-            ReadString(value.get(), member), member);
+        configuration.get().distribution = Transcode<std::string>(
+            ReadString(value.get(), member));
     }
 
     auto operator()(const WslLinuxUserDestination &) const -> void {
-        configuration.get().linux_user = ToUtf8<std::string>(
-            ReadString(value.get(), member), member);
+        configuration.get().linux_user = Transcode<std::string>(
+            ReadString(value.get(), member));
     }
 
     auto operator()(const WslClientPathDestination &) const -> void {
-        configuration.get().client_path = ToUtf8<std::u8string>(
-            ReadString(value.get(), member), member);
+        configuration.get().client_path = Transcode<std::u8string>(
+            ReadString(value.get(), member));
     }
 
     auto operator()(const WslRpcHelperPathDestination &) const -> void {
         configuration.get().rpc_helper_path =
-            ToUtf8<std::string>(ReadString(value.get(), member), member);
+            Transcode<std::string>(ReadString(value.get(), member));
     }
 
     auto operator()(const WslSambaDcerpcdPathDestination &) const -> void {
         configuration.get().samba_dcerpcd_path =
-            ToUtf8<std::string>(ReadString(value.get(), member), member);
+            Transcode<std::string>(ReadString(value.get(), member));
     }
 
     std::reference_wrapper<WslConfiguration> configuration;
@@ -721,7 +695,7 @@ auto ReadFields(
             : std::format("{}.{}", parent, name);
     };
     for (const auto &entry : object) {
-        const auto name = winrt::to_string(entry.Key());
+        const auto name = Transcode<std::string>(entry.Key());
         if (!std::ranges::contains(
                 fields, std::string_view{name},
                 [](const auto &field) { return field.name; })) {
@@ -731,7 +705,7 @@ auto ReadFields(
     }
     for (const auto &field : fields) {
         const auto member = member_path(field.name);
-        const auto name = winrt::to_hstring(field.name);
+        const auto name = Transcode<std::wstring>(field.name);
         const auto read_default = [&] {
             if constexpr (std::same_as<
                     Configuration, BackupConfiguration>) {
@@ -772,17 +746,17 @@ auto ReadFields(
     auto file = std::ifstream(path, std::ios::binary);
     if (!file.is_open()) {
         throw std::runtime_error(std::format(
-            "could not open the backup configuration '{}'", path.string()));
+            "could not open the backup configuration '{}'", Transcode<std::string>(path.native())));
     }
     const auto source = wil::secure_string(
         std::istreambuf_iterator<char>{file}, {});
     if (file.bad()) {
         throw std::runtime_error(std::format(
-            "could not read the backup configuration '{}'", path.string()));
+            "could not read the backup configuration '{}'", Transcode<std::string>(path.native())));
     }
-    const auto document = winrt::to_hstring(
+    const auto document = Transcode<wil::secure_wstring>(
         std::string_view{source.data(), source.size()});
-    const auto root = JsonObject::Parse(document);
+    const auto root = JsonObject::Parse(std::wstring_view{document});
     auto result = BackupConfiguration{};
     const auto fields = ConfigurationDescription();
     ReadFields(result, root, fields, {});
@@ -814,6 +788,6 @@ export [[nodiscard]] auto ReadBackupConfiguration(
     } catch (const winrt::hresult_error &error) {
         throw std::runtime_error(std::format(
             "could not parse the backup configuration '{}': {}",
-            path.string(), winrt::to_string(error.message())));
+            Transcode<std::string>(path.native()), Transcode<std::string>(error.message())));
     }
 }

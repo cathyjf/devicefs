@@ -42,6 +42,10 @@ import devicefs.stream_writer;
 import devicefs.filesystem_measurement;
 #endif
 
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
+
 export namespace devicefs {
 
 class SnapshotAllocationBitmap {
@@ -357,7 +361,7 @@ namespace devicefs::filesystem_internal {
     if ((volume.TotalClusters.QuadPart <= 0) || (volume.BytesPerCluster == 0)) {
         throw std::runtime_error(std::format(
             "FSCTL_GET_NTFS_VOLUME_DATA returned invalid data for '{}' ({})",
-            filename.string(), description));
+            Transcode<std::string>(filename.native()), description));
     }
 
     // The nonpositive case is rejected above, so this conversion preserves
@@ -367,7 +371,7 @@ namespace devicefs::filesystem_internal {
     if (cluster_count > (device_size / volume.BytesPerCluster)) {
         throw std::runtime_error(std::format(
             "the NTFS cluster span exceeds the exposed length of '{}' ({})",
-            filename.string(), description));
+            Transcode<std::string>(filename.native()), description));
     }
 
     // The bitmap is applied directly to device offsets, so LCN 0 must begin at byte 0.
@@ -384,7 +388,7 @@ namespace devicefs::filesystem_internal {
             "NTFS LCN 0 is offset {} sectors from the start of the exposed device "
             "'{}' ({})",
             retrieval_base.FileAreaOffset.QuadPart,
-            filename.string(), description));
+            Transcode<std::string>(filename.native()), description));
     }
 
     const auto bitmap_bytes =
@@ -395,7 +399,7 @@ namespace devicefs::filesystem_internal {
     if (!std::in_range<DWORD>(output_size)) {
         throw std::runtime_error(std::format(
             "the NTFS allocation bitmap for '{}' is too large ({})",
-            filename.string(), description));
+            Transcode<std::string>(filename.native()), description));
     }
     // std::in_range above proves output_size is representable by DWORD.
     const auto output_size_for_api =
@@ -422,7 +426,7 @@ namespace devicefs::filesystem_internal {
         (returned < bitmap_data_size)) {
         throw std::runtime_error(std::format(
             "FSCTL_GET_VOLUME_BITMAP returned incomplete data for '{}' ({})",
-            filename.string(), description));
+            Transcode<std::string>(filename.native()), description));
     }
 
     auto result = AllocationBitmap{
@@ -454,7 +458,7 @@ auto WindowsBlockDevice::FromFilename(
     std::filesystem::path filename, const bool extended_dasd,
     const bool cache, const bool synthetic_free_clusters,
     const std::string_view description) -> WindowsBlockDevice {
-    auto handle = wil::unique_hfile(CreateFileA(filename.string().c_str(), GENERIC_READ,
+    auto handle = wil::unique_hfile(CreateFileA(Transcode<std::string>(filename.native()).c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
     if (!handle) {
@@ -473,7 +477,7 @@ auto WindowsBlockDevice::FromFilename(
     if (length.Length.QuadPart < 0) {
         throw std::runtime_error(std::format(
             "IOCTL_DISK_GET_LENGTH_INFO returned an invalid length for '{}' ({})",
-            filename.string(), description));
+            Transcode<std::string>(filename.native()), description));
     }
 
     auto geometry = DISK_GEOMETRY{};
@@ -493,13 +497,13 @@ auto WindowsBlockDevice::FromFilename(
         throw std::runtime_error(std::format(
             "block device '{}' has a {}-byte length that is not a multiple of "
             "its {}-byte sector size ({})",
-            filename.string(), size, geometry.BytesPerSector, description));
+            Transcode<std::string>(filename.native()), size, geometry.BytesPerSector, description));
     }
     if ((size % kAdvertisedSectorSize) != 0) {
         throw std::runtime_error(std::format(
             "block device '{}' has a {}-byte length that is not a multiple of "
             "the advertised {}-byte allocation unit ({})",
-            filename.string(), size, kAdvertisedSectorSize, description));
+            Transcode<std::string>(filename.native()), size, kAdvertisedSectorSize, description));
     }
 
     const auto dasd_error = extended_dasd
@@ -526,7 +530,7 @@ auto WindowsBlockDevice::FromFilename(
             const auto option = cache ? "--cache" : "--synthetic-free-clusters";
             throw std::runtime_error(std::format(
                 "{} requires read-only block device '{}' ({})",
-                option, filename.string(), description));
+                option, Transcode<std::string>(filename.native()), description));
         }
     }
     auto allocation_bitmap = synthetic_free_clusters

@@ -40,6 +40,9 @@ import devicefs.synthetic_backup_block_device;
 import devicefs.supervisor.temporary_paths;
 import devicefs.supervisor.vshadow;
 import devicefs.vss_block_descriptors;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 export struct IncrementalDiagnosticOptions {
     bool print_statistics = false;
@@ -127,7 +130,7 @@ struct SnapshotDiagnosticResult {
 };
 
 [[nodiscard]] auto GuidText(const GUID &identifier) {
-    return winrt::to_string(winrt::to_hstring(identifier));
+    return Transcode<std::string>(winrt::to_hstring(identifier));
 }
 
 [[nodiscard]] auto VolumeName(const GUID &identifier) {
@@ -495,8 +498,8 @@ enum class BackupViewPreparation {
         }
     });
 
-    const auto synthetic_mount_text = synthetic_mount.string();
-    const auto real_mount_text = real_mount.string();
+    const auto synthetic_mount_text = Transcode<std::string>(synthetic_mount.native());
+    const auto real_mount_text = Transcode<std::string>(real_mount.native());
     auto endpoint = std::format(
         "devicefs-block-device-{}", UniqueName());
     auto suspended_synthetic = internal::StartDeviceFs(
@@ -514,7 +517,7 @@ enum class BackupViewPreparation {
     // The child owners must be destroyed before the RPC server because
     // unmounting the synthetic VHDX can issue final block-device reads.
     auto server = SyntheticBackupServer::Start(
-        std::filesystem::path{endpoint}.wstring(),
+        Transcode<std::wstring>(endpoint),
         suspended_synthetic.process.dwProcessId,
         std::move(devices));
     internal::ResumeDeviceFs(suspended_synthetic);

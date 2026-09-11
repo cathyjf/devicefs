@@ -28,6 +28,9 @@ import :internal;
 import :pbs;
 import devicefs.supervisor.vshadow;
 import devicefs.supervisor.winrt_apartment;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 // The Windows GetObject macro conflicts with C++/WinRT IJsonValue::GetObject.
 #undef GetObject
@@ -124,15 +127,15 @@ using namespace wil::literals;
         if (IIDFromString(value.c_str(), &result) != S_OK) {
             throw std::runtime_error(std::format(
                 "{}: '{}'", error,
-                std::filesystem::path{std::wstring_view{
-                    value.c_str(), value.size()}}.string()));
+                Transcode<std::string>(std::wstring_view{
+                    value.c_str(), value.size()})));
         }
         return result;
     };
 
     auto root = JsonObject{nullptr};
     if (!JsonObject::TryParse(
-            std::filesystem::path{manifest}.wstring(), root)) {
+            Transcode<std::wstring>(manifest), root)) {
         throw std::runtime_error(
             "the backup manifest is not a JSON object");
     }
@@ -155,7 +158,7 @@ using namespace wil::literals;
         if (entry.Value().ValueType() != JsonValueType::Object) {
             throw std::runtime_error(std::format(
                 "backup-manifest volume '{}' is not an object",
-                winrt::to_string(entry.Key())));
+                Transcode<std::string>(entry.Key())));
         }
         const auto snapshot = required_value(
             entry.Value().GetObject(), L"snapshot-id", JsonValueType::String,
@@ -177,7 +180,7 @@ using namespace wil::literals;
                 std::format(
                     "backup-manifest volume '{}' contains an invalid "
                     "snapshot identifier",
-                    winrt::to_string(entry.Key()))));
+                    Transcode<std::string>(entry.Key()))));
     }
     return result;
 }
@@ -191,7 +194,7 @@ auto PreviousBackupManifestResult::ParseManifest() const
     } catch (const winrt::hresult_error &error) {
         throw std::runtime_error(std::format(
             "the Windows Runtime failed while parsing the backup manifest: {}",
-            winrt::to_string(error.message())));
+            Transcode<std::string>(error.message())));
     }
 }
 
@@ -284,8 +287,8 @@ namespace internal {
 
         auto volumes = JsonObject{};
         for (const auto &snapshot : snapshot_set.snapshots) {
-            const auto original_volume = std::filesystem::path{
-                snapshot.original_volume}.wstring();
+            const auto original_volume = Transcode<std::wstring>(
+                snapshot.original_volume);
             auto mount_points = JsonArray{};
             for (const auto &mount_point :
                 VolumeMountPoints(original_volume)) {
@@ -301,8 +304,8 @@ namespace internal {
             volume.SetNamedValue(L"snapshot-id", JsonValue::CreateStringValue(
                 winrt::to_hstring(snapshot.identifier)));
             volume.SetNamedValue(L"notes", notes);
-            volumes.SetNamedValue(std::filesystem::path{
-                SnapshotImageName(snapshot)}.wstring(), volume);
+            volumes.SetNamedValue(Transcode<std::wstring>(
+                SnapshotImageName(snapshot)), volume);
         }
 
         auto result = JsonObject{};
@@ -311,12 +314,11 @@ namespace internal {
         result.SetNamedValue(L"snapshot-set", JsonValue::CreateStringValue(
             winrt::to_hstring(snapshot_set.identifier)));
         result.SetNamedValue(L"volumes", volumes);
-        const auto encoded = winrt::to_string(result.Stringify());
-        return std::u8string{encoded.begin(), encoded.end()};
+        return Transcode<std::u8string>(result.Stringify());
     } catch (const winrt::hresult_error &error) {
         throw std::runtime_error(std::format(
             "could not serialize the backup manifest: {}",
-            winrt::to_string(error.message())));
+            Transcode<std::string>(error.message())));
     }
 }
 

@@ -12,11 +12,13 @@ Git object database for comparison without putting the dependency into history.
 | `src/types/inc/CodepointWidthDetector.hpp` | `3b18ce205714768266fd87bc3a7041d86b191a58` |
 | `LICENSE` | `017b9885a46ad4c7f4367ad2949fb66fb56f977f` |
 
-The copied detector uses `char16_t` and `std::u16string_view` for its UTF-16
-input. Upstream uses `wchar_t`, which has 16 bits on Windows but 32 bits on the
-supported Unix platforms. Explicit UTF-16 types let the same decoder process
-surrogate pairs correctly on every platform. The Unicode tables and
-segmentation algorithms retain their upstream implementation.
+The copied detector uses the shared `devicefs::terminal::utf16_code_unit` type
+and `std::basic_string_view<utf16_code_unit>` for its UTF-16 input. The type is
+`wchar_t` when `wchar_t` has the same size as `char16_t`, and otherwise is
+`char16_t`. simdutf uses the same definition, so the detector can read its
+converted buffer directly. Upstream uses `wchar_t` unconditionally, which
+would interpret UTF-32 as UTF-16 on platforms with 32-bit `wchar_t`. The
+Unicode tables and segmentation algorithms retain their upstream implementation.
 
 The header imports `std` on both platforms. Upstream obtains its
 standard-library declarations through a precompiled header. The MSVC build

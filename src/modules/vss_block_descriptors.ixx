@@ -67,6 +67,9 @@ export module devicefs.vss_block_descriptors;
 import std;
 import <devicefs/windows_imports.h>;
 import devicefs.common;
+import devicefs.terminal.transcoding;
+
+using devicefs::terminal::Transcode;
 
 export namespace devicefs::vss {
 
@@ -184,7 +187,7 @@ constexpr auto kVssIdentifier = std::array{
 class RawSource {
   public:
     explicit RawSource(const std::string_view path) {
-        auto normalized_path = std::filesystem::path{path}.wstring();
+        auto normalized_path = Transcode<std::wstring>(path);
         constexpr auto volume_guid_prefix =
             LR"(\\?\Volume{)"sv;
         const auto volume_guid_end =
@@ -241,12 +244,12 @@ class RawSource {
                     "IOCTL_DISK_GET_LENGTH_INFO returned {} byte(s); "
                     "{} were required for VSS descriptor source '{}'",
                     returned, sizeof(device_length),
-                    std::filesystem::path{normalized_path}.string()));
+                    Transcode<std::string>(normalized_path)));
             }
             if (device_length.Length.QuadPart < 0) {
                 throw std::runtime_error(std::format(
                     "VSS descriptor source '{}' reported a negative length",
-                    std::filesystem::path{normalized_path}.string()));
+                    Transcode<std::string>(normalized_path)));
             }
             size_ = wil::safe_cast_failfast<std::uint64_t>(
                 device_length.Length.QuadPart);
@@ -268,14 +271,14 @@ class RawSource {
                     "IOCTL_DISK_GET_DRIVE_GEOMETRY returned {} byte(s); "
                     "{} were required for VSS descriptor source '{}'",
                     returned, sizeof(geometry),
-                    std::filesystem::path{normalized_path}.string()));
+                    Transcode<std::string>(normalized_path)));
             }
             sector_size_ = geometry.BytesPerSector;
             if ((sector_size_ == 0) || ((size_ % sector_size_) != 0)) {
                 throw std::runtime_error(std::format(
                     "VSS descriptor source '{}' had invalid sector geometry "
                     "(length {}, bytes per sector {})",
-                    std::filesystem::path{normalized_path}.string(),
+                    Transcode<std::string>(normalized_path),
                     size_, sector_size_));
             }
 
@@ -308,7 +311,7 @@ class RawSource {
             if (file_size.QuadPart < 0) {
                 throw std::runtime_error(std::format(
                     "VSS descriptor image '{}' reported a negative length",
-                    std::filesystem::path{normalized_path}.string()));
+                    Transcode<std::string>(normalized_path)));
             }
             size_ = wil::safe_cast_failfast<std::uint64_t>(file_size.QuadPart);
         }
@@ -316,7 +319,7 @@ class RawSource {
         if (size_ == 0) {
             throw std::runtime_error(std::format(
                 "VSS descriptor source '{}' is empty",
-                std::filesystem::path{normalized_path}.string()));
+                Transcode<std::string>(normalized_path)));
         }
     }
 
@@ -1025,7 +1028,7 @@ auto ReadBlockDescriptors(
             // format uniqueness assertion made by libvshadow.
             throw std::runtime_error(std::format(
                 "VSS snapshot ID '{}' matched multiple stores in '{}'",
-                winrt::to_string(winrt::to_hstring(snapshot_identifier)),
+                Transcode<std::string>(winrt::to_hstring(snapshot_identifier)),
                 source_path));
         }
         selected = &store;
@@ -1033,7 +1036,7 @@ auto ReadBlockDescriptors(
     if (selected == nullptr) {
         throw std::runtime_error(std::format(
             "VSS snapshot ID '{}' was not found in the catalog for '{}'",
-            winrt::to_string(winrt::to_hstring(snapshot_identifier)),
+            Transcode<std::string>(winrt::to_hstring(snapshot_identifier)),
             source_path));
     }
     return ReadDescriptorList(source, *selected);

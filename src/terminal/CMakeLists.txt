@@ -33,6 +33,7 @@ get_filename_component(DEVICEFS_ROOT "../.." ABSOLUTE)
 set(WIL_INCLUDE_DIR "${DEVICEFS_ROOT}/dependencies/wil/include")
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    include("${DEVICEFS_ROOT}/misc/MsvcChecks.cmake")
     set(DEVICEFS_TERMINAL_LIBRARY_TYPE STATIC)
 else()
     set(DEVICEFS_TERMINAL_LIBRARY_TYPE OBJECT)
@@ -158,7 +159,7 @@ foreach(target IN LISTS DEVICEFS_TERMINAL_ANALYSIS_TARGETS)
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _MSVC_STL_HARDENING=1
     )
     target_compile_options(${target} PRIVATE
-        /MP /W4 /WX /permissive- /EHsc /utf-8 /guard:cf /guard:ehcont /sdl
+        /MP /W4 /WX /permissive- /EHsc /utf-8 /guard:cf /guard:ehcont ${DEVICEFS_MSVC_CHECKS}
         /analyze:external- "SHELL:/analyze:log $(IntDir)"
         /analyze:log:format:sarif /analyze:sarif:configuration
         /analyze:log:compilerwarnings

@@ -31,6 +31,7 @@ endif()
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+include(misc/MsvcChecks.cmake)
 
 # Increase build parallelism for native C++ projects.
 # See <https://devblogs.microsoft.com/cppblog/cpp-build-throughput-investigation-and-tune-up>.
@@ -211,7 +212,7 @@ target_compile_definitions(vshadow PRIVATE
     UNICODE _UNICODE _WIN32_WINNT=0x0A00 _MSVC_STL_HARDENING=1
 )
 target_compile_options(vshadow PRIVATE
-    /W3 /WX- /permissive /EHsc /utf-8 /guard:cf /guard:ehcont /sdl
+    /W3 /WX- /permissive /EHsc /utf-8 /guard:cf /guard:ehcont ${DEVICEFS_MSVC_CHECKS}
     /analyze-
 )
 set_target_properties(vshadow PROPERTIES
@@ -319,7 +320,7 @@ foreach(target IN LISTS DEVICEFS_CODE_ANALYSIS_TARGETS)
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _MSVC_STL_HARDENING=1
     )
     target_compile_options(${target} PRIVATE
-        /W4 /WX /permissive- /EHsc /utf-8 /guard:cf /guard:ehcont /sdl
+        /W4 /WX /permissive- /EHsc /utf-8 /guard:cf /guard:ehcont ${DEVICEFS_MSVC_CHECKS}
         /analyze:external- "SHELL:/analyze:log $(IntDir)"
         /analyze:log:format:sarif /analyze:sarif:configuration
         /analyze:log:compilerwarnings

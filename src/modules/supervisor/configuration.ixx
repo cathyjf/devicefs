@@ -754,8 +754,17 @@ auto ReadFields(
         throw std::runtime_error(std::format(
             "could not read the backup configuration '{}'", Transcode<std::string>(path.native())));
     }
-    const auto document = Transcode<wil::secure_wstring>(
-        std::string_view{source.data(), source.size()});
+    const auto document = [&] {
+        try {
+            return Transcode<wil::secure_wstring>(
+                std::string_view{source.data(), source.size()});
+        } catch (const std::invalid_argument &error) {
+            throw std::runtime_error(std::format(
+                "expected configuration file containing UTF-8 text "
+                "but found invalid text instead: {}: {}",
+                Transcode<std::string>(path.native()), error.what()));
+        }
+    }();
     const auto root = JsonObject::Parse(std::wstring_view{document});
     auto result = BackupConfiguration{};
     const auto fields = ConfigurationDescription();

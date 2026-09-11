@@ -65,7 +65,7 @@
     {
       "name": "unix-gcc",
       "inherits": "unix",
-      "toolchainFile": "${sourceDir}/../unix/cmake/gcc-16.cmake",
+      "toolchainFile": "${sourceDir}/../unix/cmake/gcc.cmake",
       "cacheVariables": {
         "CMAKE_CXX_FLAGS_INIT": null
       }

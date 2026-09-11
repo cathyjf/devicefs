@@ -84,6 +84,19 @@ constexpr auto kEnterAlternateScreen = "\x1b[?1049h"sv;
 // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-The-Alternate-Screen-Buffer
 constexpr auto kLeaveAlternateScreen = "\x1b[?1049l"sv;
 
+// Kitty keyboard protocol: `CSI > 1 u` saves the current keyboard mode and
+// selects flag 1, "Disambiguate escape codes". Escape and modified keys then
+// arrive as complete key reports, allowing Escape to be recognized without a
+// timeout. Push after entering the alternate screen, whose keyboard-mode stack
+// is separate from the main screen.
+// https://sw.kovidgoyal.net/kitty/keyboard-protocol/#progressive-enhancement
+constexpr auto kPushDisambiguatedKeys = "\x1b[>1u"sv;
+
+// Kitty keyboard protocol: `CSI < u` pops one saved keyboard mode and restores
+// it. Send this before leaving the screen on which the mode was pushed.
+// https://sw.kovidgoyal.net/kitty/keyboard-protocol/#quickstart
+constexpr auto kPopKeyboardMode = "\x1b[<u"sv;
+
 // DECRST 25 (DECTCEM) hides the cursor.
 // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-visibility
 constexpr auto kHideCursor = "\x1b[?25l"sv;

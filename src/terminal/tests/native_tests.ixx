@@ -32,6 +32,7 @@ import devicefs.terminal.safecast;
 import devicefs.terminal.scope_exit;
 import devicefs.terminal.test_support;
 import devicefs.terminal.menu_measurements;
+import devicefs.terminal.vt;
 
 #ifdef _WIN32
     import <windows.h>;
@@ -173,6 +174,27 @@ public:
         Require(count == std::ssize(text), "could not supply the complete test input"sv);
     }
 
+    // Read the expected output from the pseudoterminal's master, including
+    // restoration commands that bypass `TestConsole::Write`. A short read keeps
+    // collecting bytes until the complete expected output can be compared.
+    [[nodiscard]] auto ReadOutput(const std::size_t length) const -> std::string {
+        auto output = std::string(length, '\0');
+        auto remaining = std::span{output};
+        while (!remaining.empty()) {
+            const auto count = read(descriptors_[0], remaining.data(), remaining.size());
+            if (count < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                throw std::system_error(errno, std::generic_category(),
+                    "could not read test terminal output");
+            }
+            Require(count != 0, "the test terminal closed before completing its output"sv);
+            remaining = remaining.subspan(FailFastCast<std::size_t>(count));
+        }
+        return output;
+    }
+
 private:
     std::array<int, 2> descriptors_ = [] {
         auto descriptors = std::array<int, 2>{};
@@ -223,7 +245,30 @@ public:
 
 [[nodiscard]] auto TestNativeInput(NativeInput &input) -> bool {
     const auto original_modes = input.Modes();
-    auto passed = Test("native update measurements counting begin, presentation, and guard output"sv, [&] {
+    auto passed = true;
+#ifndef _WIN32
+    passed &= Test("kitty keyboard protocol mode pushed and restored on the Unix alternate screen"sv, [&] {
+        constexpr auto expected = vt::Concatenate<
+            vt::kEnterAlternateScreen, vt::kPushDisambiguatedKeys,
+            vt::kSaveCursorVisibility, vt::kHideCursor,
+            vt::kPopKeyboardMode, vt::kResetAttributes, vt::kShowCursor,
+            vt::kRestoreCursorVisibility, vt::kLeaveAlternateScreen>();
+        for (const auto unwind : std::array{false, true}) {
+            auto console = NativeConsole{};
+            try {
+                const auto screen = console.EnterScreen();
+                if (unwind) {
+                    throw InjectedFailure{"leave the screen through exception unwinding"};
+                }
+            } catch (const InjectedFailure &) {
+            }
+            const auto output = input.ReadOutput(expected.size());
+            Require(output == expected, std::format(
+                "screen entry and restoration: expected {:?}, received {:?}", expected, output));
+        }
+    });
+#endif
+    passed &= Test("native update measurements counting begin, presentation, and guard output"sv, [&] {
         // BSU (`CSI ? 2026 h`) begins a synchronized update. ESU (`CSI ? 2026 l`)
         // ends it, once for presentation and once more when the guard is destroyed.
         // https://github.com/contour-terminal/vt-extensions/blob/master/synchronized-output.md
@@ -492,6 +537,139 @@ public:
         Require(received_signal != 0, "the query received none of the test signals"sv);
         Require(std::chrono::steady_clock::now() - start < 8s,
             "signal interruptions extended the query beyond its completion limit"sv);
+    });
+    passed &= Test("kitty keyboard protocol Escape, shortcuts, modifiers, and keypad navigation on Unix"sv, [&] {
+        // Kitty's CSI u codes identify keys, with an optional modifier value
+        // equal to one plus the modifier bits. CSI letter/tilde navigation
+        // remains available alongside encoded keys and ordinary Enter/text.
+        // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#quickstart
+        // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions
+        for (const auto &[sequence, expected] : std::array{
+                std::pair{"\x1b[27u"sv, MenuKey::Back},
+                std::pair{"\x1b[27;1u"sv, MenuKey::Back},
+                std::pair{"\x1b[27;u"sv, MenuKey::Back},
+                std::pair{"\x1b[99;5u"sv, MenuKey::Cancel},
+                std::pair{"\x1b[99;6u"sv, MenuKey::Cancel},
+                std::pair{"\x1b[99;197u"sv, MenuKey::Cancel},
+                std::pair{"\x1b[108;5u"sv, MenuKey::Redraw},
+                std::pair{"\x1b[108;69u"sv, MenuKey::Redraw},
+                std::pair{"\x1b[13u"sv, MenuKey::Accept},
+                std::pair{"\x1b[109;5u"sv, MenuKey::Accept},
+                std::pair{"\x1b[57414u"sv, MenuKey::Accept},
+                std::pair{"\x1b[57419u"sv, MenuKey::Up},
+                std::pair{"\x1b[57420u"sv, MenuKey::Down},
+                std::pair{"\x1b[57421u"sv, MenuKey::PageUp},
+                std::pair{"\x1b[57422u"sv, MenuKey::PageDown},
+                std::pair{"\x1b[57423u"sv, MenuKey::Home},
+                std::pair{"\x1b[57424u"sv, MenuKey::End},
+                std::pair{"\x1b[1;129A"sv, MenuKey::Up},
+                std::pair{"\x1b[5;129~"sv, MenuKey::PageUp},
+                std::pair{"\x1b[6;129~"sv, MenuKey::PageDown},
+                std::pair{"\r"sv, MenuKey::Accept},
+                std::pair{"1"sv, MenuKey::Details}}) {
+            auto console = TestConsole{};
+            input.Feed(std::format("{}1", sequence));
+            const auto start = std::chrono::steady_clock::now();
+            Require(console.ReadMenuInput().key == expected,
+                std::format("incorrect action for encoded key {:?}", sequence));
+            if (sequence == "\x1b[27u"sv) {
+                std::println("Encoded Escape: {:.3f} ms", std::chrono::duration<double, std::milli>{
+                    std::chrono::steady_clock::now() - start}.count());
+            }
+            Require(console.ReadMenuInput().key == MenuKey::Details,
+                "decoding a key consumed the following shortcut"sv);
+        }
+    });
+    passed &= Test("unrelated and malformed kitty keyboard reports leaving the next command intact"sv, [&] {
+        // These CSI u sequences include unrelated modifiers, unknown keys,
+        // invalid numeric fields, and optional enhancements we did not enable.
+        // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#an-overview
+        for (const auto sequence : std::array{
+                "\x1b[99u"sv, "\x1b[99;3u"sv, "\x1b[99;7u"sv,
+                "\x1b[999999999999999999999u"sv, "\x1b[27;0u"sv,
+                "\x1b[27;999999999999999999999u"sv, "\x1b[;5u"sv,
+                "\x1b[99;5:3u"sv, "\x1b[?1u"sv}) {
+            auto console = TestConsole{};
+            input.Feed(std::format("{}1", sequence));
+            Require(console.ReadMenuInput().key == MenuKey::Details,
+                std::format("unrelated encoded input {:?} invoked a menu action", sequence));
+        }
+    });
+    passed &= Test("kitty keyboard protocol Escape surviving every input split"sv, [&] {
+        // Kitty reports Escape as CSI 27 u, with a final byte distinguishing it
+        // from both a lone legacy Escape and an incomplete sequence.
+        // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions
+        constexpr auto escape = "\x1b[27u"sv;
+        for (const auto split : std::views::iota(1uz, escape.size())) {
+            auto console = TestConsole{};
+            input.Feed(escape.substr(0, split));
+            auto remainder = std::async(std::launch::async, [&input, split, escape] {
+                std::this_thread::sleep_for(5ms);
+                input.Feed(std::format("{}1", escape.substr(split)));
+            });
+            Require(console.ReadMenuInput().key == MenuKey::Back,
+                "a fragmented encoded Escape was not recognized"sv);
+            remainder.get();
+            Require(console.ReadMenuInput().key == MenuKey::Details,
+                "a fragmented Escape consumed subsequent input"sv);
+        }
+    });
+    passed &= Test("fragmented kitty keyboard protocol Ctrl+C interrupting cursor and size queries"sv, [&] {
+        // CSI 99;5 u is Ctrl+C; CSI 108;5 u is Ctrl+L. Leave Ctrl+L before
+        // cancellation and the `1` shortcut after it to verify queue retention.
+        // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#modifiers
+        constexpr auto cancel = "\x1b[99;5u"sv;
+        for (const auto size_query : std::array{false, true}) {
+            for (const auto split : std::views::iota(1uz, cancel.size())) {
+                auto console = TestConsole{};
+                auto remainder = std::future<void>{};
+                console.on_write = [&](const auto) {
+                    input.Feed(std::format("\x1b[108;5u{}", cancel.substr(0, split)));
+                    remainder = std::async(std::launch::async, [&input, split, cancel] {
+                        std::this_thread::sleep_for(5ms);
+                        input.Feed(std::format("{}1", cancel.substr(split)));
+                    });
+                };
+                try {
+                    if (size_query) {
+                        std::ignore = console.QuerySize();
+                    } else {
+                        std::ignore = console.QueryCursor();
+                    }
+                    Require(false, "encoded Ctrl+C did not cancel the query"sv);
+                } catch (const InputCancelled &) {
+                }
+                remainder.get();
+                Require(console.ReadMenuInput().key == MenuKey::Redraw,
+                    "cancellation lost the preceding Ctrl+L"sv);
+                Require(console.ReadMenuInput().key == MenuKey::Details,
+                    "cancellation lost the following shortcut"sv);
+            }
+        }
+    });
+    passed &= Test("Unix query replies retaining their order relative to kitty keyboard protocol Ctrl+C"sv, [&] {
+        // A CPR reports (4, 9); CSI 99;5 u cancels. Test both arrival orders.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+        // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#modifiers
+        for (const auto reply_first : std::array{false, true}) {
+            auto console = TestConsole{};
+            console.on_write = [&](const auto) {
+                input.Feed(reply_first ? "\x1b[4;9R\x1b[99;5u1"sv :
+                    "\x1b[99;5u\x1b[4;9R1"sv);
+            };
+            if (reply_first) {
+                Require(console.QueryCursor() == CursorPosition{4, 9},
+                    "a later Ctrl+C displaced the preceding reply"sv);
+                console.on_write = {};
+            }
+            try {
+                std::ignore = console.QueryCursor();
+                Require(false, "encoded Ctrl+C was lost while reading the reply"sv);
+            } catch (const InputCancelled &) {
+            }
+            Require(console.ReadMenuInput().key == MenuKey::Details,
+                "query cancellation damaged the queued shortcut"sv);
+        }
     });
     passed &= Test("Unix fragmented navigation and a lone Escape"sv, [&] {
         auto console = TestConsole{};

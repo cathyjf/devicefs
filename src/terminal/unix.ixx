@@ -43,8 +43,18 @@ constexpr auto kEscapeTimeout = 30ms;
 }
 
 [[nodiscard]] auto CloseTerminalScoped(const int descriptor) {
-    return ScopeExit{[descriptor] { std::ignore = close(descriptor); }};
+    return ScopeExit{std::bind(close, descriptor)};
 }
+
+// This `TcSetAttrInvoker` type could be replaced with a lambda. However, doing
+// so causes GCC 16.2.0 on macOS to crash when compiling main.cpp.
+struct TcSetAttrInvoker {
+    int descriptor;
+    termios previous;
+    auto operator()() {
+        return tcsetattr(descriptor, TCSANOW, &previous);
+    }
+};
 
 // Raw input delivers keys and terminal replies immediately, including Ctrl+C
 // as an input byte that the menu can interpret as cancellation. Output retains
@@ -56,9 +66,7 @@ constexpr auto kEscapeTimeout = 30ms;
         throw std::system_error(errno, std::generic_category(),
             "could not read the controlling terminal's modes");
     }
-    auto restore = ScopeExit{[descriptor, previous] {
-        std::ignore = tcsetattr(descriptor, TCSANOW, &previous);
-    }};
+    auto restore = ScopeExit{TcSetAttrInvoker{descriptor, previous}};
     auto current = previous;
     cfmakeraw(&current);
     current.c_oflag = OPOST | ONLCR;
@@ -212,7 +220,8 @@ private:
     // therefore left with a visible cursor when the interactive session ends.
     // https://invisible-mirror.net/xterm/ctlseqs/ctlseqs.html
     [[nodiscard]] auto RestoreScreenOnExit() {
-        return ScopeExit{[this] { WriteControlSequenceNoThrow(kLeaveScreen); }};
+        return ScopeExit{std::bind(
+            &UnixConsole::WriteControlSequenceNoThrow, this, kLeaveScreen)};
     }
 
     [[nodiscard]] auto ReadWindowSize() const -> TerminalSize {

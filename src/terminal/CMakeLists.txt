@@ -32,7 +32,13 @@ option(DEVICEFS_TERMINAL_BUILD_TESTS "Build the terminal test entry point" OFF)
 get_filename_component(DEVICEFS_ROOT "../.." ABSOLUTE)
 set(WIL_INCLUDE_DIR "${DEVICEFS_ROOT}/dependencies/wil/include")
 
-add_library(windows-terminal-width STATIC
+if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    set(DEVICEFS_TERMINAL_LIBRARY_TYPE STATIC)
+else()
+    set(DEVICEFS_TERMINAL_LIBRARY_TYPE OBJECT)
+endif()
+
+add_library(windows-terminal-width ${DEVICEFS_TERMINAL_LIBRARY_TYPE}
     dependencies/terminal/src/types/CodepointWidthDetector.cpp
 )
 target_include_directories(windows-terminal-width PUBLIC
@@ -42,10 +48,21 @@ target_include_directories(windows-terminal-width PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/compat"
 )
 
-add_library(devicefs-terminal STATIC)
+add_library(devicefs-terminal ${DEVICEFS_TERMINAL_LIBRARY_TYPE})
 target_sources(devicefs-terminal PUBLIC
-    FILE_SET CXX_MODULES FILES terminal.ixx text.ixx formatting.ixx layout.ixx frame.ixx drawing.ixx menu.ixx safecast.ixx
-        scope_exit.ixx terminal_reports.ixx base_console.ixx vt.ixx
+    FILE_SET CXX_MODULES FILES
+        base_console.ixx
+        drawing.ixx
+        formatting.ixx
+        frame.ixx
+        layout.ixx
+        menu.ixx
+        safecast.ixx
+        scope_exit.ixx
+        terminal_reports.ixx
+        terminal.ixx
+        text.ixx
+        vt.ixx
 )
 if(WIN32)
     target_sources(devicefs-terminal PUBLIC FILE_SET CXX_MODULES FILES windows.ixx)
@@ -65,13 +82,6 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
     add_executable(devicefs-terminal-test
         tests/main.cpp
     )
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        # GCC 16.2 on macOS crashes in `mangle_decl` during `free_lang_data` when
-        # compiling this importer with LTO, pointing to `SetTerminalModeScoped`'s
-        # cleanup lambda. Compiling only this source without LTO avoids the crash.
-        # The other sources and the final link retain LTO.
-        set_property(SOURCE tests/main.cpp APPEND PROPERTY COMPILE_OPTIONS -fno-lto)
-    endif()
     if(WIN32)
         target_sources(devicefs-terminal-test PRIVATE
             "${DEVICEFS_ROOT}/src/resources/devicefs.manifest")
@@ -81,7 +91,10 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
             tests/test_support.ixx tests/native_tests.ixx tests/text_tests.ixx
             tests/menu_measurements.ixx
     )
-    target_link_libraries(devicefs-terminal-test PRIVATE devicefs-terminal)
+    target_link_libraries(devicefs-terminal-test PRIVATE
+        devicefs-terminal
+        windows-terminal-width
+    )
     target_include_directories(devicefs-terminal-test PRIVATE
         "${DEVICEFS_ROOT}/src/modules/include"
     )

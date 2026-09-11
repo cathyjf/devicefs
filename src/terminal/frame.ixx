@@ -262,9 +262,10 @@ public:
         // last screen row retains the uncertainty because probing could scroll.
         InvalidateRows(row, 2);
         terminal.Write(" "sv);
-        const auto observed = terminal.QueryCursor();
+        const auto observed = detail::TextEndpoint(
+            terminal.QueryCursor(), row, size.columns, detail::TextFit::MayWrap);
         if (!observed ||
-            !(((observed->row == row) && (observed->column == size.columns)) ||
+            !(((observed->row == row) && (observed->column >= size.columns)) ||
                 ((observed->row == (row + 1)) &&
                     (observed->column == std::min(2, size.columns))))) {
             return std::nullopt;
@@ -341,9 +342,10 @@ private:
                 highlight(line.reverse);
                 output.Write(group.text);
                 if (!same_text && (known == widths_.end())) {
-                    const auto observed = output.QueryCursor();
+                    const auto observed = detail::TextEndpoint(
+                        output.QueryCursor(), row, columns, detail::TextFit::WithinRow);
                     if (!observed || (observed->row != row) ||
-                        (observed->column < column) || (observed->column > columns)) {
+                        (observed->column < column)) {
                         return std::nullopt;
                     }
                     // A group followed by more text in a fitted row must leave
@@ -351,7 +353,7 @@ private:
                     // to visible groups, so each following group needs a cell.
                     // A nonfinal group's last-column report therefore identifies
                     // a free cell rather than a pending wrap.
-                    if (!final_group || (observed->column < columns) ||
+                    if (!final_group || (observed->column != columns) ||
                         (group.width_bound < (columns - column + 1))) {
                         end_column = observed->column;
                         widths_.emplace(group.text, end_column - column);

@@ -32,6 +32,36 @@ struct TerminalSize {
     int columns;
 };
 
+namespace detail {
+
+enum class TextFit { WithinRow, MayWrap };
+
+// `TextEndpoint` locates the end of a text write from its cursor report. Above
+// the bottom screen row, kitty reports a filled rightmost cell as column one of
+// the following row, although no text has been written there. Represent that
+// endpoint as one column past the completed row so wrapping and width measurement can
+// distinguish it from text that actually continued onto another row.
+// Call this after writing prepared text, which contains no cursor commands or
+// newlines; `first_row` is the row on which that write began.
+// https://github.com/kovidgoyal/kitty/blob/master/kitty/screen.c#L3043-L3062
+// In a one-column window, text that actually wrapped can also leave the cursor
+// at column one. Only a write known to fit its row disambiguates that report;
+// otherwise retain the reported row for the caller's wrapping calculation.
+[[nodiscard]] auto TextEndpoint(const std::optional<CursorPosition> &reported,
+    const int first_row, const int columns, const TextFit fit) noexcept
+    -> std::optional<CursorPosition> {
+    if (!reported || (reported->column < 1) || (reported->column > columns)) {
+        return std::nullopt;
+    }
+    if ((reported->column == 1) && (reported->row > first_row) &&
+        ((columns > 1) || (fit == TextFit::WithinRow))) {
+        return CursorPosition{.row = reported->row - 1, .column = columns + 1};
+    }
+    return reported;
+}
+
+}
+
 // A query can receive Ctrl+C while waiting for the terminal's reply. This
 // distinct exception ends that wait and lets SelectMenuItem return cancellation
 // without drawing a recovery message. Other console callers can handle the
@@ -330,8 +360,8 @@ export template <typename LineStarted = std::nullptr_t>
     // cell until the next printable character arrives. A report of that column
     // can therefore mean the cell is empty or already filled. `Uncertain`
     // records that ambiguity so the next write is observed individually.
-    // `Filled` records a row completed by inserting indentation, which requires
-    // an explicit move to the next row.
+    // `Filled` records a completed row, which requires an explicit move to the
+    // next row before writing its indented continuation.
     enum class RightMargin { Available, Uncertain, Filled };
     auto margin = cursor.column == size.columns ?
         RightMargin::Uncertain : RightMargin::Available;
@@ -342,10 +372,10 @@ export template <typename LineStarted = std::nullptr_t>
             .stop = stop,
         };
     };
-    const auto observe = [&]() -> std::optional<CursorPosition> {
-        const auto observed = terminal.QueryCursor();
+    const auto observe = [&](const detail::TextFit fit) -> std::optional<CursorPosition> {
+        const auto observed = detail::TextEndpoint(
+            terminal.QueryCursor(), cursor.row, size.columns, fit);
         if (!observed ||
-            (observed->column < 1) || (observed->column > size.columns) ||
             (observed->row < cursor.row) || ((observed->row - cursor.row) > 1)) {
             return std::nullopt;
         }
@@ -396,13 +426,13 @@ export template <typename LineStarted = std::nullptr_t>
             if (clusters.empty()) {
                 return result(WrappingStop::EndOfText);
             }
-            const auto observed = observe();
+            const auto observed = observe(detail::TextFit::WithinRow);
             if (!observed || (observed->row != cursor.row)) {
                 return result(WrappingStop::RedrawRequired);
             }
             cursor = *observed;
-            margin = cursor.column == size.columns ?
-                RightMargin::Uncertain : RightMargin::Available;
+            margin = cursor.column > size.columns ? RightMargin::Filled :
+                cursor.column == size.columns ? RightMargin::Uncertain : RightMargin::Available;
             continue;
         }
 
@@ -425,7 +455,7 @@ export template <typename LineStarted = std::nullptr_t>
         terminal.Write(clusters.front().text);
         remaining.remove_prefix(clusters.front().text.size());
         clusters = clusters.subspan(1);
-        const auto observed = observe();
+        const auto observed = observe(detail::TextFit::MayWrap);
         if (!observed) {
             return result(WrappingStop::RedrawRequired);
         }
@@ -453,8 +483,8 @@ export template <typename LineStarted = std::nullptr_t>
                 vt::MoveCursor(cursor.row, cursor.column)));
         } else {
             cursor = *observed;
-            margin = cursor.column == size.columns ?
-                RightMargin::Uncertain : RightMargin::Available;
+            margin = cursor.column > size.columns ? RightMargin::Filled :
+                cursor.column == size.columns ? RightMargin::Uncertain : RightMargin::Available;
         }
     }
     return result(WrappingStop::EndOfText);

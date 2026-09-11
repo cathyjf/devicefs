@@ -92,7 +92,7 @@ public:
                         (group.text == "👩‍💻"sv) || (group.text == "😀"sv)) {
                         return 2;
                     }
-                    Require((group.text == "é"sv) || (group.text == "©"sv) ||
+                    Require((group.text == "é"sv) || (group.text == "©"sv) || (group.text == "·"sv) ||
                         (group.text.size() == 1),
                         std::format("the frame fixture has no width for {:?}", group.text));
                     return 1;
@@ -124,6 +124,9 @@ public:
 
     [[nodiscard]] auto QueryCursor() noexcept -> std::optional<CursorPosition> {
         ++queries;
+        if (report_pending_wrap_on_next_row && pending_wrap_ && (cursor_.row < size_.rows)) {
+            return CursorPosition{.row = cursor_.row + 1, .column = 1};
+        }
         return cursor_;
     }
     auto PresentFrame() noexcept -> void { ++presentations; }
@@ -180,6 +183,10 @@ public:
     int queries = 0;
     int cursor_moves = 0;
     int attribute_changes = 0;
+    // If true, report a pending wrap as kitty does: at the next row's beginning
+    // except on the last screen row, where the report stays at the last column.
+    // https://github.com/kovidgoyal/kitty/blob/master/kitty/screen.c#L3043-L3062
+    bool report_pending_wrap_on_next_row = false;
 
 private:
     auto ClearCell(const int row, const int column) -> void {
@@ -231,6 +238,56 @@ private:
 export [[nodiscard]] auto RunFrameTests() -> bool {
     static_assert(FrameTerminal<FrameConsole>);
     auto passed = true;
+    passed &= Test("kitty right-margin reports presenting full rows and reusing measured widths"sv, [] {
+        auto terminal = FrameConsole{{.rows = 3, .columns = 4}};
+        terminal.report_pending_wrap_on_next_row = true;
+        auto presenter = DeltaFramePresenter{};
+        auto frame = FrameBuffer{TerminalSize{.rows = 3, .columns = 4}};
+        frame.rows.at(0).text = "ab日";
+        frame.rows.at(1).text = "cdéZ";
+        frame.rows.at(2).text = "fghi";
+        Require(presenter.Flip(terminal, frame), "kitty reports prevented frame presentation"sv);
+        for (const auto row : std::views::iota(0, 3)) {
+            Require(terminal.Row(row + 1) == frame.rows.at(row).text,
+                "a full row's text was changed or misplaced"sv);
+        }
+        terminal.ResetActivity();
+        frame.rows.at(0).reverse = true;
+        Require(presenter.Flip(terminal, frame) && (terminal.queries == 0) &&
+            (terminal.painted == "ab日"),
+            "highlighting failed to reuse the measured full row"sv);
+        terminal.ResetActivity();
+        Require(presenter.Flip(terminal, frame) && (terminal.writes == 0),
+            "an unchanged kitty frame produced output"sv);
+    });
+    passed &= Test("measuring a one-column row with either style of pending-wrap report"sv, [] {
+        for (const auto next_row_report : std::array{false, true}) {
+            auto terminal = FrameConsole{{.rows = 3, .columns = 1}};
+            terminal.report_pending_wrap_on_next_row = next_row_report;
+            auto presenter = DeltaFramePresenter{};
+            const auto measured = presenter.MeasureLine(terminal,
+                FrameLine{.text = "a"}, 1, {.rows = 3, .columns = 1});
+            Require(measured && (measured->groups.size() == 1) &&
+                !measured->groups.front().uncertain_width &&
+                (measured->groups.front().end_column == 2),
+                "a one-column row lost its occupied cell during measurement"sv);
+        }
+    });
+    passed &= Test("kitty reports distinguishing a free final cell from a filled final cell"sv, [] {
+        for (const auto text : std::array{"ab·"sv, "ab日"sv}) {
+            auto terminal = FrameConsole{{.rows = 3, .columns = 4}};
+            terminal.report_pending_wrap_on_next_row = true;
+            auto presenter = DeltaFramePresenter{};
+            const auto measured = presenter.MeasureLine(terminal,
+                FrameLine{.text = std::string{text}}, 1, {.rows = 3, .columns = 4});
+            Require(measured && !measured->groups.empty() &&
+                !measured->groups.back().uncertain_width &&
+                (measured->groups.back().end_column == (text == "ab·"sv ? 4 : 5)),
+                "measurement failed to distinguish a free final cell from a filled final cell"sv);
+            Require(terminal.queries == (text == "ab·"sv ? 4 : 3),
+                "the probe did not distinguish an ambiguous report from a known filled cell"sv);
+        }
+    });
     passed &= Test("replacing an unsized message with a blank or shorter sized frame"sv, [] {
         for (const auto replacement : std::array{""sv, "OK"sv}) {
             auto terminal = FrameConsole{{.rows = 2, .columns = 32}};

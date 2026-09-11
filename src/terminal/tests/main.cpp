@@ -299,6 +299,69 @@ static_assert(Terminal<ScriptedTerminal> && !FrameTerminal<ScriptedTerminal>);
         Require(result.remaining.empty(), "part of the label was omitted"sv);
         Require(result.rows == 1, "filling the last column counted as a wrap"sv);
     });
+    passed &= Test("one-column wrapping retaining actual row changes in cursor reports"sv, [] {
+        constexpr auto replies = std::array{
+            CursorPosition{1, 1}, CursorPosition{1, 1}, CursorPosition{2, 1}};
+        auto terminal = ScriptedTerminal{replies};
+        const auto result = WriteWrappingText(terminal, "abc"sv,
+            WrappingOptions{.size = {10, 1}, .maximum_rows = 2});
+        CheckText(terminal.Output(), "ab"sv);
+        CheckText(result.remaining, "c"sv);
+        terminal.CheckRepliesConsumed();
+        Require((result.stop == WrappingStop::RowLimit) && (result.rows == 2),
+            "a one-column wrap was mistaken for a pending wrap on the preceding row"sv);
+    });
+    passed &= Test("kitty right-margin reports placing indentation on the following row"sv, [] {
+        constexpr auto replies = std::array{CursorPosition{1, 1}, CursorPosition{2, 1}};
+        auto terminal = ScriptedTerminal{replies};
+        auto lines = std::vector<std::string_view>{};
+        const auto result = WriteWrappingText(terminal, "abcdefgh"sv,
+            WrappingOptions{.size = {10, 5}, .continuation_column = 3, .maximum_rows = 9},
+            [&lines](const std::string_view suffix) { lines.push_back(suffix); });
+        // CUP starts the continuation at row 2, column 3.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
+        CheckText(terminal.Output(), "abcde\x1b[2;3Hfgh"sv);
+        terminal.CheckRepliesConsumed();
+        Require((result.stop == WrappingStop::EndOfText) && (result.rows == 2) &&
+            (lines == std::vector{"abcdefgh"sv, "fgh"sv}),
+            "the pending wrap changed the completed row or its continuation"sv);
+    });
+    passed &= Test("kitty right-margin reports respecting the final permitted row"sv, [] {
+        constexpr auto replies = std::array{CursorPosition{1, 1}, CursorPosition{2, 1}};
+        auto terminal = ScriptedTerminal{replies};
+        const auto result = WriteWrappingText(terminal, "abcdefgh"sv,
+            WrappingOptions{.size = {10, 5}, .maximum_rows = 1});
+        CheckText(terminal.Output(), "abcde"sv);
+        CheckText(result.remaining, "fgh"sv);
+        terminal.CheckRepliesConsumed();
+        Require((result.stop == WrappingStop::RowLimit) && (result.rows == 1),
+            "a pending wrap was mistaken for text on the next row"sv);
+    });
+    passed &= Test("kitty reporting a single narrow ambiguous character filling the row"sv, [] {
+        constexpr auto replies = std::array{
+            CursorPosition{1, 1}, CursorPosition{1, 5}, CursorPosition{2, 1}};
+        auto terminal = ScriptedTerminal{replies};
+        const auto result = WriteWrappingText(terminal, "abcd·x"sv,
+            WrappingOptions{.size = {10, 5}, .continuation_column = 3, .maximum_rows = 9});
+        // CUP starts the continuation at row 2, column 3.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
+        CheckText(terminal.Output(), "abcd·\x1b[2;3Hx"sv);
+        terminal.CheckRepliesConsumed();
+        Require((result.stop == WrappingStop::EndOfText) && (result.rows == 2),
+            "the individually observed character did not complete its original row"sv);
+    });
+    passed &= Test("kitty reporting a wide character wrapping and filling the next row"sv, [] {
+        constexpr auto replies = std::array{CursorPosition{1, 2}, CursorPosition{3, 1}};
+        auto terminal = ScriptedTerminal{replies};
+        const auto result = WriteWrappingText(terminal, "日x"sv,
+            WrappingOptions{.size = {10, 2}, .maximum_rows = 3});
+        // CUP starts the remaining text at row 3, column 1.
+        // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
+        CheckText(terminal.Output(), "日\x1b[3;1Hx"sv);
+        terminal.CheckRepliesConsumed();
+        Require((result.stop == WrappingStop::EndOfText) && (result.rows == 3),
+            "the wide character's completed row was mistaken for a second wrap"sv);
+    });
     passed &= Test("a fitting emoji sequence retaining its complete UTF-8 bytes"sv,
         [] {
             auto terminal = ScriptedTerminal{};

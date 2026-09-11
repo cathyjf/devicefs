@@ -36,6 +36,7 @@ import devicefs.terminal.menu_tests;
 import devicefs.terminal.frame_tests;
 import devicefs.terminal.native_tests;
 import devicefs.terminal.text_tests;
+import devicefs.terminal.transcoding_tests;
 import devicefs.terminal.menu_measurements;
 import devicefs.terminal.reports;
 
@@ -847,6 +848,7 @@ constexpr auto EXIT_FAILURE = 1;
     passed &= TestLoggingFilter();
     passed &= TestGeneratedText();
     passed &= TestAsciiPredicate();
+    passed &= TestTranscoding();
     passed &= TestWrapping();
     passed &= TestMenu();
     passed &= RunFrameTests();

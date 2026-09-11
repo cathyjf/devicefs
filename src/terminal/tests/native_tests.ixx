@@ -25,6 +25,7 @@ module;
 export module devicefs.terminal.native_tests;
 
 import std;
+import devicefs.terminal.transcoding;
 import devicefs.terminal;
 import devicefs.terminal.menu;
 import devicefs.terminal.reports;
@@ -85,7 +86,8 @@ public:
     }
 
     auto Feed(const std::string_view text) const -> void {
-        const auto records = std::filesystem::path{text}.wstring() |
+        const auto wide = Transcode<char16_t>(text);
+        const auto records = std::u16string_view{wide} |
             std::views::transform([](const wchar_t character) {
                 auto record = INPUT_RECORD{.EventType = KEY_EVENT};
                 record.Event.KeyEvent = {.bKeyDown = TRUE, .wRepeatCount = 1,

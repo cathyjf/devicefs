@@ -48,6 +48,19 @@ target_include_directories(windows-terminal-width PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/compat"
 )
 
+add_library(simdutf ${DEVICEFS_TERMINAL_LIBRARY_TYPE}
+    dependencies/simdutf/simdutf.cpp
+)
+target_include_directories(simdutf SYSTEM PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/simdutf/include"
+)
+if(MSVC)
+    target_compile_definitions(simdutf PRIVATE _MSVC_STL_HARDENING=1)
+    target_compile_options(simdutf PRIVATE
+        /permissive- /EHsc /utf-8 /guard:cf /guard:ehcont /sdl
+    )
+endif()
+
 add_library(devicefs-terminal ${DEVICEFS_TERMINAL_LIBRARY_TYPE})
 target_sources(devicefs-terminal PUBLIC
     FILE_SET CXX_MODULES FILES
@@ -61,6 +74,7 @@ target_sources(devicefs-terminal PUBLIC
         scope_exit.ixx
         terminal_reports.ixx
         terminal.ixx
+        transcoding.ixx
         text.ixx
         vt.ixx
 )
@@ -69,7 +83,7 @@ if(WIN32)
 else()
     target_sources(devicefs-terminal PUBLIC FILE_SET CXX_MODULES FILES unix.ixx)
 endif()
-target_link_libraries(devicefs-terminal PRIVATE windows-terminal-width)
+target_link_libraries(devicefs-terminal PRIVATE windows-terminal-width simdutf)
 target_include_directories(devicefs-terminal PRIVATE
     "${DEVICEFS_ROOT}/src/modules/include"
 )
@@ -89,11 +103,12 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
     target_sources(devicefs-terminal-test PRIVATE
         FILE_SET CXX_MODULES FILES tests/menu_tests.ixx tests/frame_tests.ixx
             tests/test_support.ixx tests/native_tests.ixx tests/text_tests.ixx
-            tests/menu_measurements.ixx
+            tests/menu_measurements.ixx tests/transcoding_tests.ixx
     )
     target_link_libraries(devicefs-terminal-test PRIVATE
         devicefs-terminal
         windows-terminal-width
+        simdutf
     )
     target_include_directories(devicefs-terminal-test PRIVATE
         "${DEVICEFS_ROOT}/src/modules/include"

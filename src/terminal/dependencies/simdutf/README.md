@@ -1,7 +1,9 @@
 # simdutf
 
-`simdutf.h` and `simdutf.cpp` are unmodified files from the simdutf 9.1.2
+`simdutf.h` and `simdutf.cpp` come from the simdutf 9.1.2
 [single-header release archive](https://github.com/simdutf/simdutf/releases/download/v9.1.2/singleheader.zip).
+The header is under `include/simdutf/`, and `simdutf.cpp` includes it as
+`simdutf/simdutf.h`. The source is otherwise unchanged.
 
 Archive SHA-256:
 `631d95aaf39371505897b0916be2a60dd7c17ae16cec8bd5036d15d23bd0ac21`.

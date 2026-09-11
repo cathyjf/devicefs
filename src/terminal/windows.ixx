@@ -4,6 +4,7 @@
 export module devicefs.terminal.windows;
 
 import std;
+import devicefs.terminal.transcoding;
 import <windows.h>;
 import <wil/resource.h>;
 import <wil/stl.h>;
@@ -77,7 +78,7 @@ public:
         // shared with other programs. Microsoft's WriteConsole documentation
         // describes the separate encodings accepted by the A and W functions:
         // https://learn.microsoft.com/en-us/windows/console/writeconsole
-        const auto wide = std::filesystem::path{text}.wstring();
+        const auto wide = Transcode<char16_t>(text);
         if (wide.size() > std::numeric_limits<DWORD>::max()) {
             throw std::length_error(std::format(
                 "terminal text has {} UTF-16 code units; WriteConsoleW's "

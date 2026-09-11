@@ -364,3 +364,6 @@ Windows Terminal detector retains its upstream MIT license. Its
 [dependency notes](dependencies/terminal/README.md) identify the source revision
 and describe the changes that let the UTF-16 detector run on all three
 platforms.
+
+Unicode transcoding uses [simdutf](dependencies/simdutf/README.md), available
+under either the MIT license or Apache License 2.0.

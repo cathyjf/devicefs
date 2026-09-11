@@ -12,6 +12,7 @@ module;
 export module devicefs.terminal;
 
 import std;
+import devicefs.terminal.transcoding;
 import devicefs.terminal.vt;
 #ifdef _MSC_VER
     import <terminal/src/types/inc/CodepointWidthDetector.hpp>;
@@ -225,7 +226,7 @@ export template <WidthPolicy Policy = WidthPolicy::AllModes>
         }
         return measured;
     }
-    const auto wide = std::filesystem::path{prepared}.u16string();
+    const auto wide = Transcode<char16_t>(prepared);
     // Windows Terminal's detector uses int for cluster lengths and intermediate
     // width sums. Each UTF-16 code unit can contribute at most two columns to
     // those sums, even when the final composed character is much narrower.

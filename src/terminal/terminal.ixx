@@ -153,14 +153,47 @@ concept Terminal = requires(T &terminal, std::string_view text) {
 
 namespace devicefs::terminal {
 
+// `IsEntirelyAscii` checks whether every byte is in the ASCII range, including
+// control characters. Runtime checks use eight-byte loads and stop at the first
+// block containing a non-ASCII byte.
+//
+// Assembly inspection and timing comparisons on ARM64 with Clang 23 and MSVC 19.52
+// found that `all_of` tested one byte at a time. Eight-byte blocks made ASCII
+// scans substantially faster while retaining fast rejection near the beginning.
+// Whole-string OR and maximum reductions lost that early exit; their generated
+// code also varied considerably between the two compilers.
+//
+// The tested sixteen-byte variant improved long scans but cost more for several
+// short labels. Overlapping the final eight-byte block avoided a scalar tail
+// and performed well on both compilers for ordinary label lengths.
 export
 [[nodiscard]]
 ATTRIBUTE_FORCEINLINE
-constexpr auto IsEntirelyAscii(const std::string_view text) {
-    return std::ranges::all_of(text,
-        [](const unsigned char byte) {
-            return byte <= 127;
-        });
+constexpr auto IsEntirelyAscii(std::string_view text) {
+    if (std::is_constant_evaluated() ||
+        (text.size() < sizeof(std::uint64_t))) {
+        return std::ranges::all_of(text,
+            [](const unsigned char byte) { return byte <= 127; });
+    }
+
+    // Test the high bit of all eight bytes together. The repeated mask
+    // works in either byte order.
+    constexpr auto kHighBits = std::uint64_t{0x8080808080808080};
+    const auto tail = text.substr(text.size() - sizeof(std::uint64_t));
+    while (text.size() > sizeof(std::uint64_t)) {
+        auto word = std::uint64_t{};
+        std::memcpy(&word, text.data(), sizeof(word));
+        if (word & kHighBits) {
+            return false;
+        }
+        text.remove_prefix(sizeof(word));
+    }
+
+    // Check the final eight bytes, overlapping the preceding block when
+    // necessary so that the load remains entirely within the string.
+    auto word = std::uint64_t{};
+    std::memcpy(&word, tail.data(), sizeof(word));
+    return !(word & kHighBits);
 }
 
 export struct MeasuredCluster {

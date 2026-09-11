@@ -846,6 +846,7 @@ constexpr auto EXIT_FAILURE = 1;
     auto passed = TestTextPreparation();
     passed &= TestLoggingFilter();
     passed &= TestGeneratedText();
+    passed &= TestAsciiPredicate();
     passed &= TestWrapping();
     passed &= TestMenu();
     passed &= RunFrameTests();

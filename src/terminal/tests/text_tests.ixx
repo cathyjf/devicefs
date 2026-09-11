@@ -4,6 +4,7 @@
 export module devicefs.terminal.text_tests;
 
 import std;
+import devicefs.terminal;
 import devicefs.terminal.text;
 import devicefs.terminal.safecast;
 import devicefs.terminal.test_support;
@@ -16,6 +17,19 @@ namespace {
 
 constexpr auto kSeed = 0x54455854u;
 constexpr auto kCaseCount = 2048uz;
+
+// Compare the block-based predicate with a byte-at-a-time reference. Report
+// the input and its offset in the test buffer so failures can be reproduced
+// with the same bytes and alignment.
+auto CheckAscii(const std::string_view text, const std::size_t offset = 0) -> void {
+    const auto expected = std::ranges::all_of(text,
+        [](const unsigned char byte) { return byte <= 127; });
+    if (IsEntirelyAscii(text) != expected) {
+        throw std::runtime_error(std::format(
+            "ASCII check disagreed with the byte-at-a-time reference; offset {}, length {}, input {:?}",
+            offset, text.size(), text));
+    }
+}
 
 // Combining arbitrary bytes with recognizable fragments exercises transitions
 // between prose, malformed UTF-8, and partly received terminal commands. A fixed
@@ -71,6 +85,60 @@ constexpr auto kCaseCount = 2048uz;
     return output;
 }
 
+}
+
+export [[nodiscard]] auto TestAsciiPredicate() -> bool {
+    static_assert(IsEntirelyAscii(std::string_view{}));
+    static_assert(IsEntirelyAscii("Installation"sv));
+    static_assert(IsEntirelyAscii("\0\x7f"sv));
+    static_assert(!IsEntirelyAscii("\x80"sv));
+    static_assert(!IsEntirelyAscii("Installation\xff"sv));
+
+    auto passed = Test("ASCII predicate matching the naive check for every byte value, lengths 0–33, and offsets 0–15"sv, [] {
+        CheckAscii(std::string_view{});
+        auto storage = std::string(49, '\x80');
+        for (auto size = 0uz; size <= 33; ++size) {
+            for (auto offset = 0uz; offset < 16; ++offset) {
+                std::ranges::fill(storage, '\x80');
+                const auto text = std::span{storage}.subspan(offset, size);
+                std::ranges::fill(text, 'a');
+                const auto view = std::string_view{text.data(), text.size()};
+                // Non-ASCII bytes immediately outside the view expose loads
+                // that include neighboring bytes in the result.
+                CheckAscii(view, offset);
+                for (auto index = 0uz; index < size; ++index) {
+                    for (auto byte = 0u; byte <= 255; ++byte) {
+                        text[index] = std::bit_cast<char>(FailFastCast<unsigned char>(byte));
+                        CheckAscii(view, offset);
+                    }
+                    text[index] = 'a';
+                }
+            }
+        }
+    });
+    passed &= Test("ASCII predicate matching the naive check for 2048 generated buffers up to 8192 bytes"sv, [] {
+        auto random = std::mt19937{kSeed};
+        for (auto index = 0uz; index < kCaseCount; ++index) {
+            const auto size = random() % 8193uz;
+            const auto offset = random() % 16uz;
+            auto storage = std::string(size + offset + 1, '\xff');
+            const auto text = std::span{storage}.subspan(offset, size);
+            const auto view = std::string_view{text.data(), text.size()};
+            for (auto &byte : text) {
+                byte = FailFastCast<char>(random() % 128);
+            }
+            CheckAscii(view, offset);
+            if (!text.empty()) {
+                text[random() % text.size()] = '\x80';
+                CheckAscii(view, offset);
+            }
+            for (auto &byte : text) {
+                byte = std::bit_cast<char>(FailFastCast<unsigned char>(random() % 256));
+            }
+            CheckAscii(view, offset);
+        }
+    });
+    return passed;
 }
 
 export [[nodiscard]] auto TestGeneratedText() -> bool {

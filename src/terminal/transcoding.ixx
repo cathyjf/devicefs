@@ -5,16 +5,15 @@ module;
 
 #include "compat/gsl_suppress.h"
 
-// The preamble imports `std` through its code-unit definitions. An import
-// supplied by an included file must precede the named module declaration.
-// https://eel.is/c++draft/cpp.import#2
-#include "compat/simdutf_preamble.h"
+// simdutf's inline functions call helpers in anonymous namespaces. Those
+// references are forbidden in the named part of a module interface, so the
+// combined declarations and implementation belong in the global module fragment.
+// https://eel.is/c++draft/basic.link#17
+#include "simdutf/combined.h"
 
 export module devicefs.terminal.transcoding;
 
 import std;
-
-#include "simdutf/combined.h"
 
 namespace devicefs::terminal::detail {
 

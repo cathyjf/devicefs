@@ -21,14 +21,10 @@ are defined in `compat/utf_code_units.h` and shared with the width
 detector. The preamble defines the character-type substitutions for both
 declarations and implementation; the generated header undefines them afterward.
 
-`transcoding.ixx` includes the preamble before its module declaration because
-an import after that declaration cannot come from a header inclusion. It then
-includes the combined header within the module. This compiles simdutf's
-implementation once as part of the wrapper, with no separate simdutf target.
-The preamble's include guard prevents the combined header from repeating the
-standard-library import. On Clang 23, placing the implementation in the global
-module fragment instead caused template instantiations to fail to find
-`load_block` in the Base64 decoder.
+`transcoding.ixx` includes the combined header in its global module fragment.
+This compiles simdutf's implementation once as part of the wrapper, with no
+separate simdutf target. The preamble disables simdutf's unused Base64 feature;
+its comment explains the Clang compatibility reason.
 
 Integer and library feature macros come from `<cstdint>` and `<version>`.
 These headers precede the standard-library import because GCC rejects their

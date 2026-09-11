@@ -22,6 +22,11 @@ using std::strlen;
 using std::printf;
 using std::getenv;
 
+// The transcoder uses simdutf's Unicode conversions. Its unused Base64 decoder
+// fails to find `load_block` when Clang 23 compiles the combined implementation
+// in a global module fragment. simdutf's feature switch omits that decoder.
+#define SIMDUTF_FEATURE_BASE64 0
+
 // Our adaptation gives simdutf the code-unit types shared by the transcoder and
 // width detector. The macros cover both upstream files and are undefined at the
 // end of the generated header.

@@ -214,7 +214,7 @@ public:
                 terminal.PresentFrame();
             }
         }
-        initialized_ = true;
+        initialized_ = frame.size.has_value();
         failed.release();
         return complete;
     }

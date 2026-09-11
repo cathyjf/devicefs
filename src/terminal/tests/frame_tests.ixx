@@ -79,6 +79,7 @@ public:
             // ESC (0x1B) marks the next command after ordinary display text.
             // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
             const auto end = text.find('\x1b');
+            Require(end != 0, std::format("unsupported frame command {:?}", text));
             const auto printed = text.substr(0, end);
             for (const auto &group : MeasureText<WidthPolicy::WindowsTerminalGraphemes>(printed)) {
                 const auto width = [&] {
@@ -230,6 +231,24 @@ private:
 export [[nodiscard]] auto RunFrameTests() -> bool {
     static_assert(FrameTerminal<FrameConsole>);
     auto passed = true;
+    passed &= Test("replacing an unsized message with a blank or shorter sized frame"sv, [] {
+        for (const auto replacement : std::array{""sv, "OK"sv}) {
+            auto terminal = FrameConsole{{.rows = 2, .columns = 32}};
+            auto presenter = DeltaFramePresenter{};
+            auto message = FrameBuffer{std::nullopt};
+            message.rows.front().text = "Terminal size unavailable.";
+            Require(presenter.Flip(terminal, message) &&
+                (terminal.Row(1) == message.rows.front().text),
+                "the unsized message was not displayed"sv);
+            auto frame = FrameBuffer{TerminalSize{.rows = 2, .columns = 32}};
+            frame.rows.front().text = replacement;
+            Require(presenter.Flip(terminal, frame) && (terminal.Row(1) == replacement) &&
+                terminal.Row(2).empty(), "the sized frame left text from the unsized message"sv);
+            terminal.ResetActivity();
+            Require(presenter.Flip(terminal, frame) && (terminal.writes == 0),
+                "an unchanged sized frame produced output"sv);
+        }
+    });
     passed &= Test("adjacent Unicode groups sharing cursor positioning and highlighting"sv, [] {
         auto terminal = FrameConsole{{.rows = 2, .columns = 80}};
         auto presenter = DeltaFramePresenter{};

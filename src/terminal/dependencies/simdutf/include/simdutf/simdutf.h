@@ -3,16 +3,13 @@
 #ifndef SIMDUTF_H
 #define SIMDUTF_H
 
-#include "utf_code_units.h"
-
-// This header is included both by a named module and by `simdutf.cpp`.
-// Explicit C++ linkage attaches its declarations to the global module, so
-// both translation units refer to the same library functions and types.
-// https://eel.is/c++draft/module.unit#7.2
-extern "C++" {
-// These headers supply integer-constant macros and library feature-test macros.
+// simdutf needs integer-constant and feature-test macros as well as the
+// declarations imported by `utf_code_units.h`. GCC reports redefinitions when
+// these headers follow the import, so the headers are included first.
+// https://gcc.gnu.org/onlinedocs/gcc/C_002b_002b-Modules.html
 #include <cstdint>
 #include <version>
+#include "utf_code_units.h"
 
 using std::size_t;
 using std::ptrdiff_t;
@@ -14183,8 +14180,6 @@ template <detail::base64_literal_helper a> consteval auto operator""_base64() {
 // implementations can't compile unless that implementation is turned on).
 
 SIMDUTF_POP_DISABLE_WARNINGS
-
-} // extern "C++"
 
 #endif // SIMDUTF_H
 /* end file include/simdutf.h */

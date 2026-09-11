@@ -5,11 +5,16 @@ module;
 
 #include "compat/gsl_suppress.h"
 
-export module devicefs.terminal.transcoding;
-
+// simdutf's header imports `std` through its code-unit definitions. An import
+// supplied by an included file must precede the named module declaration.
+// https://eel.is/c++draft/cpp.import#2
 #include "simdutf/simdutf.h"
 #undef char16_t
 #undef char32_t
+
+export module devicefs.terminal.transcoding;
+
+import std;
 
 namespace devicefs::terminal::detail {
 

@@ -14,11 +14,16 @@ detector. The header defines
 the character-type substitutions for both declarations and implementation;
 `transcoding.ixx` undefines them immediately after including the header.
 
-Explicit C++ linkage keeps the library declarations attached to the global
-module when the header is included by `transcoding.ixx`. Integer and library
-feature macros come from `<cstdint>` and `<version>`; the implementation also
-uses `<climits>` for its eight-bit-byte assertion. The amalgamated C API uses
-the same character-type substitutions as the C++ implementation.
+`transcoding.ixx` includes the simdutf header in its global module fragment,
+before the named module declaration. This also places the header's transitive
+`import std` before that declaration; an import after a named module declaration
+cannot come from a header inclusion. The module imports `std` directly as well.
+
+Integer and library feature macros come from `<cstdint>` and `<version>`.
+These headers precede the standard-library import because GCC rejects their
+declarations when they follow the import. The implementation also uses
+`<climits>` for its eight-bit-byte assertion. The amalgamated C API uses the
+same character-type substitutions as the C++ implementation.
 
 Archive SHA-256:
 `631d95aaf39371505897b0916be2a60dd7c17ae16cec8bd5036d15d23bd0ac21`.

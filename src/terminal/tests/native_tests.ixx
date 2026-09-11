@@ -339,7 +339,7 @@ public:
                 }
             };
             const auto screen = console.EnterScreen();
-            Require(!SelectTestMenuItem(console, {}, std::array{"Installation"sv}),
+            Require(!SelectTestMenuItem(console, {}, std::array{"Installé"sv}),
                 "cancellation returned a selected entry"sv);
             Require(!output.contains("unavailable"sv), "cancellation painted recovery instructions"sv);
         }

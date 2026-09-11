@@ -35,7 +35,7 @@ constexpr auto FailFastCast(const Source input) noexcept -> Target {
     // changing their values. The standard comparison functions can then accept
     // those values even though the functions exclude `char` and `wchar_t`.
     if (std::cmp_less(+input, +std::numeric_limits<Target>::lowest()) ||
-        std::cmp_greater(+input, +std::numeric_limits<Target>::max())) {
+        std::cmp_greater(+input, +std::numeric_limits<Target>::max())) [[unlikely]] {
 #ifdef _WIN32
         // Reason code 8 is FAST_FAIL_RANGE_CHECK_FAILURE.
         __fastfail(8);

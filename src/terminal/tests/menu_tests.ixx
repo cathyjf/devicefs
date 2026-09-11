@@ -175,7 +175,12 @@ public:
                 screen.cursor.column = 1;
                 screen.pending_wrap = false;
             }
-            Require((text.front() >= ' ') && (text.front() <= '~'),
+            // Width-query tests use `é` as an unfamiliar one-column character.
+            // This fixture stores one byte per cell, representing that glyph
+            // with `e` while consuming both bytes of its UTF-8 encoding.
+            const auto accented = text.starts_with("é"sv);
+            const auto character = accented ? 'e' : text.front();
+            Require((character >= ' ') && (character <= '~'),
                 "the menu fixture received a non-ASCII display character"sv);
             Require((screen.cursor.row >= 1) && (screen.cursor.row <= size_.rows) &&
                 (screen.cursor.column >= 1) && (screen.cursor.column <= size_.columns),
@@ -189,8 +194,8 @@ public:
                 line.push_back(' ');
             }
             *std::next(line.begin(),
-                CompileTimeCast<std::ptrdiff_t>(screen.cursor.column) - 1) = text.front();
-            text.remove_prefix(1);
+                CompileTimeCast<std::ptrdiff_t>(screen.cursor.column) - 1) = character;
+            text.remove_prefix(accented ? 2 : 1);
             if (screen.cursor.column == size_.columns) {
                 screen.pending_wrap = true;
             } else {
@@ -339,7 +344,7 @@ constexpr auto kPositionEntries = std::array{
 }
 
 export [[nodiscard]] auto TestMenu() -> bool {
-    auto passed = Test("complete menu traffic for initial display, selection, scrolling, and resizing"sv, [] {
+    auto passed = Test("ASCII menu display, selection, scrolling, and resizing needing no width queries"sv, [] {
         constexpr auto input = std::array{
             MenuInput{MenuKey::Down}, MenuInput{MenuKey::End}, MenuInput{MenuKey::Home},
             MenuInput{MenuKey::Resize}, MenuInput{MenuKey::Accept}};
@@ -361,12 +366,9 @@ export [[nodiscard]] auto TestMenu() -> bool {
             "measuring the menu changed its selection"sv);
         PrintMenuMeasurements(terminal.measurements);
         Require(terminal.measurements.size() == input.size(), "a menu update was not measured"sv);
-        Require((terminal.measurements.at(0).cursor_queries > 0) &&
-            (terminal.measurements.at(2).cursor_queries > 0),
-            "initial or unfamiliar text was not measured through the terminal"sv);
-        for (const auto index : {1uz, 3uz, 4uz}) {
-            Require(terminal.measurements.at(index).cursor_queries == 0,
-                "cached selection, scrolling, or resizing queried character widths again"sv);
+        for (const auto &measurement : terminal.measurements) {
+            Require(measurement.cursor_queries == 0,
+                "ASCII menu text caused a width query"sv);
         }
     });
     passed &= Test("header callbacks rerunning for resize and redraw while navigation reuses their drawing"sv, [] {
@@ -445,7 +447,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
         try {
             const auto screen = terminal.EnterScreen();
             std::ignore = SelectMenuItem(terminal, [](auto &frame) {
-                frame.WriteLine("Unpublished"sv);
+                frame.WriteLine("Unpublishéd"sv);
                 frame.Write(" header"sv);
                 throw std::logic_error{"the test header callback failed"};
             }, kEntries);
@@ -1163,7 +1165,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
         auto terminal = MenuConsole{std::span<const MenuInput>{}, size};
         const auto session = terminal.EnterScreen();
         auto frame = FrameBuffer{size};
-        frame.rows.front().text = "First row";
+        frame.rows.front().text = "Premiér row";
         frame.rows.at(1).text = "Second row";
         frame.rows.back().text = "Third row";
         terminal.cursor_reports_available = false;
@@ -1180,7 +1182,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
             const auto update = terminal.BeginUpdate();
             Require(terminal.Flip(frame), "the frame could not be retried after reports resumed"sv);
         }
-        Require((terminal.Row(1) == "First row"sv) &&
+        Require((terminal.Row(1) == "Premier row"sv) &&
             (terminal.Row(2) == "Second row"sv) && (terminal.Row(3) == "Third row"sv),
             "retrying the frame omitted its failed row or an unattempted row"sv);
     });
@@ -1190,7 +1192,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
             auto terminal = MenuConsole{input};
             const auto screen = terminal.EnterScreen();
             terminal.cursor_reports_available = false;
-            Require(!SelectTestMenuItem(terminal, kHeader, kEntries),
+            Require(!SelectTestMenuItem(terminal, std::array{"Héader"sv}, kEntries),
                 "the menu did not accept cancellation after a failed frame"sv);
             Require(terminal.Row(1) == "Layout unavailable.    Ctrl+L: Redraw    Esc: Back"sv,
                 "the failed frame did not display the recovery instructions"sv);
@@ -1205,7 +1207,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
         }
     });
     passed &= Test("layout measurement failure displaying instructions without another cursor query"sv, [] {
-        const auto name = std::string(100, 'A');
+        const auto name = std::format("é{}", std::string(100, 'A'));
         const auto entries = std::array{std::string_view{name}};
         constexpr auto input = std::array{MenuInput{MenuKey::Cancel}};
         auto terminal = MenuConsole{input};
@@ -1218,17 +1220,17 @@ export [[nodiscard]] auto TestMenu() -> bool {
             "layout recovery needed a cursor report or omitted its instructions"sv);
     });
     passed &= Test("redrawing after an unavailable cursor report"sv, [] {
-        constexpr auto header = std::array{"abcdefghijklmnopqrst café"sv};
+        constexpr auto header = std::array{"ébcdefghijklmnopqrst café"sv};
         constexpr auto input = std::array{MenuInput{MenuKey::Redraw}, MenuInput{MenuKey::Accept}};
         auto terminal = MenuConsole{input, {.rows = 8, .columns = 12}};
         const auto screen = terminal.EnterScreen();
         terminal.fail_next_cursor_query = true;
         Require(SelectTestMenuItem(terminal, header, kEntries) == 0,
             "an unavailable cursor report changed the selected entry"sv);
-        Require(!terminal.frames.front().contains("abcdefghi..."sv),
+        Require(!terminal.frames.front().contains("ebcdefghi..."sv),
             "the test's unavailable cursor report did not interrupt header clipping"sv);
         Require((terminal.cursor_queries.at(1) != 0) &&
-            (terminal.Row(1) == "abcdefghi..."sv),
+            (terminal.Row(1) == "ebcdefghi..."sv),
             "an incompletely drawn header was cached instead of retried on the next frame"sv);
     });
     passed &= Test("widening a menu leaving an unchanged drawing untouched"sv, [] {
@@ -1283,7 +1285,7 @@ export [[nodiscard]] auto TestMenu() -> bool {
             "increasing height left the footer, controls, or status in their old rows"sv);
     });
     passed &= Test("resizing a long name using cached widths and preserving selection"sv, [] {
-        const auto long_name = std::format("{}END-OF-NAME", std::string(90, 'A'));
+        const auto long_name = std::format("é{}END-OF-NAME", std::string(90, 'A'));
         const auto entries = std::array{"First"sv, std::string_view{long_name}};
         constexpr auto input = std::array{MenuInput{MenuKey::Resize}, MenuInput{MenuKey::Accept}};
         auto terminal = MenuConsole{input, {.rows = 8, .columns = 80}};
@@ -1405,9 +1407,9 @@ export [[nodiscard]] auto TestMenu() -> bool {
     passed &= Test("an oversized scratch-row allowance reusing only the remaining physical rows"sv, [] {
         constexpr auto size = TerminalSize{.rows = 3, .columns = 8};
         auto terminal = MenuConsole{std::span<const MenuInput>{}, size};
-        const auto layout = LayoutText(terminal, "abcdefghijklmnopqrstuvwxyz"sv, {2, 1},
+        const auto layout = LayoutText(terminal, "ébcdefghijklmnopqrstuvwxyz"sv, {2, 1},
             {.size = size, .maximum_rows = 20});
-        Require(layout && (layout->rows == std::vector{"abcdefgh"sv, "ijklmnop"sv, "qrstuvwx"sv, "yz"sv}) &&
+        Require(layout && (layout->rows == std::vector{"ébcdefgh"sv, "ijklmnop"sv, "qrstuvwx"sv, "yz"sv}) &&
             !layout->truncated && !layout->oversized,
             "a large scratch allowance rejected or truncated text that fits across reused pages"sv);
         Require((terminal.cursor_query_calls > 0) &&
@@ -1457,8 +1459,8 @@ export [[nodiscard]] auto TestMenu() -> bool {
             "cached layout performed terminal I/O"sv);
         auto measured = MenuConsole{std::span<const MenuInput>{}, options.size};
         check_layout(measured);
-        Require(measured.cursor_query_calls > 0,
-            "the uncached case did not exercise observed wrapping across scratch pages"sv);
+        Require((measured.write_calls == 0) && (measured.cursor_query_calls == 0),
+            "ASCII layout performed terminal I/O without needing cached widths"sv);
     });
     return passed;
 }

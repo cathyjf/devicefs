@@ -126,9 +126,10 @@ export namespace devicefs::terminal {
 // becomes shorter, its blank tail is erased through the right margin. The
 // comparison uses complete composed characters for every label.
 //
-// While drawing previously unseen groups, `Flip` uses cursor movement to measure
-// their widths. Recorded widths serve subsequent frames and layouts; upper
-// bounds on unmeasured widths determine where text may be shortened. Rows marked
+// ASCII groups use one column per byte. For other previously unseen groups,
+// `Flip` uses cursor movement to measure their widths. Recorded widths serve
+// subsequent frames and layouts; upper bounds on unmeasured widths determine
+// where text may be shortened. Rows marked
 // `FrameClipping::None` rely on the caller's completed layout. `Flip` returns
 // false if a cursor report cannot establish a usable position. Drawing stops
 // at that row so one unavailable report does not cause another wait on each
@@ -145,11 +146,11 @@ public:
         -> std::optional<std::vector<MeasuredCluster>> {
         auto groups = MeasureText<Policy>(text);
         for (auto &group : groups) {
-            const auto known = widths_.find(group.text);
-            if (known == widths_.end()) {
+            const auto known = KnownWidth(group.text);
+            if (!known) {
                 return std::nullopt;
             }
-            group.width_bound = known->second;
+            group.width_bound = *known;
         }
         return groups;
     }
@@ -278,6 +279,20 @@ public:
     }
 
 private:
+    // Prepared ASCII text occupies one column per byte, so layout and drawing
+    // can use its width without a terminal query. Preparation has already
+    // removed commands and replaced controls with visible notation; deliberate
+    // newlines are handled by the frame writer before measuring a row.
+    [[nodiscard]] auto KnownWidth(const std::string_view text) const -> std::optional<int> {
+        if (IsEntirelyAscii(text)) {
+            return FailFastCast<int>(text.size());
+        }
+        if (const auto known = widths_.find(text); known != widths_.end()) {
+            return known->second;
+        }
+        return std::nullopt;
+    }
+
     template <WidthPolicy Policy>
     [[nodiscard]] auto PaintRow(Terminal auto &output, const FrameLine &line,
         const int row, const int columns,
@@ -327,13 +342,13 @@ private:
             auto end_column = same_text ? old->end_column : column;
             auto uncertain_width = same_text && old->uncertain_width;
             if (!same_text || (previous->source.reverse != line.reverse)) {
-                const auto known = widths_.find(group.text);
+                const auto known = KnownWidth(group.text);
                 // The old row may have occupied the last cell. A replacement
                 // group's cursor report at that column cannot distinguish a free
                 // cell from a filled cell awaiting a wrap. Clearing the old cell
                 // before drawing the replacement leaves a blank tail when the
                 // replacement turns out to be narrower.
-                if (!same_text && (known == widths_.end()) &&
+                if (!same_text && !known &&
                     (group.width_bound >= (columns - column + 1)) &&
                     (old_end > columns)) {
                     erase(columns, 1);
@@ -341,7 +356,7 @@ private:
                 move(column);
                 highlight(line.reverse);
                 output.Write(group.text);
-                if (!same_text && (known == widths_.end())) {
+                if (!same_text && !known) {
                     const auto observed = detail::TextEndpoint(
                         output.QueryCursor(), row, columns, detail::TextFit::WithinRow);
                     if (!observed || (observed->row != row) ||
@@ -362,7 +377,7 @@ private:
                         uncertain_width = true;
                     }
                 } else if (!same_text) {
-                    end_column = column + known->second;
+                    end_column = column + *known;
                 }
                 written_column = uncertain_width ? std::nullopt : std::optional{end_column};
             }
@@ -379,8 +394,7 @@ private:
             if (line.clipping == FrameClipping::IfNeeded) {
                 auto remaining = columns;
                 for (const auto &group : groups) {
-                    const auto known = widths_.find(group.text);
-                    const auto width = known == widths_.end() ? group.width_bound : known->second;
+                    const auto width = KnownWidth(group.text).value_or(group.width_bound);
                     if (width > remaining) {
                         return ellipsis_columns;
                     }
@@ -392,11 +406,11 @@ private:
         }();
         for (auto index = std::size_t{}; index < groups.size(); ++index) {
             const auto &group = groups.at(index);
-            const auto known = widths_.find(group.text);
-            const auto width = known == widths_.end() ? group.width_bound : known->second;
+            const auto known = KnownWidth(group.text);
+            const auto width = known.value_or(group.width_bound);
             if ((column > columns) ||
                 ((width > (columns - reserve - column + 1)) &&
-                    ((line.clipping != FrameClipping::None) || (known != widths_.end())))) {
+                    ((line.clipping != FrameClipping::None) || known))) {
                 next.shortened = true;
                 break;
             }

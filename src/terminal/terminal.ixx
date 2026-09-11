@@ -3,6 +3,8 @@
 
 module;
 
+#include "compat/forceinline_compat.h"
+
 #ifndef _MSC_VER
     #include <terminal/src/types/inc/CodepointWidthDetector.hpp>
 #endif
@@ -151,6 +153,16 @@ concept Terminal = requires(T &terminal, std::string_view text) {
 
 namespace devicefs::terminal {
 
+export
+[[nodiscard]]
+ATTRIBUTE_FORCEINLINE
+constexpr auto IsEntirelyAscii(const std::string_view text) {
+    return std::ranges::all_of(text,
+        [](const unsigned char byte) {
+            return byte <= 127;
+        });
+}
+
 export struct MeasuredCluster {
     std::string_view text;
     int width_bound;
@@ -168,6 +180,18 @@ export struct MeasuredCluster {
 export template <WidthPolicy Policy = WidthPolicy::AllModes>
 [[nodiscard]] auto MeasureText(const std::string_view prepared)
     -> std::vector<MeasuredCluster> {
+    // Prepared ASCII has one independent, single-column character per byte.
+    // Build those groups directly; text containing non-ASCII bytes needs the
+    // detector below to keep combining characters with their bases.
+    if ((prepared.size() <= (std::numeric_limits<int>::max() / 2)) &&
+        IsEntirelyAscii(prepared)) {
+        auto measured = std::vector<MeasuredCluster>{};
+        measured.reserve(prepared.size());
+        for (auto index = std::size_t{}; index < prepared.size(); ++index) {
+            measured.push_back({.text = prepared.substr(index, 1), .width_bound = 1});
+        }
+        return measured;
+    }
     const auto wide = std::filesystem::path{prepared}.u16string();
     // Windows Terminal's detector uses int for cluster lengths and intermediate
     // width sums. Each UTF-16 code unit can contribute at most two columns to

@@ -284,7 +284,7 @@ export [[nodiscard]] auto RunFrameTests() -> bool {
                 !measured->groups.back().uncertain_width &&
                 (measured->groups.back().end_column == (text == "ab·"sv ? 4 : 5)),
                 "measurement failed to distinguish a free final cell from a filled final cell"sv);
-            Require(terminal.queries == (text == "ab·"sv ? 4 : 3),
+            Require(terminal.queries == (text == "ab·"sv ? 2 : 1),
                 "the probe did not distinguish an ambiguous report from a known filled cell"sv);
         }
     });

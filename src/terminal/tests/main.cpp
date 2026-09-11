@@ -276,6 +276,34 @@ static_assert(Terminal<ScriptedTerminal> && !FrameTerminal<ScriptedTerminal>);
 
 [[nodiscard]] auto TestWrapping() -> bool {
     auto passed = true;
+    passed &= Test("ASCII measurement preserving byte boundaries, widths, and borrowed storage in both policies"sv, [] {
+        const auto printable = std::views::iota(' ', '\x7f') | std::ranges::to<std::string>();
+        for (const auto &text : std::array{std::string{}, printable, std::string(1024, 'a'),
+                PrepareTerminalText("\0\t\n\r\x7f\\"sv)}) {
+            for (const auto &groups : std::array{
+                    MeasureText<WidthPolicy::AllModes>(text),
+                    MeasureText<WidthPolicy::WindowsTerminalGraphemes>(text)}) {
+                Require(groups.size() == text.size(), "ASCII grouping changed the number of characters"sv);
+                for (const auto &[index, group] : std::views::enumerate(groups)) {
+                    Require((group.text == std::string_view{text}.substr(index, 1)) &&
+                        (group.text.data() == text.data() + index) && (group.width_bound == 1),
+                        std::format("ASCII group {} lost its byte, storage, or single-column width", index));
+                }
+            }
+        }
+    });
+    passed &= Test("an ASCII prefix retaining its following composed character in both policies"sv, [] {
+        constexpr auto text = "aéz"sv;
+        constexpr auto expected = std::array{"a"sv, "é"sv, "z"sv};
+        for (const auto &groups : std::array{
+                MeasureText<WidthPolicy::AllModes>(text),
+                MeasureText<WidthPolicy::WindowsTerminalGraphemes>(text)}) {
+            Require(groups.size() == expected.size(), "mixed text lost its composed-character boundary"sv);
+            for (const auto &[index, group] : std::views::enumerate(groups)) {
+                CheckText(group.text, expected.at(index));
+            }
+        }
+    });
     passed &= Test("a complete fitting label using one write and only the initial cursor query"sv,
         [] {
             auto terminal = ScriptedTerminal{};

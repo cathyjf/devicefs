@@ -1,6 +1,6 @@
 /* auto-generated on 2026-09-10 22:05:17 -0400. Do not edit! */
 /* begin file src/simdutf.cpp */
-#include "simdutf.h"
+#include "simdutf/simdutf.h"
 
 /* begin file src/encoding_types.cpp */
 

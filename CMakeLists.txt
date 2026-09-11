@@ -237,6 +237,8 @@ target_link_libraries(vss-descriptor-dump PRIVATE
     devicefs-common devicefs-vss-block-descriptors ole32
 )
 
+add_subdirectory(src/terminal)
+
 add_executable(backup-supervisor
     src/main.cpp
     src/backup_supervisor.cpp
@@ -244,7 +246,7 @@ add_executable(backup-supervisor
 )
 target_link_libraries(backup-supervisor PRIVATE
     devicefs-common devicefs-filesystem devicefs-rpc-block-device
-    devicefs-vss-block-descriptors vshadow
+    devicefs-vss-block-descriptors devicefs-terminal vshadow
 )
 
 set(START_PBS

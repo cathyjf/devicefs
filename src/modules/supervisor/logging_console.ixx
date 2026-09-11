@@ -23,132 +23,12 @@ export module devicefs.supervisor.logging_console;
 import std;
 import <devicefs/windows_imports.h>;
 import devicefs.common;
+import devicefs.terminal.text;
 
 using namespace std::string_view_literals;
 
 using unique_pseudoconsole = wil::unique_any<
     HPCON, decltype(&::ClosePseudoConsole), ::ClosePseudoConsole>;
-
-// ConPTY emits UTF-8 interleaved with VT sequences. Keep parser state across
-// pipe reads and strip the ESC-prefixed sequences throughout the stream while
-// preserving non-ASCII UTF-8 bytes. Of the C0 controls, retain only tabs and
-// line feeds; dropping carriage returns turns CRLF into LF and prevents
-// progress output from rewriting replayed lines.
-// https://learn.microsoft.com/en-us/windows/console/createpseudoconsole
-// https://ecma-international.org/publications-and-standards/standards/ecma-48/
-class VtFilter {
-public:
-    [[nodiscard]] auto Remove(std::span<char8_t> input) noexcept {
-        auto output_size = 0uz;
-        for (const auto character : input) {
-            if (Preserve(character)) {
-                input[output_size++] = character;
-            }
-        }
-        return std::u8string_view{input.data(), output_size};
-    }
-
-private:
-    enum class State {
-        Text,
-        Escape,
-        EscapeIntermediate,
-        ControlSequence,
-        OscString,
-        StString,
-    };
-
-    [[nodiscard]] auto Preserve(const char8_t character) noexcept -> bool {
-        if ((state_ == State::OscString) ||
-            (state_ == State::StString)) {
-            if (IsSequenceCancellation(character) ||
-                ((state_ == State::OscString) &&
-                 (character == u8'\x07'))) {
-                state_ = State::Text;
-            } else if (character == u8'\x1b') {
-                state_ = State::Escape;
-            }
-            return false;
-        }
-        if (character == u8'\x1b') {
-            state_ = State::Escape;
-            return false;
-        }
-        if (IsSequenceCancellation(character)) {
-            state_ = State::Text;
-            return false;
-        }
-        if (IsControl(character)) {
-            return IsPlainTextControl(character);
-        }
-
-        switch (state_) {
-        case State::Text:
-            return true;
-
-        case State::Escape:
-            switch (character) {
-            case u8'[':
-                state_ = State::ControlSequence;
-                break;
-            case u8']':
-                state_ = State::OscString;
-                break;
-            case u8'P':
-            case u8'X':
-            case u8'^':
-            case u8'_':
-                state_ = State::StString;
-                break;
-            default:
-                if (character <= u8'/') {
-                    state_ = State::EscapeIntermediate;
-                } else if (character <= u8'~') {
-                    state_ = State::Text;
-                } else {
-                    state_ = State::Text;
-                    return true;
-                }
-            }
-            return false;
-
-        case State::EscapeIntermediate:
-            if (character <= u8'/') {
-                return false;
-            }
-            state_ = State::Text;
-            return character > u8'~';
-
-        case State::ControlSequence:
-            if (character >= u8'@') {
-                state_ = State::Text;
-                return character > u8'~';
-            }
-            return false;
-
-        default:
-            std::unreachable();
-        }
-    }
-
-    [[nodiscard]] static constexpr auto IsPlainTextControl(
-        const char8_t character) noexcept -> bool {
-        return (character == u8'\t') ||
-               (character == u8'\n');
-    }
-
-    [[nodiscard]] static constexpr auto IsControl(
-        const char8_t character) noexcept -> bool {
-        return (character < u8' ') || (character == u8'\x7f');
-    }
-
-    [[nodiscard]] static constexpr auto IsSequenceCancellation(
-        const char8_t character) noexcept -> bool {
-        return (character == u8'\x18') || (character == u8'\x1a');
-    }
-
-    State state_ = State::Text;
-};
 
 export class Log {
 public:
@@ -351,7 +231,7 @@ private:
     constexpr auto kBufferSize = DWORD{4096};
     auto buffer = std::array<char8_t, kBufferSize>{};
     auto first_error = DWORD{ERROR_SUCCESS};
-    auto filter = VtFilter{};
+    auto filter = devicefs::terminal::VtFilter{};
     while (true) {
         auto read = DWORD{};
         if (!ReadFile(output.get(), buffer.data(), kBufferSize,

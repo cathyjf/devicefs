@@ -35,8 +35,6 @@ namespace devicefs::terminal {
 // The filter retains unfinished commands between calls. A log reader reuses
 // one instance across its reads, while each label gets a separate instance;
 // otherwise an unfinished command in one label could hide later entries.
-// Command parsing is based on the supervisor's log filter in
-// `src/modules/supervisor/logging_console.ixx`.
 export class VtFilter {
 public:
     // `Remove` strips ESC-prefixed terminal commands and their payloads from

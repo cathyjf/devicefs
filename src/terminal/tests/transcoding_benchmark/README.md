@@ -45,9 +45,32 @@ run to UTF-16 to UTF-8.
 
 `--verify-only` checks every fixture without timing. `--retry-only` restricts
 the experiment to UTF-16 to UTF-8, the direction with a bounded converter.
-`--help` lists the options. A full timing run usually takes tens of seconds.
+`--help` lists the options. A full timing run targets approximately 60 seconds.
 The executable returns a nonzero status if a policy produces different text
 or another error prevents completion.
+
+### Deferred deallocation
+
+Add `-DDEVICEFS_TRANSCODING_BENCHMARK_DEFER_DEALLOCATION=ON` to the configure
+command and rebuild to retain allocations until each timed batch ends. Set it
+to `OFF` and rebuild to restore immediate deallocation. The CSV's
+`allocation_policy` column records `deferred` or `immediate` on every row.
+
+The deferred build replaces ordinary scalar and array `operator new` and
+`operator delete`, covering the benchmark's character buffers and strings.
+Each allocation calls the platform's `malloc` and records the pointer;
+deletion leaves the memory allocated until the batch finishes. A static array
+of 1,048,576 pointers holds those records and is reused between batches. A full
+array causes `std::bad_alloc` before another block is allocated. Allocations
+outside timed batches, including setup and reporting, remain until process exit.
+
+The timer includes allocation and pointer recording. Releasing the recorded
+memory happens after the timer stops, including for calibration batches.
+Consequently, deferred results measure conversion with delayed reclamation;
+they exclude the cost of reclamation and can take longer than a minute to
+collect. `--verify-only` also checks that both string and array allocations
+reach the replacement operators and that cleanup restores the allocation
+record count from before the batch.
 
 ## Policies
 
@@ -98,21 +121,34 @@ has 450 conversion cases and 4,800 measurement rows, including retry operations
 only for UTF-16 to UTF-8.
 
 `input_units`, `output_units`, and `worst_units` count code units in their
-respective encodings. `iterations` is the repetition count per timed sample.
+respective encodings. `iterations` is the total repetition count per sample;
+`batch_iterations` is the number performed before each cleanup.
 Each operation takes seven samples; `median_ns` is the middle sample,
 `p14_ns` the second, and `p86_ns` the sixth after sorting. All times are per
-operation in nanoseconds. Sample batches aim for 0.75 ms, following calibration.
+operation in nanoseconds. Samples aim for 1.5 ms, following a calibration
+batch lasting at least 0.5 ms. The seven samples across all 4,800 measurements
+budget about 50 seconds for timing, plus calibration and fixture preparation.
 Case order and operation order are shuffled using the supplied seed.
+
+For each input, allocating operations use the same batch size: the smallest
+calibrated sample count. Faster operations repeat whole batches to obtain
+enough measured time, with deferred allocations freed after each batch.
+Thus, competing policies perform the same number of conversions before cleanup;
+their allocation sizes still reflect their different sizing decisions.
+Counting, conversion into preallocated storage, and the control operation do
+not allocate and retain a single batch per sample. Rounding sample counts up
+to whole batches can increase the full run time beyond the timing budget.
 
 Inputs and comparison results are prepared outside timing. Every result escapes
 to an observer compiled without LTO, preventing the optimizer from removing
 conversions and allocation/free pairs. The input address is reloaded through a
 volatile pointer on each iteration so counting cannot be hoisted out of a loop.
 
-Allocations are repeatedly reused by a warm allocator. The allocation-only
-measurements do not touch the allocated storage; the complete conversions do
-write their output. These measurements do not reproduce memory pressure or
-the cost of first touching fresh pages.
+With immediate deallocation, the allocator can repeatedly reuse storage from
+the preceding iteration. Deferred deallocation prevents that reuse within a
+batch. The allocation-only measurements do not touch the allocated storage;
+the complete conversions do write their output and can incur first-touch
+costs as they encounter fresh pages.
 
 Compare policies within each build. Comparing absolute times between MSVC and
 Clang also changes the generated code, standard library, allocator, and build

@@ -4,13 +4,124 @@
 #include "../../compat/forceinline_compat.h"
 #include "../../compat/gsl_suppress.h"
 
+#ifdef __GNUC__
+    #define ATTRIBUTE_FLATTEN_FUNCTION __attribute__((flatten))
+#else
+    #define ATTRIBUTE_FLATTEN_FUNCTION
+#endif
+
+#ifdef _MSC_VER
+    #define ALLOCATION_ANNOTATIONS _Ret_notnull_ _Post_writable_byte_size_(bytes)
+#else
+    #define ALLOCATION_ANNOTATIONS
+#endif
+
 import std;
+#ifdef _MSC_VER
+    import <sal.h>;
+#endif
 import devicefs.terminal.transcoding_benchmark;
 using namespace devicefs::terminal;
 using namespace std::string_view_literals;
 auto Observe(const void *, std::size_t) noexcept -> void;
 
 namespace {
+
+#ifdef BENCHMARK_DEFER_DEALLOCATION
+constexpr auto kDeallocationPolicy = "deferred"sv;
+// Each allocation occupies one slot until batch cleanup. Earlier allocations,
+// including the input fixtures, remain recorded while later batches run.
+void *allocation_pointers[1'048'576]{};
+#else
+constexpr auto kDeallocationPolicy = "immediate"sv;
+#endif
+auto next_allocation_index = 0uz;
+
+// A batch frees only allocations recorded since its starting index, leaving
+// its input fixtures available for subsequent measurements.
+GSL_SUPPRESS("26408",
+    "The recorded blocks came directly from `malloc`; `free` releases them "
+    "without invoking the empty replacement `operator delete`.")
+auto FreeAllocations([[maybe_unused]] const std::size_t first) noexcept -> void {
+#ifdef BENCHMARK_DEFER_DEALLOCATION
+    for (void *const pointer : std::span{allocation_pointers}.subspan(
+            first, next_allocation_index - first)) {
+        std::free(pointer);
+    }
+    next_allocation_index = first;
+#endif
+}
+
+}
+
+#ifdef BENCHMARK_DEFER_DEALLOCATION
+#if defined(__GNUC__) && !defined(__clang__)
+    // GCC warns when `always_inline` is used without an `inline` declaration.
+    // Replacement allocation functions must not be declared `inline`, so these
+    // definitions use the optimization hint and suppress that warning locally.
+    // https://gcc.gnu.org/pipermail/gcc-cvs/2024-January/397876.html
+    // https://eel.is/c++draft/dcl.fct.def.replace
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wattributes"
+#endif
+GSL_SUPPRESS("26408",
+    "The replacement `operator new` obtains its backing storage from `malloc`; "
+    "calling `new` would recurse.")
+ATTRIBUTE_FORCEINLINE ATTRIBUTE_FLATTEN_FUNCTION
+ALLOCATION_ANNOTATIONS
+auto operator new(const std::size_t bytes) -> void * {
+    if ((bytes == 0) ||
+        (next_allocation_index == std::size(allocation_pointers))) [[unlikely]] {
+        throw std::bad_alloc{};
+    }
+    ATTRIBUTE_MSVC_FLATTEN
+    if (void *const pointer = std::malloc(bytes)) [[likely]] {
+        return allocation_pointers[next_allocation_index++] = pointer;
+    }
+    throw std::bad_alloc{};
+}
+
+ATTRIBUTE_FORCEINLINE ATTRIBUTE_FLATTEN_FUNCTION
+ALLOCATION_ANNOTATIONS
+auto operator new[](const std::size_t bytes) -> void * {
+    ATTRIBUTE_MSVC_FLATTEN
+    return ::operator new(bytes);
+}
+
+ATTRIBUTE_FORCEINLINE ATTRIBUTE_FLATTEN_FUNCTION
+auto operator delete(void *) noexcept -> void {}
+ATTRIBUTE_FORCEINLINE ATTRIBUTE_FLATTEN_FUNCTION
+auto operator delete[](void *) noexcept -> void {}
+ATTRIBUTE_FORCEINLINE ATTRIBUTE_FLATTEN_FUNCTION
+auto operator delete(void *, std::size_t) noexcept -> void {}
+ATTRIBUTE_FORCEINLINE ATTRIBUTE_FLATTEN_FUNCTION
+auto operator delete[](void *, std::size_t) noexcept -> void {}
+#if defined(__GNUC__) && !defined(__clang__)
+    #pragma GCC diagnostic pop
+#endif
+#endif
+
+namespace {
+
+// This check exercises both array and string allocation through the installed
+// operators. Two batches verify that cleanup restores the starting index.
+auto VerifyAllocationPolicy() -> void {
+    for (auto batch = 0; batch < 2; ++batch) {
+        const auto first = next_allocation_index;
+        for (auto iteration = 0; iteration < 8; ++iteration) {
+            const auto array = std::make_unique_for_overwrite<char[]>(512);
+            const auto text = std::string(512, 'x');
+            Observe(array.get(), 512);
+            Observe(text.data(), text.size());
+        }
+        const auto recorded = next_allocation_index - first;
+        FreeAllocations(first);
+        if ((next_allocation_index != first) ||
+            (recorded != (kDeallocationPolicy == "deferred"sv ? 16uz : 0uz))) {
+            throw std::runtime_error("benchmark allocation policy did not record the expected allocations");
+        }
+    }
+}
 
 struct Options {
     std::uint32_t seed = 20260912;
@@ -109,20 +220,49 @@ auto RunCase(const std::string_view direction, const std::string_view pattern,
     // therefore cannot be hoisted out of the loop as a repeated pure expression.
     const Input *volatile input_address = input.data();
     const auto time = [&](const std::size_t operation, const std::size_t count) {
+        const auto first = next_allocation_index;
         const auto start = std::chrono::steady_clock::now();
         for (auto iteration = 0uz; iteration < count; ++iteration) {
             functions.at(operation)({input_address, input.size()}, exact, bound, buffer);
         }
-        return std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - start).count();
+        const auto elapsed = std::chrono::duration<double, std::nano>(
+            std::chrono::steady_clock::now() - start).count();
+        FreeAllocations(first);
+        return elapsed;
     };
+    // The full profile measures 4,800 operations seven times each. A 1.5 ms
+    // sample budget totals about 50 seconds, leaving room for calibration and
+    // fixture preparation within an approximately one-minute run. Calibration
+    // lasts at least 0.5 ms to estimate iterations from a longer observation.
     for (auto operation = 0uz; operation < operation_count; ++operation) {
         auto count = 16uz;
         auto elapsed = time(operation, count);
-        while (elapsed < 100000.0) {
+        while (elapsed < 500'000.0) {
             count *= 2;
             elapsed = time(operation, count);
         }
-        iterations.at(operation) = std::max(1uz, static_cast<std::size_t>(count * 750000.0 / elapsed));
+        iterations.at(operation) = std::max(1uz, static_cast<std::size_t>(count * 1'500'000.0 / elapsed));
+    }
+    // Allocating operations perform the same number of conversions before
+    // cleanup, so a faster policy does not accumulate more live allocations.
+    // The smallest calibrated count sets that batch size. Faster operations
+    // repeat whole batches to retain their measurement duration. Operations
+    // that do not allocate can use their entire sample as one batch.
+    const auto batch_sizes = [&] {
+        auto sizes = iterations;
+        const auto shared = std::ranges::min(std::span{iterations}.first(operation_count));
+        for (auto operation = static_cast<std::size_t>(Work::AllocateExact);
+            operation < operation_count; ++operation) {
+            if (operation != static_cast<std::size_t>(Work::ConvertOnly)) {
+                sizes.at(operation) = shared;
+            }
+        }
+        return sizes;
+    }();
+    for (auto operation = 0uz; operation < operation_count; ++operation) {
+        const auto batch_size = batch_sizes.at(operation);
+        iterations.at(operation) =
+            ((iterations.at(operation) + batch_size - 1) / batch_size) * batch_size;
     }
     auto order = std::vector<std::size_t>(operation_count);
     std::iota(order.begin(), order.end(), 0uz);
@@ -130,7 +270,12 @@ auto RunCase(const std::string_view direction, const std::string_view pattern,
         std::shuffle(order.begin(), order.end(), random);
         for (const auto operation : order) {
             const auto count = iterations.at(operation);
-            samples.at(operation).at(round) = time(operation, count) / count;
+            const auto batch_size = batch_sizes.at(operation);
+            auto elapsed = 0.0;
+            for (auto completed = 0uz; completed < count; completed += batch_size) {
+                elapsed += time(operation, batch_size);
+            }
+            samples.at(operation).at(round) = elapsed / count;
         }
     }
     for (auto operation = 0uz; operation < operation_count; ++operation) {
@@ -146,10 +291,12 @@ auto RunCase(const std::string_view direction, const std::string_view pattern,
             }
             return escaped;
         }();
-        std::println("{},{},{},{},\"{}\",{},{},{},{},{},{},{},{},{:.3f},{:.3f},{:.3f}",
+        std::println("{},{},{},{},\"{}\",{},{},{},{},{},{},{},{},{:.3f},{:.3f},{:.3f},{},{}",
             BENCHMARK_COMPILER, BENCHMARK_ARCHITECTURE, BENCHMARK_CONFIGURATION,
             BenchmarkImplementation(), processor, options.seed, direction, pattern,
-            input.size(), exact, bound, names.at(operation), iterations.at(operation), sorted[3], sorted[1], sorted[5]);
+            input.size(), exact, bound, names.at(operation), iterations.at(operation),
+            sorted[3], sorted[1], sorted[5],
+            kDeallocationPolicy, batch_sizes.at(operation));
     }
 }
 
@@ -166,7 +313,8 @@ auto RunBenchmark(const Options options) -> void {
     std::shuffle(cases.begin(), cases.end(), random);
     if (!options.verify_only) {
         std::println("compiler,architecture,configuration,simdutf,processor,seed,direction,pattern,"
-            "input_units,output_units,worst_units,operation,iterations,median_ns,p14_ns,p86_ns");
+            "input_units,output_units,worst_units,operation,iterations,median_ns,p14_ns,p86_ns,"
+            "allocation_policy,batch_iterations");
     }
     GSL_SUPPRESS("26445",
         "This structured binding copies the pair, including its string view. "
@@ -232,6 +380,7 @@ auto main(const int argc, char **argv) -> int {
                 throw std::invalid_argument(std::format("unrecognized or incomplete option: {}", argument));
             }
         }
+        VerifyAllocationPolicy();
         RunBenchmark(options);
         if (options.verify_only) {
             std::println("All transcoding capacity policies produced equal output.");

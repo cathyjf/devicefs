@@ -46,16 +46,17 @@ using std::getenv;
     // warning policy to the third-party code. The third-party code was not
     // designed to comply with our strict warning policy.
     #pragma warning(disable : 4310 5260 4505 4324)
-#else
+#elifdef __clang__
     // The transcoder uses simdutf's Unicode conversions. Its unused Base64 decoder
     // fails to find `load_block` when Clang 23 compiles the combined implementation
     // in a global module fragment. simdutf's feature switch omits that decoder.
+    // GCC does not produce require disabling this feature.
     #define SIMDUTF_FEATURE_BASE64 0
-
-    // In the clang and gcc builds, we textually include simdutf in our module
+#else
+    // In the Clang and GCC builds, we textually include simdutf in our module
     // interface. With its constant-evaluation support enabled, the span overloads
     // expose references to scalar helpers with internal linkage. Those references
-    // are invalid C++ in the clang and gcc builds, although only gcc objects to
+    // are invalid C++ in the Clang and GCC builds, although only GCC objects to
     // them. Beacuse the simdutf code is imported as a header unit on MSVC++, the
     // MSVC++ build does not involve any invalid C++.
     //
@@ -70,7 +71,5 @@ using std::getenv;
     // Disabling simdutf's constant evaluation feature removes the potentially-invalid
     // code that GCC finds objectionable without removing functionality that our
     // current callers use.
-    #ifndef __clang__
-        #define SIMDUTF_CPLUSPLUS23 0
-    #endif
+    #define SIMDUTF_CPLUSPLUS23 0
 #endif

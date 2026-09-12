@@ -10,7 +10,7 @@ using BenchmarkUtf32 = utf32_code_unit;
 }
 
 template <typename Output, typename Input>
-auto Count(const std::basic_string_view<Input> input) {
+constexpr auto Count(const std::basic_string_view<Input> input) noexcept {
     return detail::TranscodedCapacity<Output>(input);
 }
 template <typename Output, typename Input>

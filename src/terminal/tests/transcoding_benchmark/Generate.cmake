@@ -40,7 +40,7 @@ string(REPLACE "const auto input = std::basic_string_view{units};"
                 input.data(), input.size(), inline_.data(), inline_.size() - 1);
             if (attempted.error == simdutf::SUCCESS) {
                 size_ = attempted.output_count;
-                inline_[size_] = Character{};
+                inline_.at(size_) = Character{};
                 return;
             }
             if (attempted.error != simdutf::OUTPUT_BUFFER_TOO_SMALL) {

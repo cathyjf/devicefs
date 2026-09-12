@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "../../compat/forceinline_compat.h"
+#include "../../compat/gsl_suppress.h"
 
 import std;
 import devicefs.terminal.transcoding_benchmark;
@@ -26,7 +27,8 @@ constexpr auto names = std::array{"control"sv, "count"sv, "alloc_exact"sv, "allo
 
 template <Work Operation, typename Output, typename Input>
 auto Exercise(const std::basic_string_view<Input> input, const std::size_t exact,
-    const std::size_t bound, const std::span<Output> buffer) -> void {
+    const std::size_t bound, const std::span<Output> buffer)
+    noexcept(Operation == Work::Control || Operation == Work::Count) -> void {
     // The timed operations call conversion helpers directly. Applying the same
     // inlining hint as `Transcode` makes their call overhead representative of
     // production conversions when comparing the sizing policies.
@@ -84,7 +86,7 @@ auto RunCase(const std::string_view direction, const std::string_view pattern,
         return;
     }
     const auto functions = [] {
-        auto operations = std::vector{
+        auto operations = std::vector<decltype(&Exercise<Work::Exact, Output, Input>)>{
             &Exercise<Work::Control, Output, Input>, &Exercise<Work::Count, Output, Input>,
             &Exercise<Work::AllocateExact, Output, Input>, &Exercise<Work::AllocateWorst, Output, Input>,
             &Exercise<Work::ConvertOnly, Output, Input>, &Exercise<Work::Exact, Output, Input>,
@@ -116,18 +118,19 @@ auto RunCase(const std::string_view direction, const std::string_view pattern,
             count *= 2;
             elapsed = time(operation, count);
         }
-        iterations[operation] = std::max(1uz, static_cast<std::size_t>(count * 750000.0 / elapsed));
+        iterations.at(operation) = std::max(1uz, static_cast<std::size_t>(count * 750000.0 / elapsed));
     }
     auto order = std::vector<std::size_t>(operation_count);
     std::iota(order.begin(), order.end(), 0uz);
     for (auto round = 0uz; round < 7; ++round) {
         std::shuffle(order.begin(), order.end(), random);
         for (const auto operation : order) {
-            samples[operation][round] = time(operation, iterations[operation]) / iterations[operation];
+            const auto count = iterations.at(operation);
+            samples.at(operation).at(round) = time(operation, count) / count;
         }
     }
     for (auto operation = 0uz; operation < operation_count; ++operation) {
-        auto sorted = samples[operation];
+        auto sorted = samples.at(operation);
         std::ranges::sort(sorted);
         // Quoting the processor field keeps commas and quotes in a supplied
         // display name from changing the CSV's columns.
@@ -142,7 +145,7 @@ auto RunCase(const std::string_view direction, const std::string_view pattern,
         std::println("{},{},{},{},\"{}\",{},{},{},{},{},{},{},{},{:.3f},{:.3f},{:.3f}",
             BENCHMARK_COMPILER, BENCHMARK_ARCHITECTURE, BENCHMARK_CONFIGURATION,
             BenchmarkImplementation(), processor, options.seed, direction, pattern,
-            input.size(), exact, bound, names[operation], iterations[operation], sorted[3], sorted[1], sorted[5]);
+            input.size(), exact, bound, names.at(operation), iterations.at(operation), sorted[3], sorted[1], sorted[5]);
     }
 }
 
@@ -161,13 +164,17 @@ auto RunBenchmark(const Options options) -> void {
         std::println("compiler,architecture,configuration,simdutf,processor,seed,direction,pattern,"
             "input_units,output_units,worst_units,operation,iterations,median_ns,p14_ns,p86_ns");
     }
-    for (const auto &[pattern, length] : cases) {
+    GSL_SUPPRESS("26445",
+        "This structured binding copies the pair, including its string view. "
+        "C26445 incorrectly diagnoses a reference to the view even though "
+        "the declaration uses `const auto`, without `&`.")
+    for (const auto [pattern, length] : cases) {
         auto points = std::basic_string<BenchmarkUtf32>{};
         points.reserve(length);
         for (auto index = 0uz; index < length; ++index) {
             const auto point = [&]() -> char32_t {
-                if (pattern == "ascii") { return U"abcdefghijklmnopqrstuvwxyz"[index % 26]; }
-                if (pattern == "mostly_ascii") { return index % 32 == 31 ? U'é' : U"abcdefghijklmnopqrstuvwxyz"[index % 26]; }
+                if (pattern == "ascii") { return U"abcdefghijklmnopqrstuvwxyz"sv[index % 26]; }
+                if (pattern == "mostly_ascii") { return index % 32 == 31 ? U'é' : U"abcdefghijklmnopqrstuvwxyz"sv[index % 26]; }
                 if (pattern == "latin") { return U'é'; }
                 if (pattern == "cjk") { return U'界'; }
                 if (pattern == "emoji") { return U'\U0001f600'; }

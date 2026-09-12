@@ -28,6 +28,7 @@ if(WIN32)
 endif()
 
 option(DEVICEFS_TERMINAL_BUILD_TESTS "Build the terminal test entry point" OFF)
+option(DEVICEFS_TERMINAL_BUILD_BENCHMARKS "Build the transcoding capacity benchmark" OFF)
 
 get_filename_component(DEVICEFS_ROOT "../.." ABSOLUTE)
 set(WIL_INCLUDE_DIR "${DEVICEFS_ROOT}/dependencies/wil/include")
@@ -141,6 +142,10 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
         add_test(NAME devicefs_terminal_native COMMAND devicefs-terminal-test --native-test)
     endif()
     set_tests_properties(devicefs_terminal devicefs_terminal_native PROPERTIES TIMEOUT 30)
+endif()
+
+if(DEVICEFS_TERMINAL_BUILD_BENCHMARKS)
+    include(tests/transcoding_benchmark/targets.cmake)
 endif()
 
 foreach(target IN LISTS DEVICEFS_TERMINAL_ANALYSIS_TARGETS)

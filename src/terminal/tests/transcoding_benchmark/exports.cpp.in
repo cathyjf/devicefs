@@ -1,0 +1,30 @@
+// SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+export namespace devicefs::terminal {
+using BenchmarkUtf16 = utf16_code_unit;
+using BenchmarkUtf32 = utf32_code_unit;
+
+[[nodiscard]] auto BenchmarkImplementation() {
+    return simdutf::get_active_implementation()->name();
+}
+
+template <typename Output, typename Input>
+auto Count(const std::basic_string_view<Input> input) {
+    return detail::TranscodedCapacity<Output>(input);
+}
+template <typename Output, typename Input>
+auto Convert(const std::basic_string_view<Input> input, const std::span<Output> output) {
+    return detail::ConvertText(input, output);
+}
+template <Sizing Policy, typename Output, typename Input>
+auto StringResult(const std::basic_string_view<Input> input) {
+    const auto capacity = [&] {
+        if constexpr (Policy == Sizing::Exact) { return Count<Output>(input); }
+        else { return WorstCaseCapacity<Output>(input); }
+    }();
+    auto result = std::basic_string<Output>(capacity, Output{});
+    if (!input.empty()) { result.resize(Convert(input, std::span{result})); }
+    return result;
+}
+}

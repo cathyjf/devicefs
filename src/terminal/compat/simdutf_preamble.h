@@ -10,6 +10,13 @@
 #include <climits>
 #include <cstdint>
 #include <version>
+#ifndef _WIN32
+    // When _WIN32 is not defined, simdutf also includes `strings.h`. We
+    // textually include it here first for the same reasons as stated above in
+    // regard to the other headers.
+    #include <strings.h>
+#endif
+
 #include "utf_code_units.h"
 
 using std::size_t;
@@ -47,11 +54,18 @@ using std::getenv;
     // designed to comply with our strict warning policy.
     #pragma warning(disable : 4310 5260 4505 4324)
 #elifdef __clang__
-    // The transcoder uses simdutf's Unicode conversions. Its unused Base64 decoder
-    // fails to find `load_block` when Clang 23 compiles the combined implementation
-    // in a global module fragment. simdutf's feature switch omits that decoder.
-    // GCC does not produce require disabling this feature.
-    #define SIMDUTF_FEATURE_BASE64 0
+    #if __clang_major__ < 24
+        // The transcoder uses simdutf's Unicode conversions. The unused simdutf
+        // Base64 decoder fails to find `load_block` when Clang 23 compiles the
+        // combined implementation in a global module fragment. Defining this symbol
+        // prevents that decoder from being compiled.
+        //
+        // MSVC++ and GCC do not require disabling this feature.
+        //
+        // This workaround is no longer required as of Clang 24.0.0.
+        // See <https://github.com/llvm/llvm-project/issues/210822>.
+        #define SIMDUTF_FEATURE_BASE64 0
+    #endif
 #else
     // In the Clang and GCC builds, we textually include simdutf in our module
     // interface. With its constant-evaluation support enabled, the span overloads

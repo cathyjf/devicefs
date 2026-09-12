@@ -64,6 +64,24 @@ auto FreeAllocations([[maybe_unused]] const std::size_t first) noexcept -> void 
     #pragma GCC diagnostic push
     #pragma GCC diagnostic ignored "-Wattributes"
 #endif
+#if defined(__APPLE__) && defined(__clang__)
+    // String allocations inside shared libc++ must also use this replacement.
+    // However, dyld's search for overrides of library weak symbols skips
+    // binaries without the `MH_WEAK_DEFINES` flag, which this executable lacked.
+    // An exported weak definition anywhere in the executable sets that flag;
+    // it need not be `operator new`. An unrelated weak definition also fixed the
+    // reproducer while leaving `operator new` strong. Applying the attribute here
+    // supplies the executable-wide flag without adding a dummy definition, not
+    // because `operator new` needs weaker precedence. See
+    // `handleStrongWeakDefOverrides` and `resolveSymbol`:
+    // https://github.com/apple-oss-distributions/dyld/blob/main/dyld/JustInTimeLoader.cpp
+    // https://github.com/apple-oss-distributions/dyld/blob/main/dyld/Loader.cpp
+    // libc++ uses the same workaround via `TEST_WORKAROUND_BUG_109234844_WEAK`,
+    // which expands to `__attribute__((weak))` on Apple platforms:
+    // https://github.com/llvm/llvm-project/blob/llvmorg-20.1.8/libcxx/test/std/language.support/support.dynamic/new.delete/new.delete.single/new.size_nothrow.replace.indirect.pass.cpp#L31
+    // https://github.com/llvm/llvm-project/blob/llvmorg-20.1.8/libcxx/test/support/test_macros.h#L511
+    [[gnu::weak]]
+#endif
 GSL_SUPPRESS("26408",
     "The replacement `operator new` obtains its backing storage from `malloc`; "
     "calling `new` would recurse.")
@@ -151,7 +169,16 @@ auto Exercise(const std::basic_string_view<Input> input, const std::size_t exact
     } else if constexpr (Operation == Work::AllocateExact || Operation == Work::AllocateWorst) {
         const auto allocated = std::make_unique_for_overwrite<Output[]>(
             (Operation == Work::AllocateExact ? exact : bound) + 1);
+#if defined(__GNUC__) && !defined(__clang__)
+        // The `Observe` function does not read the bytes pointed to by its
+        // pointer argument.
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
         Observe(allocated.get(), (Operation == Work::AllocateExact ? exact : bound) + 1);
+#if defined(__GNUC__) && !defined(__clang__)
+        #pragma GCC diagnostic pop
+#endif
     } else if constexpr (Operation == Work::ConvertOnly) {
         const auto count = input.empty() ? 0 : Convert(input, buffer);
         buffer[count] = Output{};

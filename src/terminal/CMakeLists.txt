@@ -18,6 +18,12 @@ endif()
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Static runtime libraries can contribute debug information even when our
+    # sources are compiled in Release mode. This option omits those symbols
+    # from the Release executables.
+    add_link_options($<$<CONFIG:Release>:LINKER:--strip-debug>)
+endif()
 if(WIN32)
     find_program(POWERSHELL_EXECUTABLE NAMES pwsh REQUIRED)
     set(CMAKE_VS_GLOBALS

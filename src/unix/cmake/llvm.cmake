@@ -1,5 +1,5 @@
 find_program(LLVM_C_COMPILER
-    NAMES clang-23 clang-22 clang
+    NAMES clang-24 clang-23 clang-22 clang
     HINTS /opt/homebrew/opt/llvm/bin
     REQUIRED
 )

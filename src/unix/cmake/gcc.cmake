@@ -1,13 +1,15 @@
 find_program(GCC_C_COMPILER
-    NAMES gcc-16
-    HINTS /opt/homebrew/opt/gcc/bin
+    NAMES gcc-16 gcc
+    HINTS
+        /opt/homebrew/opt/gcc/bin
+        /opt/gcc-16/bin
     REQUIRED
 )
 
 get_filename_component(CMAKE_C_COMPILER "${GCC_C_COMPILER}" REALPATH)
 get_filename_component(GCC_BIN_DIRECTORY "${CMAKE_C_COMPILER}" DIRECTORY)
 get_filename_component(GCC_C_COMPILER_FILENAME "${CMAKE_C_COMPILER}" NAME)
-if(GCC_C_COMPILER_FILENAME MATCHES "^gcc(-.*)$")
+if(GCC_C_COMPILER_FILENAME MATCHES "gcc(-.*)$")
     set(GCC_VERSION_SUFFIX "${CMAKE_MATCH_1}")
 endif()
 
@@ -35,3 +37,6 @@ if(GNU_OBJCOPY)
     set(CMAKE_OBJDUMP "${GNU_BINUTILS_DIRECTORY}/objdump")
     set(CMAKE_STRIP "${GNU_BINUTILS_DIRECTORY}/strip")
 endif()
+
+list(APPEND CMAKE_PROJECT_INCLUDE
+    "${CMAKE_CURRENT_LIST_DIR}/gcc-verify.cmake")

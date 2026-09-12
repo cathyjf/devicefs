@@ -59,9 +59,31 @@ template <typename Allocator, UtfCharacter Input>
 
 // simdutf writes into caller-owned storage. UTF-8 input needs at most one output
 // code unit per byte. UTF-16 to UTF-32 also cannot grow in code-unit count.
-// Conversions that can grow use simdutf's length calculation before allocating.
+// For conversions that can grow, `inline_capacity` enables hybrid sizing:
+// count only when knowing the output length could avoid a heap allocation.
+// A worst-case bound suffices when it fits inline or when the input already
+// guarantees a heap allocation. Zero selects counting for expanding conversions.
+// The sizing benchmark found this policy faster than always counting across
+// MSVC, Clang and GCC builds, while avoiding unnecessary allocations.
 template <UtfCharacter Output, UtfCharacter Input>
-[[nodiscard]] constexpr auto TranscodedCapacity(const std::basic_string_view<Input> input) noexcept {
+[[nodiscard]] constexpr auto TranscodedCapacity(const std::basic_string_view<Input> input,
+    const std::size_t inline_capacity = 0) noexcept {
+    // Each UTF-16 unit needs at most three UTF-8 bytes; a surrogate pair needs
+    // four bytes for its two units. Each UTF-32 unit needs at most four UTF-8
+    // bytes or two UTF-16 units. These expanding conversions also produce at
+    // least as many output units as input units for valid text.
+    constexpr auto expansion = sizeof(Output) == 1 ?
+        (sizeof(Input) == 2 ? 3uz : sizeof(Input) == 4 ? 4uz : 1uz) :
+        (sizeof(Output) == 2 && sizeof(Input) == 4 ? 2uz : 1uz);
+    if constexpr (expansion > 1) {
+        if ((inline_capacity != 0) &&
+            (input.size() <= std::numeric_limits<std::size_t>::max() / expansion)) {
+            const auto bound = input.size() * expansion;
+            if ((bound < inline_capacity) || (input.size() >= inline_capacity)) {
+                return bound;
+            }
+        }
+    }
     if constexpr (sizeof(Output) == 1 && sizeof(Input) == 2) {
         return simdutf::utf8_length_from_utf16(input);
     } else if constexpr (sizeof(Output) == 1 && sizeof(Input) == 4) {
@@ -141,7 +163,7 @@ public:
     explicit TranscodedText(const std::basic_string_view<Input> text) {
         const auto units = detail::UtfInput<std::allocator<Character>>(text);
         const auto input = std::basic_string_view{units};
-        const auto capacity = input.empty() ? 0 : detail::TranscodedCapacity<Character>(input);
+        const auto capacity = input.empty() ? 0 : detail::TranscodedCapacity<Character>(input, inline_.size());
         if (capacity >= (std::numeric_limits<std::size_t>::max() / sizeof(Character))) {
             throw std::length_error("transcoded text and its terminator exceed the allocation limit");
         }

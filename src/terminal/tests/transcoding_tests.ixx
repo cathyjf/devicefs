@@ -128,6 +128,28 @@ export auto TestTranscoding() -> bool {
             Require(std::string_view{restored} == input, "round-trip conversion changed text"sv);
         }
     });
+    passed &= Test("expanding conversions across worst-case and actual inline capacity boundaries"sv, [] {
+        const auto check_repeated = [](const std::string_view utf8_unit,
+            const std::u16string_view utf16_unit, const std::u32string_view utf32_unit) {
+            for (const auto length : {0uz, 1uz, 63uz, 64uz, 84uz, 85uz, 86uz,
+                    127uz, 128uz, 254uz, 255uz, 256uz, 257uz}) {
+                auto utf8 = std::string{};
+                auto utf16 = std::u16string{};
+                auto utf32 = std::u32string{};
+                for (auto index = 0uz; index < length; ++index) {
+                    utf8 += utf8_unit;
+                    utf16 += utf16_unit;
+                    utf32 += utf32_unit;
+                }
+                CheckConversion(std::u16string_view{utf16}, std::string_view{utf8});
+                CheckConversion(std::u32string_view{utf32}, std::string_view{utf8});
+                CheckConversion(std::u32string_view{utf32}, std::u16string_view{utf16});
+            }
+        };
+        check_repeated("x"sv, u"x"sv, U"x"sv);
+        check_repeated("界"sv, u"界"sv, U"界"sv);
+        check_repeated("👩"sv, u"👩"sv, U"👩"sv);
+    });
     passed &= Test("transcoding long composed text across SIMD block boundaries"sv, [] {
         auto utf8 = std::string{};
         auto utf16 = std::u16string{};
@@ -164,6 +186,13 @@ export auto TestTranscoding() -> bool {
             CheckRejected<char>(invalid);
             CheckRejected<char16_t>(invalid);
             CheckRejected<char32_t>(invalid);
+        }
+        for (const auto length : {63uz, 85uz, 127uz, 255uz, 256uz}) {
+            const auto utf16 = std::u16string(length, u'x') + u'\xd800';
+            const auto utf32 = std::u32string(length, U'x') + U'\x110000';
+            CheckRejected<char>(std::u16string_view{utf16});
+            CheckRejected<char>(std::u32string_view{utf32});
+            CheckRejected<char16_t>(std::u32string_view{utf32});
         }
     });
     passed &= Test("native wide input rejecting invalid code units in scalar and SIMD conversions"sv, []<typename Wide = wchar_t> {

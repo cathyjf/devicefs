@@ -53,9 +53,9 @@ or another error prevents completion.
 
 | CSV operation | Work measured |
 |---|---|
-| `exact` | Current `TranscodedText`: count the output, select inline or heap storage, then convert. |
+| `exact` | Count the output, select inline or heap storage, then convert. |
 | `worst` | The same owner, selecting capacity from the worst-case expansion. |
-| `hybrid` | Count only when that might avoid a heap allocation. |
+| `hybrid` | Production `TranscodedText` policy: count only when that might avoid a heap allocation. |
 | `retry_exact` | Attempt conversion into the inline buffer; on insufficient space, count, allocate, and reconvert. |
 | `retry_worst` | The same attempt, followed by worst-case allocation and reconversion when necessary. |
 | `string_exact` / `string_worst` | Return a `basic_string`, including its capacity initialization and destruction. |

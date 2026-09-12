@@ -9,7 +9,7 @@ foreach(required
     "export module devicefs.terminal.transcoding;"
     "template <detail::UtfCharacter Character>\nclass TranscodedText"
     "const auto input = std::basic_string_view{units};"
-    "const auto capacity = input.empty() ? 0 : detail::TranscodedCapacity<Character>(input);"
+    "const auto capacity = input.empty() ? 0 : detail::TranscodedCapacity<Character>(input, inline_.size());"
 )
     string(FIND "${source}" "${required}" position)
     if(position EQUAL -1)
@@ -47,13 +47,13 @@ string(REPLACE "const auto input = std::basic_string_view{units};"
                 throw std::invalid_argument(\"invalid benchmark input\");
             }
         }" source "${source}")
-string(REPLACE "const auto capacity = input.empty() ? 0 : detail::TranscodedCapacity<Character>(input);"
+string(REPLACE "const auto capacity = input.empty() ? 0 : detail::TranscodedCapacity<Character>(input, inline_.size());"
     "const auto capacity = input.empty() ? 0 : [&] {
             const auto bound = WorstCaseCapacity<Character>(input);
             if constexpr (Policy == Sizing::Worst || Policy == Sizing::RetryWorst) { return bound; }
             else {
                 if constexpr (Policy == Sizing::Hybrid) {
-                    if (bound < inline_.size() || input.size() >= inline_.size()) { return bound; }
+                    return detail::TranscodedCapacity<Character>(input, inline_.size());
                 }
                 return detail::TranscodedCapacity<Character>(input);
             }

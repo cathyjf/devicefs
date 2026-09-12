@@ -4,6 +4,7 @@
 module;
 
 #include "compat/gsl_suppress.h"
+#include "compat/forceinline_compat.h"
 
 // simdutf's inline functions call helpers in anonymous namespaces. Those
 // references are forbidden in the named part of a module interface, so the
@@ -183,6 +184,10 @@ template <typename Output>
     requires detail::UtfCharacter<Output> || requires { typename Output::value_type; }
 [[nodiscard]] auto Transcode(const auto &text) {
     const auto input = std::basic_string_view{text};
+    // Recursive inlining removes constructor and simdutf implementation-accessor
+    // calls that survive ordinary inlining in MSVC x64 builds. These calls add
+    // overhead to short conversions even when the result fits in inline storage.
+    ATTRIBUTE_MSVC_FLATTEN
     if constexpr (detail::UtfCharacter<Output>) {
         return TranscodedText<Output>{input};
     } else {

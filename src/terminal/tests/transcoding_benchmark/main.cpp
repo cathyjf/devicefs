@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "../../compat/forceinline_compat.h"
+
 import std;
 import devicefs.terminal.transcoding_benchmark;
 using namespace devicefs::terminal;
@@ -25,6 +27,10 @@ constexpr auto names = std::array{"control"sv, "count"sv, "alloc_exact"sv, "allo
 template <Work Operation, typename Output, typename Input>
 auto Exercise(const std::basic_string_view<Input> input, const std::size_t exact,
     const std::size_t bound, const std::span<Output> buffer) -> void {
+    // The timed operations call conversion helpers directly. Applying the same
+    // inlining hint as `Transcode` makes their call overhead representative of
+    // production conversions when comparing the sizing policies.
+    ATTRIBUTE_MSVC_FLATTEN
     if constexpr (Operation == Work::Control) {
         Observe(input.data(), input.size());
     } else if constexpr (Operation == Work::Count) {

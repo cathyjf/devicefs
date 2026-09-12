@@ -6,15 +6,28 @@ module;
 #include "compat/gsl_suppress.h"
 #include "compat/forceinline_compat.h"
 
-// simdutf's inline functions call helpers in anonymous namespaces. Those
-// references are forbidden in the named part of a module interface, so the
-// combined declarations and implementation belong in the global module fragment.
-// https://eel.is/c++draft/basic.link#17
-#include "simdutf/combined.h"
+#ifndef _MSC_VER
+    // MSBuild provides automatic support for header units, so the simdutf code
+    // can be (and is) imported as a header unit below. However, aside from the
+    // Windows build (which benefits from the MSBuild automation), CMake does
+    // not support compiling header units. As a result, on non-Windows
+    // platforms, we must textually include the simdutf code.
+    //
+    // simdutf's inline functions call helpers in anonymous namespaces. Those
+    // references are forbidden in the named part of a module interface, so the
+    // textual inclusion of the combined declarations and implementation
+    // must occur in the global module fragment.
+    // https://eel.is/c++draft/basic.link#17
+    #include "simdutf/combined.h"
+#endif
 
 export module devicefs.terminal.transcoding;
 
 import std;
+
+#ifdef _MSC_VER
+    import <simdutf/combined.h>;
+#endif
 
 namespace devicefs::terminal::detail {
 

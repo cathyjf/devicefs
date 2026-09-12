@@ -48,7 +48,9 @@ target_include_directories(windows-terminal-width PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/dependencies"
 )
 
-set(SIMDUTF_GENERATED_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/simdutf/combined.h")
+set(SIMDUTF_GENERATED_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/simdutf")
+set(SIMDUTF_GENERATED_HEADER "${SIMDUTF_GENERATED_DIRECTORY}/combined.h")
+set(SIMDUTF_ANALYSIS_EXCLUDE_DIRECTORIES "${SIMDUTF_GENERATED_DIRECTORY}")
 add_custom_command(
     OUTPUT "${SIMDUTF_GENERATED_HEADER}"
     COMMAND "${CMAKE_COMMAND}"
@@ -157,7 +159,8 @@ foreach(target IN LISTS DEVICEFS_TERMINAL_ANALYSIS_TARGETS)
         VS_GLOBAL_EnableCppCoreCheck true
         VS_GLOBAL_RunCodeAnalysis true
         VS_GLOBAL_CodeAnalysisRuleSet "${DEVICEFS_ROOT}/.ruleset"
-        VS_GLOBAL_CAExcludePath "${WIL_INCLUDE_DIR};$(CAExcludePath)"
+        VS_GLOBAL_CAExcludePath
+            "${SIMDUTF_ANALYSIS_EXCLUDE_DIRECTORIES};${WIL_INCLUDE_DIR};$(CAExcludePath)"
     )
     target_include_directories(${target} SYSTEM PRIVATE "${WIL_INCLUDE_DIR}")
     target_compile_definitions(${target} PRIVATE

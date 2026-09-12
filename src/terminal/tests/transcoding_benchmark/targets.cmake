@@ -3,10 +3,12 @@
 
 set(benchmark_source "${CMAKE_CURRENT_LIST_DIR}")
 set(benchmark_output "${CMAKE_CURRENT_BINARY_DIR}/transcoding-benchmark")
+set(benchmark_simdutf_directory "${benchmark_output}/generated/simdutf")
+list(APPEND SIMDUTF_ANALYSIS_EXCLUDE_DIRECTORIES "${benchmark_simdutf_directory}")
 add_custom_command(
     OUTPUT
         "${benchmark_output}/sizing.ixx"
-        "${benchmark_output}/generated/simdutf/combined.h"
+        "${benchmark_simdutf_directory}/combined.h"
     COMMAND "${CMAKE_COMMAND}"
         "-DTERMINAL_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}"
         "-DOUTPUT_DIRECTORY=${benchmark_output}"

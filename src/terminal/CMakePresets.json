@@ -54,7 +54,7 @@
       },
       "cacheVariables": {
         "CMAKE_CXX_EXTENSIONS": false,
-        "CMAKE_CXX_FLAGS_INIT": "-stdlib=libc++",
+        "CMAKE_CXX_FLAGS_INIT": "-stdlib=libc++ -Wno-reserved-module-identifier",
         "CMAKE_CXX_MODULE_STD": true,
         "CMAKE_EXPERIMENTAL_CXX_IMPORT_STD": "f35a9ac6-8463-4d38-8eec-5d6008153e7d"
       },

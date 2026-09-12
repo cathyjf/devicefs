@@ -86,17 +86,21 @@ auto RunCase(const std::string_view direction, const std::string_view pattern,
         return;
     }
     const auto functions = [] {
-        auto operations = std::vector<decltype(&Exercise<Work::Exact, Output, Input>)>{
-            &Exercise<Work::Control, Output, Input>, &Exercise<Work::Count, Output, Input>,
-            &Exercise<Work::AllocateExact, Output, Input>, &Exercise<Work::AllocateWorst, Output, Input>,
-            &Exercise<Work::ConvertOnly, Output, Input>, &Exercise<Work::Exact, Output, Input>,
-            &Exercise<Work::Worst, Output, Input>, &Exercise<Work::Hybrid, Output, Input>,
-            &Exercise<Work::StringExact, Output, Input>, &Exercise<Work::StringWorst, Output, Input>};
+        const auto make_operations = [](const auto... retry_operations) {
+            return std::to_array<decltype(&Exercise<Work::Exact, Output, Input>)>({
+                &Exercise<Work::Control, Output, Input>, &Exercise<Work::Count, Output, Input>,
+                &Exercise<Work::AllocateExact, Output, Input>, &Exercise<Work::AllocateWorst, Output, Input>,
+                &Exercise<Work::ConvertOnly, Output, Input>, &Exercise<Work::Exact, Output, Input>,
+                &Exercise<Work::Worst, Output, Input>, &Exercise<Work::Hybrid, Output, Input>,
+                &Exercise<Work::StringExact, Output, Input>, &Exercise<Work::StringWorst, Output, Input>,
+                retry_operations...});
+        };
         if constexpr (sizeof(Input) == 2 && sizeof(Output) == 1) {
-            operations.push_back(&Exercise<Work::RetryExact, Output, Input>);
-            operations.push_back(&Exercise<Work::RetryWorst, Output, Input>);
+            return make_operations(&Exercise<Work::RetryExact, Output, Input>,
+                &Exercise<Work::RetryWorst, Output, Input>);
+        } else {
+            return make_operations();
         }
-        return operations;
     }();
     const auto operation_count = functions.size();
     auto iterations = std::array<std::size_t, names.size()>{};
@@ -107,7 +111,7 @@ auto RunCase(const std::string_view direction, const std::string_view pattern,
     const auto time = [&](const std::size_t operation, const std::size_t count) {
         const auto start = std::chrono::steady_clock::now();
         for (auto iteration = 0uz; iteration < count; ++iteration) {
-            functions[operation]({input_address, input.size()}, exact, bound, buffer);
+            functions.at(operation)({input_address, input.size()}, exact, bound, buffer);
         }
         return std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - start).count();
     };

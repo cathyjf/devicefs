@@ -57,7 +57,11 @@ export auto TestTranscoding() -> bool {
         CheckConversion(utf32, utf32);
         CheckConversion(u8"café 👩‍💻"sv, u"café 👩‍💻"sv);
         CheckConversion(u"café 👩‍💻"sv, u8"café 👩‍💻"sv);
+        CheckConversion(u8"café 👩‍💻"sv, U"café 👩‍💻"sv);
+        CheckConversion(U"café 👩‍💻"sv, u8"café 👩‍💻"sv);
         CheckConversion(u8"café 👩‍💻"sv, "café 👩‍💻"sv);
+        CheckConversion("café 👩‍💻"sv, u8"café 👩‍💻"sv);
+        CheckConversion(u8"café 👩‍💻"sv, u8"café 👩‍💻"sv);
     });
     passed &= Test("transcoding empty views, strings, literals and pointers"sv, [] {
         CheckConversion(std::string_view{}, std::u16string_view{});

@@ -43,34 +43,17 @@ template <typename Allocator, UtfCharacter Input>
     }
 }
 
-// simdutf's UTF-8 functions accept `char*` and `const char*`. C++ permits
-// reading and writing an object's bytes through a `char*`, so these functions
-// can read or write our `char8_t` buffers through the converted pointers.
-// https://eel.is/c++draft/basic.lval#11
-template <typename Character>
-GSL_SUPPRESS("26490",
-    "Accessing a `char8_t` buffer through a `char*` is permitted by C++'s "
-    "rule allowing access to an object's bytes through a `char` glvalue.")
-[[nodiscard]] auto SimdData(Character *data) noexcept {
-    if constexpr (std::same_as<std::remove_const_t<Character>, char8_t>) {
-        using Byte = std::conditional_t<std::is_const_v<Character>, const char, char>;
-        return reinterpret_cast<Byte *>(data);
-    } else {
-        return data;
-    }
-}
-
 // simdutf writes into caller-owned storage. UTF-8 input needs at most one output
 // code unit per byte. UTF-16 to UTF-32 also cannot grow in code-unit count.
 // Conversions that can grow use simdutf's length calculation before allocating.
 template <UtfCharacter Output, UtfCharacter Input>
 [[nodiscard]] constexpr auto TranscodedCapacity(const std::basic_string_view<Input> input) noexcept {
     if constexpr (sizeof(Output) == 1 && sizeof(Input) == 2) {
-        return simdutf::utf8_length_from_utf16(SimdData(input.data()), input.size());
+        return simdutf::utf8_length_from_utf16(input);
     } else if constexpr (sizeof(Output) == 1 && sizeof(Input) == 4) {
-        return simdutf::utf8_length_from_utf32(SimdData(input.data()), input.size());
+        return simdutf::utf8_length_from_utf32(input);
     } else if constexpr (sizeof(Output) == 2 && sizeof(Input) == 4) {
-        return simdutf::utf16_length_from_utf32(SimdData(input.data()), input.size());
+        return simdutf::utf16_length_from_utf32(input);
     } else {
         return input.size();
     }
@@ -85,27 +68,27 @@ template <typename Allocator = std::allocator<std::byte>, UtfCharacter Output, U
         std::copy_n(units.begin(), count, output.begin());
         return count;
     } else {
-        const auto result = [&]<typename... Arguments>(Arguments... arguments) {
+        const auto result = [&] {
             if constexpr (sizeof(Input) == 1 && sizeof(Output) == 2) {
-                return simdutf::convert_utf8_to_utf16_with_errors(arguments...);
+                return simdutf::convert_utf8_to_utf16_with_errors(input, output);
             } else if constexpr (sizeof(Input) == 1 && sizeof(Output) == 4) {
-                return simdutf::convert_utf8_to_utf32_with_errors(arguments...);
+                return simdutf::convert_utf8_to_utf32_with_errors(input, output);
             } else if constexpr (sizeof(Input) == 2 && sizeof(Output) == 1) {
-                return simdutf::convert_utf16_to_utf8_with_errors(arguments...);
+                return simdutf::convert_utf16_to_utf8_with_errors(input, output);
             } else if constexpr (sizeof(Input) == 2 && sizeof(Output) == 4) {
-                return simdutf::convert_utf16_to_utf32_with_errors(arguments...);
+                return simdutf::convert_utf16_to_utf32_with_errors(input, output);
             } else if constexpr (sizeof(Input) == 4 && sizeof(Output) == 1) {
-                return simdutf::convert_utf32_to_utf8_with_errors(arguments...);
+                return simdutf::convert_utf32_to_utf8_with_errors(input, output);
             } else if constexpr (sizeof(Input) == 4 && sizeof(Output) == 2) {
-                return simdutf::convert_utf32_to_utf16_with_errors(arguments...);
+                return simdutf::convert_utf32_to_utf16_with_errors(input, output);
             } else {
                 const auto validated = [&] {
                     if constexpr (sizeof(Input) == 1) {
-                        return simdutf::validate_utf8_with_errors(SimdData(input.data()), input.size());
+                        return simdutf::validate_utf8_with_errors(input);
                     } else if constexpr (sizeof(Input) == 2) {
-                        return simdutf::validate_utf16_with_errors(SimdData(input.data()), input.size());
+                        return simdutf::validate_utf16_with_errors(input);
                     } else {
-                        return simdutf::validate_utf32_with_errors(SimdData(input.data()), input.size());
+                        return simdutf::validate_utf32_with_errors(input);
                     }
                 }();
                 if (validated.error == simdutf::SUCCESS) {
@@ -113,7 +96,7 @@ template <typename Allocator = std::allocator<std::byte>, UtfCharacter Output, U
                 }
                 return validated;
             }
-        }(SimdData(input.data()), input.size(), SimdData(output.data()));
+        }();
         if (result.error != simdutf::SUCCESS) {
             throw std::invalid_argument(std::format(
                 "could not transcode UTF-{} input at code-unit offset {}: {}",

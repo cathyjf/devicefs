@@ -51,9 +51,24 @@ import devicefs.terminal.transcoding_benchmark;
 import devicefs.terminal.scope_exit;
 using namespace devicefs::terminal;
 using namespace std::string_view_literals;
-auto Observe(const void *, std::size_t) noexcept -> void;
 
 namespace {
+
+// The volatile stores retain each result's address and length. The signal
+// fence keeps the writes producing its contents from being discarded when
+// the compiler can inspect this function. It emits no hardware fence.
+// https://eel.is/c++draft/atomics.fences
+// Forced inlining avoids adding call overhead to only some measured cases.
+// The `inline` keyword suppresses GCC's warning that an `always_inline`
+// function might not be inlinable unless also declared `inline`.
+ATTRIBUTE_FORCEINLINE
+inline auto Observe(const void *data, const std::size_t size) noexcept -> void {
+    [[maybe_unused]] static const void *volatile pointer_seen;
+    [[maybe_unused]] static volatile std::size_t size_seen;
+    pointer_seen = data;
+    size_seen = size;
+    std::atomic_signal_fence(std::memory_order_seq_cst);
+}
 
 #ifdef BENCHMARK_DEFER_DEALLOCATION
 constexpr auto kDeallocationPolicy = "deferred"sv;

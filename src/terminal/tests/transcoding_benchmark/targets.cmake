@@ -36,15 +36,6 @@ target_include_directories(transcoding-benchmark-policies SYSTEM PRIVATE
     "${benchmark_output}/generated"
 )
 
-# Observing each result prevents the optimizer from removing conversions or
-# allocation/free pairs. Compiling the observer without LTO keeps its body
-# unavailable to the benchmark's optimizer.
-add_library(transcoding-benchmark-observer ${DEVICEFS_TERMINAL_LIBRARY_TYPE}
-    "${benchmark_source}/observer.cpp"
-)
-set_target_properties(transcoding-benchmark-observer PROPERTIES
-    INTERPROCEDURAL_OPTIMIZATION FALSE
-)
 add_executable(devicefs-transcoding-benchmark "${benchmark_source}/main.cpp")
 target_sources(devicefs-transcoding-benchmark PRIVATE
     FILE_SET CXX_MODULES FILES scope_exit.ixx
@@ -55,7 +46,7 @@ if(DEVICEFS_TRANSCODING_BENCHMARK_DEFER_DEALLOCATION)
     target_compile_definitions(devicefs-transcoding-benchmark PRIVATE BENCHMARK_DEFER_DEALLOCATION)
 endif()
 target_link_libraries(devicefs-transcoding-benchmark PRIVATE
-    transcoding-benchmark-policies transcoding-benchmark-observer
+    transcoding-benchmark-policies
 )
 if(MSVC)
     set(benchmark_architecture "${CMAKE_CXX_COMPILER_ARCHITECTURE_ID}")
@@ -74,6 +65,6 @@ if(WIN32)
     )
 endif()
 list(APPEND DEVICEFS_TERMINAL_ANALYSIS_TARGETS
-    transcoding-benchmark-policies transcoding-benchmark-observer
+    transcoding-benchmark-policies
     devicefs-transcoding-benchmark
 )

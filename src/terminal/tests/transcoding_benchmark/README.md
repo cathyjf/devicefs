@@ -139,10 +139,11 @@ Counting, conversion into preallocated storage, and the control operation do
 not allocate and retain a single batch per sample. Rounding sample counts up
 to whole batches can increase the full run time beyond the timing budget.
 
-Inputs and comparison results are prepared outside timing. Every result escapes
-to an observer compiled without LTO, preventing the optimizer from removing
-conversions and allocation/free pairs. The input address is reloaded through a
-volatile pointer on each iteration so counting cannot be hoisted out of a loop.
+Inputs and comparison results are prepared outside timing. Every result passes
+through an observer that records its address and length with volatile
+stores and issues a signal fence to preserve the work producing its contents.
+The input address is reloaded through a volatile pointer on each iteration so
+counting cannot be hoisted out of a loop.
 
 With immediate deallocation, the allocator can repeatedly reuse storage from
 the preceding iteration. Deferred deallocation prevents that reuse within a

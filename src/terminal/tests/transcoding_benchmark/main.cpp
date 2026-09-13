@@ -38,7 +38,10 @@
 #ifdef _MSC_VER
     #define ALLOCATION_ANNOTATIONS \
         _Ret_notnull_ _Post_writable_byte_size_(bytes) \
-        __declspec(restrict) __declspec(allocator)
+        __declspec(restrict) __declspec(allocator) \
+        __pragma(warning(suppress : 4559, justification : \
+            "The replacement adds `__declspec(restrict)` to the standard declaration: " \
+            "it returns fresh storage, with backing addresses retained only for cleanup."))
 #else
     #define ALLOCATION_ANNOTATIONS [[gnu::malloc]]
 #endif
@@ -108,14 +111,6 @@ auto next_allocation_index = 0uz;
 }
 
 #ifdef BENCHMARK_DEFER_DEALLOCATION
-#ifdef _MSC_VER
-    // `std` declares these overloads without `__declspec(restrict)`, so MSVC
-    // reports C4559 when our definitions add it. Our replacements return fresh
-    // storage and retain addresses only for cleanup, as justified above;
-    // strengthening the allocation promise is intentional.
-    #pragma warning(push)
-    #pragma warning(disable : 4559)
-#endif
 #if defined(__GNUC__) && !defined(__clang__)
     // GCC warns when `always_inline` is used without an `inline` declaration.
     // Replacement allocation functions must not be declared `inline`, so these
@@ -174,9 +169,6 @@ auto operator new(const std::size_t bytes) -> void * {
     ATTRIBUTE_MSVC_FLATTEN
     return ::operator new(bytes, std::align_val_t{__STDCPP_DEFAULT_NEW_ALIGNMENT__});
 }
-#ifdef _MSC_VER
-    #pragma warning(pop)
-#endif
 
 // The standard library forwards array and `nothrow` forms to these scalar
 // replacements. Sized deletion also forwards, but defining both sizes follows

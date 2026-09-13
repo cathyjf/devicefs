@@ -46,6 +46,9 @@ set_target_properties(transcoding-benchmark-observer PROPERTIES
     INTERPROCEDURAL_OPTIMIZATION FALSE
 )
 add_executable(devicefs-transcoding-benchmark "${benchmark_source}/main.cpp")
+target_sources(devicefs-transcoding-benchmark PRIVATE
+    FILE_SET CXX_MODULES FILES scope_exit.ixx
+)
 option(DEVICEFS_TRANSCODING_BENCHMARK_DEFER_DEALLOCATION
     "Defer deallocations during batches" OFF)
 if(DEVICEFS_TRANSCODING_BENCHMARK_DEFER_DEALLOCATION)

@@ -10,10 +10,37 @@
     #define ATTRIBUTE_FLATTEN_FUNCTION
 #endif
 
+// These annotations let the compiler optimize accesses to newly allocated
+// storage independently of accesses to existing objects, as it can with the
+// ordinary allocator. `allocation_pointers` retains the backing addresses only
+// for batch cleanup to pass to `free` after the caller finishes using them.
+// Nothing reads or writes the allocated contents through those saved pointers,
+// so retaining them does not introduce a competing access to the caller's data.
+//
+// Microsoft's `__declspec(restrict)` documentation illustrates this distinction
+// with an allocator that retains a global pointer to its backing memory pool
+// while returning separately usable regions of that pool:
+// https://learn.microsoft.com/en-us/cpp/cpp/restrict?view=msvc-170#example
+//
+// Clang translates `[[gnu::malloc]]` into a `noalias` return attribute. LLVM
+// uses the resulting alias information to skip stores that cannot modify the
+// memory being read; the relevant independence concerns the memory accesses,
+// rather than the mere existence of another copy of the address:
+// https://github.com/llvm/llvm-project/blob/483af6c1be7ca13eda7cc5314bb93185d21b272a/clang/lib/CodeGen/CGCall.cpp#L2844-L2846
+// https://github.com/llvm/llvm-project/blob/483af6c1be7ca13eda7cc5314bb93185d21b272a/llvm/lib/Analysis/MemoryDependenceAnalysis.cpp#L581-L598
+//
+// GCC likewise represents a malloc-like result as a distinct heap object in
+// its points-to analysis. That analysis treats `free` separately from reading
+// or writing the allocation's contents, matching our use of the saved pointers
+// solely for deferred cleanup:
+// https://github.com/gcc-mirror/gcc/blob/1c1cf87e07567288d09c5ec07e32d05a37d5faa3/gcc/gimple-ssa-pta-constraints.cc#L1591-L1616
+// https://github.com/gcc-mirror/gcc/blob/1c1cf87e07567288d09c5ec07e32d05a37d5faa3/gcc/gimple-ssa-pta-constraints.cc#L2670-L2674
 #ifdef _MSC_VER
-    #define ALLOCATION_ANNOTATIONS _Ret_notnull_ _Post_writable_byte_size_(bytes)
+    #define ALLOCATION_ANNOTATIONS \
+        _Ret_notnull_ _Post_writable_byte_size_(bytes) \
+        __declspec(restrict) __declspec(allocator)
 #else
-    #define ALLOCATION_ANNOTATIONS
+    #define ALLOCATION_ANNOTATIONS [[gnu::malloc]]
 #endif
 
 import std;
@@ -21,6 +48,7 @@ import std;
     import <sal.h>;
 #endif
 import devicefs.terminal.transcoding_benchmark;
+import devicefs.terminal.scope_exit;
 using namespace devicefs::terminal;
 using namespace std::string_view_literals;
 auto Observe(const void *, std::size_t) noexcept -> void;
@@ -39,22 +67,40 @@ auto next_allocation_index = 0uz;
 
 // A batch frees only allocations recorded since its starting index, leaving
 // its input fixtures available for subsequent measurements.
-GSL_SUPPRESS("26408",
-    "The recorded blocks came directly from `malloc`; `free` releases them "
-    "without invoking the empty replacement `operator delete`.")
-auto FreeAllocations([[maybe_unused]] const std::size_t first) noexcept -> void {
+// Cleanup is skipped when an exception escapes because the exception may own
+// an allocation that the outer handler still needs to read.
+[[nodiscard]] auto FreeNewAllocationsOnExit() noexcept {
 #ifdef BENCHMARK_DEFER_DEALLOCATION
-    for (void *const pointer : std::span{allocation_pointers}.subspan(
-            first, next_allocation_index - first)) {
-        std::free(pointer);
-    }
-    next_allocation_index = first;
+    return ScopeExit{[first = next_allocation_index,
+                         exceptions = std::uncaught_exceptions()] {
+        if (std::uncaught_exceptions() != exceptions) {
+            return;
+        }
+        for (void *const pointer : std::span{allocation_pointers}.subspan(
+                first, next_allocation_index - first)) {
+            GSL_SUPPRESS("26408",
+                "The recorded blocks came directly from `malloc`; `free` releases them "
+                "without invoking the empty replacement `operator delete`.")
+            std::free(pointer);
+        }
+        next_allocation_index = first;
+    }};
+#else
+    return std::monostate{};
 #endif
 }
 
 }
 
 #ifdef BENCHMARK_DEFER_DEALLOCATION
+#ifdef _MSC_VER
+    // `std` declares these overloads without `__declspec(restrict)`, so MSVC
+    // reports C4559 when our definitions add it. Our replacements return fresh
+    // storage and retain addresses only for cleanup, as justified above;
+    // strengthening the allocation promise is intentional.
+    #pragma warning(push)
+    #pragma warning(disable : 4559)
+#endif
 #if defined(__GNUC__) && !defined(__clang__)
     // GCC warns when `always_inline` is used without an `inline` declaration.
     // Replacement allocation functions must not be declared `inline`, so these
@@ -87,33 +133,49 @@ GSL_SUPPRESS("26408",
     "calling `new` would recurse.")
 ATTRIBUTE_FORCEINLINE ATTRIBUTE_FLATTEN_FUNCTION
 ALLOCATION_ANNOTATIONS
-auto operator new(const std::size_t bytes) -> void * {
+auto operator new(const std::size_t bytes, const std::align_val_t alignment) -> void * {
+    const auto boundary = std::to_underlying(alignment);
+    // Extended alignment needs room to advance the address returned by `malloc`.
+    // The list retains the original address so batch cleanup can release it
+    // with `free`. Ordinary allocations request exactly `bytes` from `malloc`.
+    const auto padding = boundary > __STDCPP_DEFAULT_NEW_ALIGNMENT__ ? boundary - 1 : 0;
     if ((bytes == 0) ||
-        (next_allocation_index == std::size(allocation_pointers))) [[unlikely]] {
+        (next_allocation_index == std::size(allocation_pointers)) ||
+        (bytes > (std::numeric_limits<std::size_t>::max() - padding))) [[unlikely]] {
         throw std::bad_alloc{};
     }
+    auto space = bytes + padding;
     ATTRIBUTE_MSVC_FLATTEN
-    if (void *const pointer = std::malloc(bytes)) [[likely]] {
-        return allocation_pointers[next_allocation_index++] = pointer;
+    if (auto pointer = std::malloc(space)) [[likely]] {
+        allocation_pointers[next_allocation_index++] = pointer;
+        return (padding == 0) ? pointer : std::align(boundary, bytes, pointer, space);
     }
     throw std::bad_alloc{};
 }
 
 ATTRIBUTE_FORCEINLINE ATTRIBUTE_FLATTEN_FUNCTION
 ALLOCATION_ANNOTATIONS
-auto operator new[](const std::size_t bytes) -> void * {
+auto operator new(const std::size_t bytes) -> void * {
     ATTRIBUTE_MSVC_FLATTEN
-    return ::operator new(bytes);
+    return ::operator new(bytes, std::align_val_t{__STDCPP_DEFAULT_NEW_ALIGNMENT__});
 }
+#ifdef _MSC_VER
+    #pragma warning(pop)
+#endif
 
+// The standard library forwards array and `nothrow` forms to these scalar
+// replacements. Sized deletion also forwards, but defining both sizes follows
+// the standard's recommendation and avoids GCC's `-Wsized-deallocation` warning.
+// https://eel.is/c++draft/new.delete.single
+// https://eel.is/c++draft/new.delete.array
 ATTRIBUTE_FORCEINLINE ATTRIBUTE_FLATTEN_FUNCTION
 auto operator delete(void *) noexcept -> void {}
 ATTRIBUTE_FORCEINLINE ATTRIBUTE_FLATTEN_FUNCTION
-auto operator delete[](void *) noexcept -> void {}
+auto operator delete(void *, std::align_val_t) noexcept -> void {}
 ATTRIBUTE_FORCEINLINE ATTRIBUTE_FLATTEN_FUNCTION
 auto operator delete(void *, std::size_t) noexcept -> void {}
 ATTRIBUTE_FORCEINLINE ATTRIBUTE_FLATTEN_FUNCTION
-auto operator delete[](void *, std::size_t) noexcept -> void {}
+auto operator delete(void *, std::size_t, std::align_val_t) noexcept -> void {}
 #if defined(__GNUC__) && !defined(__clang__)
     #pragma GCC diagnostic pop
 #endif
@@ -121,22 +183,83 @@ auto operator delete[](void *, std::size_t) noexcept -> void {}
 
 namespace {
 
-// This check exercises both array and string allocation through the installed
-// operators. Two batches verify that cleanup restores the starting index.
+// Explicit calls exercise the library's forwarding overloads without allowing
+// the compiler to omit allocations as it may with a `new` expression.
+GSL_SUPPRESS("26401", "This test owns each block and calls its matching deletion overload.")
+GSL_SUPPRESS("26407", "Heap allocation is the behavior being tested.")
+GSL_SUPPRESS("26409",
+    "Explicit calls select each overload to verify forwarding; "
+    "a smart pointer would select the overload itself.")
+auto VerifyAllocationForms(const auto... alignment) -> std::size_t {
+    constexpr auto bytes = 513uz;
+    const auto pointers = std::array{
+        ::operator new(bytes, alignment...),
+        ::operator new[](bytes, alignment...),
+        ::operator new(bytes, alignment..., std::nothrow),
+        ::operator new[](bytes, alignment..., std::nothrow),
+    };
+    const auto boundary = std::max({std::size_t{__STDCPP_DEFAULT_NEW_ALIGNMENT__},
+        std::to_underlying(alignment)...});
+    for (void *const pointer : pointers) {
+        auto aligned = pointer;
+        auto space = bytes;
+        if ((pointer == nullptr) || (std::align(boundary, bytes, aligned, space) != pointer)) {
+            throw std::runtime_error("benchmark allocation returned incorrectly aligned storage");
+        }
+        std::ranges::fill(std::span{static_cast<std::byte *>(pointer), bytes}, std::byte{0x5a});
+        Observe(pointer, bytes);
+    }
+    ::operator delete(pointers[0], alignment...);
+    ::operator delete[](pointers[1], alignment...);
+    ::operator delete(pointers[2], alignment..., std::nothrow);
+    ::operator delete[](pointers[3], alignment..., std::nothrow);
+#ifdef __cpp_sized_deallocation
+    ::operator delete(::operator new(bytes, alignment...), bytes, alignment...);
+    ::operator delete[](::operator new[](bytes, alignment...), bytes, alignment...);
+    return pointers.size() + 2;
+#else
+    return pointers.size();
+#endif
+}
+
+// Array and string allocations also exercise calls made from library code.
+// Two batches verify that cleanup restores the starting index.
 auto VerifyAllocationPolicy() -> void {
     for (auto batch = 0; batch < 2; ++batch) {
         const auto first = next_allocation_index;
-        for (auto iteration = 0; iteration < 8; ++iteration) {
-            const auto array = std::make_unique_for_overwrite<char[]>(512);
-            const auto text = std::string(512, 'x');
-            Observe(array.get(), 512);
-            Observe(text.data(), text.size());
+        {
+            [[maybe_unused]] const auto allocations = FreeNewAllocationsOnExit();
+            const auto expected = 16 + VerifyAllocationForms() +
+                VerifyAllocationForms(std::align_val_t{64}) +
+                VerifyAllocationForms(std::align_val_t{4096});
+            for (auto iteration = 0; iteration < 8; ++iteration) {
+                const auto array = std::make_unique_for_overwrite<char[]>(512);
+                const auto text = std::string(512, 'x');
+                Observe(array.get(), 512);
+                Observe(text.data(), text.size());
+            }
+            if (next_allocation_index - first !=
+                (kDeallocationPolicy == "deferred"sv ? expected : 0uz)) {
+                throw std::runtime_error("benchmark allocation policy did not record the expected allocations");
+            }
         }
-        const auto recorded = next_allocation_index - first;
-        FreeAllocations(first);
-        if ((next_allocation_index != first) ||
-            (recorded != (kDeallocationPolicy == "deferred"sv ? 16uz : 0uz))) {
-            throw std::runtime_error("benchmark allocation policy did not record the expected allocations");
+        if (next_allocation_index != first) {
+            throw std::runtime_error("benchmark allocation cleanup did not restore the starting index");
+        }
+    }
+    // An inner guard must leave an escaping exception's storage alive until
+    // its handler finishes; the outer guard then releases the retained storage.
+    [[maybe_unused]] const auto allocations = FreeNewAllocationsOnExit();
+    const auto first = next_allocation_index;
+    try {
+        [[maybe_unused]] const auto batch = FreeNewAllocationsOnExit();
+        throw std::runtime_error(std::string(512, 'x'));
+    } catch (const std::runtime_error &error) {
+        if ((kDeallocationPolicy == "deferred"sv) && (next_allocation_index == first)) {
+            throw std::runtime_error("benchmark allocation cleanup ran during exception unwinding");
+        }
+        if (std::string_view{error.what()} != std::string(512, 'x')) {
+            throw std::runtime_error("benchmark allocation cleanup invalidated the exception message");
         }
     }
 }
@@ -247,14 +370,13 @@ auto RunCase(const std::string_view direction, const std::string_view pattern,
     // therefore cannot be hoisted out of the loop as a repeated pure expression.
     const Input *volatile input_address = input.data();
     const auto time = [&](const std::size_t operation, const std::size_t count) {
-        const auto first = next_allocation_index;
+        [[maybe_unused]] const auto allocations = FreeNewAllocationsOnExit();
         const auto start = std::chrono::steady_clock::now();
         for (auto iteration = 0uz; iteration < count; ++iteration) {
             functions.at(operation)({input_address, input.size()}, exact, bound, buffer);
         }
         const auto elapsed = std::chrono::duration<double, std::nano>(
             std::chrono::steady_clock::now() - start).count();
-        FreeAllocations(first);
         return elapsed;
     };
     // The full profile measures 4,800 operations seven times each. A 1.5 ms

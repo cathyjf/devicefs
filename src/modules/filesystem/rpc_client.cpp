@@ -136,11 +136,11 @@ constexpr auto kTcpUsername = "devicefs"sv;
             password.begin(), password.end()};
     auto identity = SEC_WINNT_AUTH_IDENTITY_A{
         .User = username.data(),
-        .UserLength = wil::safe_cast<ULONG>(username.size()),
+        .UserLength = wil::safe_cast_failfast<ULONG>(username.size()),
         .Domain = nullptr,
         .DomainLength = 0,
         .Password = encoded_password.data(),
-        .PasswordLength = wil::safe_cast<ULONG>(encoded_password.size()),
+        .PasswordLength = wil::safe_cast_failfast<ULONG>(encoded_password.size()),
         .Flags = SEC_WINNT_AUTH_IDENTITY_ANSI,
     };
     const auto error = RpcBindingSetAuthInfoA(

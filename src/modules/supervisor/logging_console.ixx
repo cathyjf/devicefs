@@ -155,7 +155,16 @@ private:
         }
         // Current diagnostics and ConPTY chunks are far below MAXDWORD, but WriteRaw
         // accepts an arbitrary string view, so reject a length WriteFile cannot represent.
-        const auto size = wil::safe_cast<DWORD>(output.size());
+        const auto size = [bytes = output.size()] {
+            auto converted = DWORD{};
+            if (FAILED(wil::safe_cast_nothrow(bytes, &converted))) {
+                throw std::runtime_error(std::format(
+                    "could not write the backup supervisor log: {} bytes "
+                    "exceeds the maximum of {} bytes per write",
+                    bytes, std::numeric_limits<decltype(converted)>::max()));
+            }
+            return converted;
+        }();
         auto written = DWORD{};
         if (!WriteFile(file_.get(), output.data(),
                 size, &written, nullptr)) {

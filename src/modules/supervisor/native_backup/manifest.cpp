@@ -251,27 +251,23 @@ export [[nodiscard]] auto RetrievePreviousBackupManifest(
     const HANDLE cancellation_event,
     const std::optional<std::u8string> &namespace_override)
     -> std::optional<PreviousBackupManifestResult> {
-    try {
-        constexpr auto arguments =
-            std::array{"--print-manifest"sv};
-        auto result = internal::RunPbsFish(
-            cancellation_event,
-            namespace_override,
-            internal::PbsFishRequest{
-                .additional_arguments = arguments,
-                .send_encryption_key = true,
-                .standard_output = internal::PbsStandardOutput::Capture,
-            });
-        if (!result) {
-            return std::nullopt;
-        }
-        return PreviousBackupManifestResult{
-            .exit_code = result->exit_code,
-            .manifest = std::move(result->standard_output.value()),
-        };
-    } catch (const wil::ResultException &error) {
-        throw std::runtime_error(error.what());
+    constexpr auto arguments =
+        std::array{"--print-manifest"sv};
+    auto result = internal::RunPbsFish(
+        cancellation_event,
+        namespace_override,
+        internal::PbsFishRequest{
+            .additional_arguments = arguments,
+            .send_encryption_key = true,
+            .standard_output = internal::PbsStandardOutput::Capture,
+        });
+    if (!result) {
+        return std::nullopt;
     }
+    return PreviousBackupManifestResult{
+        .exit_code = result->exit_code,
+        .manifest = std::move(result->standard_output.value()),
+    };
 }
 
 namespace internal {

@@ -129,7 +129,7 @@ struct DeviceFsStartRequest {
             if (value.empty()) {
                 return;
             }
-            const auto size = wil::safe_cast<DWORD>(value.size_bytes());
+            const auto size = wil::safe_cast_failfast<DWORD>(value.size_bytes());
             auto written = DWORD{};
             if (!WriteFile(password_output.get(), value.data(), size,
                     &written, nullptr)) {

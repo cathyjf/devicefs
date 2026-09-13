@@ -73,25 +73,6 @@ template <typename Operation>
     return VolumeImageName(snapshot.original_volume, ".img");
 }
 
-[[nodiscard]] auto WaitForProcess(
-    const HANDLE process,
-    const std::chrono::milliseconds timeout) -> bool {
-    const auto result = WaitForSingleObject(
-        process, wil::safe_cast<DWORD>(timeout.count()));
-    if (result == WAIT_FAILED) {
-        WinError("could not wait for a backup process");
-    }
-    return result == WAIT_OBJECT_0;
-}
-
-[[nodiscard]] auto ProcessExitCode(const HANDLE process) {
-    auto result = DWORD{};
-    if (!GetExitCodeProcess(process, &result)) {
-        WinError("could not obtain a backup process exit code");
-    }
-    return result;
-}
-
 auto TryWriteError(
     _In_z_ const char *const context,
     const std::exception &error) noexcept {

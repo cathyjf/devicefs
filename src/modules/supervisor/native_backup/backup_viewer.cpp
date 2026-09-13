@@ -37,6 +37,7 @@ import :privileges;
 import :vhdx_attachment;
 import devicefs.common;
 import devicefs.stream_writer;
+import devicefs.supervisor.process_launch;
 import devicefs.supervisor.temporary_paths;
 import devicefs.terminal.transcoding;
 
@@ -288,12 +289,12 @@ auto WaitForViewSession(
             devicefs::stdout, "Closing the selective-view operation.\n");
         return internal::kCancelledExitCode;
     }
-    if (internal::WaitForProcess(
+    if (WaitForProcess(
             fish.Process(), std::chrono::milliseconds{0})) {
         throw std::runtime_error(std::format(
             "the Linux view operation exited before the VHDX could be "
             "attached with code {}",
-            internal::ProcessExitCode(fish.Process())));
+            ProcessExitCode(fish.Process())));
     }
     devicefs::WriteToStream(
         devicefs::stdout,

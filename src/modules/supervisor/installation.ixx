@@ -251,8 +251,17 @@ auto ConfigurePreshutdownTimeout(
     const SC_HANDLE service,
     const std::chrono::milliseconds preshutdown_timeout) {
     auto configuration = SERVICE_PRESHUTDOWN_INFO{
-        .dwPreshutdownTimeout =
-            wil::safe_cast<DWORD>(preshutdown_timeout.count()),
+        .dwPreshutdownTimeout = [count = preshutdown_timeout.count()] {
+            auto converted = DWORD{};
+            if (FAILED(wil::safe_cast_nothrow(count, &converted))) {
+                throw std::runtime_error(std::format(
+                    "could not configure service '{}' with a {} ms preshutdown "
+                    "timeout: the supported range is 0 to {} ms",
+                    kServiceName, count,
+                    std::numeric_limits<decltype(converted)>::max()));
+            }
+            return converted;
+        }(),
     };
     if (!ChangeServiceConfig2W(service,
             SERVICE_CONFIG_PRESHUTDOWN_INFO, &configuration)) {

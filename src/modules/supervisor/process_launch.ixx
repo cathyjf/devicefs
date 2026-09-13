@@ -24,6 +24,34 @@ import std;
 import <devicefs/windows_imports.h>;
 import devicefs.common;
 
+export [[nodiscard]] auto WaitForProcess(
+    const HANDLE process,
+    const std::chrono::milliseconds timeout) -> bool {
+    const auto result = WaitForSingleObject(
+        process, [count = timeout.count()] {
+            auto converted = DWORD{};
+            if (FAILED(wil::safe_cast_nothrow(count, &converted))) {
+                throw std::runtime_error(std::format(
+                    "could not wait for a backup process: timeout {} ms "
+                    "is outside the supported range of 0 to {} ms",
+                    count, std::numeric_limits<decltype(converted)>::max()));
+            }
+            return converted;
+        }());
+    if (result == WAIT_FAILED) {
+        WinError("could not wait for a backup process");
+    }
+    return result == WAIT_OBJECT_0;
+}
+
+export [[nodiscard]] auto ProcessExitCode(const HANDLE process) {
+    auto result = DWORD{};
+    if (!GetExitCodeProcess(process, &result)) {
+        WinError("could not obtain a backup process exit code");
+    }
+    return result;
+}
+
 export [[nodiscard]] auto DuplicateInheritableHandle(const HANDLE source) {
     if ((source == nullptr) || (source == INVALID_HANDLE_VALUE)) {
         throw std::runtime_error("a child-process standard handle is unavailable");

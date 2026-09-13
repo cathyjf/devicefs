@@ -29,6 +29,7 @@ import devicefs.supervisor.logging_console;
 import devicefs.supervisor.materialize_oci;
 import devicefs.supervisor.native_backup;
 import devicefs.supervisor.process_diagnostics;
+import devicefs.supervisor.process_launch;
 import devicefs.supervisor.vshadow;
 import devicefs.terminal.transcoding;
 
@@ -110,20 +111,11 @@ struct BackupProcess {
 
     [[nodiscard]] auto Wait(
         const std::chrono::milliseconds timeout) const {
-        const auto result = WaitForSingleObject(
-            process.hProcess, wil::safe_cast<DWORD>(timeout.count()));
-        if (result == WAIT_FAILED) {
-            WinError("could not wait for a backup process");
-        }
-        return result == WAIT_OBJECT_0;
+        return WaitForProcess(process.hProcess, timeout);
     }
 
     [[nodiscard]] auto ExitCode() const {
-        auto result = DWORD{};
-        if (!GetExitCodeProcess(process.hProcess, &result)) {
-            WinError("could not obtain a backup process exit code");
-        }
-        return result;
+        return ProcessExitCode(process.hProcess);
     }
 
     [[nodiscard]] auto WaitForAll(

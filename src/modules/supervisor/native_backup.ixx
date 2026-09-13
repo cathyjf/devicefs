@@ -129,7 +129,10 @@ namespace internal {
         const auto pbs_result = RunPbsFish(
             cancellation_event,
             namespace_override,
-            PbsFishRequest{.snapshot_manifest = snapshot_manifest});
+            PbsFishRequest{
+                .snapshot_manifest = snapshot_manifest,
+                .send_encryption_key = true,
+            });
         result = pbs_result
             ? pbs_result->exit_code : kCancelledExitCode;
     }

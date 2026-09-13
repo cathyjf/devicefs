@@ -259,6 +259,7 @@ export [[nodiscard]] auto RetrievePreviousBackupManifest(
             namespace_override,
             internal::PbsFishRequest{
                 .additional_arguments = arguments,
+                .send_encryption_key = true,
                 .standard_output = internal::PbsStandardOutput::Capture,
             });
         if (!result) {

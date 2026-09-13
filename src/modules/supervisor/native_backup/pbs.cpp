@@ -53,6 +53,9 @@ struct PbsFishRequest {
     std::span<const std::string_view> additional_arguments{};
     std::optional<std::u8string_view> snapshot_manifest;
     std::string_view rpc_password{};
+    // If true, append the encryption-key document to the WSL input for
+    // an operation that encrypts or decrypts backup data.
+    bool send_encryption_key = false;
     PbsStandardOutput standard_output = PbsStandardOutput::Forward;
     std::chrono::milliseconds term_grace = 45s;
     std::chrono::milliseconds kill_grace = 30s;
@@ -709,8 +712,8 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
 
     auto input = SecureUtf8String{};
     // start-pbs.fish consumes these ten NUL-delimited records in order,
-    // followed by the key document that proxmox-backup-client reads from
-    // its inherited standard input.
+    // followed, when requested, by the key document that proxmox-backup-client
+    // reads from its inherited standard input.
     const auto append_record = [&](const std::u8string_view value) {
         input.append(value);
         input.push_back(u8'\0');
@@ -730,7 +733,9 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
     input.append(
         request.rpc_password.begin(), request.rpc_password.end());
     input.push_back(u8'\0');
-    input.append(configuration.pbs_encryption_key);
+    if (request.send_encryption_key) {
+        input.append(configuration.pbs_encryption_key);
+    }
     auto process = StartWslFish(
         configuration,
         arguments,
@@ -772,6 +777,7 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
         PbsFishRequest{
             .additional_arguments = arguments,
             .rpc_password = rpc_password,
+            .send_encryption_key = true,
             .standard_output = PbsStandardOutput::Readiness,
         },
         false);

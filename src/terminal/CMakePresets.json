@@ -29,7 +29,7 @@
       "generator": "Visual Studio 18 2026",
       "architecture": "x64",
       "cacheVariables": {
-        "CMAKE_VS_GLOBALS": "ForceImportAfterCppDefaultProps=${sourceDir}/../../misc/SelectLatestMsvc.props"
+        "CMAKE_VS_GLOBALS": "ForceImportAfterCppDefaultProps=${sourceDir}/../../misc/ApplyMsvcOverrides.props"
       },
       "condition": {
         "type": "equals",

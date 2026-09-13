@@ -26,12 +26,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 if(WIN32)
     find_program(POWERSHELL_EXECUTABLE NAMES pwsh REQUIRED)
-    list(APPEND CMAKE_VS_GLOBALS
-        "UseMultiToolTask=true"
-        "EnableClServerMode=true"
-        "BuildPassReferences=true"
-        "IgnoreWarnIntDirSharingDetected=true"
-    )
 endif()
 
 option(DEVICEFS_TERMINAL_BUILD_TESTS "Build the terminal test entry point" OFF)
@@ -128,12 +122,6 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
     target_include_directories(devicefs-terminal-test PRIVATE
         "${DEVICEFS_ROOT}/src/modules/include"
     )
-    if(WIN32)
-        target_link_options(devicefs-terminal-test PRIVATE
-            /GUARD:CF /guard:ehcont
-            $<$<STREQUAL:${CMAKE_CXX_COMPILER_ARCHITECTURE_ID},x64>:/CETCOMPAT>
-        )
-    endif()
     list(APPEND DEVICEFS_TERMINAL_ANALYSIS_TARGETS devicefs-terminal-test)
 
     enable_testing()
@@ -174,7 +162,7 @@ foreach(target IN LISTS DEVICEFS_TERMINAL_ANALYSIS_TARGETS)
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _MSVC_STL_HARDENING=1
     )
     target_compile_options(${target} PRIVATE
-        /MP /W4 /WX /permissive- ${DEVICEFS_MSVC_FLAGS}
+        /W4 /WX /permissive-
         /analyze:external- "SHELL:/analyze:log $(IntDir)"
         /analyze:log:format:sarif /analyze:sarif:configuration
         /analyze:log:compilerwarnings

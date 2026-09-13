@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
+  SPDX-License-Identifier: GPL-3.0-or-later
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!--
+    Select the preview toolchain if it is installed.
+    Otherwise, use the normal toolchain.
+    See <https://learn.microsoft.com/en-us/cpp/overview/acquire-msvc#use-an-installed-msvc-toolset>.
+  -->
+  <PropertyGroup>
+    <MSVCPreviewEnabled
+      Condition="Exists('$(VSInstallRoot)\VC\Auxiliary\Build\Microsoft.VCToolsVersion.Preview.props')">true</MSVCPreviewEnabled>
+  </PropertyGroup>
+  <!--
+    Release builds use /Ob3 for more aggressive inlining.
+    This runs after CMake's settings have been read so that they cannot restore /Ob2.
+    MSBuild cannot select /Ob3 through InlineFunctionExpansion, so we clear that
+    setting and add /Ob3 to AdditionalOptions.
+    See <https://learn.microsoft.com/en-us/cpp/build/reference/ob-inline-function-expansion>.
+  -->
+  <Target Name="DeviceFsInlining" BeforeTargets="PrepareForBuild"
+    Condition="'$(Configuration)' == 'Release'">
+    <ItemGroup>
+      <ClCompile>
+        <InlineFunctionExpansion>Default</InlineFunctionExpansion>
+        <AdditionalOptions>%(AdditionalOptions) /Ob3</AdditionalOptions>
+      </ClCompile>
+    </ItemGroup>
+  </Target>
+</Project>

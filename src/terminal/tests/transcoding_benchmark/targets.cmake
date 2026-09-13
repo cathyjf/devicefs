@@ -58,12 +58,6 @@ target_compile_definitions(devicefs-transcoding-benchmark PRIVATE
     "BENCHMARK_ARCHITECTURE=\"${benchmark_architecture}\""
     "BENCHMARK_CONFIGURATION=\"$<CONFIG>\""
 )
-if(WIN32)
-    target_link_options(devicefs-transcoding-benchmark PRIVATE
-        /GUARD:CF /guard:ehcont
-        $<$<STREQUAL:${CMAKE_CXX_COMPILER_ARCHITECTURE_ID},x64>:/CETCOMPAT>
-    )
-endif()
 list(APPEND DEVICEFS_TERMINAL_ANALYSIS_TARGETS
     transcoding-benchmark-policies
     devicefs-transcoding-benchmark

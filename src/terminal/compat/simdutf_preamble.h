@@ -52,7 +52,12 @@ using std::getenv;
     // because doing so causes MSVC++ to apply this project's strict first-party
     // warning policy to the third-party code. The third-party code was not
     // designed to comply with our strict warning policy.
-    #pragma warning(disable : 4310 5260 4505 4324)
+    #pragma warning(disable : 4310 5260 4505 4324 4668)
+
+    // This pragma warning scope is intentionally popped at the end of `combined.h`,
+    // so we must suppress C5031 ("A warning-state pop matches a push from a
+    // different file.").
+    #pragma warning(disable : 5031)
 #elifdef __clang__
     #if __clang_major__ < 24
         // The transcoder uses simdutf's Unicode conversions. The unused simdutf

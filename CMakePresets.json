@@ -13,7 +13,7 @@
       "architecture": "x64",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
-        "CMAKE_VS_GLOBALS": "ForceImportAfterCppDefaultProps=${sourceDir}/misc/SelectLatestMsvc.props"
+        "CMAKE_VS_GLOBALS": "ForceImportAfterCppDefaultProps=${sourceDir}/misc/ApplyMsvcOverrides.props"
       },
       "environment": {
         "POWERSHELL_TELEMETRY_OPTOUT": "true",

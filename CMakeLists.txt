@@ -33,18 +33,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 include(misc/MsvcFlags.cmake)
 
-# Increase build parallelism for native C++ projects.
-# See <https://devblogs.microsoft.com/cppblog/cpp-build-throughput-investigation-and-tune-up>.
-list(APPEND CMAKE_VS_GLOBALS
-    "UseMultiToolTask=true"
-    "EnableClServerMode=true"
-    "BuildPassReferences=true"
-)
-
-# Build multiple source files concurrently.
-# See <https://learn.microsoft.com/en-us/cpp/build/reference/mp-build-with-multiple-processes>.
-add_compile_options(/MP)
-
 option(DEVICEFS_MEASURE_FREE_CLUSTER_DATA
     "Measure nonzero data in bitmap-free clusters (diagnostic builds only)"
     OFF
@@ -212,7 +200,7 @@ target_compile_definitions(vshadow PRIVATE
     UNICODE _UNICODE _WIN32_WINNT=0x0A00 _MSVC_STL_HARDENING=1
 )
 target_compile_options(vshadow PRIVATE
-    /W3 /WX- /permissive ${DEVICEFS_MSVC_FLAGS}
+    /W3 /WX- /permissive
     /analyze-
 )
 set_target_properties(vshadow PROPERTIES
@@ -320,7 +308,7 @@ foreach(target IN LISTS DEVICEFS_CODE_ANALYSIS_TARGETS)
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _MSVC_STL_HARDENING=1
     )
     target_compile_options(${target} PRIVATE
-        /W4 /WX /permissive- ${DEVICEFS_MSVC_FLAGS}
+        /W4 /WX /permissive-
         /analyze:external- "SHELL:/analyze:log $(IntDir)"
         /analyze:log:format:sarif /analyze:sarif:configuration
         /analyze:log:compilerwarnings
@@ -329,10 +317,6 @@ endforeach()
 
 foreach(target devicefs vss-descriptor-dump backup-supervisor)
     target_sources(${target} PRIVATE src/resources/devicefs.manifest)
-    target_link_options(${target} PRIVATE
-        /GUARD:CF /guard:ehcont
-        $<$<STREQUAL:${CMAKE_CXX_COMPILER_ARCHITECTURE_ID},x64>:/CETCOMPAT>
-    )
 endforeach()
 
 set_target_properties(devicefs-filesystem PROPERTIES

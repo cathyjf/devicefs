@@ -43,6 +43,32 @@ export [[nodiscard]] auto InventoryVhdx(
     HANDLE cancellation_event,
     std::string_view device) -> int;
 
+// Retrieve the PBS snapshot catalog as UTF-8 JSON for all groups in the
+// configured namespace, or the supplied override. An empty catalog is a JSON
+// array containing no entries; cancellation returns an empty optional.
+// Retrieval failures throw, with PBS diagnostics forwarded to standard error.
+export [[nodiscard]] auto RetrieveBackupCatalog(
+    const HANDLE cancellation_event,
+    const std::optional<std::u8string> &namespace_override)
+    -> std::optional<std::u8string> {
+    constexpr auto arguments = std::to_array<std::string_view>({"--list-backups"});
+    auto result = internal::RunPbsFish(
+        cancellation_event, namespace_override,
+        internal::PbsFishRequest{
+            .additional_arguments = arguments,
+            .standard_output = internal::PbsStandardOutput::Capture,
+        });
+    if (!result) {
+        return std::nullopt;
+    }
+    if (result->exit_code != 0) {
+        throw std::runtime_error(std::format(
+            "the backup catalog query exited with code {}",
+            result->exit_code));
+    }
+    return std::move(result->standard_output);
+}
+
 export [[nodiscard]] auto RunSelectiveView(
     const HANDLE cancellation_event,
     const std::string_view archive,

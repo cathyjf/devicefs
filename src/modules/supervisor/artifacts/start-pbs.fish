@@ -6,6 +6,14 @@ set pbs_manifest_filename devicefs-manifest.conf
 set print_samba_logs 0
 set --export use_map_grpc 1
 
+function pretty_print_json
+    if set -l jq (command -v jq)
+        $jq
+    else
+        cat
+    end
+end
+
 function unmount_vss
     timeout --kill-after=1s 5s fish --no-config -c 'while ! sudo -n umount $argv[1]; sleep 1; end' $vss_mount_point
 end
@@ -64,12 +72,9 @@ function run_backup --argument-names parallel_images
         set image_filename (path basename $image_path)
         set --append backup_argv "$image_filename:$image_path"
     end
-    if set -l jq (command -v jq)
-        # If jq is installed, use it to prettify the manifest.
-        set -l manifest_ (echo -- $DEVICEFS_MANIFEST | $jq | string collect)
-        if ! string match -q -r '[^0]' $pipestatus
-            set DEVICEFS_MANIFEST $manifest_
-        end
+    set -l manifest_ (echo -- $DEVICEFS_MANIFEST | pretty_print_json | string collect)
+    if ! string match -q -r '[^0]' $pipestatus
+        set DEVICEFS_MANIFEST $manifest_
     end
     printf 'Backup manifest:\n%s\n' $DEVICEFS_MANIFEST
     $DEVICEFS_PBS_CLIENT $backup_argv \
@@ -83,6 +88,21 @@ function print_manifest
         $DEVICEFS_PBS_CLIENT restore --keyfd 0 \
         host/{$backup_id} {$pbs_manifest_filename}.blob - &
     supervise_pbs $last_pid true
+end
+
+function list_backups
+    cancel_before_start true
+    set -l catalog (mktemp -t devicefs-catalog.XXXXXXXXXX) || return
+    # Omitting the group lists every snapshot in PBS_NAMESPACE in one request.
+    $DEVICEFS_PBS_CLIENT snapshot list --output-format json >$catalog &
+    supervise_pbs $last_pid true
+    set -l result $status
+    if test $result -eq 0
+        pretty_print_json <$catalog
+        set result $status
+    end
+    rm -f -- $catalog
+    return $result
 end
 
 function finish_view
@@ -320,7 +340,7 @@ function run_view --argument-names snapshot_override archive address port rpc_he
     return $finish_exit_code
 end
 
-argparse /parallel-images /print-manifest /view -- $argv || exit
+argparse /parallel-images /print-manifest /list-backups /view -- $argv || exit
 
 set pid_file $argv[1]
 set stop_file $argv[2]
@@ -343,5 +363,7 @@ if set --query _flag_view
     set operation run_view $argv[4..10]
 else if set --query _flag_print_manifest
     set operation print_manifest
+else if set --query _flag_list_backups
+    set operation list_backups
 end
 $operation

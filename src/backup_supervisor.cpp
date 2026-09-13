@@ -710,6 +710,23 @@ struct SelectiveViewOptions {
         });
 }
 
+[[nodiscard]] auto RunListBackups(
+    std::optional<std::u8string> namespace_override) {
+    const auto [input, console_mode] = GetForegroundConsoleInput(
+        "--list-backups requires an attached console");
+    return RunForegroundOperation(
+        input, console_mode,
+        [namespace_override = std::move(namespace_override)](
+            const HANDLE cancellation_event) {
+            const auto catalog = RetrieveBackupCatalog(
+                cancellation_event, namespace_override);
+            if (!catalog) {
+                return kCancelledExitCode;
+            }
+            return devicefs::WriteToStream(devicefs::stdout, *catalog) ? 0 : 1;
+        });
+}
+
 [[nodiscard]] auto RunQueryManifest(
     std::optional<std::u8string> namespace_override) {
     const auto [input, console_mode] = GetForegroundConsoleInput(
@@ -849,6 +866,8 @@ auto PrintHelp() noexcept {
         "      --namespace and --volumes override configured values.\n"
         "  backup-supervisor.exe --query-manifest "
         "[--namespace NAMESPACE]\n"
+        "  backup-supervisor.exe --list-backups [--namespace NAMESPACE]\n"
+        "      Print the namespace's full backup catalog as JSON.\n"
         "  backup-supervisor.exe --view ARCHIVE "
         "[--snapshot SNAPSHOT] [--timestamp TIMESTAMP] "
         "[--address ADDRESS] "
@@ -907,6 +926,11 @@ auto BackupSupervisorMain(
             return RunSelectiveViewMode(
                 ParseSelectiveViewOptions(
                     std::span{arguments}.subspan(1)));
+        }
+        if (option == "--list-backups") {
+            return RunListBackups(
+                ParseNamespaceOverride(
+                    std::span{arguments}.subspan(1), "--list-backups"));
         }
         if (option == "--query-manifest") {
             return RunQueryManifest(

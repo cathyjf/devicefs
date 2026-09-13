@@ -494,7 +494,17 @@ struct StartedWslFish {
         if (input.empty()) {
             return;
         }
-        const auto size = wil::safe_cast<DWORD>(input.size_bytes());
+        const auto size = [bytes = input.size_bytes()] {
+            auto converted = DWORD{};
+            if (FAILED(wil::safe_cast_nothrow(bytes, &converted))) {
+                throw std::runtime_error(std::format(
+                    "could not send WSL input: {} bytes exceeds the maximum "
+                    "of {} bytes per write",
+                    bytes,
+                    std::numeric_limits<decltype(converted)>::max()));
+            }
+            return converted;
+        }();
         auto written = DWORD{};
         if (!WriteFile(started.standard_input.get(), input.data(), size,
                 &written, nullptr)) {
@@ -679,8 +689,17 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
         "/tmp/devicefs-{}", UniqueName());
     auto pid_file = std::format("{}.pid", control_path);
     auto stop_file = std::format("{}.stop", control_path);
-    const auto computer_name = Transcode<std::string>(
-        wil::GetEnvironmentVariableW<std::wstring>(L"COMPUTERNAME"));
+    const auto computer_name = [] {
+        constexpr auto name = L"COMPUTERNAME";
+        auto value = std::wstring{};
+        if (const auto error = wil::GetEnvironmentVariableW(name, value);
+            FAILED(error)) {
+            WinError("could not read the {} environment variable",
+                std::wstring_view{name},
+                ExplicitWin32Error::FromHresult(error));
+        }
+        return Transcode<std::string>(value);
+    }();
     auto arguments = std::vector<std::string_view>{
         pid_file, stop_file, computer_name};
     if (parallel_images) {

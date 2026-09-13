@@ -4,9 +4,9 @@ root = true
 charset = utf-8
 end_of_line = lf
 trim_trailing_whitespace = true
+indent_style = space
 
 [*.{c++,cc,cpp,cxx,h,h++,hh,hpp,hxx,inl,ipp,ixx,tlh,tli}]
-indent_style = space
 indent_size = 4
 
 cpp_indent_braces = false
@@ -48,12 +48,7 @@ cpp_space_around_ternary_operator = insert
 
 cpp_wrap_preserve_blocks = never
 
-[CMakeLists.txt]
-indent_style = space
-indent_size = 4
-
-[*.{cs,ps1}]
-indent_style = space
+[{CMakeLists.txt,*.{cmake,cs,fish,ps1}}]
 indent_size = 4
 
 [*.cs]
@@ -93,3 +88,6 @@ csharp_space_between_square_brackets = false
 
 csharp_preserve_single_line_statements = false
 csharp_prefer_braces = true
+
+[*.{props,json}]
+indent_size = 2

@@ -26,7 +26,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 if(WIN32)
     find_program(POWERSHELL_EXECUTABLE NAMES pwsh REQUIRED)
-    set(CMAKE_VS_GLOBALS
+    list(APPEND CMAKE_VS_GLOBALS
         "UseMultiToolTask=true"
         "EnableClServerMode=true"
         "BuildPassReferences=true"

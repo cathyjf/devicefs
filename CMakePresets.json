@@ -12,6 +12,9 @@
       "generator": "Visual Studio 18 2026",
       "architecture": "x64",
       "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_VS_GLOBALS": "ForceImportAfterCppDefaultProps=${sourceDir}/misc/SelectLatestMsvc.props"
+      },
       "environment": {
         "POWERSHELL_TELEMETRY_OPTOUT": "true",
         "POWERSHELL_UPDATECHECK": "Off",

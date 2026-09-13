@@ -28,6 +28,9 @@
       "inherits": "base-configure-preset",
       "generator": "Visual Studio 18 2026",
       "architecture": "x64",
+      "cacheVariables": {
+        "CMAKE_VS_GLOBALS": "ForceImportAfterCppDefaultProps=${sourceDir}/../../misc/SelectLatestMsvc.props"
+      },
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",

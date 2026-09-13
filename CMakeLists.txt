@@ -35,7 +35,7 @@ include(misc/MsvcFlags.cmake)
 
 # Increase build parallelism for native C++ projects.
 # See <https://devblogs.microsoft.com/cppblog/cpp-build-throughput-investigation-and-tune-up>.
-set(CMAKE_VS_GLOBALS
+list(APPEND CMAKE_VS_GLOBALS
     "UseMultiToolTask=true"
     "EnableClServerMode=true"
     "BuildPassReferences=true"

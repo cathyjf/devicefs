@@ -30,6 +30,7 @@ if(WIN32)
         "UseMultiToolTask=true"
         "EnableClServerMode=true"
         "BuildPassReferences=true"
+        "IgnoreWarnIntDirSharingDetected=true"
     )
 endif()
 

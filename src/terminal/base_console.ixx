@@ -106,6 +106,8 @@ protected:
             return MenuKey::Cancel;
         case U'\x0c':
             return MenuKey::Redraw;
+        case U'\t':
+            return MenuKey::SwitchArea;
         case U'1':
             return MenuKey::Details;
         default:

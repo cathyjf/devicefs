@@ -141,6 +141,8 @@ struct TcSetAttrInvoker {
         return MenuKey::Home;
     case 'F':
         return MenuKey::End;
+    case 'Z':
+        return MenuKey::SwitchArea;
     case '~': {
         const auto parameters = sequence.substr(2, sequence.size() - 3);
         const auto parameter = parameters.substr(0, parameters.find(';'));
@@ -199,8 +201,14 @@ public:
         }
     }
 
-    [[nodiscard]] auto ReadMenuInput() -> MenuInput {
+    // A deadline lets an output view refresh while no key is pressed. Partial
+    // key sequences remain queued between calls, with their own Escape timeout.
+    [[nodiscard]] auto ReadMenuInput(const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::time_point::max()) -> MenuInput {
         for (;;) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return {.key = MenuKey::Timeout};
+            }
             // The driver records window-size changes even while no key is
             // pressed. Checking that record between bounded input waits lets
             // the menu notice resizes without installing a process-wide signal
@@ -211,19 +219,20 @@ public:
                 return {.key = MenuKey::Resize};
             }
             if (pending_.empty()) {
-                std::ignore = ReceiveUntil(std::chrono::steady_clock::now() +
-                    unix_detail::kInputPollInterval);
+                std::ignore = ReceiveUntil(std::min(deadline,
+                    std::chrono::steady_clock::now() + unix_detail::kInputPollInterval));
                 continue;
             }
             // ESC (0x1B) begins a terminal sequence; a lone ESC is the Escape key.
             // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
             if (pending_.front() == '\x1b') {
-                if (const auto action = ReadEscape()) {
+                if (const auto action = ReadEscape(deadline)) {
                     return {.key = *action};
                 }
                 continue;
             }
             const auto character = pending_.front();
+            escape_deadline_.reset();
             pending_.erase(0, 1);
             if ((character == '\r') || (character == '\n')) {
                 return {.key = MenuKey::Accept};
@@ -415,6 +424,8 @@ private:
         const auto active = (modifiers - 1) & ~(kCapsLock | kNumLock);
         if (((active & ~kShift) == kControl) && (key >= U'a') && (key <= U'z')) {
             key -= U'a' - 1;
+        } else if ((active == kShift) && (key == U'\t')) {
+            return MenuKey::SwitchArea;
         } else if ((active != 0) && (key < 128) && (key != U'\x1b') && (key != U'\r')) {
             return std::nullopt;
         }
@@ -478,13 +489,17 @@ private:
     // An incomplete sequence gets up to `kEscapeTimeout` to receive more bytes;
     // if that wait expires, the leading ESC is consumed as the Back action.
     // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#disambiguate-escape-codes
-    [[nodiscard]] auto ReadEscape() -> std::optional<MenuKey> {
-        const auto deadline = std::chrono::steady_clock::now() + unix_detail::kEscapeTimeout;
+    [[nodiscard]] auto ReadEscape(const std::chrono::steady_clock::time_point deadline)
+        -> std::optional<MenuKey> {
+        if (!escape_deadline_) {
+            escape_deadline_ = std::chrono::steady_clock::now() + unix_detail::kEscapeTimeout;
+        }
         for (;;) {
             // Ctrl+C is user input even when a fragmented terminal reply
             // surrounds it. Consume cancellation before removing a complete
             // sequence, leaving the reply and other keys queued for later input.
             if (ConsumeCancellation()) {
+                escape_deadline_.reset();
                 return MenuKey::Cancel;
             }
             if (pending_.size() > 1) {
@@ -493,6 +508,7 @@ private:
                 // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-PC-Style-Function-Keys
                 if ((pending_[1] != '[') && (pending_[1] != 'O')) {
                     pending_.erase(0, 1);
+                    escape_deadline_.reset();
                     return MenuKey::Back;
                 }
                 if (const auto length = unix_detail::KeySequenceLength(pending_)) {
@@ -500,10 +516,15 @@ private:
                     const auto action = sequence.ends_with('u') ? KittyKey(sequence) :
                         unix_detail::NavigationKey(sequence);
                     pending_.erase(0, length);
+                    escape_deadline_.reset();
                     return action;
                 }
             }
-            if (!ReceiveUntil(deadline)) {
+            if (!ReceiveUntil(std::min(deadline, *escape_deadline_))) {
+                if (std::chrono::steady_clock::now() < *escape_deadline_) {
+                    return std::nullopt;
+                }
+                escape_deadline_.reset();
                 pending_.erase(0, 1);
                 return MenuKey::Back;
             }
@@ -518,6 +539,7 @@ private:
         unix_detail::SetTerminalModeScoped(descriptor_);
     TerminalSize window_size_ = ReadWindowSize();
     std::string pending_;
+    std::optional<std::chrono::steady_clock::time_point> escape_deadline_;
 };
 
 }

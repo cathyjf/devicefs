@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+module;
+
+#include "compat/gsl_suppress.h"
+
 export module devicefs.terminal.menu;
 
 import std;
@@ -18,7 +22,7 @@ export namespace devicefs::terminal {
 
 enum class MenuKey {
     Up, Down, PageUp, PageDown, Home, End, Accept, Back, Cancel, Details,
-    Resize, Redraw,
+    Resize, Redraw, SwitchArea, Timeout,
 };
 
 struct MenuInput {
@@ -208,7 +212,7 @@ public:
         return true;
     }
 
-    auto Draw(auto &frame, const MenuViewport viewport) const -> void {
+    auto DrawEntries(auto &frame, const MenuViewport viewport, const bool focused = true) const -> void {
         frame.MoveTo({.row = viewport.first_row});
         if (entries_.empty()) {
             frame.WriteLine("No entries are available."sv);
@@ -224,8 +228,12 @@ public:
                 FrameLineOptions{.clipping = layout.truncated &&
                         ((position.row + 1) == layout.rows.size()) ?
                             FrameClipping::Ellipsis : FrameClipping::None,
-                    .highlight = position.entry == selected_entry_});
+                    .highlight = focused && (position.entry == selected_entry_)});
         }
+    }
+
+    auto Draw(auto &frame, const MenuViewport viewport) const -> void {
+        DrawEntries(frame, viewport);
         frame.MoveTo({.row = viewport.size.rows - kInformationRows + 1});
         frame.WriteLine("{}", MakeInformationLine(
             std::array{"Up/Down: Select"sv, "Enter: Choose"sv, "Esc: Back"sv}));
@@ -447,6 +455,36 @@ struct MenuPresentation {
     std::optional<MenuViewport> viewport;
 };
 
+// Recovery cannot require the cursor reports that just failed. Fit the message
+// using width bounds and send the completed screen without another query.
+template <WidthPolicy Policy>
+auto ShowMenuRecovery(auto &terminal, const std::optional<TerminalSize> size,
+    const std::span<const std::string_view> items) -> void {
+    auto message = MakeInformationLine(items).text;
+    if (size) {
+        const auto groups = MeasureText<Policy>(message);
+        if (std::ranges::fold_left(groups, 0,
+                [](const auto width, const auto &group) { return width + group.width_bound; }) >
+            size->columns) {
+            const auto marker_width = std::min(3, size->columns);
+            auto remaining_columns = size->columns - marker_width;
+            auto retained_bytes = std::size_t{};
+            for (const auto &group : groups) {
+                if (group.width_bound > remaining_columns) {
+                    break;
+                }
+                remaining_columns -= group.width_bound;
+                retained_bytes += group.text.size();
+            }
+            message.resize(retained_bytes);
+            message.append(FailFastCast<std::size_t>(marker_width), '.');
+        }
+    }
+    terminal.InvalidateFrame();
+    terminal.Write(std::format("{}{}", vt::kClearScreen, message));
+    terminal.PresentFrame();
+}
+
 // `PresentMenu` builds a complete frame around the active list or full-name
 // view. The header callback supplies the preceding content and the row where
 // the menu begins. A saved header avoids repeating that work on navigation;
@@ -461,32 +499,7 @@ template <WidthPolicy Policy, MenuScrollPolicy Scrolling, typename T>
     const auto update = terminal.BeginUpdate();
     const auto terminal_size = cached.terminal_size ? cached.terminal_size : terminal.QuerySize();
     const auto show_message = [&](const std::span<const std::string_view> items) {
-        // Recovery instructions must be readable when cursor reports are
-        // unavailable. Fit the message using width bounds, then send the
-        // completed screen in one write without querying the terminal.
-        auto message = MakeInformationLine(items).text;
-        if (terminal_size) {
-            const auto groups = MeasureText<Policy>(message);
-            if (std::ranges::fold_left(groups, 0,
-                    [](const auto width, const auto &group) { return width + group.width_bound; }) >
-                terminal_size->columns) {
-                const auto marker_width = std::min(3, terminal_size->columns);
-                auto remaining_columns = terminal_size->columns - marker_width;
-                auto retained_bytes = std::size_t{};
-                for (const auto &group : groups) {
-                    if (group.width_bound > remaining_columns) {
-                        break;
-                    }
-                    remaining_columns -= group.width_bound;
-                    retained_bytes += group.text.size();
-                }
-                message.resize(retained_bytes);
-                message.append(FailFastCast<std::size_t>(marker_width), '.');
-            }
-        }
-        terminal.InvalidateFrame();
-        terminal.Write(std::format("{}{}", vt::kClearScreen, message));
-        terminal.PresentFrame();
+        ShowMenuRecovery<Policy>(terminal, terminal_size, items);
         return MenuPresentation<T, Policy>{.terminal_size = terminal_size,
             .header = std::nullopt, .viewport = std::nullopt};
     };
@@ -546,6 +559,360 @@ template <WidthPolicy Policy, MenuScrollPolicy Scrolling, typename T>
 }
 
 export namespace devicefs::terminal {
+
+// A command's identifier is returned to the caller when selected. Keep the
+// identifier stable when changing its label or replacing the available commands.
+struct OutputCommand {
+    std::size_t id;
+    std::string_view label;
+};
+
+enum class OutputCommandPosition { AboveOutput, BelowOutput };
+
+// An output menu displays arriving logical lines and a selectable command list.
+// AppendLine and SetCommands copy their inputs. Use this object on the UI thread;
+// the update callback can drain a producer's queue without holding its lock
+// during rendering. Retain the object across Select calls to preserve scrollback,
+// focus, and selection while the caller handles a command.
+//
+// This interface accepts complete lines, with no trailing newline. Embedded
+// controls receive the same visible notation as menu labels. Byte-stream
+// decoding, unfinished lines, and carriage-return progress updates belong to
+// the producer feeding this interface.
+class OutputMenu {
+public:
+    // Retain at most this many logical lines, discarding the oldest first.
+    // Individual lines are retained in full and wrap when displayed.
+    GSL_SUPPRESS("26455", "Constructing the retained-line deque can allocate storage and throw.")
+    explicit OutputMenu(const std::size_t retained_lines = 4096)
+        : retained_lines_(retained_lines) {}
+
+    OutputMenu(const OutputMenu &) = delete;
+    auto operator=(const OutputMenu &) -> OutputMenu & = delete;
+
+    // Place commands above or below the output, with a blank row between the
+    // two areas. The default is BelowOutput. Changing the position retains
+    // keyboard focus, command selection, and the passage being read.
+    auto SetCommandPosition(const OutputCommandPosition position) noexcept -> void {
+        if (position != command_position_) {
+            command_position_ = position;
+            dirty_ = true;
+        }
+    }
+
+    // Request this many displayed rows for command text, including wrapped
+    // continuations. Headings, the blank separator, and bottom controls occupy
+    // additional rows. The view reduces this height when needed to leave at
+    // least one output row; values below one request one row.
+    // Without a request, commands use up to four rows and at most half the
+    // available content area.
+    auto SetCommandRows(const int rows) noexcept -> void {
+        const auto requested = std::max(1, rows);
+        if (command_rows_ != requested) {
+            command_rows_ = requested;
+            dirty_ = true;
+        }
+    }
+
+    auto AppendLine(const std::string_view text) -> void {
+        if (retained_lines_ == 0) {
+            return;
+        }
+        lines_.push_back({.text = PrepareTerminalText(text), .layout = std::nullopt});
+        if (lines_.size() > retained_lines_) {
+            lines_.pop_front();
+            ++first_line_;
+        }
+        dirty_ = true;
+    }
+
+    // Supply the commands currently available to the user. An existing selection
+    // follows its identifier through reordering and label changes. If that command
+    // disappears, select the nearest remaining entry without invoking it.
+    auto SetCommands(const std::span<const OutputCommand> commands) -> void {
+        auto labels = std::vector<std::string>{};
+        auto ids = std::vector<std::size_t>{};
+        for (const auto &command : commands) {
+            if (std::ranges::contains(ids, command.id)) {
+                throw std::invalid_argument("output menu command identifiers must be distinct");
+            }
+            labels.push_back(PrepareTerminalText(command.label));
+            ids.push_back(command.id);
+        }
+        if ((ids == command_ids_) && (labels == command_labels_)) {
+            return;
+        }
+        auto selected = list_ ? list_->SelectedIndex() : 0;
+        if (!command_ids_.empty()) {
+            const auto found = std::ranges::find(ids, command_ids_.at(selected));
+            if (found != ids.end()) {
+                selected = FailFastCast<std::size_t>(found - ids.begin());
+            }
+        }
+        list_.reset();
+        command_ids_ = std::move(ids);
+        command_labels_ = std::move(labels);
+        list_.emplace(command_labels_, selected);
+        dirty_ = true;
+    }
+
+    // Request a new frame when caller-owned header content changes.
+    auto Refresh() noexcept -> void { dirty_ = true; }
+
+    // Display output and commands within the caller's existing EnterScreen
+    // lifetime. draw_header receives the complete Frame and leaves its cursor
+    // at column one where the first area begins. update receives this OutputMenu
+    // before the first frame and after each input wait, so it can append output,
+    // replace commands, or request a refreshed heading. It must return promptly.
+    // Idle waits last at most 50 ms; unchanged state produces no terminal output.
+    //
+    // Tab or Shift+Tab changes area. Arrows, paging, and Home/End operate on that
+    // area. Scrolling upward suspends following new output; reaching the bottom
+    // resumes it. Resizing preserves the passage being read. Enter returns the
+    // selected command's identifier only while commands have focus. Escape or
+    // Ctrl+C returns an empty optional. The caller owns the operation's lifetime
+    // and decides what selecting a command or cancelling should do.
+    //
+    // The console supplies ReadMenuInput(deadline), returning MenuKey::Timeout
+    // when the deadline expires. I/O and callback exceptions propagate. Missing
+    // layout reports show recovery instructions and await resize or Ctrl+L.
+    template <WidthPolicy Policy = WidthPolicy::AllModes>
+    [[nodiscard]] auto Select(MenuTerminal<Policy> auto &terminal,
+        auto &&draw_header, auto &&update) -> std::optional<std::size_t> try {
+        using namespace std::chrono_literals;
+        constexpr auto kRefreshInterval = 50ms;
+        auto size = std::optional<TerminalSize>{};
+        auto input = MenuInput{MenuKey::Redraw};
+        auto usable = false;
+        auto retry = true;
+        dirty_ = true;
+        if (!list_) {
+            list_.emplace(command_labels_, 0);
+        }
+        for (;;) {
+            std::invoke(update, *this);
+            if (retry || (usable && dirty_)) {
+                const auto guard = terminal.BeginUpdate();
+                if (!size) {
+                    size = terminal.QuerySize();
+                }
+                usable = size && Present<Policy>(terminal, draw_header, *size, input);
+                if (!size) {
+                    menu_detail::ShowMenuRecovery<Policy>(terminal, size, std::array{
+                        "Terminal size unavailable."sv, "Ctrl+L: Retry"sv, "Esc: Back"sv});
+                }
+                dirty_ = false;
+                retry = false;
+            }
+            input = terminal.ReadMenuInput(std::chrono::steady_clock::now() + kRefreshInterval);
+            if ((input.key == MenuKey::Back) || (input.key == MenuKey::Cancel)) {
+                return std::nullopt;
+            }
+            if ((input.key == MenuKey::Resize) || (input.key == MenuKey::Redraw)) {
+                size.reset();
+                retry = true;
+                if (input.key == MenuKey::Redraw) {
+                    terminal.InvalidateFrame();
+                    list_->InvalidateLayout();
+                    layout_width_ = 0;
+                }
+            } else if (usable) {
+                if (input.key == MenuKey::SwitchArea) {
+                    if ((input.repeat % 2) != 0) {
+                        commands_focused_ = !commands_focused_;
+                        dirty_ = true;
+                    }
+                } else if (commands_focused_) {
+                    if ((input.key == MenuKey::Accept) && !command_ids_.empty()) {
+                        return command_ids_.at(list_->SelectedIndex());
+                    }
+                    dirty_ |= list_->Navigate(input);
+                } else {
+                    dirty_ |= Scroll(input);
+                }
+            }
+        }
+    } catch (const InputCancelled &) {
+        return std::nullopt;
+    }
+
+private:
+    struct Line {
+        std::string text;
+        std::optional<TextLayout> layout;
+    };
+
+    struct Row {
+        std::size_t line;
+        std::size_t offset;
+        std::size_t length;
+        bool truncated;
+    };
+
+    [[nodiscard]] auto Scroll(const MenuInput input) -> bool {
+        if (rows_.empty()) {
+            return false;
+        }
+        const auto last = rows_.size() - std::min(rows_.size(), output_rows_);
+        const auto amount = input.repeat *
+            ((input.key == MenuKey::PageUp) || (input.key == MenuKey::PageDown) ? output_rows_ : 1);
+        switch (input.key) {
+        case MenuKey::Up:
+        case MenuKey::PageUp:
+            top_ -= std::min(top_, amount);
+            break;
+        case MenuKey::Down:
+        case MenuKey::PageDown:
+            top_ += std::min(last - std::min(top_, last), amount);
+            top_ = std::min(top_, last);
+            break;
+        case MenuKey::Home:
+            top_ = 0;
+            break;
+        case MenuKey::End:
+            top_ = last;
+            break;
+        default:
+            return false;
+        }
+        following_ = top_ == last;
+        anchor_line_ = rows_.at(top_).line;
+        anchor_offset_ = rows_.at(top_).offset;
+        history_lost_ = false;
+        return true;
+    }
+
+    template <WidthPolicy Policy>
+    [[nodiscard]] auto PrepareOutput(MenuTerminal<Policy> auto &terminal,
+        const menu_detail::MenuViewport viewport) -> bool {
+        if (layout_width_ != viewport.size.columns) {
+            for (auto &line : lines_) {
+                line.layout.reset();
+            }
+            layout_width_ = viewport.size.columns;
+        }
+        rows_.clear();
+        auto id = first_line_;
+        for (auto &line : lines_) {
+            if (!line.layout) {
+                line.layout = LayoutText<Policy>(terminal, line.text,
+                    {.row = viewport.first_row},
+                    {.size = viewport.size, .continuation_column = 1,
+                        .maximum_rows = viewport.rows});
+            }
+            if (!line.layout) {
+                return false;
+            }
+            for (const auto row : line.layout->rows) {
+                rows_.push_back({.line = id,
+                    .offset = FailFastCast<std::size_t>(row.data() - line.text.data()),
+                    .length = row.size(), .truncated = false});
+            }
+            if (line.layout->truncated) {
+                rows_.back().truncated = true;
+            }
+            ++id;
+        }
+        output_rows_ = FailFastCast<std::size_t>(viewport.rows);
+        if (following_) {
+            top_ = rows_.size() - std::min(rows_.size(), output_rows_);
+        } else {
+            history_lost_ |= anchor_line_ < first_line_;
+            const auto after = std::ranges::upper_bound(rows_, std::pair{anchor_line_, anchor_offset_}, {},
+                [](const Row &row) { return std::pair{row.line, row.offset}; });
+            top_ = after == rows_.begin() ? 0 :
+                FailFastCast<std::size_t>(after - rows_.begin() - 1);
+        }
+        return true;
+    }
+
+    template <WidthPolicy Policy>
+    [[nodiscard]] auto Present(MenuTerminal<Policy> auto &terminal, auto &draw_header,
+        const TerminalSize size, const MenuInput input) -> bool {
+        auto frame = Frame<std::remove_reference_t<decltype(terminal)>, Policy>{terminal, size};
+        std::invoke(draw_header, frame);
+        frame.ClearFromCurrentRow();
+        const auto first = frame.CurrentRow();
+        // Reserve two area headings, two control rows, and a blank row between
+        // the areas.
+        const auto available = size.rows - first - 4;
+        const auto message = [&](const std::string_view text) {
+            auto recovery = Frame<std::remove_reference_t<decltype(terminal)>, Policy>{terminal, size};
+            recovery.WriteLine("{}", text);
+            if (!terminal.template Flip<Policy>(recovery)) {
+                menu_detail::ShowMenuRecovery<Policy>(terminal, size, std::array{text});
+            }
+            return false;
+        };
+        if (!frame.Ready()) {
+            return message("Layout unavailable. Ctrl+L: Retry. Esc: Back."sv);
+        }
+        if ((size.columns < menu_detail::kMinimumColumns) || (available < 2)) {
+            return message("Enlarge the window. Esc: Back."sv);
+        }
+        const auto command_rows = std::min(
+            command_rows_.value_or(std::min(4, available / 2)), available - 1);
+        const auto output_rows = available - command_rows;
+        const auto commands_above = command_position_ == OutputCommandPosition::AboveOutput;
+        const auto output = menu_detail::MenuViewport{
+            .size = size, .first_row = commands_above ? first + command_rows + 3 : first + 1,
+            .rows = output_rows};
+        const auto commands = menu_detail::MenuViewport{
+            .size = size, .first_row = commands_above ? first + 1 : first + output_rows + 3,
+            .rows = command_rows};
+        list_->SetWidth(size.columns);
+        if (!PrepareOutput<Policy>(terminal, output) ||
+            !list_->Prepare<Policy, MenuScrollPolicy::Line>(terminal, commands,
+                commands_focused_ || (input.key == MenuKey::Resize) || (input.key == MenuKey::Redraw) ?
+                    input : MenuInput{MenuKey::Timeout})) {
+            return message("Layout unavailable. Ctrl+L: Retry. Esc: Back."sv);
+        }
+        frame.MoveTo({.row = output.first_row - 1});
+        frame.WriteLine("Output{} - {}", commands_focused_ ? ""sv : " (active)"sv,
+            history_lost_ ? "older lines discarded"sv :
+            (following_ ? "following newest lines"sv : "reading history; End: follow newest"sv));
+        const auto count = std::min(output_rows_, rows_.size() - top_);
+        for (auto index = 0uz; index < count; ++index) {
+            const auto &row = rows_.at(top_ + index);
+            frame.MoveTo({.row = output.first_row + FailFastCast<int>(index)});
+            frame.WriteLine("{}", PreparedText{.text = lines_.at(row.line - first_line_).text.substr(
+                row.offset, row.length)}, FrameLineOptions{
+                .clipping = row.truncated ? FrameClipping::Ellipsis : FrameClipping::None});
+        }
+        frame.MoveTo({.row = commands.first_row - 1});
+        frame.WriteLine("Commands{}", commands_focused_ ? " (active)"sv : ""sv);
+        list_->DrawEntries(frame, commands, commands_focused_);
+        frame.MoveTo({.row = size.rows - 1});
+        frame.WriteLine("Tab: Change area    Up/Down: {}    Enter: Choose\n",
+            commands_focused_ ? "Select"sv : "Scroll"sv);
+        frame.WriteLine("PgUp/PgDn: Page    Home/End    Ctrl+L: Redraw    Esc: Back"sv);
+        if (!frame.Ready() || !terminal.template Flip<Policy>(frame)) {
+            return message("Layout unavailable. Ctrl+L: Retry. Esc: Back."sv);
+        }
+        return true;
+    }
+
+    std::size_t retained_lines_;
+    std::deque<Line> lines_;
+    std::size_t first_line_ = 0;
+    std::vector<Row> rows_;
+    std::size_t top_ = 0;
+    std::size_t output_rows_ = 0;
+    // The logical line and byte offset identify the passage being read even
+    // after a width change gives it a different wrapped row number.
+    std::size_t anchor_line_ = 0;
+    std::size_t anchor_offset_ = 0;
+    int layout_width_ = 0;
+    bool following_ = true;
+    bool history_lost_ = false;
+    bool commands_focused_ = true;
+    bool dirty_ = true;
+    OutputCommandPosition command_position_ = OutputCommandPosition::BelowOutput;
+    std::optional<int> command_rows_;
+    std::vector<std::size_t> command_ids_;
+    std::vector<std::string> command_labels_;
+    std::optional<menu_detail::MenuListView> list_;
+};
 
 // `SelectMenuItem` displays a scrolling list after caller-drawn content and
 // returns the original index of the chosen entry. Escape or Ctrl+C cancels

@@ -228,7 +228,8 @@ public:
         return found == displayed_.lines.end() ? ""sv : std::string_view{found->second};
     }
 
-    [[nodiscard]] auto ReadMenuInput() -> MenuInput {
+    [[nodiscard]] auto ReadMenuInput(const std::chrono::steady_clock::time_point =
+        std::chrono::steady_clock::time_point::max()) -> MenuInput {
         Require(active, "menu input was read without an active screen owner"sv);
         Require(!updating, "the menu waited for input with a screen update unfinished"sv);
         auto frame = std::string{};
@@ -344,7 +345,212 @@ constexpr auto kPositionEntries = std::array{
 }
 
 export [[nodiscard]] auto TestMenu() -> bool {
-    auto passed = Test("ASCII menu display, selection, scrolling, and resizing needing no width queries"sv, [] {
+    auto passed = Test("output following, inspection, focus, and quiet input deadlines"sv, [] {
+        constexpr auto input = std::array{
+            MenuInput{MenuKey::Timeout}, MenuInput{MenuKey::Timeout},
+            MenuInput{MenuKey::SwitchArea}, MenuInput{MenuKey::Up},
+            MenuInput{MenuKey::Timeout}, MenuInput{MenuKey::End},
+            MenuInput{MenuKey::SwitchArea}, MenuInput{MenuKey::Down}, MenuInput{MenuKey::Accept}};
+        auto terminal = MenuConsole{input, {.rows = 12, .columns = 100}};
+        const auto screen = terminal.EnterScreen();
+        auto view = OutputMenu{};
+        view.SetCommands(std::array{OutputCommand{10, "First"sv}, OutputCommand{20, "Second"sv}});
+        for (auto line = 0; line < 8; ++line) {
+            view.AppendLine(std::format("Line {}", line));
+        }
+        const auto result = view.Select(terminal, [](auto &) {}, [&](auto &output) {
+            if (terminal.frames.size() == 2) {
+                output.AppendLine("Line 8"sv);
+            } else if (terminal.frames.size() == 5) {
+                output.AppendLine("Line 9"sv);
+            }
+        });
+        Require(result == 20, "output navigation changed the selected command"sv);
+        Require(terminal.frames.at(0).contains("Line 4\nLine 5\nLine 6\nLine 7"sv),
+            "initial output did not follow the bottom"sv);
+        Require(terminal.touched_rows.at(1).empty() && (terminal.presentations.at(1) == 0),
+            "an idle timeout repainted the screen"sv);
+        Require(terminal.frames.at(2).contains("Line 5\nLine 6\nLine 7\nLine 8"sv),
+            "new output did not follow the bottom"sv);
+        Require(terminal.frames.at(5).contains("Line 4\nLine 5\nLine 6\nLine 7"sv),
+            "arriving output moved the passage being inspected"sv);
+        Require(terminal.frames.at(6).contains("Line 6\nLine 7\nLine 8\nLine 9"sv),
+            "End did not resume following"sv);
+        Require(!terminal.touched_rows.at(2).contains(8) &&
+            !terminal.touched_rows.at(2).contains(9), "arriving output repainted commands"sv);
+    });
+    passed &= Test("commands moving above output with a blank row and retained view state"sv, [] {
+        constexpr auto input = std::array{MenuInput{MenuKey::Down}, MenuInput{MenuKey::SwitchArea},
+            MenuInput{MenuKey::Home}, MenuInput{MenuKey::Down}, MenuInput{MenuKey::Timeout},
+            MenuInput{MenuKey::Timeout}, MenuInput{MenuKey::SwitchArea}, MenuInput{MenuKey::Accept}};
+        auto terminal = MenuConsole{input, {.rows = 14, .columns = 100}};
+        const auto screen = terminal.EnterScreen();
+        auto view = OutputMenu{};
+        view.SetCommands(std::array{OutputCommand{10, "First"sv}, OutputCommand{20, "Second"sv},
+            OutputCommand{30, "Third"sv}, OutputCommand{40, "Fourth"sv}});
+        for (auto line = 0; line < 8; ++line) {
+            view.AppendLine(std::format("Line {}", line));
+        }
+        Require(view.Select(terminal, [](auto &frame) {
+            frame.Write("Caller header\n"sv);
+        }, [&](auto &output) {
+            if (terminal.frames.size() == 5) {
+                output.SetCommandPosition(OutputCommandPosition::AboveOutput);
+            } else if (terminal.frames.size() == 6) {
+                output.SetCommandPosition(OutputCommandPosition::BelowOutput);
+            }
+        }) == 20, "changing area order lost the selected command"sv);
+        const auto &above = terminal.frames.at(5);
+        const auto &below = terminal.frames.at(6);
+        Require(above.starts_with("Caller header\nCommands\n"sv) &&
+            above.contains("  Fourth\n\nOutput (active)"sv),
+            "commands were not above output with a blank row between them"sv);
+        Require(below.starts_with("Caller header\nOutput (active)"sv) &&
+            below.contains("Line 4\n\nCommands\n"sv),
+            "output was not above commands with a blank row between them"sv);
+        Require(above.contains("Line 1\nLine 2\nLine 3\nLine 4"sv) &&
+            below.contains("Line 1\nLine 2\nLine 3\nLine 4"sv),
+            "changing area order moved the passage being read"sv);
+        Require(!terminal.touched_rows.at(5).contains(1) &&
+            !terminal.touched_rows.at(6).contains(1), "moving areas repainted the unchanged header"sv);
+    });
+    passed &= Test("both output-menu orders retaining their separator at the minimum height"sv, [] {
+        constexpr auto input = std::array{MenuInput{MenuKey::Resize}, MenuInput{MenuKey::Back}};
+        for (const auto position : std::array{
+            OutputCommandPosition::AboveOutput, OutputCommandPosition::BelowOutput}) {
+            auto terminal = MenuConsole{input, {.rows = 7, .columns = 80}};
+            terminal.resize_to = TerminalSize{.rows = 6, .columns = 80};
+            const auto screen = terminal.EnterScreen();
+            auto view = OutputMenu{};
+            view.SetCommandPosition(position);
+            view.AppendLine("Output line"sv);
+            view.SetCommands(std::array{OutputCommand{1, "Command"sv}});
+            Require(!view.Select(terminal, [](auto &) {}, [](auto &) {}),
+                "a small window prevented cancellation"sv);
+            Require(terminal.frames.front().contains(position == OutputCommandPosition::AboveOutput ?
+                "> Command\n\nOutput"sv : "Output line\n\nCommands"sv),
+                "the minimum-height layout omitted the blank separator"sv);
+            Require(terminal.frames.back().contains("Enlarge the window"sv),
+                "a window without room for both areas did not show recovery instructions"sv);
+        }
+    });
+    passed &= Test("requested command heights in both area orders and after resizing"sv, [] {
+        constexpr auto input = std::array{MenuInput{MenuKey::Resize}, MenuInput{MenuKey::Back}};
+        for (const auto position : std::array{
+            OutputCommandPosition::AboveOutput, OutputCommandPosition::BelowOutput}) {
+            for (const auto requested : std::array{1, 5, 100, 0, -1}) {
+                auto terminal = MenuConsole{input, {.rows = 12, .columns = 80}};
+                terminal.resize_to = TerminalSize{.rows = 8, .columns = 80};
+                const auto screen = terminal.EnterScreen();
+                auto view = OutputMenu{};
+                view.SetCommandPosition(position);
+                view.SetCommandRows(requested);
+                view.AppendLine("Output line"sv);
+                view.SetCommands(std::array{OutputCommand{1, "Command"sv}});
+                Require(!view.Select(terminal, [](auto &) {}, [](auto &) {}),
+                    "a requested command height prevented cancellation"sv);
+                const auto expected = requested == 100 ? std::array{6z, 2z} :
+                    (requested == 5 ? std::array{5z, 2z} : std::array{1z, 1z});
+                for (auto index = 0uz; index < expected.size(); ++index) {
+                    const auto &frame = terminal.frames.at(index);
+                    const auto commands = frame.find("Commands (active)"sv);
+                    const auto end = frame.find(position == OutputCommandPosition::AboveOutput ?
+                        "Output -"sv : "Tab: Change area"sv);
+                    Require((commands != std::string::npos) && (end != std::string::npos),
+                        "the requested height displaced an area or the controls"sv);
+                    const auto rows = std::ranges::count(
+                        std::string_view{frame}.substr(commands, end - commands), '\n');
+                    Require(rows == expected.at(index) +
+                        (position == OutputCommandPosition::AboveOutput ? 2 : 1),
+                        "the command area did not receive the requested displayed rows"sv);
+                    Require(frame.contains("Output line"sv),
+                        "the command height left no row for output"sv);
+                }
+            }
+        }
+    });
+    passed &= Test("output command identity surviving readiness changes and successive actions"sv, [] {
+        constexpr auto input = std::array{MenuInput{MenuKey::Down}, MenuInput{MenuKey::Timeout},
+            MenuInput{MenuKey::Accept}, MenuInput{MenuKey::Accept}};
+        auto terminal = MenuConsole{input, {.rows = 12, .columns = 80}};
+        const auto screen = terminal.EnterScreen();
+        auto view = OutputMenu{};
+        view.SetCommands(std::array{OutputCommand{10, "Pause"sv}, OutputCommand{20, "Cancel"sv}});
+        const auto update = [&](auto &output) {
+            if (terminal.frames.size() == 2) {
+                output.SetCommands(std::array{OutputCommand{30, "Open folder"sv},
+                    OutputCommand{10, "Pause"sv}, OutputCommand{20, "Close"sv}});
+            }
+        };
+        Require(view.Select(terminal, [](auto &) {}, update) == 20,
+            "enabling a command changed the pending selection"sv);
+        Require(view.Select(terminal, [](auto &) {}, [](auto &) {}) == 20,
+            "returning from a command lost the selection"sv);
+        Require(terminal.touched_rows.back().empty(), "reopening the same view repainted it"sv);
+        Require(terminal.screen_entries == 1, "an action reentered the alternate screen"sv);
+    });
+    passed &= Test("output inspection preserving its text offset through repeated rewrapping"sv, [] {
+        constexpr auto input = std::array{MenuInput{MenuKey::SwitchArea}, MenuInput{MenuKey::Home},
+            MenuInput{MenuKey::Down, 2}, MenuInput{MenuKey::Resize}, MenuInput{MenuKey::Resize},
+            MenuInput{MenuKey::Back}};
+        constexpr auto sizes = std::array{TerminalSize{12, 30}, TerminalSize{12, 20}};
+        auto terminal = MenuConsole{input, {.rows = 12, .columns = 20}};
+        terminal.resize_sequence = sizes;
+        const auto screen = terminal.EnterScreen();
+        auto view = OutputMenu{};
+        auto text = std::string{};
+        for (auto part = 0; part < 10; ++part) {
+            text.append(std::format("{:02}abcdefghijklmnopqr", part));
+        }
+        view.AppendLine(text);
+        Require(!view.Select(terminal, [](auto &) {}, [](auto &) {}), "Back selected a command"sv);
+        Require(terminal.frames.at(3).contains("02abcdefghijklmnopqr\n"sv) &&
+            terminal.frames.at(5).contains("02abcdefghijklmnopqr\n"sv),
+            "rewrapping drifted from the original reading position"sv);
+        Require(terminal.frames.at(4).contains(text.substr(30, 30)),
+            "widening did not display the row containing the saved offset"sv);
+    });
+    passed &= Test("retained output reporting discarded history and preparing complete lines"sv, [] {
+        constexpr auto input = std::array{MenuInput{MenuKey::SwitchArea}, MenuInput{MenuKey::Home},
+            MenuInput{MenuKey::Timeout}, MenuInput{MenuKey::Back}};
+        auto terminal = MenuConsole{input, {.rows = 8, .columns = 100}};
+        const auto screen = terminal.EnterScreen();
+        auto view = OutputMenu{3};
+        view.AppendLine("Oldest"sv);
+        view.AppendLine("Middle"sv);
+        view.AppendLine("Newest"sv);
+        Require(!view.Select(terminal, [](auto &) {}, [&](auto &output) {
+            if (terminal.frames.size() == 3) {
+                output.AppendLine("A\tB\nC"sv);
+            }
+        }), "Back selected a command"sv);
+        Require(terminal.frames.back().contains("older lines discarded"sv) &&
+            terminal.frames.back().contains("Middle\nNewest"sv),
+            "discarded history did not move to the oldest retained passage"sv);
+        // A second opening follows End to inspect the prepared appended line.
+        constexpr auto more = std::array{MenuInput{MenuKey::SwitchArea}, MenuInput{MenuKey::End},
+            MenuInput{MenuKey::Back}};
+        auto second = MenuConsole{more, {.rows = 8, .columns = 100}};
+        const auto second_screen = second.EnterScreen();
+        auto prepared = OutputMenu{};
+        prepared.AppendLine("A\tB\nC"sv);
+        Require(!prepared.Select(second, [](auto &) {}, [](auto &) {}), "Back selected a command"sv);
+        Require(second.frames.back().contains("A\\tB\\nC"sv), "output controls moved the cursor"sv);
+    });
+    passed &= Test("an output menu remaining cancellable while too small or without layout reports"sv, [] {
+        constexpr auto input = std::array{MenuInput{MenuKey::Timeout}, MenuInput{MenuKey::Back}};
+        for (const auto small : std::array{false, true}) {
+            auto terminal = MenuConsole{input, {.rows = small ? 3 : 12, .columns = 40}};
+            terminal.cursor_reports_available = false;
+            const auto screen = terminal.EnterScreen();
+            auto view = OutputMenu{};
+            view.AppendLine(std::string(100, 'x') + "é");
+            Require(!view.Select(terminal, [](auto &) {}, [](auto &) {}),
+                "unavailable layout prevented cancellation"sv);
+            Require(terminal.touched_rows.at(1).empty(), "idle recovery repainted its message"sv);
+        }
+    });
+    passed &= Test("ASCII menu display, selection, scrolling, and resizing needing no width queries"sv, [] {
         constexpr auto input = std::array{
             MenuInput{MenuKey::Down}, MenuInput{MenuKey::End}, MenuInput{MenuKey::Home},
             MenuInput{MenuKey::Resize}, MenuInput{MenuKey::Accept}};

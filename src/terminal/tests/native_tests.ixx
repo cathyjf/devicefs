@@ -248,7 +248,34 @@ public:
 [[nodiscard]] auto TestNativeInput(NativeInput &input) -> bool {
     const auto original_modes = input.Modes();
     auto passed = true;
+    passed &= Test("native input deadlines and Tab focus changes"sv, [&] {
+        auto console = TestConsole{};
+        Require(console.ReadMenuInput(std::chrono::steady_clock::now() + 5ms).key == MenuKey::Timeout,
+            "idle input did not reach its deadline"sv);
+        input.Feed("\t"sv);
+        Require(console.ReadMenuInput().key == MenuKey::SwitchArea, "Tab did not change area"sv);
+        input.Feed("\x03"sv);
+        Require(console.ReadMenuInput(std::chrono::steady_clock::now() + 100ms).key == MenuKey::Cancel,
+            "a bounded input wait lost cancellation"sv);
+    });
 #ifndef _WIN32
+    passed &= Test("Unix fragmented keys surviving an earlier refresh deadline"sv, [&] {
+        auto console = TestConsole{};
+        // CSI B is Down, CSI Z is Shift+Tab, and kitty's CSI 27 u is Escape.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-PC-Style-Function-Keys
+        // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#disambiguate-escape-codes
+        input.Feed("\x1b["sv);
+        Require(console.ReadMenuInput(std::chrono::steady_clock::now() + 1ms).key == MenuKey::Timeout,
+            "a refresh deadline turned a partial arrow into Escape"sv);
+        input.Feed("B\x1b[Z\x1b[27u"sv);
+        Require(console.ReadMenuInput().key == MenuKey::Down, "a refresh deadline lost the arrow"sv);
+        Require(console.ReadMenuInput().key == MenuKey::SwitchArea, "Shift+Tab did not change area"sv);
+        Require(console.ReadMenuInput().key == MenuKey::Back, "kitty Escape was not decoded"sv);
+        input.Feed("\x1b"sv);
+        Require(console.ReadMenuInput(std::chrono::steady_clock::now() + 1ms).key == MenuKey::Timeout,
+            "a refresh deadline prematurely consumed a lone Escape"sv);
+        Require(console.ReadMenuInput().key == MenuKey::Back, "a lone Escape was lost between waits"sv);
+    });
     passed &= Test("kitty keyboard protocol mode pushed and restored on the Unix alternate screen"sv, [&] {
         constexpr auto expected = vt::Concatenate<
             vt::kEnterAlternateScreen, vt::kPushDisambiguatedKeys,
@@ -439,6 +466,30 @@ public:
             (navigation.at(3).cursor_queries == 0) &&
             (navigation.at(4).cursor_queries == 0),
             "the native menus repeated measurements for cached text"sv);
+    });
+    passed &= Test("arriving Unicode output and a command selection through native Console Host"sv, [&] {
+        auto console = NativeConsole{};
+        const auto screen = console.EnterScreen();
+        auto view = OutputMenu{};
+        view.SetCommands(std::array{OutputCommand{7, "Open folder"sv}});
+        auto updates = 0;
+        const auto selected = view.Select(console, [](auto &frame) {
+            frame.Write("Output menu native test\n"sv);
+        }, [&](auto &output) {
+            ++updates;
+            if (updates == 1) {
+                output.AppendLine("日本語 — café — é — 👩‍💻");
+            } else if (updates == 2) {
+                output.AppendLine("Mount ready.");
+            } else if (updates == 3) {
+                auto enter = INPUT_RECORD{.EventType = KEY_EVENT};
+                enter.Event.KeyEvent = {.bKeyDown = TRUE, .wRepeatCount = 1,
+                    .wVirtualKeyCode = VK_RETURN, .wVirtualScanCode = 0,
+                    .uChar = {.UnicodeChar = L'\r'}, .dwControlKeyState = 0};
+                input.FeedRecords(std::span{&enter, 1});
+            }
+        });
+        Require(selected == 7, "the output view could not select its native command"sv);
     });
     passed &= Test("Windows console host emitting character-only cursor-reply events"sv, [] {
         auto console = NativeConsole{};

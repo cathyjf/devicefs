@@ -862,6 +862,7 @@ constexpr auto kHelp = R"(Usage:
   devicefs-terminal-test --native-test
   devicefs-terminal-test --menu
   devicefs-terminal-test --measure-menu
+  devicefs-terminal-test --output-menu
   devicefs-terminal-test --text TEXT
   devicefs-terminal-test --file FILENAME
 
@@ -870,7 +871,86 @@ The text is filtered, wrapped, and indented by two columns after each wrap.
 Text begins at the current cursor position and uses the remaining screen rows.
 --menu opens submenus; Escape returns to the parent or closes the main menu.
 --measure-menu reports each menu update's time and terminal traffic after exit.
+--output-menu streams sample output above commands; Tab changes the active area.
 )"sv;
+
+[[nodiscard]] auto OutputMenuDemo() -> int {
+    using namespace std::chrono_literals;
+    auto terminal = NativeConsole{};
+    auto view = OutputMenu{200};
+    auto sequence = 0;
+    auto paused = false;
+    auto ready = false;
+    auto command_position = OutputCommandPosition::BelowOutput;
+    auto next_line = std::chrono::steady_clock::now();
+    const auto draw_header = [&ready](auto &frame) {
+        frame.Write("Streaming output and command selection\n{}\n\n",
+            ready ? "The example mount is ready."sv : "Preparing the example mount..."sv);
+    };
+    const auto update = [&](auto &output) {
+        const auto now = std::chrono::steady_clock::now();
+        if (!paused && (now >= next_line)) {
+            ++sequence;
+            output.AppendLine(std::format("[{:03}] {}", sequence,
+                (sequence % 5) == 0 ?
+                    "A longer diagnostic with Unicode: café, 日本語, é, and 👩‍💻. Resize the window while reading this passage to try its wrapping."sv :
+                    "Reading backup data and preparing the mounted folder."sv));
+            next_line = now + 400ms;
+            ready = sequence >= 8;
+        }
+        if (ready) {
+            output.SetCommands(std::array{
+                OutputCommand{1, "Open mounted folder in Explorer (demonstration)"sv},
+                OutputCommand{2, paused ? "Resume output"sv : "Pause output"sv},
+                OutputCommand{3, "Produce a burst of output"sv},
+                OutputCommand{5, command_position == OutputCommandPosition::BelowOutput ?
+                    "Move commands above output"sv : "Move commands below output"sv},
+                OutputCommand{4, "Close demonstration"sv}});
+        } else {
+            output.SetCommands(std::array{
+                OutputCommand{2, paused ? "Resume output"sv : "Pause output"sv},
+                OutputCommand{5, command_position == OutputCommandPosition::BelowOutput ?
+                    "Move commands above output"sv : "Move commands below output"sv},
+                OutputCommand{4, "Cancel demonstration"sv}});
+        }
+    };
+    const auto last_selection = [&]() -> std::optional<std::size_t> {
+        const auto screen = terminal.EnterScreen();
+        auto selected = std::optional<std::size_t>{};
+        while (const auto action = view.Select(terminal, draw_header, update)) {
+            selected = action;
+            switch (*action) {
+            case 1:
+                view.AppendLine("Explorer action selected. This demonstration does not create a mount.");
+                break;
+            case 2:
+                paused = !paused;
+                break;
+            case 3:
+                for (auto index = 1; index <= 40; ++index) {
+                    view.AppendLine(std::format("Burst line {}: inspecting another backup record.", index));
+                }
+                break;
+            case 4:
+                return action;
+            case 5:
+                command_position = command_position == OutputCommandPosition::BelowOutput ?
+                    OutputCommandPosition::AboveOutput : OutputCommandPosition::BelowOutput;
+                view.SetCommandPosition(command_position);
+                break;
+            default:
+                std::unreachable();
+            }
+        }
+        return selected;
+    }();
+    if (last_selection) {
+        std::println("Last output-menu command: {}", *last_selection);
+    } else {
+        std::println("Output menu cancelled.");
+    }
+    return EXIT_SUCCESS;
+}
 
 template <MenuTerminal Console = NativeConsole>
 [[nodiscard]] auto MenuDemo() -> int {
@@ -956,6 +1036,10 @@ auto main(const int argc, char *const argv[]) -> int {
         if (std::setlocale(LC_CTYPE, kLocaleCodeset) == nullptr) {
             throw std::runtime_error(std::format(
                 "failed to set the character encoding to {}", kLocaleCodeset));
+        }
+        if ((arguments.size() == 2) &&
+            (std::string_view{arguments[1]} == "--output-menu"sv)) {
+            return OutputMenuDemo();
         }
         if ((arguments.size() == 2) &&
             (std::string_view{arguments[1]} == "--menu"sv)) {

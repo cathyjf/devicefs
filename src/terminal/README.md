@@ -330,6 +330,17 @@ wrapping with supplied input. With no arguments, it writes sample text from
 the current cursor position. Use `--measure-menu` to try the menu and report
 its interaction costs afterward.
 
+Use `--output-menu` to try arriving output with selectable commands on the
+same screen. Tab changes focus between the output and commands. Scrolling back
+holds the passage being read while new lines arrive; End follows the newest
+output again. The demonstration offers pause/resume and burst output, and adds
+an example folder command when its simulated preparation finishes. Another
+command moves the commands above or below the output, with a blank row between
+the two areas.
+`OutputMenu` provides this interaction for callers supplying complete output
+lines and available commands. Its declaration in [menu.ixx](menu.ixx) documents
+the update callback and retained view state.
+
 ## Verification and performance measurements
 
 The self-tests exercise grouping, observed wrapping, clipping, selective

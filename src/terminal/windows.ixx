@@ -111,8 +111,28 @@ public:
         return ReadConsoleRecord();
     }
 
-    [[nodiscard]] auto ReadMenuInput() -> MenuInput {
+    // Wait for navigation until `deadline`. Timeout returns control to callers
+    // that also display arriving output; omitting the deadline waits for input.
+    [[nodiscard]] auto ReadMenuInput(const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::time_point::max()) -> MenuInput {
         for (;;) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                return {.key = MenuKey::Timeout};
+            }
+            if (pending_.empty()) {
+                const auto timeout = deadline == std::chrono::steady_clock::time_point::max() ?
+                    INFINITE : FailFastCast<DWORD>(std::min<std::int64_t>(INFINITE - 1,
+                        std::chrono::ceil<std::chrono::milliseconds>(deadline - now).count()));
+                const auto wait = WaitForSingleObject(input_.get(), timeout);
+                if (wait == WAIT_TIMEOUT) {
+                    return {.key = MenuKey::Timeout};
+                }
+                if (wait == WAIT_FAILED) {
+                    throw std::system_error(GetLastError(), std::system_category(),
+                        "could not wait for terminal input");
+                }
+            }
             const auto record = ReadInput();
             if (record.EventType == WINDOW_BUFFER_SIZE_EVENT) {
                 return {.key = MenuKey::Resize};
@@ -151,6 +171,8 @@ public:
                     return MenuKey::Accept;
                 case VK_ESCAPE:
                     return MenuKey::Back;
+                case VK_TAB:
+                    return MenuKey::SwitchArea;
                 default:
                     break;
                 }

@@ -105,7 +105,6 @@ struct Snapshot {
                 snapshot.archives.push_back(std::move(name));
             }
         }
-        std::ranges::sort(snapshot.archives);
         groups[group].push_back(std::move(snapshot));
     }
     for (auto &[group, snapshots] : groups) {
@@ -205,7 +204,18 @@ export template <class RetrieveManifest>
             if (!labels) {
                 return std::nullopt;
             }
-            const auto archives = *labels | std::ranges::to<std::vector<std::string_view>>();
+            const auto choices = [&labels_ = *labels, &archives = selected.archives] {
+                auto choices = std::views::zip_transform(
+                    [](const auto &label, const auto &archive) {
+                        return std::pair{std::string_view{label}, std::string_view{archive}};
+                    }, labels_, archives) | std::ranges::to<std::vector>();
+                std::ranges::stable_sort(choices, {}, [](const auto &choice) {
+                    return choice.first;
+                });
+                return choices;
+            }();
+            const auto archives = choices | std::views::keys |
+                std::ranges::to<std::vector<std::string_view>>();
             const auto archive = Choose(terminal,
                 std::format("{} / {} — {}", name, selected.timestamp,
                     archives.empty() ? "This snapshot contains no image archives." :
@@ -215,7 +225,7 @@ export template <class RetrieveManifest>
             }
             return BackupSelection{
                 .snapshot = identifier,
-                .archive = selected.archives.at(*archive),
+                .archive = std::string{choices.at(*archive).second},
             };
         }
     }

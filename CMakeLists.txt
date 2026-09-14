@@ -251,6 +251,7 @@ file(GENERATE OUTPUT "${ARTIFACT_RESOURCE_SCRIPT}" CONTENT
 target_sources(backup-supervisor PRIVATE "${ARTIFACT_RESOURCE_SCRIPT}")
 target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/account_management.ixx
+    src/modules/supervisor/browse.ixx
     src/modules/supervisor/configuration.ixx
     src/modules/supervisor/embedded_artifacts.ixx
     src/modules/supervisor/https_download.ixx

@@ -23,6 +23,7 @@ import devicefs.common;
 import devicefs.filesystem;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
+import devicefs.supervisor.browse;
 import devicefs.supervisor.launch_powershell;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.logging_console;
@@ -786,6 +787,30 @@ struct SelectiveViewOptions {
         });
 }
 
+[[nodiscard]] auto RunBrowseMode(std::optional<std::u8string> namespace_override) {
+    const auto [input, console_mode] = GetForegroundConsoleInput(
+        "--browse requires an attached console");
+    auto catalog = std::optional<std::u8string>{};
+    devicefs::WriteToStream(devicefs::stdout, "Loading the backup catalog...\n");
+    const auto result = RunForegroundOperation(input, console_mode,
+        [&catalog, &namespace_override](const HANDLE cancellation_event) {
+            catalog = RetrieveBackupCatalog(cancellation_event, namespace_override);
+            return catalog ? 0 : kCancelledExitCode;
+        });
+    if (result != 0) {
+        return result;
+    }
+    const auto selection = SelectBackup(*catalog);
+    if (!selection) {
+        return 0;
+    }
+    return RunSelectiveViewMode(SelectiveViewOptions{
+        .archive = selection->archive,
+        .snapshot_override = selection->snapshot,
+        .namespace_override = std::move(namespace_override),
+    });
+}
+
 [[nodiscard]] auto RunIncrementalDiagnosticMode(
     IncrementalDiagnosticOptions options) {
     const auto [input, console_mode] = GetForegroundConsoleInput(
@@ -860,6 +885,8 @@ auto PrintHelp() noexcept {
         "[--namespace NAMESPACE]\n"
         "  backup-supervisor.exe --list-backups [--namespace NAMESPACE]\n"
         "      Print the namespace's full backup catalog as JSON.\n"
+        "  backup-supervisor.exe --browse [--namespace NAMESPACE]\n"
+        "      Choose a backup and image archive to open with --view.\n"
         "  backup-supervisor.exe --view ARCHIVE "
         "[--snapshot SNAPSHOT] [--timestamp TIMESTAMP] "
         "[--address ADDRESS] "
@@ -923,6 +950,10 @@ auto BackupSupervisorMain(
             return RunListBackups(
                 ParseNamespaceOverride(
                     std::span{arguments}.subspan(1), "--list-backups"));
+        }
+        if (option == "--browse") {
+            return RunBrowseMode(ParseNamespaceOverride(
+                std::span{arguments}.subspan(1), "--browse"));
         }
         if (option == "--query-manifest") {
             return RunQueryManifest(

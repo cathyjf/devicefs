@@ -328,9 +328,6 @@ auto AppendDisplayCharacter(std::string &output,
     case U'\r':
         output.append("\\r"sv);
         return;
-    case U'\\':
-        output.append("\\\\"sv);
-        return;
     default:
         break;
     }
@@ -360,8 +357,7 @@ auto AppendDisplayCharacter(std::string &output,
 // controls as readable ASCII notation. Outside removed commands, tabs, line
 // feeds, and carriage returns become \t, \n, and \r. Other C0 controls and DEL
 // become \xHH; C1 controls, Unicode line and paragraph separators, and
-// directional controls become \u{XXXX}. Literal backslashes are doubled so a
-// visible \n can be distinguished from an original backslash followed by n.
+// directional controls become \u{XXXX}. Literal backslashes remain unchanged.
 // Malformed UTF-8 outside removed commands is shown as one \xHH per byte.
 //
 // This policy can garble legitimate filenames. It replaces all twelve Unicode

@@ -214,10 +214,9 @@ hyperlinks, and control strings. Hyperlink text remains visible after its
 surrounding commands are removed.
 
 Individual controls become readable notation. A newline appears as `\n`, a
-tab as `\t`, and an invalid UTF-8 byte as `\xHH`. Literal backslashes are
-doubled, distinguishing a real newline from a name containing the two
-characters `\n`. Each label has independent parser state, so an unfinished
-command in one entry cannot consume the following entry.
+tab as `\t`, and an invalid UTF-8 byte as `\xHH`. Literal backslashes remain
+unchanged, so Windows paths display normally. Each label has independent parser
+state, so an unfinished command in one entry cannot consume the following entry.
 
 Unicode directional controls are also represented visibly: a left-to-right
 mark, for example, appears as `\u{200E}`. This is a known limitation for

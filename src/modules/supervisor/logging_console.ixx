@@ -52,35 +52,32 @@ public:
                 std::wstring_view{path.native()});
         }
 
-        auto size = LARGE_INTEGER{};
-        if (!GetFileSizeEx(file_.get(), &size)) {
-            WinError("could not obtain the size of backup supervisor log '{}'",
+        const auto is_log_empty = [handle = file_.get(), &path] {
+            auto size = LARGE_INTEGER{};
+            if (!GetFileSizeEx(handle, &size)) {
+                WinError("could not obtain the size of backup supervisor log '{}'",
+                    std::wstring_view{path.native()});
+            }
+            return (size.QuadPart == 0);
+        }();
+        if (is_log_empty) {
+            return;
+        }
+        const auto offset = LARGE_INTEGER{.QuadPart = -1};
+        if (!SetFilePointerEx(file_.get(), offset, nullptr, FILE_END)) {
+            WinError("could not seek in backup supervisor log '{}'",
                 std::wstring_view{path.native()});
         }
-        if (size.QuadPart != 0) {
-            const auto offset = LARGE_INTEGER{.QuadPart = -1};
-            if (!SetFilePointerEx(
-                    file_.get(), offset, nullptr, FILE_END)) {
-                WinError("could not seek in backup supervisor log '{}'",
-                    std::wstring_view{path.native()});
-            }
-            auto last = char{};
-            auto read = DWORD{};
-            if (!ReadFile(file_.get(), &last, DWORD{sizeof(last)},
-                    &read, nullptr)) {
-                WinError("could not inspect backup supervisor log '{}'",
-                    std::wstring_view{path.native()});
-            }
-            if (read != DWORD{sizeof(last)}) {
-                throw std::runtime_error(std::format(
-                    "the read from backup supervisor log '{}' was incomplete",
-                    Transcode<std::string>(path.native())));
-            }
-            if (last != '\n') {
-                WriteRaw(last == '\r'
-                    ? "\n"sv
-                    : "\r\n"sv);
-            }
+        auto last = char{};
+        auto read = DWORD{};
+        if (!ReadFile(file_.get(), &last, sizeof(last), &read, nullptr)) {
+            WinError("could not read from backup supervisor log '{}'",
+                std::wstring_view{path.native()});
+        }
+        if (last != '\n') {
+            WriteRaw(last == '\r'
+                ? "\n"sv
+                : "\r\n"sv);
         }
     }
 

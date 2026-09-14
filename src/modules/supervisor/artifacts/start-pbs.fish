@@ -82,11 +82,14 @@ function run_backup --argument-names parallel_images
     supervise_pbs $last_pid unmount_vss
 end
 
-function print_manifest
+function print_manifest --argument-names snapshot
+    if test -z "$snapshot"
+        set snapshot host/{$backup_id}
+    end
     cancel_before_start true
     timeout --kill-after=5s 60s \
         $DEVICEFS_PBS_CLIENT restore --keyfd 0 \
-        host/{$backup_id} {$pbs_manifest_filename}.blob - &
+        $snapshot {$pbs_manifest_filename}.blob - &
     supervise_pbs $last_pid true
 end
 
@@ -360,10 +363,10 @@ read --null --global DEVICEFS_RPC_PASSWORD || exit
 
 set operation run_backup $_flag_parallel_images
 if set --query _flag_view
-    set operation run_view $argv[4..10]
+    set operation run_view
 else if set --query _flag_print_manifest
     set operation print_manifest
 else if set --query _flag_list_backups
     set operation list_backups
 end
-$operation
+$operation $argv[4..]

@@ -247,12 +247,66 @@ auto PreviousBackupManifestResult::SnapshotManifest::QuerySnapshotVolumes() cons
     return result;
 }
 
-export [[nodiscard]] auto RetrievePreviousBackupManifest(
+export struct BackupVolumeDescription {
+    std::vector<std::string> mount_points;
+    std::string label;
+};
+
+// Read display notes by image archive name. Optional notes that are absent or
+// have an unrecognized type contribute no description. Invalid JSON also
+// contributes no descriptions. Invalid text encoding throws std::invalid_argument.
+export [[nodiscard]] auto ReadBackupVolumeDescriptions(const std::u8string_view manifest)
+    -> std::map<std::string, BackupVolumeDescription> {
+    const auto apartment = WinrtApartment{
+        "could not initialize the Windows Runtime to read backup volume descriptions"};
+    using winrt::Windows::Data::Json::JsonObject;
+    using winrt::Windows::Data::Json::JsonValueType;
+    auto root = JsonObject{nullptr};
+    if (!JsonObject::TryParse(Transcode<std::wstring>(manifest), root)) {
+        return {};
+    }
+    const auto note = [](const JsonObject &object, const std::wstring_view name,
+        const JsonValueType type) {
+        const auto value = object.GetNamedValue(name, nullptr);
+        return value && (value.ValueType() == type) ? value : nullptr;
+    };
+    auto result = std::map<std::string, BackupVolumeDescription>{};
+    const auto volumes = note(root, L"volumes", JsonValueType::Object);
+    if (!volumes) {
+        return result;
+    }
+    for (const auto &entry : volumes.GetObject()) {
+        if (entry.Value().ValueType() != JsonValueType::Object) {
+            continue;
+        }
+        const auto notes = note(entry.Value().GetObject(), L"notes", JsonValueType::Object);
+        if (!notes) {
+            continue;
+        }
+        auto &description = result[Transcode<std::string>(entry.Key())];
+        if (const auto label = note(notes.GetObject(), L"volume-label", JsonValueType::String)) {
+            description.label = Transcode<std::string>(label.GetString());
+        }
+        if (const auto mounts = note(notes.GetObject(), L"mount-points", JsonValueType::Array)) {
+            for (const auto &mount : mounts.GetArray()) {
+                if (mount.ValueType() == JsonValueType::String) {
+                    description.mount_points.push_back(Transcode<std::string>(mount.GetString()));
+                }
+            }
+        }
+    }
+    return result;
+}
+
+// Without a snapshot, PBS selects the current host's latest backup. An explicit
+// snapshot identifies the exact backup whose manifest should be restored.
+export [[nodiscard]] auto RetrieveBackupManifest(
     const HANDLE cancellation_event,
-    const std::optional<std::u8string> &namespace_override)
+    const std::optional<std::u8string> &namespace_override,
+    const std::optional<std::string_view> snapshot = std::nullopt)
     -> std::optional<PreviousBackupManifestResult> {
-    constexpr auto arguments =
-        std::array{"--print-manifest"sv};
+    const auto arguments =
+        std::array{"--print-manifest"sv, "--"sv, snapshot.value_or(""sv)};
     auto result = internal::RunPbsFish(
         cancellation_event,
         namespace_override,

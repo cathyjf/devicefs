@@ -1656,7 +1656,7 @@ export [[nodiscard]] auto RunIncrementalDiagnostics(
             return QueryBaselineSnapshot(
                 *options.baseline_snapshot_identifier);
         }
-        const auto previous = RetrievePreviousBackupManifest(
+        const auto previous = RetrieveBackupManifest(
             cancellation_event, options.namespace_override);
         if (!previous) {
             return std::unexpected{internal::kCancelledExitCode};

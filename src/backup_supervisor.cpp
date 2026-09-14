@@ -728,7 +728,7 @@ struct SelectiveViewOptions {
         input, console_mode,
         [namespace_override = std::move(namespace_override)](
             const HANDLE cancellation_event) {
-            const auto result = RetrievePreviousBackupManifest(
+            const auto result = RetrieveBackupManifest(
                 cancellation_event, namespace_override);
             if (!result) {
                 return kCancelledExitCode;
@@ -800,7 +800,34 @@ struct SelectiveViewOptions {
     if (result != 0) {
         return result;
     }
-    const auto selection = SelectBackup(*catalog);
+    const auto selection = SelectBackup(*catalog,
+        [input, &namespace_override](const std::string_view snapshot)
+            -> std::optional<std::u8string> {
+            auto manifest = std::u8string{};
+            const auto menu_input_mode = [input] {
+                auto mode = DWORD{};
+                if (!GetConsoleMode(input, &mode)) {
+                    WinError("could not read the menu's console input mode before downloading the manifest");
+                }
+                return mode;
+            }();
+            const auto retrieved = RunForegroundOperation(input, menu_input_mode,
+                [snapshot, &namespace_override, &manifest](const HANDLE cancellation_event) {
+                    auto response = RetrieveBackupManifest(
+                        cancellation_event, namespace_override, snapshot);
+                    if (!response) {
+                        return kCancelledExitCode;
+                    }
+                    if (response->exit_code == 0) {
+                        manifest = std::move(response->manifest);
+                    }
+                    return 0;
+                });
+            if (retrieved != 0) {
+                return std::nullopt;
+            }
+            return manifest;
+        });
     if (!selection) {
         return 0;
     }

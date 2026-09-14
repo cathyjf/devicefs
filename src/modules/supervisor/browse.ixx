@@ -12,6 +12,7 @@ import <devicefs/windows_imports.h>;
 import <winrt/Windows.Data.Json.h>;
 import <winrt/Windows.Foundation.Collections.h>;
 import devicefs.supervisor.winrt_apartment;
+import devicefs.supervisor.native_backup;
 import devicefs.terminal.menu;
 import devicefs.terminal.windows;
 import devicefs.terminal.transcoding;
@@ -26,6 +27,7 @@ using namespace devicefs::terminal;
 struct Snapshot {
     std::string timestamp;
     std::vector<std::string> archives;
+    bool has_manifest = false;
 };
 
 [[nodiscard]] auto ReadCatalogField(
@@ -95,6 +97,9 @@ struct Snapshot {
             auto name = Transcode<std::string>(
                 ReadCatalogField(file.GetObject(), L"filename",
                     file_location, &JsonValue::GetString));
+            if (name == "devicefs-manifest.conf.blob") {
+                snapshot.has_manifest = true;
+            }
             if (name.ends_with(".img.fidx")) {
                 name.resize(name.size() - ".fidx"sv.size());
                 snapshot.archives.push_back(std::move(name));
@@ -116,6 +121,41 @@ struct Snapshot {
     }, labels, {}, selected);
 }
 
+// Return display labels, or no value if the manifest retrieval was cancelled.
+[[nodiscard]] auto MakeArchiveLabels(const std::string_view snapshot,
+    const std::span<const std::string> archives,
+    const auto &retrieve_manifest) -> std::optional<std::vector<std::string>> {
+    const auto manifest = retrieve_manifest(snapshot);
+    if (!manifest) {
+        return std::nullopt;
+    }
+    const auto descriptions = [&manifest] {
+        try {
+            return ReadBackupVolumeDescriptions(*manifest);
+        } catch (const std::invalid_argument &) {
+            // Invalid UTF-8 or an unpaired surrogate in a JSON string
+            // leaves this menu with the original image names.
+            return decltype(ReadBackupVolumeDescriptions(*manifest)){};
+        }
+    }();
+    return archives | std::views::transform([&descriptions](const auto &archive) {
+        const auto found = descriptions.find(archive);
+        if (found == descriptions.end()) {
+            return archive;
+        }
+        const auto mount_points = found->second.mount_points |
+            std::views::filter([](const auto &mount) { return !mount.empty(); }) |
+            std::views::join_with(", "sv) | std::ranges::to<std::string>();
+        const auto label = !mount_points.empty() && !found->second.label.empty()
+            ? std::format(" ({})", found->second.label) : found->second.label;
+        const auto prefix = mount_points + label;
+        if (!prefix.empty()) {
+            return std::format("{} — {}", prefix, archive);
+        }
+        return archive;
+    }) | std::ranges::to<std::vector<std::string>>();
+}
+
 } // namespace browse_detail
 
 export struct BackupSelection {
@@ -126,7 +166,11 @@ export struct BackupSelection {
 // Select a group, snapshot, and image archive from RetrieveBackupCatalog's JSON.
 // All menus share one screen lifetime. Returning restores the ordinary console
 // so the caller can start the selected view. Cancellation returns no selection.
-export [[nodiscard]] auto SelectBackup(const std::u8string_view catalog)
+// retrieve_manifest receives the selected snapshot identifier and returns its
+// manifest, or no value if retrieval was cancelled.
+export template <class RetrieveManifest>
+[[nodiscard]] auto SelectBackup(const std::u8string_view catalog,
+    const RetrieveManifest retrieve_manifest)
     -> std::optional<BackupSelection> {
     using namespace browse_detail;
     const auto groups = ParseCatalog(catalog);
@@ -148,17 +192,31 @@ export [[nodiscard]] auto SelectBackup(const std::u8string_view catalog)
                 std::format("{} — choose a snapshot (UTC)", name), times, snapshot_index)) {
             snapshot_index = *snapshot;
             const auto &selected = snapshots.at(*snapshot);
-            const auto archives = selected.archives |
-                std::ranges::to<std::vector<std::string_view>>();
-            if (const auto archive = Choose(terminal,
-                    std::format("{} / {} — {}", name, selected.timestamp,
-                        archives.empty() ? "This snapshot contains no image archives." :
-                        "Choose an image archive"), archives, 0)) {
-                return BackupSelection{
-                    .snapshot = std::format("{}/{}", name, selected.timestamp),
-                    .archive = std::string{archives.at(*archive)},
-                };
+            const auto identifier = std::format("{}/{}", name, selected.timestamp);
+            const auto labels = [&] {
+                if (!selected.has_manifest) {
+                    return std::optional{selected.archives};
+                }
+                // Retrieval can write diagnostics to the console. The next menu
+                // must repaint those cells while retaining this screen owner.
+                terminal.InvalidateFrame();
+                return MakeArchiveLabels(identifier, selected.archives, retrieve_manifest);
+            }();
+            if (!labels) {
+                return std::nullopt;
             }
+            const auto archives = *labels | std::ranges::to<std::vector<std::string_view>>();
+            const auto archive = Choose(terminal,
+                std::format("{} / {} — {}", name, selected.timestamp,
+                    archives.empty() ? "This snapshot contains no image archives." :
+                    "Choose an image archive"), archives, 0);
+            if (!archive) {
+                continue;
+            }
+            return BackupSelection{
+                .snapshot = identifier,
+                .archive = selected.archives.at(*archive),
+            };
         }
     }
     return std::nullopt;

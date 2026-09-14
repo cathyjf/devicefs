@@ -36,10 +36,10 @@ using unique_pseudoconsole = wil::unique_any<
 export class Log {
 public:
     explicit Log(const std::filesystem::path &directory) {
-        // Missing time-zone data should remove line timestamps and select the
-        // fixed fallback filename, not prevent the backup from running.
+        // Query the time zone. If the time zone cannot be queried, the code
+        // falls back to UTC.
         try {
-            zone_ = std::chrono::current_zone();
+            zone_.emplace(*std::chrono::current_zone());
         } catch (...) {}
 
         std::filesystem::create_directory(directory);
@@ -133,15 +133,14 @@ public:
 
 private:
     [[nodiscard]] auto LogFilename() const -> std::wstring {
-        if (zone_ != nullptr) {
-            try {
-                const auto now = std::chrono::floor<std::chrono::seconds>(
-                    std::chrono::system_clock::now());
-                return std::format(L"{:%F}-backup.log",
-                    std::chrono::zoned_seconds{zone_, now});
-            } catch (...) {}
+        constexpr auto kFormatString = L"{:%F}-backup.log";
+        const auto now = std::chrono::floor<std::chrono::seconds>(
+            std::chrono::system_clock::now());
+        if (zone_) {
+            return std::format(kFormatString,
+                std::chrono::zoned_seconds{&zone_->get(), now});
         }
-        return L"backup.log";
+        return std::format(kFormatString, now);
     }
 
     template <typename Character>
@@ -173,19 +172,15 @@ private:
         }
     }
 
-    [[nodiscard]] auto Timestamp() const noexcept -> std::string {
-        try {
-            if (zone_ == nullptr) {
-                return {};
-            }
-            const auto now = std::chrono::floor<std::chrono::seconds>(
-                std::chrono::system_clock::now());
-            return std::format("[{:%a, %d %b %Y %T %z}] ",
-                std::chrono::zoned_seconds{zone_, now});
-        } catch (...) {
-            // Timestamp metadata is never worth failing the backup.
-            return {};
+    [[nodiscard]] auto Timestamp() const -> std::string {
+        constexpr auto kFormatString = "[{:%a, %d %b %Y %T %z}] ";
+        const auto now = std::chrono::floor<std::chrono::seconds>(
+            std::chrono::system_clock::now());
+        if (zone_) {
+            return std::format(kFormatString,
+                std::chrono::zoned_seconds{&zone_->get(), now});
         }
+        return std::format(kFormatString, now);
     }
 
     template <typename Character>
@@ -230,7 +225,7 @@ private:
     }
 
     wil::unique_hfile file_;
-    const std::chrono::time_zone *zone_ = nullptr;
+    std::optional<std::reference_wrapper<const std::chrono::time_zone>> zone_;
     wil::srwlock lock_;
     bool at_line_start_ = true;
 };

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Kitware/CMake/refs/tags/v4.4.3/Help/manual/presets/schema.json",
+  "version": 9,
+  "cmakeMinimumRequired": {
+    "major": 4,
+    "minor": 4,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "gcc",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/../../../build/asr-image-trace/${presetName}",
+      "toolchainFile": "${sourceDir}/../cmake/gcc.cmake",
+      "condition": {
+        "type": "notEquals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_CXX_EXTENSIONS": false,
+        "CMAKE_CXX_FLAGS_INIT": "-static-libstdc++ -static-libgcc",
+        "CMAKE_CXX_MODULE_STD": true,
+        "CMAKE_EXPERIMENTAL_CXX_IMPORT_STD": "f35a9ac6-8463-4d38-8eec-5d6008153e7d"
+      },
+      "warnings": {
+        "uninitialized": true,
+        "dev": false
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "gcc",
+      "configurePreset": "gcc",
+      "configuration": "Release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "gcc",
+      "configurePreset": "gcc",
+      "configuration": "Release",
+      "output": {
+        "verbosity": "verbose"
+      }
+    }
+  ]
+}

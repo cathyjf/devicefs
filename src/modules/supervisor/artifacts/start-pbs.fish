@@ -135,38 +135,44 @@ function print_manifest --argument-names snapshot
     supervise_pbs $last_pid true
 end
 
+# Start a PBS catalog query with the arguments after `output`, writing its JSON
+# to that file. The caller uses `$last_pid` to publish and wait for the process.
+# Remove the file if the query fails so incomplete results are not consumed.
+function start_catalog_query --argument-names output
+    $DEVICEFS_PBS_CLIENT $argv[2..] >$output &
+    function catalog_query_finished_$last_pid --on-process-exit $last_pid --inherit-variable output \
+            --argument-names event process_id exit_code
+        test $exit_code -eq 0 || rm -f -- $output
+    end
+end
+
 # Write a JSON catalog to standard output using `directory` for temporary
 # query results. The object contains the starting `namespace` and a `snapshots`
 # array whose entries each retain their full namespace for later PBS requests.
 # The caller supplies an empty `directory/snapshots` file and removes the directory.
 #
-# Namespace discovery expands the query beyond `PBS_NAMESPACE`. If discovery
+# Query `PBS_NAMESPACE` while discovering its child namespaces. If discovery
 # or parsing fails, the starting namespace is still queried. Snapshot requests
 # run concurrently; failed requests are omitted while their diagnostics remain
 # on standard error. Cancellation returns 143, and JSON assembly errors return
 # jq's failure status.
 function collect_backup_catalog --argument-names directory
     set -l namespaces $PBS_NAMESPACE
-    $DEVICEFS_PBS_CLIENT namespace list $PBS_NAMESPACE --output-format json >$directory/query &
-    if wait_for_published_child $last_pid
-        if set -l discovered (jq -r '.data[].ns' $directory/query)
-            set namespaces $discovered
+    start_catalog_query $directory/query namespace list $PBS_NAMESPACE --output-format json
+    set -l discovery $last_pid
+    # Omitting the group lists every snapshot in this namespace in one request.
+    start_catalog_query $directory/1.json snapshot list --ns $PBS_NAMESPACE --output-format json
+    set -l children $last_pid
+    publish_children $discovery $children
+    wait $discovery
+    if test ! -e $stop_file && test -f $directory/query
+        if set -l discovered (jq -r --arg namespace $PBS_NAMESPACE \
+                '.data[].ns | select(. != $namespace)' $directory/query)
+            set --append namespaces $discovered
         end
     end
-    if test -e $stop_file
-        return 143
-    end
-    set -l children
-    for index in (seq (count $namespaces))
-        set -l output $directory/$index.json
-        # Omitting the group lists every snapshot in this namespace in one request.
-        $DEVICEFS_PBS_CLIENT snapshot list --ns $namespaces[$index] --output-format json >$output &
-        # Remove a failed query's output, which may be incomplete, so it is
-        # excluded from the catalog assembled after all queries end.
-        function catalog_query_finished_$last_pid --on-process-exit $last_pid --inherit-variable output \
-                --argument-names event process_id exit_code
-            test $exit_code -eq 0 || rm -f -- $output
-        end
+    for index in (seq 2 (count $namespaces))
+        start_catalog_query $directory/$index.json snapshot list --ns $namespaces[$index] --output-format json
         set --append children $last_pid
         publish_children $children
     end

@@ -1,15 +1,29 @@
 # SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+# This script runs one PBS operation for the Windows supervisor. The invocation
+# and input records are read at the bottom of this file. The selected operation
+# starts the required child processes and waits for completion or cancellation.
+
 set vss_mount_point /mnt/vss
 set pbs_manifest_filename devicefs-manifest.conf
+# If this is 1, view cleanup includes Samba's log files in its diagnostics.
 set print_samba_logs 0
+# If this is 1, PBS serves image reads over a Unix socket using `map-grpc`;
+# otherwise, `map` exposes a kernel loop device. The output-reader child needs
+# this exported setting to recognize the corresponding readiness message.
 set --export use_map_grpc 1
 
+# Unmount the DeviceFs snapshot images after PBS has finished reading them.
+# A busy mount is retried, with a timeout so cleanup cannot wait indefinitely.
+# The exit status reports whether unmounting succeeded or the timeout expired.
 function unmount_vss
     timeout --kill-after=1s 5s fish --no-config -c 'while ! sudo -n umount $argv[1]; sleep 1; end' $vss_mount_point
 end
 
+# Complete operation-specific cleanup by calling `finalizer` without arguments,
+# then remove the supervisor's stop request. Return the finalizer's status;
+# callers decide whether an earlier operation failure takes precedence.
 function finish_operation --argument-names finalizer
     $finalizer
     set finalizer_exit_code $status
@@ -17,6 +31,11 @@ function finish_operation --argument-names finalizer
     return $finalizer_exit_code
 end
 
+# Check for cancellation before launching the next child. If a stop request
+# exists, `finalizer` releases resources already acquired and this Fish process
+# exits. Successful cleanup yields status 143 (the conventional SIGTERM status).
+# A cleanup failure supplies its own status. Otherwise, return zero so startup
+# can proceed.
 function cancel_before_start --argument-names finalizer
     if test ! -e $stop_file
         return 0
@@ -25,6 +44,10 @@ function cancel_before_start --argument-names finalizer
     exit 143
 end
 
+# Make the supplied child PIDs available to `SendPbsFishSignal` in pbs.cpp,
+# one per line in `pid_file`. The supervisor creates `stop_file` before reading
+# those PIDs. Checking it after publication also handles a cancellation request
+# that arrived before the supervisor could discover the children.
 function publish_children
     printf '%s\n' $argv >$pid_file
     if test -e $stop_file
@@ -32,8 +55,16 @@ function publish_children
     end
 end
 
+# Write `child_pid` to the supervisor's PID file, wait for that process, and
+# return its exit status.
+# Fish's `wait` does not return the child's status, so an exit handler records it.
+# Fish passes process-exit handlers the event name, PID, and exit status as their
+# three arguments. The other process-exit handlers below use the same convention.
+# https://github.com/fish-shell/fish-shell/blob/master/tests/checks/wait.fish
+# https://github.com/fish-shell/fish-shell/blob/master/src/event.rs
 function wait_for_published_child --argument-names child_pid
     set -g child_exit_code 1
+    # Record the process-exit event's result for `wait_for_published_child`.
     function record_child_exit --on-process-exit $child_pid
         set -g child_exit_code $argv[3]
     end
@@ -43,6 +74,10 @@ function wait_for_published_child --argument-names child_pid
     return $child_exit_code
 end
 
+# Wait for an already started PBS child, then call `finalizer` to release the
+# operation's resources. A child failure takes precedence over a cleanup failure.
+# The child has already inherited its password, and any manifest has been copied
+# to a temporary file for its job, so the parent can erase those variables.
 function supervise_pbs --argument-names child_pid finalizer
     set --erase DEVICEFS_MANIFEST
     set --erase PBS_PASSWORD
@@ -56,6 +91,12 @@ function supervise_pbs --argument-names child_pid finalizer
     return $finish_exit_code
 end
 
+# Upload the mounted DeviceFs images and `DEVICEFS_MANIFEST` to `host/$backup_id`
+# in `PBS_NAMESPACE`. `parallel_images` supplies the optional PBS parallel-images
+# argument. PBS reads the encryption key from the remaining standard input.
+# The mount stays available until PBS exits; the result includes unmount failure
+# when the upload itself succeeded. PBS output and the printed manifest are
+# forwarded to the Windows supervisor.
 function run_backup --argument-names parallel_images
     sudo -n mount $vss_mount_point || exit
     cancel_before_start unmount_vss
@@ -69,11 +110,20 @@ function run_backup --argument-names parallel_images
         set DEVICEFS_MANIFEST $manifest_
     end
     printf 'Backup manifest:\n%s\n' $DEVICEFS_MANIFEST
+    # `psub` supplies the manifest as a file for this PBS job and removes that
+    # file when the job exits. Keeping it inside the command substitution ties
+    # the file's lifetime to the process that consumes it.
+    # https://github.com/fish-shell/fish-shell/blob/master/share/functions/psub.fish
     $DEVICEFS_PBS_CLIENT $backup_argv \
         {$pbs_manifest_filename}:(echo -- $DEVICEFS_MANIFEST | psub --file) &
     supervise_pbs $last_pid unmount_vss
 end
 
+# Restore the DeviceFs manifest to standard output, using the encryption key
+# from standard input. An empty `snapshot` selects the latest backup in
+# `host/$backup_id`; otherwise the supplied PBS group or snapshot is used.
+# The retrieval has a deadline, and its exit status reaches the caller so an
+# optional-manifest consumer can continue when the archive is unavailable.
 function print_manifest --argument-names snapshot
     if test -z "$snapshot"
         set snapshot host/{$backup_id}
@@ -85,6 +135,16 @@ function print_manifest --argument-names snapshot
     supervise_pbs $last_pid true
 end
 
+# Write a JSON catalog to standard output using `directory` for temporary
+# query results. The object contains the starting `namespace` and a `snapshots`
+# array whose entries each retain their full namespace for later PBS requests.
+# The caller supplies an empty `directory/snapshots` file and removes the directory.
+#
+# Namespace discovery expands the query beyond `PBS_NAMESPACE`. If discovery
+# or parsing fails, the starting namespace is still queried. Snapshot requests
+# run concurrently; failed requests are omitted while their diagnostics remain
+# on standard error. Cancellation returns 143, and JSON assembly errors return
+# jq's failure status.
 function collect_backup_catalog --argument-names directory
     set -l namespaces $PBS_NAMESPACE
     $DEVICEFS_PBS_CLIENT namespace list $PBS_NAMESPACE --output-format json >$directory/query &
@@ -101,6 +161,8 @@ function collect_backup_catalog --argument-names directory
         set -l output $directory/$index.json
         # Omitting the group lists every snapshot in this namespace in one request.
         $DEVICEFS_PBS_CLIENT snapshot list --ns $namespaces[$index] --output-format json >$output &
+        # Remove a failed query's output, which may be incomplete, so it is
+        # excluded from the catalog assembled after all queries end.
         function catalog_query_finished_$last_pid --on-process-exit $last_pid --inherit-variable output \
                 --argument-names event process_id exit_code
             test $exit_code -eq 0 || rm -f -- $output
@@ -123,6 +185,10 @@ function collect_backup_catalog --argument-names directory
         '{namespace: $namespace, snapshots: .}' $directory/snapshots
 end
 
+# Retrieve the backup catalog and print it as JSON to standard output. Create
+# temporary files for the queries, remove them afterward, and return the
+# retrieval status. Keep `PBS_PASSWORD` available during collection because
+# each query needs to inherit it, then erase it before returning.
 function list_backups
     cancel_before_start true
     set -l directory (mktemp -d -t devicefs-catalog.XXXXXXXXXX) || return
@@ -135,6 +201,13 @@ function list_backups
     return $result
 end
 
+# Stop the image mapper, wait for its output reader, and remove the temporary
+# Samba directory. The `view_*` globals identify what was started or created,
+# including during incomplete startup. The reader needs the mapper to close its
+# output before it can finish, so the mapper is stopped first.
+# Return the first failure among an unexpected mapper exit, an output-reader
+# failure, and directory removal;
+# a mapper exit caused by requested termination is treated as normal cleanup.
 function finish_view
     set --erase DEVICEFS_RPC_PASSWORD
     set --erase PBS_PASSWORD
@@ -203,6 +276,11 @@ function finish_view
     return $remove_exit_code
 end
 
+# Read mapper output from the `output_path` FIFO and forward every line to
+# standard error. Once the mapping is ready, write its Unix socket path
+# (`map-grpc`) or loop-device path (`map`) to the `device_path` FIFO so `run_view`
+# can start Samba. Continue draining mapper output until EOF. If EOF arrives
+# before readiness, write an empty line to release the waiting `run_view` reader.
 function read_view_map_output --argument-names output_path device_path
     set -l map_ready
     while read --local map_line
@@ -229,6 +307,11 @@ function read_view_map_output --argument-names output_path device_path
     end
 end
 
+# Create Samba configuration and account state under `view_root` for the given
+# listening address and port. The Windows RPC username `devicefs` is mapped to
+# the current Unix user, whose Samba password is supplied in `DEVICEFS_RPC_PASSWORD`.
+# `pdbedit` reads that password twice for confirmation; the variable is erased
+# afterward. Return failure if preparing the files or password database fails.
 function prepare_view_samba --argument-names address port
     mkdir -- $view_root/private $view_root/state $view_root/cache \
         $view_root/lock $view_root/pid $view_root/ncalrpc || return
@@ -269,6 +352,17 @@ function prepare_view_samba --argument-names address port
     return $password_pipeline_status[2]
 end
 
+# Make one PBS image `archive` available through the Samba block-device RPC
+# helper. `snapshot_override` selects a PBS group or snapshot; an empty value
+# uses `host/$backup_id`. A supplied `timestamp` is appended to select that backup.
+# `address` and `port` select the listener, while `rpc_helper` and `samba_dcerpcd`
+# identify the executables to run. The encryption key arrives on standard input.
+#
+# The mapper and its output reader remain alive while Samba serves the image.
+# Mapper diagnostics go to standard error; Samba's readiness signal goes to
+# standard output for the Windows supervisor. On exit, `finish_view` releases
+# the mapping and temporary state. An unexpected Samba failure takes precedence
+# over cleanup failure; requested termination returns the cleanup result.
 function run_view --argument-names snapshot_override archive address port rpc_helper samba_dcerpcd timestamp
     set -g view_root (mktemp -d -t devicefs-view.XXXXXXXXXX) || return
     cancel_before_start finish_view
@@ -283,6 +377,8 @@ function run_view --argument-names snapshot_override archive address port rpc_he
     printf "Mapping PBS archive '%s' from snapshot '%s'.\n" $archive $snapshot 1>&2
     set -l map_output $view_root/map-output
     set -l mapped_device_output $view_root/mapped-device
+    # Separate FIFOs let the reader keep draining diagnostics after it reports
+    # readiness, while this function proceeds to run the Samba server.
     mkfifo -- $map_output $mapped_device_output
     set -l output_exit_code $status
     if test $output_exit_code -ne 0
@@ -290,6 +386,9 @@ function run_view --argument-names snapshot_override archive address port rpc_he
         return $output_exit_code
     end
     set -l map_output_reader $view_root/read-map-output.fish
+    # Fish functions cannot run as background jobs directly. A separate Fish
+    # process runs this function's definition and receives only the FIFO paths.
+    # https://fishshell.com/docs/current/language.html#job-control
     begin
         functions -- read_view_map_output
         echo -- 'read_view_map_output $argv[1] $argv[2]'
@@ -304,6 +403,8 @@ function run_view --argument-names snapshot_override archive address port rpc_he
         $map_output $mapped_device_output </dev/null &
     set -g view_map_output_pid $last_pid
     set -g view_map_output_exit_code 1
+    # Save the output reader's result for `finish_view`, which waits for it
+    # only after stopping the mapper.
     function record_view_map_output_exit --on-process-exit $view_map_output_pid
         set -g view_map_output_exit_code $argv[3]
     end
@@ -313,10 +414,14 @@ function run_view --argument-names snapshot_override archive address port rpc_he
         set map_command map-grpc
         set --append map_operands $mapped_device_output.sock
     end
+    # This `psub` reads the key document left on standard input and keeps its
+    # temporary key file available for the lifetime of the mapper job.
     $DEVICEFS_PBS_CLIENT $map_command --keyfile (psub --file) \
         $map_operands &>$map_output &
     set -g view_map_pid $last_pid
     set -g view_map_exit_code 1
+    # Save the mapper's result so `finish_view` can report an unexpected exit
+    # even when the process ended before cleanup began.
     function record_view_map_exit --on-process-exit $view_map_pid
         set -g view_map_exit_code $argv[3]
     end
@@ -372,11 +477,16 @@ end
 
 argparse /parallel-images /print-manifest /list-backups /view -- $argv || exit
 
+# The first three positional arguments are supervisor control-file paths and
+# the local backup ID. Remaining arguments belong to the selected operation.
 set pid_file $argv[1]
 set stop_file $argv[2]
 set backup_id $argv[3]
-# Keep these reads in the same order as StartPbsFish's NUL-delimited records,
-# adding future records before the final key document.
+
+# `StartPbsFish` in pbs.cpp supplies every NUL-delimited record below, including
+# empty records for unused values. The remaining bytes are the encryption-key
+# document for operations that need it. Reading extra records would consume key
+# data, so changes to the record order must be made in both producer and consumer.
 read --null --global DEVICEFS_PBS_CLIENT || exit
 read --null --global --export PBS_SERVER || exit
 read --null --global --export PBS_PORT || exit

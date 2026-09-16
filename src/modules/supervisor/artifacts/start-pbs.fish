@@ -183,7 +183,10 @@ function collect_backup_catalog --argument-names directory
     end
     for index in (seq (count $namespaces))
         if test -f $directory/$index.json
-            jq --arg namespace $namespaces[$index] '.[] + {namespace: $namespace}' \
+            # PBS supplies `size` only when it can read the snapshot's own
+            # manifest. Exclude unfinished snapshots and unreadable manifests.
+            # https://github.com/proxmox/proxmox-backup/blob/master/src/tools/mod.rs
+            jq --arg namespace $namespaces[$index] '.[] | select(.size != null) | . + {namespace: $namespace}' \
                 $directory/$index.json >>$directory/snapshots || return
         end
     end

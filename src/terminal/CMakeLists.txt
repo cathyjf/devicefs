@@ -34,6 +34,11 @@ option(DEVICEFS_TERMINAL_BUILD_BENCHMARKS "Build the transcoding capacity benchm
 get_filename_component(DEVICEFS_ROOT "../.." ABSOLUTE)
 set(WIL_INCLUDE_DIR "${DEVICEFS_ROOT}/dependencies/wil/include")
 
+if(WIN32)
+    enable_language(RC)
+    include("${DEVICEFS_ROOT}/misc/WindowsVersionInfo.cmake")
+endif()
+
 if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     include("${DEVICEFS_ROOT}/misc/MsvcFlags.cmake")
     set(DEVICEFS_TERMINAL_LIBRARY_TYPE STATIC)
@@ -107,6 +112,7 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
         tests/main.cpp
     )
     if(WIN32)
+        devicefs_version_info(devicefs-terminal-test "DeviceFs Terminal Tests and Demonstrations" 0.1)
         target_sources(devicefs-terminal-test PRIVATE
             "${DEVICEFS_ROOT}/src/resources/devicefs.manifest")
     endif()

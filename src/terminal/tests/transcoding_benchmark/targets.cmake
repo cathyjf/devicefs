@@ -37,6 +37,9 @@ target_include_directories(transcoding-benchmark-policies SYSTEM PRIVATE
 )
 
 add_executable(devicefs-transcoding-benchmark "${benchmark_source}/main.cpp")
+if(WIN32)
+    devicefs_version_info(devicefs-transcoding-benchmark "DeviceFs Transcoding Benchmark" 0.1)
+endif()
 target_sources(devicefs-transcoding-benchmark PRIVATE
     FILE_SET CXX_MODULES FILES scope_exit.ixx
 )

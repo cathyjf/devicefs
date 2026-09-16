@@ -32,6 +32,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 include(misc/MsvcFlags.cmake)
+include(misc/WindowsVersionInfo.cmake)
 
 option(DEVICEFS_MEASURE_FREE_CLUSTER_DATA
     "Measure nonzero data in bitmap-free clusters (diagnostic builds only)"
@@ -212,6 +213,7 @@ target_link_libraries(vshadow PRIVATE
 )
 
 add_executable(devicefs src/main.cpp)
+devicefs_version_info(devicefs "DeviceFs Virtual Filesystem" 0.1)
 target_compile_definitions(devicefs PRIVATE DEVICEFS_PROGRAM_DEVICEFS)
 target_link_libraries(devicefs PRIVATE devicefs-common devicefs-filesystem)
 
@@ -219,6 +221,7 @@ add_executable(vss-descriptor-dump
     src/main.cpp
     src/vss_descriptor_dump.cpp
 )
+devicefs_version_info(vss-descriptor-dump "DeviceFs VSS Descriptor Inspector" 0.1)
 target_compile_definitions(vss-descriptor-dump PRIVATE
     DEVICEFS_PROGRAM_VSS_DESCRIPTOR_DUMP
 )
@@ -234,6 +237,7 @@ add_executable(backup-supervisor
     src/backup_supervisor.cpp
     src/modules/supervisor/account_management.cpp
 )
+devicefs_version_info(backup-supervisor "DeviceFs Backup Supervisor" 0.1)
 target_link_libraries(backup-supervisor PRIVATE
     devicefs-common devicefs-filesystem devicefs-rpc-block-device
     devicefs-vss-block-descriptors devicefs-terminal vshadow

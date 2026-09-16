@@ -30,6 +30,12 @@ struct Snapshot {
     bool has_manifest = false;
 };
 
+struct BackupGroup {
+    std::u8string namespace_name;
+    std::string name;
+    std::vector<Snapshot> snapshots;
+};
+
 [[nodiscard]] auto ReadCatalogField(
     const winrt::Windows::Data::Json::JsonObject &object,
     const std::wstring_view name, const std::string_view location, const auto read) {
@@ -50,13 +56,17 @@ struct Snapshot {
         "could not initialize the Windows Runtime to read the backup catalog"};
     using winrt::Windows::Data::Json::JsonValue;
     using winrt::Windows::Data::Json::JsonValueType;
-    auto entries = winrt::Windows::Data::Json::JsonArray{nullptr};
-    if (!winrt::Windows::Data::Json::JsonArray::TryParse(
-            Transcode<std::wstring>(json), entries)) {
+    auto catalog = winrt::Windows::Data::Json::JsonObject{nullptr};
+    if (!winrt::Windows::Data::Json::JsonObject::TryParse(
+            Transcode<std::wstring>(json), catalog)) {
         throw std::runtime_error(
-            "The backup catalog returned by PBS is not a valid JSON array.");
+            "The backup catalog returned by PBS is not a valid JSON object.");
     }
-    auto groups = std::map<std::string, std::vector<Snapshot>>{};
+    const auto starting_namespace = Transcode<std::string>(ReadCatalogField(
+        catalog, L"namespace", "catalog", &JsonValue::GetString));
+    const auto entries = ReadCatalogField(
+        catalog, L"snapshots", "catalog", &JsonValue::GetArray);
+    auto groups = std::map<std::string, BackupGroup>{};
     for (const auto &[index, entry] : entries | std::views::enumerate) {
         const auto location = std::format("[{}]", index);
         if (entry.ValueType() != JsonValueType::Object) {
@@ -64,6 +74,8 @@ struct Snapshot {
                 "PBS backup catalog entry '{}' must be a snapshot object", location));
         }
         const auto object = entry.GetObject();
+        const auto namespace_name = Transcode<std::string>(ReadCatalogField(
+            object, L"namespace", location, &JsonValue::GetString));
         const auto group = std::format("{}/{}",
             Transcode<std::string>(ReadCatalogField(
                 object, L"backup-type", location, &JsonValue::GetString)),
@@ -105,10 +117,19 @@ struct Snapshot {
                 snapshot.archives.push_back(std::move(name));
             }
         }
-        groups[group].push_back(std::move(snapshot));
+        const auto relative_namespace = starting_namespace.empty() ? namespace_name :
+            namespace_name == starting_namespace ? std::string{} :
+            namespace_name.substr(starting_namespace.size() + 1);
+        const auto label = relative_namespace.empty() ? group :
+            std::format("{}/{}", relative_namespace, group);
+        const auto position = groups.try_emplace(label, BackupGroup{
+            .namespace_name = Transcode<std::u8string>(namespace_name),
+            .name = group,
+        }).first;
+        position->second.snapshots.push_back(std::move(snapshot));
     }
-    for (auto &[group, snapshots] : groups) {
-        std::ranges::sort(snapshots, std::greater{}, &Snapshot::timestamp);
+    for (auto &[label, group] : groups) {
+        std::ranges::sort(group.snapshots, std::greater{}, &Snapshot::timestamp);
     }
     return groups;
 }
@@ -121,10 +142,11 @@ struct Snapshot {
 }
 
 // Return display labels, or no value if the manifest retrieval was cancelled.
-[[nodiscard]] auto MakeArchiveLabels(const std::string_view snapshot,
+[[nodiscard]] auto MakeArchiveLabels(const std::u8string_view namespace_name,
+    const std::string_view snapshot,
     const std::span<const std::string> archives,
     const auto &retrieve_manifest) -> std::optional<std::vector<std::string>> {
-    const auto manifest = retrieve_manifest(snapshot);
+    const auto manifest = retrieve_manifest(namespace_name, snapshot);
     if (!manifest) {
         return std::nullopt;
     }
@@ -158,6 +180,7 @@ struct Snapshot {
 } // namespace browse_detail
 
 export struct BackupSelection {
+    std::u8string namespace_name;
     std::string snapshot;
     std::string archive;
 };
@@ -165,8 +188,8 @@ export struct BackupSelection {
 // Select a group, snapshot, and image archive from RetrieveBackupCatalog's JSON.
 // All menus share one screen lifetime. Returning restores the ordinary console
 // so the caller can start the selected view. Cancellation returns no selection.
-// retrieve_manifest receives the selected snapshot identifier and returns its
-// manifest, or no value if retrieval was cancelled.
+// retrieve_manifest receives the full namespace and selected snapshot identifier
+// and returns its manifest, or no value if retrieval was cancelled.
 export template <class RetrieveManifest>
 [[nodiscard]] auto SelectBackup(const std::u8string_view catalog,
     const RetrieveManifest retrieve_manifest)
@@ -179,11 +202,12 @@ export template <class RetrieveManifest>
         std::ranges::to<std::vector<std::string_view>>();
     auto group_index = 0uz;
     while (const auto group = Choose(terminal,
-            groups.empty() ? "No backups were found in this namespace." : "Choose a backup group",
+            groups.empty() ? "No backups were found in this namespace or its descendants." : "Choose a backup group",
             group_names, group_index)) {
         group_index = *group;
         const auto name = group_names.at(*group);
-        const auto &snapshots = groups.at(std::string{name});
+        const auto &selected_group = groups.at(std::string{name});
+        const auto &snapshots = selected_group.snapshots;
         const auto times = snapshots | std::views::transform(&Snapshot::timestamp) |
             std::ranges::to<std::vector<std::string_view>>();
         auto snapshot_index = 0uz;
@@ -191,7 +215,7 @@ export template <class RetrieveManifest>
                 std::format("{} — choose a snapshot (UTC)", name), times, snapshot_index)) {
             snapshot_index = *snapshot;
             const auto &selected = snapshots.at(*snapshot);
-            const auto identifier = std::format("{}/{}", name, selected.timestamp);
+            const auto identifier = std::format("{}/{}", selected_group.name, selected.timestamp);
             const auto labels = [&] {
                 if (!selected.has_manifest) {
                     return std::optional{selected.archives};
@@ -199,7 +223,8 @@ export template <class RetrieveManifest>
                 // Retrieval can write diagnostics to the console. The next menu
                 // must repaint those cells while retaining this screen owner.
                 terminal.InvalidateFrame();
-                return MakeArchiveLabels(identifier, selected.archives, retrieve_manifest);
+                return MakeArchiveLabels(selected_group.namespace_name,
+                    identifier, selected.archives, retrieve_manifest);
             }();
             if (!labels) {
                 return std::nullopt;
@@ -224,6 +249,7 @@ export template <class RetrieveManifest>
                 continue;
             }
             return BackupSelection{
+                .namespace_name = selected_group.namespace_name,
                 .snapshot = identifier,
                 .archive = std::string{choices.at(*archive).second},
             };

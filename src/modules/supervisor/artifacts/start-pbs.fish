@@ -6,14 +6,6 @@ set pbs_manifest_filename devicefs-manifest.conf
 set print_samba_logs 0
 set --export use_map_grpc 1
 
-function pretty_print_json
-    if set -l jq (command -v jq)
-        $jq
-    else
-        cat
-    end
-end
-
 function unmount_vss
     timeout --kill-after=1s 5s fish --no-config -c 'while ! sudo -n umount $argv[1]; sleep 1; end' $vss_mount_point
 end
@@ -33,10 +25,10 @@ function cancel_before_start --argument-names finalizer
     exit 143
 end
 
-function publish_child --argument-names child_pid
-    echo $child_pid >$pid_file
+function publish_children
+    printf '%s\n' $argv >$pid_file
     if test -e $stop_file
-        kill -TERM $child_pid
+        kill -TERM $argv
     end
 end
 
@@ -45,7 +37,7 @@ function wait_for_published_child --argument-names child_pid
     function record_child_exit --on-process-exit $child_pid
         set -g child_exit_code $argv[3]
     end
-    publish_child $child_pid
+    publish_children $child_pid
     wait $child_pid
     rm -f $pid_file
     return $child_exit_code
@@ -72,7 +64,7 @@ function run_backup --argument-names parallel_images
         set image_filename (path basename $image_path)
         set --append backup_argv "$image_filename:$image_path"
     end
-    set -l manifest_ (echo -- $DEVICEFS_MANIFEST | pretty_print_json | string collect)
+    set -l manifest_ (echo -- $DEVICEFS_MANIFEST | jq | string collect)
     if ! string match -q -r '[^0]' $pipestatus
         set DEVICEFS_MANIFEST $manifest_
     end
@@ -93,18 +85,53 @@ function print_manifest --argument-names snapshot
     supervise_pbs $last_pid true
 end
 
+function collect_backup_catalog --argument-names directory
+    set -l namespaces $PBS_NAMESPACE
+    $DEVICEFS_PBS_CLIENT namespace list $PBS_NAMESPACE --output-format json >$directory/query &
+    if wait_for_published_child $last_pid
+        if set -l discovered (jq -r '.data[].ns' $directory/query)
+            set namespaces $discovered
+        end
+    end
+    if test -e $stop_file
+        return 143
+    end
+    set -l children
+    for index in (seq (count $namespaces))
+        set -l output $directory/$index.json
+        # Omitting the group lists every snapshot in this namespace in one request.
+        $DEVICEFS_PBS_CLIENT snapshot list --ns $namespaces[$index] --output-format json >$output &
+        function catalog_query_finished_$last_pid --on-process-exit $last_pid --inherit-variable output \
+                --argument-names event process_id exit_code
+            test $exit_code -eq 0 || rm -f -- $output
+        end
+        set --append children $last_pid
+        publish_children $children
+    end
+    wait $children
+    rm -f -- $pid_file
+    if test -e $stop_file
+        return 143
+    end
+    for index in (seq (count $namespaces))
+        if test -f $directory/$index.json
+            jq --arg namespace $namespaces[$index] '.[] + {namespace: $namespace}' \
+                $directory/$index.json >>$directory/snapshots || return
+        end
+    end
+    jq --slurp --arg namespace $PBS_NAMESPACE \
+        '{namespace: $namespace, snapshots: .}' $directory/snapshots
+end
+
 function list_backups
     cancel_before_start true
-    set -l catalog (mktemp -t devicefs-catalog.XXXXXXXXXX) || return
-    # Omitting the group lists every snapshot in PBS_NAMESPACE in one request.
-    $DEVICEFS_PBS_CLIENT snapshot list --output-format json >$catalog &
-    supervise_pbs $last_pid true
+    set -l directory (mktemp -d -t devicefs-catalog.XXXXXXXXXX) || return
+    printf '' >$directory/snapshots
+    collect_backup_catalog $directory
     set -l result $status
-    if test $result -eq 0
-        pretty_print_json <$catalog
-        set result $status
-    end
-    rm -f -- $catalog
+    set --erase PBS_PASSWORD
+    finish_operation true
+    rm -rf -- $directory
     return $result
 end
 
@@ -179,11 +206,11 @@ end
 function read_view_map_output --argument-names output_path device_path
     set -l map_ready
     while read --local map_line
-        printf '%s\n' $map_line 1>&2
+        echo -- $map_line 1>&2
         if test -z "$map_ready"
             if test $use_map_grpc -eq 1
                 test "$map_line" = "$device_path.sock" || continue
-                printf '%s\n' $device_path.sock >$device_path
+                echo -- $device_path.sock >$device_path
                 set map_ready 1
                 continue
             end
@@ -191,7 +218,7 @@ function read_view_map_output --argument-names output_path device_path
                 string match --regex --all --groups-only \
                     '\s(/dev/loop[0-9]+)(?:\s|$)' $map_line
             )
-                printf '%s\n' $candidate >$device_path
+                echo -- $candidate >$device_path
                 set map_ready 1
                 break
             end
@@ -265,7 +292,7 @@ function run_view --argument-names snapshot_override archive address port rpc_he
     set -l map_output_reader $view_root/read-map-output.fish
     begin
         functions -- read_view_map_output
-        printf '%s\n' 'read_view_map_output $argv[1] $argv[2]'
+        echo -- 'read_view_map_output $argv[1] $argv[2]'
     end >$map_output_reader
     set output_exit_code $status
     if test $output_exit_code -ne 0
@@ -293,7 +320,7 @@ function run_view --argument-names snapshot_override archive address port rpc_he
     function record_view_map_exit --on-process-exit $view_map_pid
         set -g view_map_exit_code $argv[3]
     end
-    publish_child $view_map_pid
+    publish_children $view_map_pid
 
     read --local mapped_device <$mapped_device_output
     set --erase PBS_PASSWORD

@@ -44,8 +44,9 @@ export [[nodiscard]] auto InventoryVhdx(
     std::string_view device) -> int;
 
 // Retrieve the PBS snapshot catalog as UTF-8 JSON for all groups in the
-// configured namespace, or the supplied override. An empty catalog is a JSON
-// array containing no entries; cancellation returns an empty optional.
+// configured namespace, or the supplied override, and its descendants. The
+// object contains the starting namespace and a snapshots array; each snapshot
+// includes its full namespace. Cancellation returns an empty optional.
 // Retrieval failures throw, with PBS diagnostics forwarded to standard error.
 export [[nodiscard]] auto RetrieveBackupCatalog(
     const HANDLE cancellation_event,

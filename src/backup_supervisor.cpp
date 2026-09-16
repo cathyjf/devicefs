@@ -801,7 +801,7 @@ struct SelectiveViewOptions {
         return result;
     }
     const auto selection = SelectBackup(*catalog,
-        [input, &namespace_override](const std::string_view snapshot)
+        [input](const std::u8string_view namespace_name, const std::string_view snapshot)
             -> std::optional<std::u8string> {
             auto manifest = std::u8string{};
             const auto menu_input_mode = [input] {
@@ -812,9 +812,9 @@ struct SelectiveViewOptions {
                 return mode;
             }();
             const auto retrieved = RunForegroundOperation(input, menu_input_mode,
-                [snapshot, &namespace_override, &manifest](const HANDLE cancellation_event) {
+                [snapshot, namespace_name, &manifest](const HANDLE cancellation_event) {
                     auto response = RetrieveBackupManifest(
-                        cancellation_event, namespace_override, snapshot);
+                        cancellation_event, std::u8string{namespace_name}, snapshot);
                     if (!response) {
                         return kCancelledExitCode;
                     }
@@ -834,7 +834,7 @@ struct SelectiveViewOptions {
     return RunSelectiveViewMode(SelectiveViewOptions{
         .archive = selection->archive,
         .snapshot_override = selection->snapshot,
-        .namespace_override = std::move(namespace_override),
+        .namespace_override = selection->namespace_name,
     });
 }
 

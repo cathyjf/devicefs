@@ -84,6 +84,7 @@ namespace internal {
     const HANDLE cancellation_event,
     const devicefs::vshadow::SnapshotSet &snapshot_set,
     const std::string_view read_user,
+    const bool use_known_data_map,
     const std::optional<std::u8string> &namespace_override) {
     const auto cancelled = WaitForSingleObject(cancellation_event, 0);
     if (cancelled == WAIT_FAILED) {
@@ -120,7 +121,8 @@ namespace internal {
     }
 
     const auto snapshot_manifest = SerializeSnapshotManifest(snapshot_set);
-    const auto devicefs = StartDeviceFs(snapshot_set.snapshots, read_user);
+    const auto devicefs = StartDeviceFs(
+        snapshot_set.snapshots, read_user, use_known_data_map);
     auto cleanup = wil::scope_exit([&] {
         TryStopDeviceFs(devicefs);
     });
@@ -165,13 +167,14 @@ export [[nodiscard]] auto RunNativeBackup(
         return kCancelledExitCode;
     }
 
-    auto [read_user, selected_volumes] = [] {
+    auto [read_user, selected_volumes, use_known_data_map] = [] {
         const auto persistent = ResolvePersistentPaths();
         auto configuration =
             ReadBackupConfiguration(persistent.configuration);
-        return std::pair{
+        return std::tuple{
             std::move(configuration.windows_username),
             std::move(configuration.volumes),
+            configuration.pbs_use_known_data_map,
         };
     }();
     if (!volume_override.empty()) {
@@ -189,6 +192,7 @@ export [[nodiscard]] auto RunNativeBackup(
                         cancellation_event,
                         snapshot_set,
                         read_user,
+                        use_known_data_map,
                         namespace_override);
                 } catch (const std::runtime_error &error) {
                     devicefs::WriteToStream(

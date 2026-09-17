@@ -63,6 +63,7 @@ struct DeviceFsStartRequest {
     std::optional<std::string> rpc_endpoint;
     std::optional<std::string_view> rpc_password;
     bool vhdx = false;
+    bool expose_known_data_map = false;
 };
 
 [[nodiscard]] auto TemporaryDeviceFsViewPath() {
@@ -82,7 +83,7 @@ struct DeviceFsStartRequest {
     };
     if (request.vhdx) {
         arguments.emplace_back("--vhdx");
-    } else if (!request.rpc_endpoint) {
+    } else if (!request.rpc_endpoint && request.expose_known_data_map) {
         // Our PBS invocation uses the default chunk size of 4 MiB.
         // We generate the bitmap at that same resolution so that its bits
         // will identify the chunks that PBS will read.
@@ -182,7 +183,8 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
 
 [[nodiscard]] auto StartDeviceFs(
     const std::span<const devicefs::vshadow::Snapshot> snapshots,
-    const std::string_view read_user) {
+    const std::string_view read_user,
+    const bool use_known_data_map) {
     const auto sources = snapshots |
         std::views::transform([](const auto &snapshot) {
             return DeviceFsSource{
@@ -195,6 +197,7 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
         .sources = sources,
         .mount_target = std::string{DeviceFsProcess::kMountTarget},
         .read_user = std::string{read_user},
+        .expose_known_data_map = use_known_data_map,
     });
 }
 

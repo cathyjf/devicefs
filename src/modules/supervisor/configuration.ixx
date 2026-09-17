@@ -54,6 +54,7 @@ export struct BackupConfiguration {
     std::u8string pbs_auth_id;
     std::u8string pbs_namespace;
     bool pbs_parallelize_image_upload = false;
+    bool pbs_use_known_data_map = false;
     std::u8string pbs_fingerprint;
     SecureUtf8String pbs_authentication_secret;
     SecureUtf8String pbs_encryption_key;
@@ -140,15 +141,12 @@ struct OptionalUtf8StringDestination :
 };
 
 struct OptionalBooleanDestination : MemberDestination<bool> {
-    using MemberDestination<bool>::MemberDestination;
+    constexpr OptionalBooleanDestination(
+        bool BackupConfiguration::*member,
+        const bool default_value) noexcept
+        : MemberDestination(member), default_value(default_value) {}
 
-    [[nodiscard]] static constexpr auto DefaultValue() noexcept {
-        return true;
-    }
-
-    [[nodiscard]] static constexpr auto TemplateValue() noexcept {
-        return DefaultValue() ? "true"sv : "false"sv;
-    }
+    bool default_value;
 };
 
 struct PortDestination : MemberDestination<std::uint16_t> {
@@ -303,7 +301,9 @@ constexpr ConfigurationField::~ConfigurationField() = default;
                 OptionalUtf8StringDestination{
                     &BackupConfiguration::pbs_namespace}},
             {"parallelize_image_upload", OptionalBooleanDestination{
-                &BackupConfiguration::pbs_parallelize_image_upload}},
+                &BackupConfiguration::pbs_parallelize_image_upload, true}},
+            {"use_known_data_map", OptionalBooleanDestination{
+                &BackupConfiguration::pbs_use_known_data_map, false}},
             {"fingerprint",
                 Utf8TextDestination{
                     &BackupConfiguration::pbs_fingerprint}},
@@ -347,6 +347,11 @@ struct TemplateValueWriter {
     template <FixedTemplateValueDestination Destination>
     constexpr auto operator()(const Destination &) const -> void {
         output.get().append(Destination::TemplateValue());
+    }
+
+    constexpr auto operator()(
+        const OptionalBooleanDestination &destination) const -> void {
+        output.get().append(destination.default_value ? "true"sv : "false"sv);
     }
 
     constexpr auto operator()(
@@ -429,8 +434,7 @@ struct DefaultFieldReader {
 
     auto operator()(
         const OptionalBooleanDestination &destination) const noexcept {
-        destination.Get(configuration.get()) =
-            OptionalBooleanDestination::DefaultValue();
+        destination.Get(configuration.get()) = destination.default_value;
         return true;
     }
 

@@ -31,6 +31,7 @@ import devicefs.supervisor.account_management;
 import devicefs.supervisor.configuration;
 import devicefs.supervisor.embedded_artifacts;
 import devicefs.supervisor.installation;
+import devicefs.supervisor.materialize_oci;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.temporary_paths;
 import devicefs.terminal.transcoding;
@@ -476,6 +477,13 @@ struct StartedWslFish {
     const PbsStandardOutput standard_output = PbsStandardOutput::Forward) {
     auto started = StartWslFishProcess(
         configuration, arguments);
+    const auto layer = ReadWslOciLayerDigest(
+        configuration.wsl.distribution, started.process.process.hProcess);
+    devicefs::WriteToStream(devicefs::stderr,
+        "Executing command in WSL distribution '{}' (registered under user '{}'){}\n",
+        configuration.wsl.distribution,
+        configuration.windows_username,
+        layer ? std::format(" with OCI layer '{}'", *layer) : std::string{});
     if (standard_output == PbsStandardOutput::Forward) {
         started.process.standard_output.emplace(
             std::move(started.standard_output),

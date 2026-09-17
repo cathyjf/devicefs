@@ -119,11 +119,12 @@ auto SetDefaultTokenAcl() {
     }
 }
 
-[[nodiscard]] auto FindDistribution(const std::string_view distribution)
+[[nodiscard]] auto FindDistribution(const std::string_view distribution,
+    const HKEY user = HKEY_CURRENT_USER)
     -> wil::shared_hkey {
     auto registrations = wil::unique_hkey{};
     if (const auto result = wil::reg::open_unique_key_nothrow(
-            HKEY_CURRENT_USER, kWslRegistration, registrations);
+            user, kWslRegistration, registrations);
         wil::reg::is_registry_not_found(result)) {
         return wil::shared_hkey{};
     } else if (FAILED(result)) {
@@ -161,6 +162,16 @@ auto SetDefaultTokenAcl() {
             distribution, ExplicitWin32Error::FromHresult(result));
     }
     return wil::shared_hkey{};
+}
+
+[[nodiscard]] auto ReadInstalledOciLayerDigest(const std::filesystem::path &directory)
+    -> std::optional<std::string> {
+    auto file = std::ifstream{directory / kOciLayerDigestFile};
+    auto digest = std::string{};
+    if (!std::getline(file, digest) || digest.empty()) {
+        return std::nullopt;
+    }
+    return digest;
 }
 
 auto RunCommand(
@@ -441,6 +452,46 @@ auto ReplaceDistribution(
 
 } // namespace
 
+// Read the OCI layer marker for the distribution registered to the WSL process's
+// Windows account. The supervisor itself can be running as another account.
+export [[nodiscard]] auto ReadWslOciLayerDigest(
+    const std::string_view distribution, const HANDLE process)
+    -> std::optional<std::string> {
+    auto token = wil::unique_handle{};
+    if (!OpenProcessToken(process, TOKEN_QUERY, token.addressof())) {
+        return std::nullopt;
+    }
+    auto user = wil::unique_tokeninfo_ptr<TOKEN_USER>{};
+    if (FAILED(wil::get_token_information_nothrow(user, token.get()))) {
+        return std::nullopt;
+    }
+    auto sid = wil::unique_hlocal_string{};
+    if (!ConvertSidToStringSidW(user->User.Sid, sid.addressof())) {
+        return std::nullopt;
+    }
+    auto profile = wil::unique_hkey{};
+    if (FAILED(wil::reg::open_unique_key_nothrow(HKEY_USERS, sid.get(), profile))) {
+        return std::nullopt;
+    }
+    const auto registration = [distribution, &profile] {
+        try {
+            return FindDistribution(distribution, profile.get());
+        } catch (const std::runtime_error &) {
+            // A failed metadata lookup must not prevent the WSL command from running.
+            return wil::shared_hkey{};
+        }
+    }();
+    if (!registration) {
+        return std::nullopt;
+    }
+    auto directory = wil::unique_cotaskmem_string{};
+    if (FAILED(wil::reg::get_value_string_nothrow(
+            registration.get(), L"BasePath", directory))) {
+        return std::nullopt;
+    }
+    return ReadInstalledOciLayerDigest(directory.get());
+}
+
 export [[nodiscard]] auto MaterializeOci(
     const std::string_view distribution,
     const std::optional<std::filesystem::path> &oci) -> bool {
@@ -464,12 +515,7 @@ export [[nodiscard]] auto MaterializeOci(
         }
         // Missing or unreadable metadata does not establish which filesystem
         // was imported. A fresh import restores both the image and its record.
-        auto file = std::ifstream{previous_directory / kOciLayerDigestFile};
-        auto digest = std::string{};
-        if (!std::getline(file, digest) || digest.empty()) {
-            return std::nullopt;
-        }
-        return digest;
+        return ReadInstalledOciLayerDigest(previous_directory);
     }();
 
     SetDefaultTokenAcl();

@@ -19,43 +19,56 @@ export module devicefs.allocation;
 import std;
 import <devicefs/windows_imports.h>;
 
-namespace devicefs::allocation_detail {
+// Query the alignment required for I/O buffers used with `file`. Returns the
+// alignment in bytes on success. On failure, returns `std::nullopt` and leaves
+// the Windows error code available through `GetLastError()`.
+//
+// A buffer used for reading from the file must have an address that is a
+// multiple of the returned value. To obtain such a buffer, callers can use the
+// `NewAlignedArray` function defined below.
+//
+// For unbuffered reads, the starting position in the file and the number of
+// bytes requested must also be multiples of the volume's sector size.
+// This function returns the buffer alignment, not that sector size.
+export [[nodiscard]] auto QueryBufferAlignment(const HANDLE file) noexcept
+    -> std::optional<std::align_val_t> {
+    auto information = FILE_ALIGNMENT_INFO{};
+    if (!GetFileInformationByHandleEx(file, FileAlignmentInfo,
+            &information, sizeof(information))) {
+        return std::nullopt;
+    }
+    // `AlignmentRequirement` encodes an N-byte alignment as `N - 1`. Adding one
+    // converts that encoding to the byte alignment accepted by `operator new`.
+    // https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/initializing-a-device-object
+    return std::align_val_t{std::size_t{information.AlignmentRequirement} + 1};
+}
 
-const auto page_size = [] {
-    auto information = SYSTEM_INFO{};
-    GetSystemInfo(&information);
-    return std::align_val_t{information.dwPageSize};
-}();
-
-} // devicefs::allocation_detail
-
-// Return an array of `size` objects of type `T` aligned to the system page
-// size. This is useful for raw volume reads because such reads can require
-// sector-aligned buffers. Microsoft recommends page-aligned allocations
-// for these buffers.
+// Allocate an array of `size` objects of type `T` whose starting address is
+// divisible by `alignment`. This is useful for raw volume reads because such
+// reads require specially-aligned buffers.
 // https://learn.microsoft.com/en-us/windows/win32/fileio/file-buffering#alignment-and-file-access-requirements
 //
-// If `terminate_on_failure` is true, allocation failures terminate the process
+// If `terminate_on_failure` is true, allocation failures terminate the process.
 // Otherwise, the function returns `std::unique_ptr{nullptr}` on failure.
 export
 template <class T = BYTE, bool terminate_on_failure = true>
     requires std::is_trivially_destructible_v<T>
-[[msvc::forceinline]]
-auto NewPageAlignedArray(const std::size_t size) noexcept {
-    const auto deleter = [](T *const allocation) noexcept {
+[[nodiscard, msvc::forceinline]]
+auto NewAlignedArray(const std::size_t size, const std::align_val_t alignment) noexcept {
+    const auto deleter = [alignment](T *const allocation) noexcept {
         [[gsl::suppress("26409",
             justification:
                 "Invoking `operator delete[]` is necessary to free the memory "
                 "allocated below.")]]
-        ::operator delete[](allocation, devicefs::allocation_detail::page_size);
+        ::operator delete[](allocation, alignment);
     };
     return std::unique_ptr<T[], decltype(deleter)>{
-        [size] noexcept {
+        [size, alignment] noexcept {
             [[gsl::suppress("26409",
                 justification:
                     "The analyzer suggests using `std::make_unique`, but that "
                     "function cannot allocate an over-aligned byte array.")]]
-            const auto buffer = ::new (devicefs::allocation_detail::page_size, std::nothrow) T[size];
+            const auto buffer = ::new (alignment, std::nothrow) T[size];
             if constexpr (terminate_on_failure) {
                 if (!buffer) {
                     std::terminate();

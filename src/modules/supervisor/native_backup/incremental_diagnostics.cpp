@@ -288,7 +288,7 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
 
 [[nodiscard]] auto BuildVolumeReport(
     const SnapshotInterval &interval) {
-    auto map = [&]()
+    auto map = [&]
         -> std::expected<DirtyBlockMap, std::string> {
         try {
             return BuildDirtyBlockMap(
@@ -368,7 +368,7 @@ enum class BackupViewPreparation {
         return BackupViewPreparation::OptimizationUnavailable;
     }
 
-    auto synthetic = [&]() -> std::optional<SyntheticBackupDevice> {
+    auto synthetic = [&] -> std::optional<SyntheticBackupDevice> {
         try {
             auto baseline = devicefs::WindowsBlockDevice::FromFilename(
                 std::filesystem::path{report.baseline_device},
@@ -376,6 +376,9 @@ enum class BackupViewPreparation {
             auto payload = devicefs::WindowsBlockDevice::FromFilename(
                 std::filesystem::path{report.payload_device},
                 true, true, true, kPayloadDescription);
+            const auto alignment = std::max(baseline.buffer_alignment, payload.buffer_alignment);
+            devicefs::WindowsBlockDevice::read_buffer_alignment = devices.empty()
+                ? alignment : std::max(devicefs::WindowsBlockDevice::read_buffer_alignment, alignment);
             return SyntheticBackupDevice::FromBlockDevices(
                 std::move(baseline), std::move(payload),
                 devicefs::vss::kBlockSize,
@@ -747,8 +750,13 @@ struct VerificationJob {
     };
 }
 
-[[nodiscard]] auto AllocateComparisonBuffer() {
-    auto result = NewPageAlignedArray<unsigned char, false>(kComparisonChunkSize);
+[[nodiscard]] auto AllocateComparisonBuffer(const HANDLE snapshot, const std::string_view source) {
+    const auto alignment = QueryBufferAlignment(snapshot);
+    if (!alignment) {
+        WinError("could not query buffer alignment for verification snapshot '{}'",
+            source);
+    }
+    auto result = NewAlignedArray<unsigned char, false>(kComparisonChunkSize, *alignment);
     if (!result) {
         WinError("could not allocate an incremental verification buffer",
             ExplicitWin32Error{ERROR_NOT_ENOUGH_MEMORY});
@@ -904,8 +912,8 @@ auto VerifySnapshotRange(
             volume.baseline_device, kBaselineDescription);
         auto payload = OpenVerificationSnapshot(
             volume.payload_device, kPayloadDescription);
-        auto baseline_storage = AllocateComparisonBuffer();
-        auto payload_storage = AllocateComparisonBuffer();
+        auto baseline_storage = AllocateComparisonBuffer(baseline.get(), volume.baseline_device);
+        auto payload_storage = AllocateComparisonBuffer(payload.get(), volume.payload_device);
         SeekVerificationSnapshot(
             baseline.get(), range_start, kBaselineDescription,
             volume.baseline_device);
@@ -1649,7 +1657,7 @@ auto PrintVerificationResult(
 export [[nodiscard]] auto RunIncrementalDiagnostics(
     const HANDLE cancellation_event,
     const IncrementalDiagnosticOptions &options) -> int {
-    const auto baseline_result = [&]()
+    const auto baseline_result = [&]
         -> std::expected<std::vector<AvailableBaseline>, int> {
         if (options.baseline_snapshot_identifier) {
             return QueryBaselineSnapshot(

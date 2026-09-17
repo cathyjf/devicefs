@@ -352,47 +352,28 @@ template <typename DeviceType>
 using DeviceFiles = std::map<std::wstring, DeviceFile<DeviceType>>;
 
 template <BlockDevice DeviceType>
-[[nodiscard]] auto OpenDevice(
+[[nodiscard]] auto OpenSource(
     const internal::Mapping &mapping, const bool extended_dasd,
     const bool cache, const bool synthetic_free_clusters,
     const UINT64 map_number,
     const std::string_view rpc_password) {
-    auto source = [&] {
-        if constexpr ((std::same_as<DeviceType, RPCBlockDevice>) ||
-            (std::same_as<DeviceType, VhdxViewer<RPCBlockDevice>>)) {
-            const auto tcp = rpc_client::IsTcpDevice(mapping);
-            return RPCBlockDevice::FromSymbol(
-                tcp
-                    ? rpc_client::MakeTcpRpcBinding(mapping, rpc_password)
-                    : rpc_client::LocalRpcBinding(),
-                tcp
-                    ? std::string_view{}
-                    : std::string_view{mapping.device}.substr(
-                        internal::kRpcDevicePrefix.size()));
-        } else {
-            return WindowsBlockDevice::FromFilename(
-                std::filesystem::path{mapping.device}, extended_dasd,
-                cache, synthetic_free_clusters,
-                std::format("--map #{}", map_number));
-        }
-    }();
-    auto device = [&]() -> DeviceType {
-        if constexpr (std::same_as<DeviceType, decltype(source)>) {
-            return std::move(source);
-        } else {
-            return DeviceType::FromBlockDevice(std::move(source));
-        }
-    }();
-    return DeviceFile<DeviceType>{
-        .name = mapping.name,
-        .info = {
-            .FileAttributes = FILE_ATTRIBUTE_READONLY,
-            .AllocationSize = device.length,
-            .FileSize = device.length,
-            .IndexNumber = map_number + 1,
-        },
-        .device = std::move(device),
-    };
+    if constexpr ((std::same_as<DeviceType, RPCBlockDevice>) ||
+        (std::same_as<DeviceType, VhdxViewer<RPCBlockDevice>>)) {
+        const auto tcp = rpc_client::IsTcpDevice(mapping);
+        return RPCBlockDevice::FromSymbol(
+            tcp
+                ? rpc_client::MakeTcpRpcBinding(mapping, rpc_password)
+                : rpc_client::LocalRpcBinding(),
+            tcp
+                ? std::string_view{}
+                : std::string_view{mapping.device}.substr(
+                    internal::kRpcDevicePrefix.size()));
+    } else {
+        return WindowsBlockDevice::FromFilename(
+            std::filesystem::path{mapping.device}, extended_dasd,
+            cache, synthetic_free_clusters,
+            std::format("--map #{}", map_number));
+    }
 }
 
 template <typename Function>
@@ -843,21 +824,46 @@ template <BlockDevice DeviceType>
 [[nodiscard]] auto OpenDevices(
     const Options &options,
     wil::secure_string rpc_password = {}) {
-    auto files = std::views::iota(0uz, options.mappings.size())
+    auto sources = std::views::iota(0uz, options.mappings.size())
         | std::views::transform([&](const auto i) {
-            const auto &mapping = options.mappings[i];
-            return std::pair{
-                Lowercase(mapping.name),
-                OpenDevice<DeviceType>(mapping, options.extended_dasd,
-                    options.cache, options.synthetic_free_clusters,
-                    i + 1, std::string_view{rpc_password})};
-        })
-        | std::ranges::to<DeviceFiles<DeviceType>>();
+            return OpenSource<DeviceType>(options.mappings[i], options.extended_dasd,
+                options.cache, options.synthetic_free_clusters,
+                i + 1, std::string_view{rpc_password});
+        }) | std::ranges::to<std::vector>();
+    if constexpr (std::same_as<typename decltype(sources)::value_type, WindowsBlockDevice>) {
+        // `VhdxViewer::FromBlockDevice` reads NTFS metadata from its source and
+        // can therefore allocate a thread's retained read buffer. The maximum
+        // alignment must already be known before that first read, so all sources
+        // are opened before any VHDX views are constructed.
+        WindowsBlockDevice::read_buffer_alignment = std::ranges::max(
+            sources | std::views::transform(&WindowsBlockDevice::buffer_alignment));
+    }
+    auto next_index = kRootInfo.IndexNumber + 1;
+    auto files = DeviceFiles<DeviceType>{};
+    for (const auto i : std::views::iota(0uz, options.mappings.size())) {
+        const auto &mapping = options.mappings[i];
+        auto &source = sources[i];
+        auto device = [&source] -> DeviceType {
+            if constexpr (std::same_as<DeviceType, std::remove_cvref_t<decltype(source)>>) {
+                return std::move(source);
+            } else {
+                return DeviceType::FromBlockDevice(std::move(source));
+            }
+        }();
+        files.emplace(
+            Lowercase(mapping.name),
+            DeviceFile<DeviceType>{
+                .name = mapping.name,
+                .info = {
+                    .FileAttributes = FILE_ATTRIBUTE_READONLY,
+                    .AllocationSize = device.length,
+                    .FileSize = device.length,
+                    .IndexNumber = next_index++,
+                },
+                .device = std::move(device),
+            });
+    }
     if constexpr (std::same_as<DeviceType, WindowsDeviceOrBitmap>) {
-        auto next_index = std::ranges::max(files | std::views::values |
-            std::views::transform([](const auto &file) {
-                return file.info.IndexNumber;
-            })) + 1;
         for (const auto &mapping : options.mappings) {
             const auto &device = std::get<WindowsBlockDevice>(
                 files.at(Lowercase(mapping.name)).device.contents);

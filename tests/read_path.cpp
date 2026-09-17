@@ -17,6 +17,7 @@
 
 import std;
 import <cstddef>;
+import devicefs.allocation;
 import devicefs.common;
 import devicefs.windows_block_device;
 
@@ -26,6 +27,28 @@ namespace {
 // observable. Its exact value is arbitrary. Each buffer also has one extra byte
 // before and after the requested output; those bytes must retain this value.
 constexpr auto kSentinelByte = BYTE{0xa5};
+
+// Check that the allocator accepts a one-byte alignment requirement as well as
+// larger alignments, and that the returned addresses satisfy those requirements.
+auto TestAlignedAllocations() -> void {
+    const auto check = []<class T>(const std::size_t alignment) {
+        const auto storage = NewAlignedArray<T, false>(1, std::align_val_t{alignment});
+        [[gsl::suppress("26490",
+            justification:
+                "The test converts the pointer to an integer to check whether its "
+                "address is divisible by the requested alignment; it does not "
+                "access the allocation through a different pointer type.")]]
+        if (!storage || ((reinterpret_cast<std::uintptr_t>(storage.get()) % alignment) != 0)) {
+            throw std::runtime_error(std::format(
+                "the allocator did not provide {}-byte alignment", alignment));
+        }
+    };
+    for (const auto alignment : {1uz, 512uz, 4096uz}) {
+        check.operator()<BYTE>(alignment);
+        check.operator()<std::byte>(alignment);
+        std::println("PASS: BYTE and std::byte allocations satisfy {}-byte alignment.", alignment);
+    }
+}
 
 // Construct a production allocation-bitmap object from supplied bits and cluster
 // geometry. The low bit of the first byte describes cluster zero, and a set bit
@@ -181,18 +204,28 @@ auto TestReads() -> void {
     }
     const auto filename = std::filesystem::temp_directory_path() /
         std::format("devicefs-read-path-{}.tmp", GetCurrentProcessId());
-    auto device = devicefs::WindowsBlockDevice{
-        .length = contents.size(),
-        .filename = filename,
-        .handle = decltype(devicefs::WindowsBlockDevice::handle){CreateFileW(
+    auto device = [&filename, length = contents.size()] {
+        auto handle = decltype(devicefs::WindowsBlockDevice::handle){CreateFileW(
             filename.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
             nullptr, CREATE_NEW,
             FILE_FLAG_OVERLAPPED | FILE_FLAG_DELETE_ON_CLOSE | FILE_ATTRIBUTE_TEMPORARY,
-            nullptr)},
-    };
-    if (!device.handle) {
-        WinError("could not create read-test file '{}'", std::wstring_view{filename.native()});
-    }
+            nullptr)};
+        if (!handle) {
+            WinError("could not create read-test file '{}'",
+                std::wstring_view{filename.native()});
+        }
+        const auto alignment = QueryBufferAlignment(handle.get());
+        if (!alignment) {
+            WinError("could not query read-test buffer alignment");
+        }
+        return devicefs::WindowsBlockDevice{
+            .length = length,
+            .filename = filename,
+            .handle = std::move(handle),
+            .buffer_alignment = *alignment
+        };
+    }();
+    devicefs::WindowsBlockDevice::read_buffer_alignment = device.buffer_alignment;
     auto operation = OVERLAPPED{};
     if (!WriteFile(device.handle.get(), contents.data(),
             wil::safe_cast_failfast<DWORD>(contents.size()), nullptr, &operation)) {
@@ -253,6 +286,7 @@ auto TestReads() -> void {
 } // namespace
 
 auto main() -> int try {
+    TestAlignedAllocations();
     TestBitmaps();
     TestReads();
     return 0;

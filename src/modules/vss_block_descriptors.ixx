@@ -255,10 +255,10 @@ class RawSource {
             size_ = wil::safe_cast_failfast<std::uint64_t>(
                 device_length.Length.QuadPart);
 
-            // Windows treats volume handles as noncached. Query the sector size
-            // so ReadRawExact can satisfy the device's offset, length, and buffer
-            // alignment requirements while still exposing byte-exact reads to
-            // the format parser.
+            // The parser requests arbitrary byte ranges, but Windows requires
+            // noncached volume reads to start and end on sector boundaries.
+            // `ReadRawExact` uses this sector size to expand each read, then
+            // copies only the bytes that the parser requested.
             auto geometry = DISK_GEOMETRY{};
             returned = 0;
             if (!DeviceIoControl(handle_.get(), IOCTL_DISK_GET_DRIVE_GEOMETRY,
@@ -275,6 +275,12 @@ class RawSource {
                     Transcode<std::string>(normalized_path)));
             }
             sector_size_ = geometry.BytesPerSector;
+            const auto alignment = QueryBufferAlignment(handle_.get());
+            if (!alignment) {
+                WinError("could not query buffer alignment for VSS descriptor source '{}'",
+                    std::wstring_view{normalized_path});
+            }
+            buffer_alignment_ = *alignment;
             if ((sector_size_ == 0) || ((size_ % sector_size_) != 0)) {
                 throw std::runtime_error(std::format(
                     "VSS descriptor source '{}' had invalid sector geometry "
@@ -390,15 +396,10 @@ class RawSource {
                 raw_offset, raw_size, size_);
         }
 
-        auto storage = NewPageAlignedArray<std::byte, false>(raw_size);
+        auto storage = NewAlignedArray<std::byte, false>(raw_size, buffer_alignment_);
         if (!storage) {
-            WinError("could not allocate a page-aligned VSS metadata buffer",
+            WinError("could not allocate an aligned VSS metadata buffer",
                 ExplicitWin32Error{ERROR_NOT_ENOUGH_MEMORY});
-        }
-        if ((std::bit_cast<std::uintptr_t>(storage.get()) %
-                sector_size_) != 0) {
-            throw std::runtime_error(
-                "the VSS metadata buffer did not meet volume alignment");
         }
 
         Seek(raw_offset);
@@ -422,6 +423,7 @@ class RawSource {
     wil::unique_hfile handle_;
     std::uint64_t size_ = 0;
     DWORD sector_size_ = 0;
+    std::align_val_t buffer_alignment_{1};
 };
 
 // ReadField decodes integer fields and serialized Windows GUIDs directly into

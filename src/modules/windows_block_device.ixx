@@ -258,6 +258,16 @@ struct AllocationBitmap {
 export namespace devicefs {
 
 struct WindowsBlockDevice {
+    // A thread reuses its retained read buffer across devices, so that buffer
+    // must satisfy every device's alignment requirement. The default is the
+    // system page size; device initialization replaces it with the maximum
+    // requirement before any reads begin. It remains unchanged thereafter
+    // because buffers allocated by earlier reads retain their original alignment.
+    inline static auto read_buffer_alignment = [] {
+        auto information = SYSTEM_INFO{};
+        GetSystemInfo(&information);
+        return std::align_val_t{information.dwPageSize};
+    }();
     static constexpr auto kAdvertisedSectorSize = UINT16{512};
     static constexpr auto kMeasureFreeClusterData =
         DEVICEFS_MEASURE_FREE_CLUSTER_DATA != 0;
@@ -265,6 +275,7 @@ struct WindowsBlockDevice {
     const std::uint64_t length;
     std::filesystem::path filename;
     wil::unique_hfile handle;
+    const std::align_val_t buffer_alignment = std::align_val_t{1};
     UINT32 sector_size = 0;
     filesystem_internal::AllocationBitmap allocation_bitmap;
 
@@ -395,16 +406,17 @@ struct WindowsBlockDevice {
         }
 
         const auto [bounce, temporary_backing_memory] = [read_length]
-            -> std::pair<std::span<BYTE>, decltype(NewPageAlignedArray(read_length))> {
+            -> std::pair<std::span<BYTE>, decltype(NewAlignedArray(read_length, read_buffer_alignment))> {
             // This 5 MIB capacity comfortably accommodates a 4 MiB PBS chunk
             // and any extra bytes needed for sector alignment.
             constexpr auto kRetainedReadBufferSize = 5uz * 1024 * 1024;
             if (read_length <= kRetainedReadBufferSize) {
                 thread_local const auto retained_buffer_storage =
-                    NewPageAlignedArray(kRetainedReadBufferSize);
-                return {std::span{retained_buffer_storage.get(), read_length}, {}};
+                    NewAlignedArray(kRetainedReadBufferSize, read_buffer_alignment);
+                return {std::span{retained_buffer_storage.get(), read_length},
+                    {nullptr, retained_buffer_storage.get_deleter()}};
             }
-            auto newly_allocated_memory = NewPageAlignedArray(read_length);
+            auto newly_allocated_memory = NewAlignedArray(read_length, read_buffer_alignment);
             return {std::span{newly_allocated_memory.get(), read_length},
                 std::move(newly_allocated_memory)};
         }();
@@ -577,6 +589,12 @@ auto WindowsBlockDevice::FromFilename(
             std::wstring_view{filename.native()}, description);
     }
 
+    const auto alignment = QueryBufferAlignment(handle.get());
+    if (!alignment) {
+        WinError("could not query buffer alignment for block device '{}' ({})",
+            std::wstring_view{filename.native()}, description);
+    }
+
     auto length = GET_LENGTH_INFORMATION{};
     const auto length_error =
         Ioctl(handle.get(), IOCTL_DISK_GET_LENGTH_INFO, &length, sizeof(length));
@@ -651,6 +669,7 @@ auto WindowsBlockDevice::FromFilename(
         .length = size,
         .filename = std::move(filename),
         .handle = std::move(handle),
+        .buffer_alignment = *alignment,
         .sector_size = geometry.BytesPerSector,
         .allocation_bitmap = std::move(allocation_bitmap),
     };

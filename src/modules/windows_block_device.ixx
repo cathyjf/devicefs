@@ -148,7 +148,7 @@ struct AllocationBitmap {
     UINT32 cluster_size = 0;
     int cluster_shift = 0;
     UINT64 cluster_count = 0;
-    wil::unique_virtualalloc_ptr<BYTE> storage;
+    std::unique_ptr<BYTE[]> storage;
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
     std::unique_ptr<FreeClusterMeasurement> measurement;
 #endif
@@ -227,6 +227,12 @@ struct AllocationBitmap {
     std::string_view description) -> AllocationBitmap;
 
 } // namespace devicefs::filesystem_internal
+
+const auto page_size_alignment = [] {
+    auto information = SYSTEM_INFO{};
+    GetSystemInfo(&information);
+    return std::align_val_t{information.dwPageSize};
+}();
 
 export namespace devicefs {
 
@@ -363,12 +369,20 @@ struct WindowsBlockDevice {
             return STATUS_SUCCESS;
         }
 
-        const auto prefix = offset - read_offset;
-
-        auto storage = wil::unique_virtualalloc_ptr<BYTE>(static_cast<BYTE *>(
-            VirtualAlloc(nullptr, read_length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)));
+        const auto storage = [read_length] {
+            // Raw volume reads can require sector-aligned buffers. Windows recommends
+            // page-aligned allocations for these buffers.
+            // https://learn.microsoft.com/en-us/windows/win32/fileio/file-buffering#alignment-and-file-access-requirements
+            const auto deleter = [](BYTE *const allocation) noexcept {
+                ::operator delete(allocation, page_size_alignment);
+            };
+            return std::unique_ptr<BYTE[], decltype(deleter)>{
+                static_cast<BYTE *>(::operator new(read_length, page_size_alignment, std::nothrow)),
+                deleter,
+            };
+        }();
         if (!storage) {
-            return failure(GetLastError());
+            return failure(ERROR_NOT_ENOUGH_MEMORY);
         }
         const auto bounce = std::span<BYTE>{storage.get(), read_length};
         auto device_transferred = LengthType{};
@@ -379,7 +393,7 @@ struct WindowsBlockDevice {
         }
 
         transferred = wanted;
-        std::ranges::copy(bounce.subspan(prefix, wanted), output.begin());
+        std::ranges::copy(bounce.subspan(offset - read_offset, wanted), output.begin());
         allocation_bitmap.SynthesizeFreeClusters(output, offset);
         (observers.RecordBounce(), ...);
         return STATUS_SUCCESS;
@@ -484,12 +498,7 @@ namespace devicefs::filesystem_internal {
     const auto output_size_for_api =
         wil::safe_cast_failfast<DWORD>(output_size);
 
-    auto storage = wil::unique_virtualalloc_ptr<BYTE>(static_cast<BYTE *>(
-        VirtualAlloc(nullptr, output_size_for_api, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)));
-    if (!storage) {
-        WinError("could not allocate the NTFS allocation bitmap for '{}' ({})",
-            std::wstring_view{filename.native()}, description);
-    }
+    auto storage = std::make_unique_for_overwrite<BYTE[]>(output_size_for_api);
     auto *const output = std::start_lifetime_as<VOLUME_BITMAP_BUFFER>(storage.get());
     auto input = STARTING_LCN_INPUT_BUFFER{.StartingLcn = {.QuadPart = 0}};
     auto returned = DWORD{};

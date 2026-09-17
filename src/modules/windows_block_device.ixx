@@ -206,14 +206,17 @@ struct AllocationBitmap {
                     free_begin = position;
                 }
             } else if (free_begin != end) {
-                std::ranges::fill(
-                    output.subspan(free_begin - offset, position - free_begin), 0);
+                // MSVC 19.52's `std::ranges::fill` misses its `memset` optimization
+                // and emits a byte-at-a-time loop. `std::fill` reaches `memset`,
+                // so we use it for the zero-filling operations in this file.
+                const auto free = output.subspan(free_begin - offset, position - free_begin);
+                std::fill(free.begin(), free.end(), 0);
                 free_begin = end;
             }
         }
         if (free_begin != end) {
-            std::ranges::fill(
-                output.subspan(free_begin - offset, end - free_begin), 0);
+            const auto free = output.subspan(free_begin - offset, end - free_begin);
+            std::fill(free.begin(), free.end(), 0);
         }
     }
 };
@@ -296,7 +299,7 @@ struct WindowsBlockDevice {
         if constexpr (!kMeasureFreeClusterData) {
             if (!allocation_bitmap.HasAllocatedClusters(offset, wanted)) {
                 (observers.RecordSynthetic(), ...);
-                std::ranges::fill(output, BYTE{});
+                std::fill(output.begin(), output.end(), BYTE{});
                 transferred = wanted;
                 return STATUS_SUCCESS;
             }

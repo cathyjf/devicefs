@@ -217,6 +217,9 @@ devicefs_version_info(devicefs "DeviceFs Virtual Filesystem" 0.1)
 target_compile_definitions(devicefs PRIVATE DEVICEFS_PROGRAM_DEVICEFS)
 target_link_libraries(devicefs PRIVATE devicefs-common devicefs-filesystem)
 
+add_executable(devicefs-read-path-test tests/read_path.cpp)
+target_link_libraries(devicefs-read-path-test PRIVATE devicefs-common devicefs-filesystem)
+
 add_executable(vss-descriptor-dump
     src/main.cpp
     src/vss_descriptor_dump.cpp
@@ -295,6 +298,7 @@ set(DEVICEFS_CODE_ANALYSIS_TARGETS
     devicefs-filesystem
     devicefs-vss-block-descriptors
     devicefs
+    devicefs-read-path-test
     vss-descriptor-dump
     backup-supervisor
 )
@@ -320,7 +324,7 @@ foreach(target IN LISTS DEVICEFS_CODE_ANALYSIS_TARGETS)
     )
 endforeach()
 
-foreach(target devicefs vss-descriptor-dump backup-supervisor)
+foreach(target devicefs devicefs-read-path-test vss-descriptor-dump backup-supervisor)
     target_sources(${target} PRIVATE src/resources/devicefs.manifest)
 endforeach()
 

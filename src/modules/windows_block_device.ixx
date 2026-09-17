@@ -27,14 +27,13 @@ module;
 #include <wil/resource.h>
 #include <wil/safecast.h>
 
-#include <cstddef>
-
 #undef stderr
 #undef stdout
 
 export module devicefs.windows_block_device;
 
 import std;
+import <cstddef>;
 import devicefs.common;
 import devicefs.stream_writer;
 
@@ -153,13 +152,49 @@ struct AllocationBitmap {
     std::unique_ptr<FreeClusterMeasurement> measurement;
 #endif
 
-    [[nodiscard]] auto IsAllocated(const UINT64 cluster) const noexcept {
-        // Preserve any device tail not represented by NTFS clusters.
-        if (cluster >= cluster_count) {
-            return true;
+    // Search the cluster indices in [first, limit), returning the first match or
+    // `limit` if none exists. If `allocated` is true, search for an allocated
+    // cluster (a set bit); otherwise, search for a free cluster (a clear bit).
+    // The range must lie within the bitmap. Each iteration skips a whole word
+    // if it contains no matching bits.
+    template <bool allocated>
+    _Pre_satisfies_((first <= limit) && (limit <= cluster_count))
+    _Post_satisfies_((first <= return) && (return <= limit))
+    [[nodiscard]] auto FindNextCluster(const UINT64 first, const UINT64 limit) const noexcept {
+        if (first == limit) {
+            return limit;
         }
-        return (storage.get()[kVolumeBitmapHeaderSize + cluster / kBitsPerByte] &
-            (1u << (cluster % kBitsPerByte))) != 0;
+        constexpr auto bits_per_word = std::numeric_limits<UINT64>::digits;
+        const auto bytes = std::span{storage.get() + kVolumeBitmapHeaderSize,
+            cluster_count / kBitsPerByte + ((cluster_count % kBitsPerByte) != 0)};
+        const auto first_bit = first % bits_per_word;
+        // Only the first word can begin before `first`. Its mask excludes those
+        // earlier cluster indices; subsequent words need no such mask.
+        auto mask = MAXUINT64 << first_bit;
+        for (auto word_begin = first - first_bit; word_begin < limit;
+             word_begin += bits_per_word) {
+            const auto remaining = bytes.subspan(word_begin / kBitsPerByte);
+            auto word = UINT64{};
+            // MSVC 19.52 on ARM64 calls `memcpy` on every iteration when a
+            // ternary selects the length. Keeping the constant-size copy in its
+            // own branch lets the compiler use one load for each complete word.
+            if (remaining.size() >= sizeof(word)) {
+                std::memcpy(&word, remaining.data(), sizeof(word));
+            } else {
+                std::memcpy(&word, remaining.data(), remaining.size());
+            }
+            // NTFS numbers bits from the low bit of each byte. Reversing the
+            // bytes on a big-endian host preserves that order within the word.
+            if constexpr (std::endian::native == std::endian::big) {
+                word = std::byteswap(word);
+            }
+            const auto matching = (allocated ? word : ~word) & mask;
+            if (matching != 0) {
+                return std::min(limit, word_begin + std::countr_zero(matching));
+            }
+            mask = MAXUINT64;
+        }
+        return limit;
     }
 
     _Pre_satisfies_((cluster_count == 0) || (cluster_size != 0))
@@ -176,12 +211,7 @@ struct AllocationBitmap {
         if (last_cluster >= cluster_count) {
             return true;
         }
-        for (auto cluster = first_cluster; cluster <= last_cluster; ++cluster) {
-            if (IsAllocated(cluster)) {
-                return true;
-            }
-        }
-        return false;
+        return FindNextCluster<true>(first_cluster, last_cluster + 1) <= last_cluster;
     }
 
     _Pre_satisfies_((cluster_count == 0) || (cluster_size != 0))
@@ -194,28 +224,24 @@ struct AllocationBitmap {
 
         const auto end = offset + output.size();
         const auto first_cluster = offset >> cluster_shift;
-        const auto last_cluster = (end - 1) >> cluster_shift;
+        // Bytes beyond the NTFS cluster count must retain their source contents.
+        const auto limit = std::min(cluster_count, ((end - 1) >> cluster_shift) + 1);
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
         measurement->ObserveRead(output, offset);
 #endif
-        auto free_begin = end;
-        for (auto cluster = first_cluster; cluster <= last_cluster; ++cluster) {
-            const auto position = std::max(offset, cluster << cluster_shift);
-            if (!IsAllocated(cluster)) {
-                if (free_begin == end) {
-                    free_begin = position;
-                }
-            } else if (free_begin != end) {
-                // MSVC 19.52's `std::ranges::fill` misses its `memset` optimization
-                // and emits a byte-at-a-time loop. `std::fill` reaches `memset`,
-                // so we use it for the zero-filling operations in this file.
-                const auto free = output.subspan(free_begin - offset, position - free_begin);
-                std::fill(free.begin(), free.end(), 0);
-                free_begin = end;
+        auto cluster = first_cluster;
+        while (cluster < limit) {
+            const auto free_cluster = FindNextCluster<false>(cluster, limit);
+            if (free_cluster == limit) {
+                return;
             }
-        }
-        if (free_begin != end) {
-            const auto free = output.subspan(free_begin - offset, end - free_begin);
+            cluster = FindNextCluster<true>(free_cluster, limit);
+            const auto free_begin = std::max(offset, free_cluster << cluster_shift);
+            const auto free_end = std::min(end, cluster << cluster_shift);
+            const auto free = output.subspan(free_begin - offset, free_end - free_begin);
+            // MSVC 19.52's `std::ranges::fill` misses its `memset` optimization
+            // and emits a byte-at-a-time loop. `std::fill` reaches `memset`,
+            // so we use it for the zero-filling operations in this file.
             std::fill(free.begin(), free.end(), 0);
         }
     }
@@ -381,9 +407,13 @@ struct WindowsBlockDevice {
             return STATUS_SUCCESS;
         };
 
-        const auto read_offset = offset - (offset % sector_size);
+        // Windows documents sector sizes as powers of two, so these masks round
+        // to sector boundaries without division on each read.
+        // https://learn.microsoft.com/en-us/windows/win32/fileio/file-buffering#alignment-and-file-access-requirements
+        const auto sector_mask = CompileTimeCast<UINT64>(sector_size) - 1;
+        const auto read_offset = offset & ~sector_mask;
         const auto end = offset + wanted;
-        const auto read_end = ((end + sector_size - 1) / sector_size) * sector_size;
+        const auto read_end = (end + sector_mask) & ~sector_mask;
         using LengthType = std::remove_cv_t<decltype(wanted)>;
         const auto aligned_length = read_end - read_offset;
         if (!std::in_range<LengthType>(aligned_length)) {

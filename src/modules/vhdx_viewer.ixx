@@ -781,7 +781,9 @@ class VhdxViewer {
             return copy_generated(gpt_suffix_, suffix_position);
         }
 
-        std::ranges::fill(output, std::byte{});
+        // MSVC 19.52 emits a byte-at-a-time loop for `std::ranges::fill` here.
+        // `std::fill` lets it use `memset` for the VHDX padding instead.
+        std::fill(output.begin(), output.end(), std::byte{});
         transferred = wanted;
         return STATUS_SUCCESS;
     }

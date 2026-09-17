@@ -246,6 +246,7 @@ devicefs_version_info(backup-supervisor "DeviceFs Backup Supervisor" 0.1)
 target_link_libraries(backup-supervisor PRIVATE
     devicefs-common devicefs-filesystem devicefs-rpc-block-device
     devicefs-vss-block-descriptors devicefs-terminal vshadow
+    Version
 )
 
 set(START_PBS

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#pragma code_page(65001)
+
 #include <winver.h>
 #include "@DEVICEFS_PRODUCT_VERSION_HEADER@"
 
@@ -36,10 +38,10 @@ BEGIN
     BLOCK "StringFileInfo"
     BEGIN
         // The table name concatenates two four-digit hexadecimal identifiers:
-        // 0409 is U.S. English; 04b0 is 1200, the Unicode character set identifier.
+        // 0409 is U.S. English; fde9 is 65001, the UTF-8 code page identifier.
         // The Translation entry below advertises this same pair to readers.
         // https://learn.microsoft.com/en-us/windows/win32/menurc/stringfileinfo-block#parameters
-        BLOCK "040904b0"
+        BLOCK "0409fde9"
         BEGIN
             VALUE "CompanyName", "Cathy J. Fitzpatrick"
             VALUE "FileDescription", "@description@"
@@ -57,12 +59,12 @@ BEGIN
     // Translation lists the pairs of language and character set identifiers available
     // in StringFileInfo.
     // VerQueryValue callers use these pairs to construct a path to a string table.
-    // Our sole pair selects the "040904b0" table: U.S. English (0x0409) and Unicode
-    // (1200). These numbers describe the resource strings, not this source file.
+    // Our sole pair selects the "0409fde9" table: U.S. English (0x0409) and UTF-8
+    // (65001). These numbers describe the resource strings, not this source file.
     // https://learn.microsoft.com/en-us/windows/win32/menurc/varfileinfo-block
     // https://learn.microsoft.com/en-us/windows/win32/api/winver/nf-winver-verqueryvaluew#parameters
     BLOCK "VarFileInfo"
     BEGIN
-        VALUE "Translation", 0x0409, 1200
+        VALUE "Translation", 0x0409, 65001
     END
 END

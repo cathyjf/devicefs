@@ -408,15 +408,16 @@ struct WindowsDeviceOrBitmap {
         _In_range_(1, length - offset) const ULONG wanted,
         _Pre_equal_to_(0) ULONG &transferred,
         Observers &...observers) const noexcept -> NTSTATUS {
-        if (const auto *const bitmap = std::get_if<std::vector<BYTE>>(&contents)) [[unlikely]] {
-            std::ranges::copy(std::span{*bitmap}.subspan(offset, wanted),
-                std::span{static_cast<BYTE *>(buffer), wanted}.begin());
-            transferred = wanted;
-            return STATUS_SUCCESS;
+        if (const auto *const device = std::get_if<WindowsBlockDevice>(&contents)) [[likely]] {
+            [[msvc::forceinline_calls]]
+            return device->Read(
+                buffer, offset, wanted, transferred, observers...);
         }
-        [[msvc::forceinline_calls]]
-        return std::get<WindowsBlockDevice>(contents).Read(
-            buffer, offset, wanted, transferred, observers...);
+        const auto &bitmap = std::get<std::vector<BYTE>>(contents);
+        std::ranges::copy(std::span{bitmap}.subspan(offset, wanted),
+            std::span{static_cast<BYTE *>(buffer), wanted}.begin());
+        transferred = wanted;
+        return STATUS_SUCCESS;
     }
 };
 

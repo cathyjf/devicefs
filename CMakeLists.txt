@@ -167,6 +167,7 @@ target_module_interfaces(devicefs-filesystem PUBLIC
     src/modules/filesystem.ixx
     src/modules/filesystem/internal.cpp
     src/modules/filesystem/rpc_client.cpp
+    src/modules/allocation.ixx
     src/modules/rpc_block_device_server.ixx
     src/modules/synthetic_backup_block_device.ixx
     src/modules/vhdx_viewer.ixx
@@ -183,6 +184,7 @@ add_library(devicefs-vss-block-descriptors STATIC)
 target_module_interfaces(devicefs-vss-block-descriptors PUBLIC
     src/modules/svi_extents.ixx
     src/modules/vss_block_descriptors.ixx
+    src/modules/allocation.ixx
 )
 target_link_libraries(devicefs-vss-block-descriptors PRIVATE devicefs-common)
 

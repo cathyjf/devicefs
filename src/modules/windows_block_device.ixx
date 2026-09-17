@@ -34,6 +34,7 @@ export module devicefs.windows_block_device;
 
 import std;
 import <cstddef>;
+import devicefs.allocation;
 import devicefs.common;
 import devicefs.stream_writer;
 
@@ -254,44 +255,6 @@ struct AllocationBitmap {
 
 } // namespace devicefs::filesystem_internal
 
-const auto page_size_alignment = [] {
-    auto information = SYSTEM_INFO{};
-    GetSystemInfo(&information);
-    return std::align_val_t{information.dwPageSize};
-}();
-
-// Return an array of `size` bytes aligned to the system page size.
-// This is useful for raw volume reads because such reads can require
-// sector-aligned buffers. Microsoft recommends page-aligned allocations
-// for these buffers.
-// https://learn.microsoft.com/en-us/windows/win32/fileio/file-buffering#alignment-and-file-access-requirements
-//
-// Allocation failures terminate the process.
-[[msvc::forceinline]]
-auto NewPageAlignedBytes(const std::size_t size) noexcept {
-    const auto deleter = [](BYTE *const allocation) noexcept {
-        [[gsl::suppress("26409",
-            justification:
-                "Invoking `operator delete[]` is necessary to free the memory "
-                "allocated below.")]]
-        ::operator delete[](allocation, page_size_alignment);
-    };
-    return std::unique_ptr<BYTE[], decltype(deleter)>{
-        [size] noexcept {
-            [[gsl::suppress("26409",
-                justification:
-                    "The analyzer suggests using `std::make_unique`, but that "
-                    "function cannot allocate an over-aligned byte array.")]]
-            const auto buffer = ::new (page_size_alignment, std::nothrow) BYTE[size];
-            if (!buffer) {
-                std::terminate();
-            }
-            return buffer;
-        }(),
-        deleter
-    };
-};
-
 export namespace devicefs {
 
 struct WindowsBlockDevice {
@@ -432,16 +395,16 @@ struct WindowsBlockDevice {
         }
 
         const auto [bounce, temporary_backing_memory] = [read_length]
-            -> std::pair<std::span<BYTE>, decltype(NewPageAlignedBytes(read_length))> {
+            -> std::pair<std::span<BYTE>, decltype(NewPageAlignedArray(read_length))> {
             // This 5 MIB capacity comfortably accommodates a 4 MiB PBS chunk
             // and any extra bytes needed for sector alignment.
             constexpr auto kRetainedReadBufferSize = 5uz * 1024 * 1024;
             if (read_length <= kRetainedReadBufferSize) {
                 thread_local const auto retained_buffer_storage =
-                    NewPageAlignedBytes(kRetainedReadBufferSize);
+                    NewPageAlignedArray(kRetainedReadBufferSize);
                 return {std::span{retained_buffer_storage.get(), read_length}, {}};
             }
-            auto newly_allocated_memory = NewPageAlignedBytes(read_length);
+            auto newly_allocated_memory = NewPageAlignedArray(read_length);
             return {std::span{newly_allocated_memory.get(), read_length},
                 std::move(newly_allocated_memory)};
         }();

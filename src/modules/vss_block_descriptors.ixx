@@ -66,6 +66,7 @@ export module devicefs.vss_block_descriptors;
 
 import std;
 import <devicefs/windows_imports.h>;
+import devicefs.allocation;
 import devicefs.common;
 import devicefs.terminal.transcoding;
 
@@ -389,13 +390,10 @@ class RawSource {
                 raw_offset, raw_size, size_);
         }
 
-        auto storage = wil::unique_virtualalloc_ptr<std::byte>{
-            static_cast<std::byte *>(VirtualAlloc(nullptr,
-                wil::safe_cast_failfast<SIZE_T>(raw_size),
-                MEM_COMMIT | MEM_RESERVE,
-                PAGE_READWRITE))};
+        auto storage = NewPageAlignedArray<std::byte, false>(raw_size);
         if (!storage) {
-            WinError("could not allocate an aligned VSS metadata buffer");
+            WinError("could not allocate a page-aligned VSS metadata buffer",
+                ExplicitWin32Error{ERROR_NOT_ENOUGH_MEMORY});
         }
         if ((std::bit_cast<std::uintptr_t>(storage.get()) %
                 sector_size_) != 0) {

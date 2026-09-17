@@ -32,6 +32,7 @@ import :filesystem_verifier;
 import :incremental;
 import :internal;
 import :manifest;
+import devicefs.allocation;
 import devicefs.common;
 import devicefs.filesystem;
 import devicefs.rpc_block_device_server;
@@ -747,12 +748,10 @@ struct VerificationJob {
 }
 
 [[nodiscard]] auto AllocateComparisonBuffer() {
-    auto result = wil::unique_virtualalloc_ptr<unsigned char>{
-        static_cast<unsigned char *>(VirtualAlloc(
-            nullptr, kComparisonChunkSize,
-            MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE))};
+    auto result = NewPageAlignedArray<unsigned char, false>(kComparisonChunkSize);
     if (!result) {
-        WinError("could not allocate an incremental verification buffer");
+        WinError("could not allocate an incremental verification buffer",
+            ExplicitWin32Error{ERROR_NOT_ENOUGH_MEMORY});
     }
     return result;
 }

@@ -82,6 +82,13 @@ struct DeviceFsStartRequest {
     };
     if (request.vhdx) {
         arguments.emplace_back("--vhdx");
+    } else if (!request.rpc_endpoint) {
+        // Our PBS invocation uses the default chunk size of 4 MiB.
+        // We generate the bitmap at that same resolution so that its bits
+        // will identify the chunks that PBS will read.
+        constexpr auto kPbsImageChunkSize = 4 * 1024 * 1024;
+        arguments.emplace_back("--expose-known-data-map");
+        arguments.emplace_back(std::to_string(kPbsImageChunkSize));
     }
     arguments.emplace_back("--mount");
     arguments.emplace_back(request.mount_target);

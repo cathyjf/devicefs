@@ -100,10 +100,15 @@ end
 function run_backup --argument-names parallel_images
     sudo -n mount $vss_mount_point || exit
     cancel_before_start unmount_vss
-    set backup_argv backup --keyfd 0 --backup-id $backup_id $parallel_images
+    set -l backup_argv backup --keyfd 0 --backup-id $backup_id $parallel_images
     for image_path in $vss_mount_point/*.img
-        set image_filename (path basename $image_path)
-        set --append backup_argv "$image_filename:$image_path"
+        set -l image_filename (path basename $image_path)
+        set -a backup_argv {$image_filename}:{$image_path}
+
+        set -l bitmap_filename {$image_path}.known-data.bitmap
+        if test -f $bitmap_filename
+            set -a backup_argv --known-data-map {$image_filename}:$bitmap_filename
+        end
     end
     set -l manifest_ (echo -- $DEVICEFS_MANIFEST | jq | string collect)
     if ! string match -q -r '[^0]' $pipestatus

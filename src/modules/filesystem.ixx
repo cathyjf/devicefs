@@ -78,6 +78,7 @@ using namespace std::string_view_literals;
 
 constexpr auto kDefaultStopEvent = "Local\\devicefs-stop"sv;
 constexpr auto kFileSystemName = L"DEVICEFS"sv;
+constexpr auto kKnownDataMapSuffix = L".known-data.bitmap";
 static_assert(kFileSystemName.size() + 1 <=
     std::size(FSP_FSCTL_VOLUME_PARAMS{}.FileSystemName),
     "The filesystem name and its terminator must fit the WinFsp volume parameters.");
@@ -110,6 +111,7 @@ struct Options {
     bool cache = false;
     bool extended_dasd = true;
     bool synthetic_free_clusters = false;
+    std::optional<std::uint64_t> known_data_map_cluster_size;
     bool vhdx = false;
     bool help = false;
 };
@@ -162,6 +164,10 @@ auto Usage(const auto output) noexcept {
         "  --cache                    Enable file-data caching (requires read-only volumes)\n"
         "  --no-extended-dasd-io      Do not issue FSCTL_ALLOW_EXTENDED_DASD_IO\n"
         "  --synthetic-free-clusters  Return zeros for free clusters on read-only NTFS volumes\n"
+        "  --expose-known-data-map CLUSTER-SIZE\n"
+        "                             Add FILENAME.known-data.bitmap for each image\n"
+        "                             CLUSTER-SIZE is bytes per bitmap bit; requires\n"
+        "                             --synthetic-free-clusters; incompatible with --vhdx\n"
         "  --vhdx                     Expose each mapped volume as a VHDX disk\n"
         "  -h, --help                 Show this help\n\n"
         "Example:\n"
@@ -203,6 +209,16 @@ auto Usage(const auto output) noexcept {
             result.extended_dasd = false;
         } else if (arg == "--synthetic-free-clusters") {
             result.synthetic_free_clusters = true;
+        } else if (arg == "--expose-known-data-map") {
+            const auto value = next(i);
+            auto size = std::uint64_t{};
+            const auto [end, error] = std::from_chars(
+                value.data(), value.data() + value.size(), size);
+            if ((error != std::errc{}) || (end != (value.data() + value.size())) || (size == 0)) {
+                throw std::invalid_argument(std::format(
+                    "--expose-known-data-map requires a positive byte count; received '{}'", value));
+            }
+            result.known_data_map_cluster_size = size;
         } else if (arg == "--vhdx") {
             result.vhdx = true;
         } else {
@@ -220,20 +236,35 @@ auto Usage(const auto output) noexcept {
             "--mount and at least one --map are required");
     }
 
+    if (result.known_data_map_cluster_size && !result.synthetic_free_clusters) {
+        throw std::invalid_argument(
+            "--expose-known-data-map requires --synthetic-free-clusters");
+    }
+    if (result.known_data_map_cluster_size && result.vhdx) {
+        throw std::invalid_argument(
+            "--expose-known-data-map cannot be combined with --vhdx");
+    }
+
     auto names = std::unordered_set<std::wstring>{};
-    for (auto i = 0uz; i < result.mappings.size(); ++i) {
-        const auto &name = result.mappings[i].name;
+    const auto register_name = [&names](const std::wstring &name, const std::size_t map_number) {
         if ((name.empty()) || (name == L".") || (name == L"..") ||
             (name.size() > kMaxNameLength) ||
             (name.find_first_of(L"/\\:") != std::wstring_view::npos)) {
             throw std::invalid_argument(std::format(
                 "invalid filename '{}' in --map #{}",
-                Transcode<std::string>(name), i + 1));
+                Transcode<std::string>(name), map_number));
         }
         if (!names.emplace(Lowercase(name)).second) {
             throw std::invalid_argument(std::format(
                 "duplicate filename '{}' in --map #{}",
-                Transcode<std::string>(name), i + 1));
+                Transcode<std::string>(name), map_number));
+        }
+    };
+    for (auto i = 0uz; i < result.mappings.size(); ++i) {
+        const auto &mapping = result.mappings[i];
+        register_name(mapping.name, i + 1);
+        if (result.known_data_map_cluster_size && !rpc_client::IsRpcDevice(mapping)) {
+            register_name(mapping.name + kKnownDataMapSuffix, i + 1);
         }
     }
     if (!result.mappings.empty()) {
@@ -304,6 +335,7 @@ auto Usage(const auto output) noexcept {
 }
 
 using devicefs::WindowsBlockDevice;
+using devicefs::WindowsDeviceOrBitmap;
 using devicefs::VhdxViewer;
 using devicefs::BlockDevice;
 using rpc_client::RPCBlockDevice;
@@ -596,6 +628,7 @@ private:
             justification: "The minimum cannot exceed the ULONG length argument.")]]
         const auto wanted = static_cast<std::remove_cv_t<decltype(length)>>(
             std::min(UINT64{length}, file->info.FileSize - offset));
+
 #if DEVICEFS_MEASURE_READ_PATH
         auto observation = Self(fs).read_measurement_.BeginRead(length, wanted);
 #endif
@@ -665,11 +698,19 @@ private:
         [[maybe_unused]] FSP_FILE_SYSTEM *const fs,
         const BOOLEAN normally) noexcept {
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
-        if constexpr (std::same_as<DeviceType, WindowsBlockDevice>) {
+        if constexpr ((std::same_as<DeviceType, WindowsBlockDevice>) ||
+                (std::same_as<DeviceType, WindowsDeviceOrBitmap>)) {
             for (const auto &entry : Self(fs).files_) {
                 const auto &file = entry.second;
-                if (file.device.allocation_bitmap.measurement) {
-                    file.device.allocation_bitmap.measurement->Report(file.name);
+                const auto *const device = [&file] {
+                    if constexpr (std::same_as<DeviceType, WindowsBlockDevice>) {
+                        return &file.device;
+                    } else {
+                        return std::get_if<WindowsBlockDevice>(&file.device.contents);
+                    }
+                }();
+                if (device && device->allocation_bitmap.measurement) {
+                    device->allocation_bitmap.measurement->Report(file.name);
                 }
             }
         }
@@ -802,7 +843,7 @@ template <BlockDevice DeviceType>
 [[nodiscard]] auto OpenDevices(
     const Options &options,
     wil::secure_string rpc_password = {}) {
-    return std::views::iota(0uz, options.mappings.size())
+    auto files = std::views::iota(0uz, options.mappings.size())
         | std::views::transform([&](const auto i) {
             const auto &mapping = options.mappings[i];
             return std::pair{
@@ -812,6 +853,35 @@ template <BlockDevice DeviceType>
                     i + 1, std::string_view{rpc_password})};
         })
         | std::ranges::to<DeviceFiles<DeviceType>>();
+    if constexpr (std::same_as<DeviceType, WindowsDeviceOrBitmap>) {
+        auto next_index = std::ranges::max(files | std::views::values |
+            std::views::transform([](const auto &file) {
+                return file.info.IndexNumber;
+            })) + 1;
+        for (const auto &mapping : options.mappings) {
+            const auto &device = std::get<WindowsBlockDevice>(
+                files.at(Lowercase(mapping.name)).device.contents);
+            if (!device.allocation_bitmap.storage) {
+                continue;
+            }
+            auto bitmap = device.MakeKnownDataMap(*options.known_data_map_cluster_size);
+            const auto name = mapping.name + kKnownDataMapSuffix;
+            files.emplace(Lowercase(name), DeviceFile<DeviceType>{
+                .name = name,
+                .info = {
+                    .FileAttributes = FILE_ATTRIBUTE_READONLY,
+                    .AllocationSize = bitmap.size(),
+                    .FileSize = bitmap.size(),
+                    .IndexNumber = next_index++,
+                },
+                .device = {
+                    .length = bitmap.size(),
+                    .contents = std::move(bitmap),
+                },
+            });
+        }
+    }
+    return files;
 }
 
 auto Run(const Options &options) {
@@ -838,6 +908,9 @@ auto Run(const Options &options) {
             }
             return password;
         }());
+    }
+    if (options.known_data_map_cluster_size) {
+        return RunWithDevices(options, OpenDevices<WindowsDeviceOrBitmap>(options));
     }
     return run();
 }

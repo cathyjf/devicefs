@@ -18,7 +18,9 @@ function Start-DeviceFsTestProcess {
         [Parameter(Mandatory)]
         [Collections.IDictionary] $Mappings,
 
-        [switch] $SyntheticFreeClusters
+        [switch] $SyntheticFreeClusters,
+
+        [UInt64] $KnownDataMapClusterSize
     )
 
     if ($Mappings.Count -eq 0) {
@@ -50,6 +52,10 @@ function Start-DeviceFsTestProcess {
     }
     if ($SyntheticFreeClusters) {
         $start_info.ArgumentList.Add('--synthetic-free-clusters')
+    }
+    if ($KnownDataMapClusterSize) {
+        $start_info.ArgumentList.Add('--expose-known-data-map')
+        $start_info.ArgumentList.Add([string]$KnownDataMapClusterSize)
     }
 
     $process = [Diagnostics.Process]::Start($start_info)

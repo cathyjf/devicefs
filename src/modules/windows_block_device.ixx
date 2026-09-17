@@ -243,6 +243,47 @@ struct WindowsBlockDevice {
         bool cache, bool synthetic_free_clusters,
         std::string_view description) -> WindowsBlockDevice;
 
+    // Return a bitmap that lets a backup client skip reading chunks that `Read`
+    // fills entirely with zeros. Each chunk contains `chunk_size` bytes, except
+    // that the last chunk ends at the end of the device.
+    // A bit value of 0 means the client can supply zeros for that chunk;
+    // a bit value of 1 means the client must read the chunk from the image.
+    // The first eight chunks use bits 0 through 7 of the first byte, where
+    // bit 0 is the least significant bit. The next eight use the second byte.
+    [[nodiscard]] auto MakeKnownDataMap(const std::uint64_t chunk_size) const
+        -> std::vector<unsigned char> {
+        if (chunk_size == 0) {
+            throw std::invalid_argument("known-data map chunk size must be nonzero");
+        }
+        constexpr auto bits_per_byte = filesystem_internal::kBitsPerByte;
+        const auto chunks = length / chunk_size + ((length % chunk_size) != 0);
+        const auto bytes = chunks / bits_per_byte + ((chunks % bits_per_byte) != 0);
+        auto result = std::vector<unsigned char>(
+            wil::safe_cast_failfast<std::size_t>(bytes));
+        for (auto chunk = std::uint64_t{}; chunk < chunks; ++chunk) {
+            const auto offset = chunk * chunk_size;
+            // For a nonempty device, the last chunk index is `(length - 1) / chunk_size`.
+            // Multiplying that index, or any earlier index, by `chunk_size` gives an
+            // `offset` of at most `length - 1`. An empty device never enters the loop.
+            _Analysis_assume_(length > offset);
+            const auto count = std::min(chunk_size, length - offset);
+            // Both arguments to `std::min` are positive: zero `chunk_size` was
+            // rejected above, and `offset` is below `length`. Their minimum is
+            // therefore positive and cannot exceed the remaining device length.
+            _Analysis_assume_((count > 0) && (count <= (length - offset)));
+            // Because `length` is a `uint64_t`, its value cannot exceed `MAXUINT64`.
+            // Further, `offset` is less than `length` and is also a `uint64_t`, so
+            // `length - offset` cannot underflow.
+            // Thus, `count <= (length - offset)` implies `count <= (MAXUINT64 - offset)`.
+            _Analysis_assume_(count <= (MAXUINT64 - offset));
+            if (allocation_bitmap.HasAllocatedClusters(offset, count)) {
+                result.at(chunk / bits_per_byte) |=
+                    wil::safe_cast_failfast<unsigned char>(1u << (chunk % bits_per_byte));
+            }
+        }
+        return result;
+    }
+
     template <typename... Observers>
     _Success_(return == STATUS_SUCCESS)
     auto Read(
@@ -339,6 +380,40 @@ struct WindowsBlockDevice {
         allocation_bitmap.SynthesizeFreeClusters(output, offset);
         (observers.RecordBounce(), ...);
         return STATUS_SUCCESS;
+    }
+};
+
+// A filesystem exposing known-data maps contains both volume images and bitmap
+// files. This device type serves those two kinds of file; ordinary mounts use
+// `WindowsBlockDevice` directly.
+struct WindowsDeviceOrBitmap {
+    const std::uint64_t length;
+    std::variant<WindowsBlockDevice, std::vector<BYTE>> contents;
+
+    [[nodiscard]] static auto FromBlockDevice(WindowsBlockDevice device) noexcept {
+        return WindowsDeviceOrBitmap{
+            .length = device.length,
+            .contents = std::move(device),
+        };
+    }
+
+    template <typename... Observers>
+    _Success_(return == STATUS_SUCCESS)
+    auto Read(
+        _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
+        _In_range_(0, length - 1) const std::uint64_t offset,
+        _In_range_(1, length - offset) const ULONG wanted,
+        _Pre_equal_to_(0) ULONG &transferred,
+        Observers &...observers) const noexcept -> NTSTATUS {
+        if (const auto *const bitmap = std::get_if<std::vector<BYTE>>(&contents)) [[unlikely]] {
+            std::ranges::copy(std::span{*bitmap}.subspan(offset, wanted),
+                std::span{static_cast<BYTE *>(buffer), wanted}.begin());
+            transferred = wanted;
+            return STATUS_SUCCESS;
+        }
+        [[msvc::forceinline_calls]]
+        return std::get<WindowsBlockDevice>(contents).Read(
+            buffer, offset, wanted, transferred, observers...);
     }
 };
 

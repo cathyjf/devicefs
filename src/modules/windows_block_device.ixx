@@ -529,7 +529,7 @@ namespace devicefs::filesystem_internal {
         wil::safe_cast_failfast<DWORD>(output_size);
 
     auto storage = std::make_unique_for_overwrite<BYTE[]>(output_size_for_api);
-    auto *const output = std::start_lifetime_as<VOLUME_BITMAP_BUFFER>(storage.get());
+    auto *const output = ::new (storage.get()) VOLUME_BITMAP_BUFFER;
     auto input = STARTING_LCN_INPUT_BUFFER{.StartingLcn = {.QuadPart = 0}};
     auto returned = DWORD{};
     const auto bitmap_error = Ioctl(device, FSCTL_GET_VOLUME_BITMAP,

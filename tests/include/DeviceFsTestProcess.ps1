@@ -1,6 +1,20 @@
 # SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+# Return the requested executable from the repository's native-architecture
+# `Release` build. `OSArchitecture` selects `windows-x64` or `windows-arm64`
+# independently of the architecture of the PowerShell process.
+function Get-DefaultTestExecutablePath {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Name
+    )
+
+    $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+    return [IO.Path]::GetFullPath(
+        (Join-Path $PSScriptRoot "../../build/windows-$architecture/Release/$Name"))
+}
+
 function Start-DeviceFsTestProcess {
     param(
         [Parameter(Mandatory)]
@@ -18,7 +32,11 @@ function Start-DeviceFsTestProcess {
         [Parameter(Mandatory)]
         [Collections.IDictionary] $Mappings,
 
+        [switch] $UseSupervisor,
+
         [switch] $SyntheticFreeClusters,
+
+        [switch] $Cache,
 
         [UInt64] $KnownDataMapClusterSize
     )
@@ -34,6 +52,9 @@ function Start-DeviceFsTestProcess {
     $start_info.CreateNoWindow = $true
     $start_info.RedirectStandardOutput = $true
     $start_info.RedirectStandardError = $true
+    if ($UseSupervisor) {
+        $start_info.ArgumentList.Add('--devicefs')
+    }
     foreach ($argument in @(
             '--mount', $MountPath,
             '--read-user', $ReadUser,
@@ -52,6 +73,9 @@ function Start-DeviceFsTestProcess {
     }
     if ($SyntheticFreeClusters) {
         $start_info.ArgumentList.Add('--synthetic-free-clusters')
+    }
+    if ($Cache) {
+        $start_info.ArgumentList.Add('--cache')
     }
     if ($KnownDataMapClusterSize) {
         $start_info.ArgumentList.Add('--expose-known-data-map')

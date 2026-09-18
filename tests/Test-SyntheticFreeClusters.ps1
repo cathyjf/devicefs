@@ -20,11 +20,14 @@ test different byte counts per bit, including sizes that cross NTFS clusters.
 
 The VHD is detached during cleanup. Use -KeepArtifactsOnFailure to retain the
 detached VHD and logs after a failure.
+
+.PARAMETER DeviceFsPath
+The `devicefs.exe` to test. Defaults to the repository's `Release` build for
+the machine's native architecture.
 #>
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
     [string] $DeviceFsPath,
 
     [ValidateRange(256, 8192)]
@@ -41,6 +44,7 @@ $ErrorActionPreference = 'Stop'
 $file_backed_virtual_bus_type = [UInt16]15
 . ([IO.Path]::Combine(
         $PSScriptRoot, 'include', 'DeviceFsTestProcess.ps1'))
+. (Join-Path $PSScriptRoot 'include/DeviceFsTestVolume.ps1')
 
 function Assert-Condition {
     param(
@@ -200,6 +204,9 @@ if (-not [Environment]::Is64BitProcess) {
     throw 'This integration test requires 64-bit PowerShell.'
 }
 
+if (-not $DeviceFsPath) {
+    $DeviceFsPath = Get-DefaultTestExecutablePath 'devicefs.exe'
+}
 $DeviceFsPath = (Resolve-Path -LiteralPath $DeviceFsPath).Path
 Assert-Condition ([IO.File]::Exists($DeviceFsPath)) `
     "devicefs was not found at '$DeviceFsPath'."
@@ -226,7 +233,6 @@ $devicefs_processes_gone = $true
 $image_detached = $false
 
 $source_label = "DFSTSRC-$($run_id.Substring(0, 16))"
-$uninitialized_partition_style = [UInt16]0
 $ntfs_cluster_size = 4096
 $free_run_length = 16
 # Force the full comparison to cross ordinary sector and cluster boundaries.
@@ -242,59 +248,9 @@ try {
     $synthetic_mount = [IO.Path]::Combine($test_root, 'synthetic')
 
     $requested_disk_length = [UInt64]$VhdSizeMiB * 1MB
-    New-VHD -Path $vhd_path -SizeBytes $requested_disk_length `
-        -Fixed | Out-Null
-
-    $disk_image = Mount-DiskImage -ImagePath $vhd_path -StorageType VHD `
-        -Access ReadWrite -NoDriveLetter -PassThru
-    $disks = @($disk_image | Get-Disk)
-    Assert-Condition ($disks.Count -eq 1) `
-        'The exact VHD image did not resolve to exactly one disk.'
-    $disk = $disks[0]
-    Assert-Condition (
-        $disk.CimInstanceProperties['BusType'].Value -eq
-            $file_backed_virtual_bus_type) `
-        'The attached test disk is not file-backed virtual storage.'
-    Assert-Condition ($disk.Size -eq $requested_disk_length) `
-        'The attached test disk has an unexpected size.'
-    Assert-Condition (
-        $disk.CimInstanceProperties['PartitionStyle'].Value -eq
-            $uninitialized_partition_style) `
-        'The newly created test disk is not uninitialized.'
-    Assert-Condition (
-        (-not $disk.IsBoot) -and (-not $disk.IsSystem) -and
-            (-not $disk.IsClustered) -and (-not $disk.IsOffline) -and
-            (-not $disk.IsReadOnly)) `
-        'The attached test disk does not satisfy the safety policy.'
-    Assert-Condition (@(Get-Partition -DiskNumber $disk.Number `
-            -ErrorAction SilentlyContinue).Count -eq 0) `
-        'The newly created test disk unexpectedly contains partitions.'
-
-    Initialize-Disk -Number $disk.Number -PartitionStyle GPT `
-        -PassThru | Out-Null
-    $source_partition = New-Partition -DiskNumber $disk.Number `
-        -UseMaximumSize -IsHidden
-    # PowerShell exposes an unassigned CIM Char16 as U+0000.
-    Assert-Condition (
-        $source_partition.IsHidden -and
-            ([char]$source_partition.DriveLetter -eq [char]0)) `
-        'The temporary partition was not created hidden and letterless.'
-
-    Set-Partition -InputObject $source_partition `
-        -NoDefaultDriveLetter $true -IsHidden $false `
-        -Confirm:$false | Out-Null
-    $source_partition = Get-Partition -DiskNumber $disk.Number `
-        -PartitionNumber $source_partition.PartitionNumber
-    Assert-Condition (
-        (-not $source_partition.IsHidden) -and
-            $source_partition.NoDefaultDriveLetter -and
-            ([char]$source_partition.DriveLetter -eq [char]0)) `
-        'The temporary partition did not become visible without a drive letter.'
-
-    Format-Volume -Partition $source_partition -FileSystem NTFS `
-        -AllocationUnitSize $ntfs_cluster_size `
-        -NewFileSystemLabel $source_label `
-        -Force -Confirm:$false | Out-Null
+    $source_partition = New-DeviceFsTestVolume -Path $vhd_path -SizeBytes $requested_disk_length `
+        -ClusterSize $ntfs_cluster_size -Label $source_label -Fixed
+    $disk = Get-Disk -Number $source_partition.DiskNumber
     Add-PartitionAccessPath -InputObject $source_partition `
         -AccessPath $source_mount
     $source_access_path_added = $true

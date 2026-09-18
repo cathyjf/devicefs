@@ -43,11 +43,19 @@ test also requires every map component to contribute independently and rejects
 a map covering the entire volume. The VHD and snapshots are removed during
 cleanup. Use -KeepArtifactsOnFailure to retain the detached VHD, process logs,
 and descriptor-tool output after a failure.
+
+.PARAMETER VssDescriptorDumpPath
+The `vss-descriptor-dump.exe` to test. Defaults to the repository's `Release`
+build for the machine's native architecture.
+
+.PARAMETER DeviceFsPath
+The `devicefs.exe` to test. Defaults to the repository's `Release` build for
+the machine's native architecture.
 #>
 
 [CmdletBinding(DefaultParameterSetName = 'DescriptorDump')]
 param(
-    [Parameter(Mandatory, Position = 0, ParameterSetName = 'DescriptorDump')]
+    [Parameter(Position = 0, ParameterSetName = 'DescriptorDump')]
     [Parameter(Mandatory, Position = 0, ParameterSetName = 'Parity')]
     [string] $VssDescriptorDumpPath,
 
@@ -55,7 +63,6 @@ param(
     [Parameter(Mandatory, ParameterSetName = 'Parity')]
     [string] $VShadowInfoPath,
 
-    [Parameter(Mandatory)]
     [string] $DeviceFsPath,
 
     [switch] $KeepArtifactsOnFailure
@@ -64,7 +71,6 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
-$file_backed_virtual_bus_type = [UInt16]15
 $microsoft_software_provider =
     [Guid]'b5946137-7b9f-4925-af80-51abd60b20d5'
 $vss_block_size = 16KB
@@ -72,6 +78,7 @@ $vshadow_forwarder_flag = 1
 $vshadow_overlay_flag = 2
 . ([IO.Path]::Combine(
         $PSScriptRoot, 'include', 'DeviceFsTestProcess.ps1'))
+. (Join-Path $PSScriptRoot 'include/DeviceFsTestVolume.ps1')
 
 function Assert-Condition {
     param(
@@ -507,6 +514,9 @@ $parity_requested = $PSCmdlet.ParameterSetName -eq 'Parity'
 if ($use_descriptor_dump) {
     . ([IO.Path]::Combine(
             $PSScriptRoot, 'include', 'VssDescriptorOutput.ps1'))
+    if (-not $VssDescriptorDumpPath) {
+        $VssDescriptorDumpPath = Get-DefaultTestExecutablePath 'vss-descriptor-dump.exe'
+    }
     $VssDescriptorDumpPath =
         (Resolve-Path -LiteralPath $VssDescriptorDumpPath).Path
     Assert-Condition ([IO.File]::Exists($VssDescriptorDumpPath)) `
@@ -517,6 +527,9 @@ if ($PSCmdlet.ParameterSetName -ne 'DescriptorDump') {
         (Resolve-Path -LiteralPath $VShadowInfoPath).Path
     Assert-Condition ([IO.File]::Exists($VShadowInfoPath)) `
         "vshadowinfo was not found at '$VShadowInfoPath'."
+}
+if (-not $DeviceFsPath) {
+    $DeviceFsPath = Get-DefaultTestExecutablePath 'devicefs.exe'
 }
 $DeviceFsPath = (Resolve-Path -LiteralPath $DeviceFsPath).Path
 Assert-Condition ([IO.File]::Exists($DeviceFsPath)) `
@@ -552,7 +565,6 @@ $parity_failures = [Collections.Generic.List[string]]::new()
 $endpoint_raw_diagnostics = [Collections.Generic.List[string]]::new()
 
 $source_label = "DFSVSS-$($run_id.Substring(0, 17))"
-$uninitialized_partition_style = [UInt16]0
 $test_vhd_size = [UInt64](1GB)
 $ntfs_cluster_size = 4096
 $overwrite_length = 12MB
@@ -570,44 +582,9 @@ try {
     New-Item -ItemType Directory -Path $source_mount | Out-Null
     $synthetic_mount = [IO.Path]::Combine($test_root, 'synthetic')
 
-    New-VHD -Path $vhd_path -SizeBytes $test_vhd_size `
-        -Fixed | Out-Null
-    $disk_image = Mount-DiskImage -ImagePath $vhd_path -StorageType VHD `
-        -Access ReadWrite -NoDriveLetter -PassThru
-    $disks = @($disk_image | Get-Disk)
-    Assert-Condition ($disks.Count -eq 1) `
-        'The VHD did not resolve to exactly one disk.'
-
-    $disk = $disks[0]
-    Assert-Condition (
-        $disk.CimInstanceProperties['BusType'].Value -eq
-            $file_backed_virtual_bus_type) `
-        'The test disk is not file-backed virtual storage.'
-    Assert-Condition (
-        ($disk.Size -eq $test_vhd_size) -and (-not $disk.IsBoot) -and
-            (-not $disk.IsSystem) -and (-not $disk.IsClustered) -and
-            (-not $disk.IsOffline) -and (-not $disk.IsReadOnly) -and
-            ($disk.CimInstanceProperties['PartitionStyle'].Value -eq
-                $uninitialized_partition_style)) `
-        'The new VHD does not satisfy the test-disk safety policy.'
-    Assert-Condition (@(Get-Partition -DiskNumber $disk.Number `
-            -ErrorAction SilentlyContinue).Count -eq 0) `
-        'The new VHD unexpectedly contains partitions.'
-
-    Initialize-Disk -Number $disk.Number -PartitionStyle GPT `
-        -PassThru | Out-Null
-    $source_partition = New-Partition -DiskNumber $disk.Number `
-        -UseMaximumSize -IsHidden
-    Set-Partition -InputObject $source_partition `
-        -NoDefaultDriveLetter $true -IsHidden $false `
-        -Confirm:$false | Out-Null
-    $source_partition = Get-Partition -DiskNumber $disk.Number `
-        -PartitionNumber $source_partition.PartitionNumber
-    Assert-Condition ([char]$source_partition.DriveLetter -eq [char]0) `
-        'The test partition unexpectedly acquired a drive letter.'
-    Format-Volume -Partition $source_partition -FileSystem NTFS `
-        -AllocationUnitSize $ntfs_cluster_size `
-        -NewFileSystemLabel $source_label -Force -Confirm:$false | Out-Null
+    $source_partition = New-DeviceFsTestVolume -Path $vhd_path -SizeBytes $test_vhd_size `
+        -ClusterSize $ntfs_cluster_size -Label $source_label -Fixed
+    $disk = Get-Disk -Number $source_partition.DiskNumber
     Add-PartitionAccessPath -InputObject $source_partition `
         -AccessPath $source_mount
     $source_access_path_added = $true

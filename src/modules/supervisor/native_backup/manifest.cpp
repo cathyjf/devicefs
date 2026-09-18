@@ -26,6 +26,7 @@ import <winrt/Windows.Data.Json.h>;
 import <winrt/Windows.Foundation.Collections.h>;
 import :internal;
 import :pbs;
+import devicefs.supervisor.installation;
 import devicefs.supervisor.vshadow;
 import devicefs.supervisor.winrt_apartment;
 import devicefs.terminal.transcoding;
@@ -327,7 +328,8 @@ export [[nodiscard]] auto RetrieveBackupManifest(
 namespace internal {
 
 [[nodiscard]] auto SerializeSnapshotManifest(
-    const devicefs::vshadow::SnapshotSet &snapshot_set) -> std::u8string {
+    const devicefs::vshadow::SnapshotSet &snapshot_set,
+    const std::string_view wsl_oci_layer) -> std::u8string {
     try {
         const auto apartment = WinrtApartment{
             "could not initialize the Windows Runtime while serializing "
@@ -365,6 +367,23 @@ namespace internal {
         result.SetNamedValue(L"snapshot-set", JsonValue::CreateStringValue(
             winrt::to_hstring(snapshot_set.identifier)));
         result.SetNamedValue(L"volumes", volumes);
+
+        const auto notes = [wsl_oci_layer] {
+            auto notes = JsonObject{};
+            if (const auto version = CurrentProductVersion<std::wstring>()) {
+                notes.SetNamedValue(L"devicefs-supervisor-version",
+                    JsonValue::CreateStringValue(*version));
+            }
+            if (!wsl_oci_layer.empty()) {
+                notes.SetNamedValue(L"wsl-oci", JsonValue::CreateStringValue(
+                    Transcode<std::wstring>(wsl_oci_layer)));
+            }
+            return notes;
+        }();
+        if (notes.Size() != 0) {
+            result.SetNamedValue(L"notes", notes);
+        }
+
         return Transcode<std::u8string>(result.Stringify());
     } catch (const winrt::hresult_error &error) {
         throw std::runtime_error(std::format(

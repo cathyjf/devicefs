@@ -454,42 +454,44 @@ auto ReplaceDistribution(
 
 // Read the OCI layer marker for the distribution registered to the WSL process's
 // Windows account. The supervisor itself can be running as another account.
+// Returns an empty string if the layer cannot be read.
 export [[nodiscard]] auto ReadWslOciLayerDigest(
     const std::string_view distribution, const HANDLE process)
-    -> std::optional<std::string> {
+    -> std::string {
     auto token = wil::unique_handle{};
     if (!OpenProcessToken(process, TOKEN_QUERY, token.addressof())) {
-        return std::nullopt;
+        return {};
     }
     auto user = wil::unique_tokeninfo_ptr<TOKEN_USER>{};
     if (FAILED(wil::get_token_information_nothrow(user, token.get()))) {
-        return std::nullopt;
+        return {};
     }
     auto sid = wil::unique_hlocal_string{};
     if (!ConvertSidToStringSidW(user->User.Sid, sid.addressof())) {
-        return std::nullopt;
+        return {};
     }
     auto profile = wil::unique_hkey{};
     if (FAILED(wil::reg::open_unique_key_nothrow(HKEY_USERS, sid.get(), profile))) {
-        return std::nullopt;
+        return {};
     }
     const auto registration = [distribution, &profile] {
         try {
             return FindDistribution(distribution, profile.get());
         } catch (const std::runtime_error &) {
-            // A failed metadata lookup must not prevent the WSL command from running.
+            // The OCI layer is informational; unavailable metadata must not
+            // prevent the backup from running.
             return wil::shared_hkey{};
         }
     }();
     if (!registration) {
-        return std::nullopt;
+        return {};
     }
     auto directory = wil::unique_cotaskmem_string{};
     if (FAILED(wil::reg::get_value_string_nothrow(
             registration.get(), L"BasePath", directory))) {
-        return std::nullopt;
+        return {};
     }
-    return ReadInstalledOciLayerDigest(directory.get());
+    return ReadInstalledOciLayerDigest(directory.get()).value_or({});
 }
 
 export [[nodiscard]] auto MaterializeOci(

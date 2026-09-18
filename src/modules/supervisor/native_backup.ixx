@@ -159,7 +159,6 @@ namespace internal {
         std::filesystem::remove(mount_target);
     }
 
-    const auto snapshot_manifest = SerializeSnapshotManifest(snapshot_set);
     const auto devicefs = StartDeviceFs(
         snapshot_set.snapshots, read_user, use_known_data_map);
     auto cleanup = wil::scope_exit([&] {
@@ -172,7 +171,9 @@ namespace internal {
             cancellation_event,
             namespace_override,
             PbsFishRequest{
-                .snapshot_manifest = snapshot_manifest,
+                .snapshot_manifest = [&snapshot_set](const std::string_view layer) {
+                    return SerializeSnapshotManifest(snapshot_set, layer);
+                },
                 .send_encryption_key = true,
             });
         result = pbs_result

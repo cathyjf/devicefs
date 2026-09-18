@@ -53,7 +53,7 @@ enum class PbsStandardOutput {
 struct PbsFishRequest {
     std::span<const std::string_view> additional_arguments{};
     std::string_view additional_program{};
-    std::optional<std::u8string_view> snapshot_manifest;
+    std::function<std::u8string(std::string_view)> snapshot_manifest;
     std::string_view rpc_password{};
     // If true, append the encryption-key document to the WSL input for
     // an operation that encrypts or decrypts backup data.
@@ -471,20 +471,10 @@ struct StartedWslFish {
 }
 
 [[nodiscard]] auto StartWslFish(
-    const BackupConfiguration &configuration,
-    const std::span<const std::string_view> arguments,
+    StartedWslFish started,
     const std::span<const char> program,
     const std::span<const char8_t> standard_input,
     const PbsStandardOutput standard_output = PbsStandardOutput::Forward) {
-    auto started = StartWslFishProcess(
-        configuration, arguments);
-    const auto layer = ReadWslOciLayerDigest(
-        configuration.wsl.distribution, started.process.process.hProcess);
-    devicefs::WriteToStream(devicefs::stderr,
-        "Executing command in WSL distribution '{}' (registered under user '{}'){}\n",
-        configuration.wsl.distribution,
-        configuration.windows_username,
-        layer ? std::format(" with OCI layer '{}'", *layer) : std::string{});
     if (standard_output == PbsStandardOutput::Forward) {
         started.process.standard_output.emplace(
             std::move(started.standard_output),
@@ -576,8 +566,7 @@ auto SendPbsFishSignal(
         const auto configuration =
             ReadBackupConfiguration(persistent.configuration);
         return StartWslFish(
-            configuration,
-            arguments,
+            StartWslFishProcess(configuration, arguments),
             std::span<const char>{program},
             std::span<const char8_t>{});
     }();
@@ -719,6 +708,9 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
     }
     arguments.append_range(request.additional_arguments);
 
+    // Launching WSL loads the user's profile, so the OCI lookup below can
+    // read the distribution registration before the manifest is serialized.
+    auto started = StartWslFishProcess(configuration, arguments);
     auto input = SecureUtf8String{};
     // start-pbs.fish consumes these ten NUL-delimited records in order,
     // followed, when requested, by the key document that proxmox-backup-client
@@ -737,8 +729,10 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
         ? *namespace_override : configuration.pbs_namespace);
     append_record(configuration.pbs_fingerprint);
     append_record(configuration.pbs_authentication_secret);
-    append_record(request.snapshot_manifest.value_or(
-        std::u8string_view{}));
+    append_record(request.snapshot_manifest
+        ? request.snapshot_manifest(ReadWslOciLayerDigest(
+            configuration.wsl.distribution, started.process.process.hProcess))
+        : std::u8string{});
     input.append(
         request.rpc_password.begin(), request.rpc_password.end());
     input.push_back(u8'\0');
@@ -751,8 +745,7 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
         request.additional_program,
     } | std::views::join | std::ranges::to<std::vector>();
     auto process = StartWslFish(
-        configuration,
-        arguments,
+        std::move(started),
         program,
         std::span<const char8_t>{input.data(), input.size()},
         request.standard_output);

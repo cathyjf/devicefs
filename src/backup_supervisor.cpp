@@ -232,30 +232,6 @@ struct ServiceOutcome {
     DWORD service_error = 0;
 };
 
-[[nodiscard]] auto CurrentProductVersion() -> std::optional<std::string> {
-    const auto executable = CurrentExecutablePath();
-    auto information = std::vector<std::byte>(
-        GetFileVersionInfoSizeW(executable.c_str(), nullptr));
-    if (information.empty()) {
-        return std::nullopt;
-    }
-    if (!GetFileVersionInfoW(
-        executable.c_str(), 0,
-        wil::safe_cast_failfast<DWORD>(information.size()),
-        information.data())) {
-        return std::nullopt;
-    }
-    auto value = LPVOID{};
-    auto length = UINT{};
-    if (!VerQueryValueW(information.data(),
-        L"\\StringFileInfo\\0409fde9\\ProductVersion",
-        &value, &length)) {
-        return std::nullopt;
-    }
-    return Transcode<std::string>(std::wstring_view{
-        static_cast<LPCWSTR>(value), length - 1});
-}
-
 [[nodiscard]] auto RunBackup(
     ServiceContext &context,
     Log &log) {

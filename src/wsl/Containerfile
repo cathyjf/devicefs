@@ -745,6 +745,10 @@ COPY --from=samba-helper-build \
 #   mount
 #       Supplies mount and umount for the temporary /mnt/vss DrvFs mount.
 #
+#   openssl
+#       Reports detected crypto capabilities so `start-pbs.fish` can compensate
+#       for missing ARM64 hardware capability bits under WSL1.
+#
 #   passwd
 #       Supplies useradd and groupadd while this stage creates pbs-vss.
 #
@@ -764,6 +768,7 @@ COPY --from=samba-helper-build \
 # https://packages.debian.org/trixie/coreutils
 # https://software.opensuse.org/download.html?project=shells%3Afish%3Arelease%3A4&package=fish
 # https://packages.debian.org/trixie/mount
+# https://packages.debian.org/trixie/openssl
 # https://packages.debian.org/trixie/passwd
 # https://packages.debian.org/trixie/qrencode
 # https://packages.debian.org/trixie/samba
@@ -781,6 +786,7 @@ apt-get install --yes --no-install-recommends \
     fish \
     jq \
     mount \
+    openssl \
     passwd \
     qrencode \
     samba \

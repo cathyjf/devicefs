@@ -14,6 +14,43 @@ set print_samba_logs 0
 # this exported setting to recognize the corresponding readiness message.
 set --export use_map_grpc 1
 
+# Enable the ARM crypto instructions reported by `/proc/cpuinfo` when OpenSSL
+# detects no ARM features.
+#
+# Under WSL1 on ARM64, `getauxval(AT_HWCAP)` returns zero even though
+# `/proc/cpuinfo` reports that hardware crypto instructions are available.
+# OpenSSL relies on `getauxval`, so it fails to detect those instructions and
+# performs the crypto operations in software instead. This fallback supplies
+# the missing capabilities through `OPENSSL_armcap` before PBS starts.
+# An existing `OPENSSL_armcap` setting or a nonzero result from OpenSSL's own
+# detection takes precedence over this fallback.
+# https://github.com/openssl/openssl/blob/openssl-3.5.7/crypto/armcap.c
+function enable_openssl_arm_crypto
+    if set --query OPENSSL_armcap
+        return
+    end
+    if ! string match --quiet OPENSSL_armcap=0x0 (openssl info -cpusettings)
+        return
+    end
+    set -l features (string match --groups-only --regex \
+        '^Features\s*:\s*(.*)' </proc/cpuinfo | string split --no-empty ' ')
+    if ! contains -- asimd $features
+        return
+    end
+
+    # AArch64 calls NEON `asimd` in `/proc/cpuinfo`. The numbers below are
+    # OpenSSL's capability bits, rather than the operating system's bit values.
+    # https://github.com/openssl/openssl/blob/openssl-3.5.7/crypto/arm_arch.h
+    set -l capabilities 1 # `ARMV7_NEON`
+    for capability in aes:4 sha1:8 sha2:16 pmull:32 sha512:64
+        set -l feature_bit (string split : $capability)
+        if contains -- $feature_bit[1] $features
+            set capabilities (math bitor $capabilities, $feature_bit[2])
+        end
+    end
+    set --global --export OPENSSL_armcap $capabilities
+end
+
 # Unmount the DeviceFs snapshot images after PBS has finished reading them.
 # A busy mount is retried, with a timeout so cleanup cannot wait indefinitely.
 # The exit status reports whether unmounting succeeded or the timeout expired.
@@ -528,6 +565,8 @@ read --null --global --export PBS_FINGERPRINT || exit
 read --null --global --export PBS_PASSWORD || exit
 read --null --global DEVICEFS_MANIFEST || exit
 read --null --global DEVICEFS_RPC_PASSWORD || exit
+
+enable_openssl_arm_crypto
 
 set operation run_backup $_flag_parallel_images
 if set --query _flag_view

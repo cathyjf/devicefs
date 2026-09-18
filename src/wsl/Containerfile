@@ -230,7 +230,7 @@ EOF
 #
 # mk-build-deps comes from devscripts and uses equivs to turn debian/control
 # into a temporary dependency package. debcargo is installed explicitly because
-# this repository follows Debian's packaged-crate workflow. LLD performs the
+# this repository follows Debian's packaged-crate workflow. Mold performs the
 # final ELF link concurrently instead of leaving that part of the build to the
 # largely serial system linker.
 #
@@ -255,7 +255,7 @@ nala install -y --no-autoremove --no-install-recommends \
     devscripts \
     dpkg-dev \
     equivs \
-    lld
+    mold
 rm -rf /var/lib/apt/lists
 EOF
 
@@ -364,7 +364,7 @@ sed --in-place \
     Cargo.toml
 export CARGO_PROFILE_RELEASE_DEBUG=0
 export RUSTC_BOOTSTRAP=1
-export RUSTFLAGS='-Zthreads=0 -C link-arg=-fuse-ld=lld'
+export RUSTFLAGS='-Zthreads=0 -C link-arg=-fuse-ld=mold'
 cargo auditable build \
     --release \
     --package proxmox-backup-client \

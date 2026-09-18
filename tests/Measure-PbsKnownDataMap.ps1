@@ -16,10 +16,12 @@ The filesystem uses the same caching and synthetic-zero options as a backup.
 The supervisor supplies the installed PBS configuration and encryption key.
 No WSL administration or separately supplied PBS credentials are needed.
 
-Compare four cases, each with serial and parallel image uploading:
+Component 1 measures the effects of exposing bitmap files, using the map reader,
+and skipping known-zero reads. It runs four cases with both serial and parallel
+image uploading:
   `hidden`:   DeviceFs does not expose a bitmap, and PBS reads the image normally.
   `unused`:   DeviceFs exposes the bitmap, but PBS still reads the image normally.
-  `all-data`: PBS uses an all-set map, forcing the new reader to read every chunk.
+  `all-data`: PBS uses an all-set map, so the map reader reads every chunk.
   `known`:    PBS uses the actual DeviceFs map and skips known-zero chunks.
 Every case backs up the same images, including their NTFS metadata. The all-set
 map is conservative; an all-clear map would incorrectly discard that metadata.
@@ -33,9 +35,27 @@ as well as its median. PBS's own duration excludes Windows and WSL startup.
 The individual logs also retain PBS progress and Fish's wall and CPU timings.
 
 Compare `hidden` with `unused` to isolate exposing the filesystem bitmap. Compare
-`unused` with `all-data` to isolate the new PBS reader while retaining source
+`unused` with `all-data` to isolate the map reader while retaining source
 reads. Compare `all-data` with `known` to see what changes when reads are skipped.
 The serial and parallel results separate the two upload implementations.
+
+Component 2 compares the PBS map reader's buffer allocation methods with serial
+uploading. The baseline exposes maps but leaves `--known-data-map` unset.
+The other cases use both `all-data` and `known` with each diagnostic buffer mode:
+  `zeroed`: Allocate every chunk with `BytesMut::zeroed` (the default).
+  `resize`: Allocate with `BytesMut::with_capacity`, then fill with zeros.
+  `reuse`: Reclaim consumed chunk storage, then fill with zeros.
+All three modes still initialize every chunk, including those read from the
+source. This isolates allocation behavior while preserving the read API.
+
+Component 3 compares `read_exact` with `read_buf` using `all-data` maps and the
+`resize` allocation mode. Both cases initialize the buffers before reading, so
+their difference measures the read API rather than the cost of zeroing.
+
+Components 2 and 3 run by default. They require a PBS client that supports the
+temporary `--test-map-buffer-mode` and `--test-map-read-buf` options. All selected
+components share the same volumes, backup group, preliminary backup, and results
+archive. At the default two repetitions, they create 19 snapshots in total.
 
 The test holds the installed backup lock while using the shared mount. It
 creates a separate PBS group named `devicefs-map-test-<unique ID>` in the
@@ -56,8 +76,12 @@ measure without preparing a multi-terabyte volume. A dynamic VHDX consumes
 physical storage for its metadata, rather than its full virtual capacity.
 
 .PARAMETER Repetitions
-The number of measured passes through all eight cases. Alternate passes run
+The number of measured passes through the selected cases. Alternate passes run
 in reverse order. The preliminary backup is additional to these passes.
+
+.PARAMETER Components
+The numbered comparisons to run: 1 for map exposure and use, 2 for allocation,
+and 3 for the read API. Accepts multiple numbers and defaults to 2,3.
 
 .PARAMETER OutputDirectory
 A new directory for executable identities, individual logs, and CSV results.
@@ -65,6 +89,12 @@ The default is a unique directory under Windows `SystemTemp`.
 
 .EXAMPLE
 pwsh .\tests\Measure-PbsKnownDataMap.ps1
+
+.EXAMPLE
+& .\tests\Measure-PbsKnownDataMap.ps1 -Components 1,2,3
+
+.EXAMPLE
+pwsh .\tests\Measure-PbsKnownDataMap.ps1 -Components 1
 
 .EXAMPLE
 pwsh .\tests\Measure-PbsKnownDataMap.ps1 .\build\windows-arm64\Release\backup-supervisor.exe -SizeGiB 256 -Repetitions 4
@@ -80,6 +110,9 @@ param(
 
     [ValidateRange(1, [int]::MaxValue)]
     [int] $Repetitions = 2,
+
+    [ValidateSet(1, 2, 3)]
+    [int[]] $Components = @(2, 3),
 
     [string] $OutputDirectory = (Join-Path $env:WINDIR 'SystemTemp' `
         "devicefs-pbs-map-test-$([Guid]::NewGuid().ToString('N'))")
@@ -157,25 +190,68 @@ try {
         ImageBytes = $image_bytes
         VirtualDiskSizes = $sizes
         Repetitions = $Repetitions
+        Components = $Components
         BackupGroup = "host/$backup_id"
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'run.json')
 
-    $cases = @(foreach ($parallel in @($false, $true)) {
-        foreach ($map in @('hidden', 'unused', 'all-data', 'known')) {
-            [pscustomobject]@{ Map = $map; Parallel = $parallel }
+    $cases = @(foreach ($component in ($Components | Select-Object -Unique)) {
+        switch ($component) {
+            1 {
+                foreach ($parallel in @($false, $true)) {
+                    foreach ($map in @('hidden', 'unused', 'all-data', 'known')) {
+                        [pscustomobject]@{
+                            Component = $component; Map = $map; Parallel = $parallel
+                            BufferMode = if ($map -in @('all-data', 'known')) { 'zeroed' } else { 'standard' }
+                            ReadApi = if ($map -in @('all-data', 'known')) { 'exact' } else { 'standard' }
+                        }
+                    }
+                }
+            }
+            2 {
+                [pscustomobject]@{
+                    Component = $component; Map = 'unused'; Parallel = $false
+                    BufferMode = 'standard'; ReadApi = 'standard'
+                }
+                foreach ($map in @('all-data', 'known')) {
+                    foreach ($buffer in @('zeroed', 'resize', 'reuse')) {
+                        [pscustomobject]@{
+                            Component = $component; Map = $map; Parallel = $false
+                            BufferMode = $buffer; ReadApi = 'exact'
+                        }
+                    }
+                }
+            }
+            3 {
+                foreach ($read_api in @('exact', 'read-buf')) {
+                    [pscustomobject]@{
+                        Component = $component; Map = 'all-data'; Parallel = $false
+                        BufferMode = 'resize'; ReadApi = $read_api
+                    }
+                }
+            }
         }
     })
+    Write-Host ('Components: {0}; {1} measured backups plus one preliminary backup.' -f
+        ($Components -join ', '), ($cases.Count * $Repetitions))
     # The client uses its default 4 MiB image chunks. The exposed map must
     # describe those same chunks; no chunk-size override is passed to PBS.
     $pbs_chunk_size = 4MB
     for ($pass = 0; $pass -le $Repetitions; ++$pass) {
-        $ordered_cases = @(if ($pass -eq 0) { $cases[0] } else { $cases })
+        $ordered_cases = @(if ($pass -eq 0) {
+            [pscustomobject]@{
+                Component = 0; Map = 'hidden'; Parallel = $false
+                BufferMode = 'standard'; ReadApi = 'standard'
+            }
+        } else { $cases })
         if (($pass % 2) -eq 0) {
             [Array]::Reverse($ordered_cases)
         }
         foreach ($case in $ordered_cases) {
             $uploader = if ($case.Parallel) { 'parallel' } else { 'serial' }
-            $name = if ($pass -eq 0) { 'warmup' } else { "$pass-$uploader-$($case.Map)" }
+            $name = if ($pass -eq 0) { 'warmup' } else {
+                '{0}-component{1}-{2}-{3}-{4}-{5}' -f $pass, $case.Component,
+                    $uploader, $case.Map, $case.BufferMode, $case.ReadApi
+            }
             $log = Join-Path $OutputDirectory "$name.log"
             $map_size = if ($case.Map -eq 'hidden') { 0 } else { $pbs_chunk_size }
             $filesystem_timer = [Diagnostics.Stopwatch]::StartNew()
@@ -190,9 +266,16 @@ try {
             $filesystem_timer.Stop()
 
             Write-Host "Running $name ($image_bytes image bytes)..."
+            # Component 1 does not require diagnostic options, so it can also
+            # run with PBS clients that do not support those options.
+            $pbs_arguments = @(if (($case.Component -gt 1) -and
+                ($case.Map -in @('all-data', 'known'))) {
+                '--test-map-buffer-mode'; $case.BufferMode
+                '--test-map-read-buf'; ($case.ReadApi -eq 'read-buf').ToString().ToLowerInvariant()
+            })
             $timer = [Diagnostics.Stopwatch]::StartNew()
             & $SupervisorPath --run-fish-program $fish_program -- `
-                $backup_id $case.Map $uploader 2>&1 | ForEach-Object {
+                $backup_id $case.Map $uploader @pbs_arguments 2>&1 | ForEach-Object {
                     '[{0:O}] {1}' -f [DateTime]::UtcNow, $_
                 } | Tee-Object -FilePath $log | Out-Host
             $exit_code = $LASTEXITCODE
@@ -208,8 +291,11 @@ try {
             } else { $null }
             $row = [pscustomobject]@{
                 Pass = $pass
+                Component = $case.Component
                 Map = $case.Map
                 Uploader = $uploader
+                BufferMode = $case.BufferMode
+                ReadApi = $case.ReadApi
                 ImageBytes = $image_bytes
                 PbsSeconds = $seconds
                 GiBPerSecond = if ($seconds -gt 0) { $image_bytes / 1GB / $seconds } else { $null }
@@ -233,15 +319,18 @@ try {
     }
 
     $summary = @($results | Where-Object { ($_.Pass -gt 0) -and ($null -ne $_.PbsSeconds) } |
-        Group-Object Uploader, Map | ForEach-Object {
+        Group-Object Component, Uploader, Map, BufferMode, ReadApi | ForEach-Object {
             $times = @($_.Group.PbsSeconds | Sort-Object)
             $middle = [int][Math]::Floor($times.Count / 2)
             $median = if (($times.Count % 2) -eq 0) {
                 ($times[$middle - 1] + $times[$middle]) / 2
             } else { $times[$middle] }
             [pscustomobject]@{
+                Component = $_.Group[0].Component
                 Uploader = $_.Group[0].Uploader
                 Map = $_.Group[0].Map
+                BufferMode = $_.Group[0].BufferMode
+                ReadApi = $_.Group[0].ReadApi
                 Runs = $times.Count
                 MinimumSeconds = $times[0]
                 MedianSeconds = $median

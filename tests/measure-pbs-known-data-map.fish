@@ -5,7 +5,9 @@
 # Run one backup for `Measure-PbsKnownDataMap.ps1`. The supervisor executes this
 # after `start-pbs.fish`, which supplies PBS credentials, the encryption key on
 # `stdin`, and the existing mount and child-supervision functions. Arguments are
-# the test backup ID, map case, and uploader (`serial` or `parallel`).
+# the test backup ID, map case, and uploader (`serial` or `parallel`), followed
+# by any diagnostic PBS options for this measurement. Those options are passed
+# directly to the backup command and appear in its printed command line.
 # Each invocation gets a fresh key stream, so the PowerShell driver starts a
 # separate supervisor invocation for every measurement.
 
@@ -42,6 +44,7 @@ if test $uploader = parallel
 end
 set -l backup_arguments backup --keyfd 0 --backup-id $test_backup_id \
     --parallel-images $parallel_images
+set -a backup_arguments $argv[4..]
 for archive in volume.img companion.img
     set -l image $vss_mount_point/$archive
     set -l map {$image}.known-data.bitmap

@@ -91,6 +91,19 @@ function supervise_pbs --argument-names child_pid finalizer
     return $finish_exit_code
 end
 
+# Print the version of the proxmox-backup-client installed in the image, as
+# reported by the `proxmox-backup.commit` file created during the Containerfile
+# building process, if that file exists.
+function maybe_print_pbs_client_version
+    set -l pbs_client_marker /usr/share/devicefs-build/proxmox-backup.commit
+    if test ! -f $pbs_client_marker
+        return
+    end
+    read --line -l pbs_version <$pbs_client_marker
+    printf 'Reported proxmox-backup-client build: %s\n' \
+        (string replace -ar '[^\w ,\.\-+]' '' $pbs_version)
+end
+
 # Upload the mounted DeviceFs images and `DEVICEFS_MANIFEST` to `host/$backup_id`
 # in `PBS_NAMESPACE`. `parallel_images` supplies the optional PBS parallel-images
 # argument. PBS reads the encryption key from the remaining standard input.
@@ -122,6 +135,7 @@ function run_backup --argument-names parallel_images
     end
     printf 'Backup manifest:\n%s\n' $DEVICEFS_MANIFEST
     set -a backup_argv {$pbs_manifest_filename}:$manifest_file
+    maybe_print_pbs_client_version
     echo -- $DEVICEFS_PBS_CLIENT $backup_argv
     $DEVICEFS_PBS_CLIENT $backup_argv &
     supervise_pbs $last_pid unmount_vss

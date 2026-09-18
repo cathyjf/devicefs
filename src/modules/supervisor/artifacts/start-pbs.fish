@@ -98,6 +98,16 @@ end
 # when the upload itself succeeded. PBS output and the printed manifest are
 # forwarded to the Windows supervisor.
 function run_backup --argument-names parallel_images
+    set -l manifest_ (echo -- $DEVICEFS_MANIFEST | jq | string collect)
+    if ! string match -q -r '[^0]' $pipestatus
+        set DEVICEFS_MANIFEST $manifest_
+    end
+    set -l manifest_file (mktemp -t devicefs-manifest.XXXXXXXXXX) || return
+    # Remove the manifest when this Fish process exits, including after cancellation.
+    function remove_backup_manifest --on-event fish_exit --inherit-variable manifest_file
+        rm -f -- $manifest_file
+    end
+    echo -- $DEVICEFS_MANIFEST >$manifest_file || return
     sudo -n mount $vss_mount_point || exit
     cancel_before_start unmount_vss
     set -l backup_argv backup --keyfd 0 --backup-id $backup_id $parallel_images
@@ -110,17 +120,10 @@ function run_backup --argument-names parallel_images
             set -a backup_argv --known-data-map {$image_filename}:$bitmap_filename
         end
     end
-    set -l manifest_ (echo -- $DEVICEFS_MANIFEST | jq | string collect)
-    if ! string match -q -r '[^0]' $pipestatus
-        set DEVICEFS_MANIFEST $manifest_
-    end
     printf 'Backup manifest:\n%s\n' $DEVICEFS_MANIFEST
-    # `psub` supplies the manifest as a file for this PBS job and removes that
-    # file when the job exits. Keeping it inside the command substitution ties
-    # the file's lifetime to the process that consumes it.
-    # https://github.com/fish-shell/fish-shell/blob/master/share/functions/psub.fish
-    $DEVICEFS_PBS_CLIENT $backup_argv \
-        {$pbs_manifest_filename}:(echo -- $DEVICEFS_MANIFEST | psub --file) &
+    set -a backup_argv {$pbs_manifest_filename}:$manifest_file
+    echo -- $DEVICEFS_PBS_CLIENT $backup_argv
+    $DEVICEFS_PBS_CLIENT $backup_argv &
     supervise_pbs $last_pid unmount_vss
 end
 

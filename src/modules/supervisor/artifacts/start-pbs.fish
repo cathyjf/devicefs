@@ -543,13 +543,14 @@ function run_view --argument-names snapshot_override archive address port rpc_he
     return $finish_exit_code
 end
 
-argparse /parallel-images /print-manifest /list-backups /view -- $argv || exit
+argparse /parallel-images /print-manifest /list-backups /view /run-fish-program -- $argv || exit
 
 # The first three positional arguments are supervisor control-file paths and
 # the local backup ID. Remaining arguments belong to the selected operation.
 set pid_file $argv[1]
 set stop_file $argv[2]
 set backup_id $argv[3]
+set -e argv[..3]
 
 # `StartPbsFish` in pbs.cpp supplies every NUL-delimited record below, including
 # empty records for unused values. The remaining bytes are the encryption-key
@@ -568,12 +569,23 @@ read --null --global DEVICEFS_RPC_PASSWORD || exit
 
 enable_openssl_arm_crypto
 
-set operation run_backup $_flag_parallel_images
-if set --query _flag_view
+set -l operation run_backup $_flag_parallel_images
+if set -q _flag_view
     set operation run_view
-else if set --query _flag_print_manifest
+else if set -q _flag_print_manifest
     set operation print_manifest
-else if set --query _flag_list_backups
+else if set -q _flag_list_backups
     set operation list_backups
+else if set -q _flag_run_fish_program
+    set operation true
 end
-$operation $argv[4..]
+$operation $argv
+set -l exit_status $status
+
+if ! set -q _flag_run_fish_program
+    exit $exit_status
+end
+
+# With `--run-fish-program`, the supervisor appends the contents of the supplied
+# file to this program. Execution continues into that code instead of starting
+# one of the built-in operations above.

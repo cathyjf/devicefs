@@ -729,6 +729,23 @@ struct SelectiveViewOptions {
         });
 }
 
+[[nodiscard]] auto RunFishProgramMode(
+    const std::span<const std::string_view> arguments) {
+    if (arguments.empty() ||
+        ((arguments.size() > 1) && (arguments[1] != "--"))) {
+        throw std::invalid_argument(
+            "--run-fish-program requires FILE [-- PROGRAM-ARGUMENTS...]");
+    }
+    const auto [input, console_mode] = GetForegroundConsoleInput(
+        "--run-fish-program requires an attached console");
+    return RunForegroundOperation(input, console_mode,
+        [arguments](const HANDLE cancellation_event) {
+            return RunFishProgram(cancellation_event,
+                std::filesystem::path{arguments.front()},
+                arguments.subspan(1));
+        });
+}
+
 [[nodiscard]] auto RunListBackups(
     std::optional<std::u8string> namespace_override) {
     const auto [input, console_mode] = GetForegroundConsoleInput(
@@ -974,6 +991,9 @@ auto BackupSupervisorMain(
         const auto option = arguments.front();
         if (option == "--backup-console") {
             return RunBackupConsole();
+        }
+        if (option == "--run-fish-program") {
+            return RunFishProgramMode(arguments.subspan(1));
         }
         if (option == kRunServiceOption) {
             if (arguments.size() != 1) {

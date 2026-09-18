@@ -52,6 +52,7 @@ enum class PbsStandardOutput {
 
 struct PbsFishRequest {
     std::span<const std::string_view> additional_arguments{};
+    std::string_view additional_program{};
     std::optional<std::u8string_view> snapshot_manifest;
     std::string_view rpc_password{};
     // If true, append the encryption-key document to the WSL input for
@@ -744,10 +745,15 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
     if (request.send_encryption_key) {
         input.append(configuration.pbs_encryption_key);
     }
+    const auto program = std::array{
+        std::string_view{StartPbsProgram()},
+        "\n"sv,
+        request.additional_program,
+    } | std::views::join | std::ranges::to<std::vector>();
     auto process = StartWslFish(
         configuration,
         arguments,
-        StartPbsProgram(),
+        program,
         std::span<const char8_t>{input.data(), input.size()},
         request.standard_output);
     return PbsFishOperation{

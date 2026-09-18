@@ -39,6 +39,45 @@ using devicefs::terminal::Transcode;
 
 export constexpr auto kCancelledExitCode = internal::kCancelledExitCode;
 
+// Read the Fish program from `path` on Windows and run it in the WSL distribution
+// registered to the configured backup account. The existing PBS startup code
+// runs first, so the supplied program can use the configured PBS connection
+// settings and authentication credentials. PBS can read the encryption key
+// from the supplied program's standard input using `--keyfd 0`.
+//
+// Scripts that start a child should use `supervise_pbs` to publish its PID for
+// cancellation and return its exit status, as the built-in PBS operations do.
+export [[nodiscard]] auto RunFishProgram(
+    const HANDLE cancellation_event,
+    const std::filesystem::path &path,
+    const std::span<const std::string_view> arguments) -> int {
+    auto file = std::ifstream{path, std::ios::binary};
+    if (!file.is_open()) {
+        throw std::runtime_error(std::format(
+            "could not open the Fish program '{}'",
+            Transcode<std::string>(path.native())));
+    }
+    const auto program = std::string{std::istreambuf_iterator<char>{file}, {}};
+    if (file.bad()) {
+        throw std::runtime_error(std::format(
+            "could not read the Fish program '{}'",
+            Transcode<std::string>(path.native())));
+    }
+    const auto fish_arguments = std::array{
+        std::span<const std::string_view>{
+            std::array{std::string_view{"--run-fish-program"}}},
+        arguments,
+    } | std::views::join | std::ranges::to<std::vector>();
+    const auto result = internal::RunPbsFish(
+        cancellation_event, std::nullopt,
+        internal::PbsFishRequest{
+            .additional_arguments = fish_arguments,
+            .additional_program = program,
+            .send_encryption_key = true,
+        });
+    return result ? result->exit_code : kCancelledExitCode;
+}
+
 export [[nodiscard]] auto InventoryVhdx(
     HANDLE cancellation_event,
     std::string_view device) -> int;

@@ -296,7 +296,6 @@ auto ExtractArchiveMember(
     const std::filesystem::path &rootfs,
     const std::optional<std::string> &previous_digest) -> std::optional<std::string> {
     using namespace winrt::Windows::Foundation;
-    using namespace winrt::Windows::Web::Http;
     using namespace winrt::Windows::Web::Http::Headers;
 
     constexpr auto registry_host = L"ghcr.io"sv;
@@ -317,7 +316,7 @@ auto ExtractArchiveMember(
         image, Transcode<std::string>(architecture));
     const auto client = [&] {
         try {
-            const auto client = HttpClient{};
+            const auto client = MakeUncachedHttpClient();
             client.DefaultRequestHeaders().UserAgent().ParseAdd(L"backup-supervisor");
             // Public GHCR images still require a pull token. This exchange is
             // anonymous; the resulting token authorizes the registry requests.

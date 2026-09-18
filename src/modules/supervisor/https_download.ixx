@@ -20,6 +20,7 @@ module;
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.Web.Http.h>
+#include <winrt/Windows.Web.Http.Filters.h>
 #include <winrt/Windows.Web.Http.Headers.h>
 
 export module devicefs.supervisor.https_download;
@@ -33,6 +34,19 @@ using devicefs::terminal::Transcode;
 
 #undef stderr
 #undef stdout
+
+// Return an HTTP client with caching disabled.
+//
+// DeviceFs does not download the same installer or OCI layer again after
+// installation, so caching these downloads only wastes disk space.
+// https://learn.microsoft.com/en-us/uwp/api/windows.web.http.filters.httpcachecontrol
+export [[nodiscard]] auto MakeUncachedHttpClient() {
+    using namespace winrt::Windows::Web::Http::Filters;
+    const auto filter = HttpBaseProtocolFilter{};
+    filter.CacheControl().ReadBehavior(HttpCacheReadBehavior::NoCache);
+    filter.CacheControl().WriteBehavior(HttpCacheWriteBehavior::NoCache);
+    return winrt::Windows::Web::Http::HttpClient{filter};
+}
 
 // HTTP and storage operations wait synchronously, which C++/WinRT permits
 // only in a multithreaded apartment. The caller owns that apartment so it

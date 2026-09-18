@@ -186,7 +186,7 @@ auto EnsureWinFsp() -> bool {
         "backup-supervisor: downloading pinned WinFsp MSI '{}' from '{}'\n",
         name, url);
     try {
-        const auto client = winrt::Windows::Web::Http::HttpClient{};
+        const auto client = MakeUncachedHttpClient();
         const auto bytes = DownloadFile(client,
             winrt::Windows::Foundation::Uri{Transcode<std::wstring>(url)}, destination);
         devicefs::WriteToStream(devicefs::stdout,
@@ -208,7 +208,6 @@ auto EnsureWinFsp() -> bool {
 auto InstallWslPackage() -> bool {
     using namespace winrt::Windows::Data::Json;
     using namespace winrt::Windows::Foundation;
-    using namespace winrt::Windows::Web::Http;
 
     // Installation must also work when the existing `wsl.exe` is too old to
     // support `wsl --update`. The release MSI supplies the new executable
@@ -225,7 +224,7 @@ auto InstallWslPackage() -> bool {
         devicefs::WriteToStream(devicefs::stdout,
             L"backup-supervisor: querying the latest WSL release from '{}'\n",
             releases_url);
-        const auto client = HttpClient{};
+        const auto client = MakeUncachedHttpClient();
         client.DefaultRequestHeaders().UserAgent().ParseAdd(L"backup-supervisor");
         const auto response = client.GetAsync(Uri{releases_url}).get();
         response.EnsureSuccessStatusCode();

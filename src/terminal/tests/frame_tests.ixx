@@ -6,9 +6,12 @@ export module devicefs.terminal.frame_tests;
 import std;
 import devicefs.terminal;
 import devicefs.terminal.test_support;
+import devicefs.terminal.safecast;
 import devicefs.terminal.frame;
 import devicefs.terminal.drawing;
 import devicefs.terminal.formatting;
+import devicefs.terminal.text_input;
+import devicefs.terminal.menu;
 
 using namespace std::string_view_literals;
 using namespace devicefs::terminal;
@@ -47,7 +50,7 @@ public:
                 const auto parameters = text.substr(0, end);
                 const auto command = text.at(end);
                 text.remove_prefix(end + 1);
-                const auto number = parameters.empty() ? 0 :
+                const auto number = parameters.empty() || parameters.starts_with('?') ? 0 :
                     std::stoi(std::string{parameters});
                 if (command == 'H') {
                     ++cursor_moves;
@@ -76,9 +79,20 @@ public:
                 }
                 continue;
             }
+            if (text.starts_with('\r') || text.starts_with('\n')) {
+                if (text.front() == '\r') {
+                    cursor_.column = 1;
+                } else {
+                    Require(cursor_.row < size_.rows, "a frame line feed scrolled the screen"sv);
+                    ++cursor_.row;
+                }
+                pending_wrap_ = false;
+                text.remove_prefix(1);
+                continue;
+            }
             // ESC (0x1B) marks the next command after ordinary display text.
             // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
-            const auto end = text.find('\x1b');
+            const auto end = text.find_first_of("\x1b\r\n"sv);
             Require(end != 0, std::format("unsupported frame command {:?}", text));
             const auto printed = text.substr(0, end);
             for (const auto &group : MeasureText<WidthPolicy::WindowsTerminalGraphemes>(printed)) {
@@ -89,10 +103,13 @@ public:
                     if ((group.text == "日"sv) || (group.text == "日\u0600"sv) ||
                         (group.text == "日\u0601"sv) ||
                         (group.text == "本"sv) ||
-                        (group.text == "👩‍💻"sv) || (group.text == "😀"sv)) {
+                        (group.text == "👩‍💻"sv) || (group.text == "😀"sv) ||
+                        (group.text == "🇨🇦"sv) || (group.text == "👍🏽"sv)) {
                         return 2;
                     }
                     Require((group.text == "é"sv) || (group.text == "©"sv) || (group.text == "·"sv) ||
+                        (group.text == "\u250C"sv) || (group.text == "\u2500"sv) || (group.text == "\u2510"sv) ||
+                        (group.text == "\u2502"sv) || (group.text == "\u2514"sv) || (group.text == "\u2518"sv) ||
                         (group.text.size() == 1),
                         std::format("the frame fixture has no width for {:?}", group.text));
                     return 1;
@@ -110,6 +127,7 @@ public:
                 for (auto offset = 0; offset < width; ++offset) {
                     cells_.insert_or_assign({cursor_.row, cursor_.column + offset},
                         Cell{std::string{group.text}, cursor_.column, width, reverse_});
+                    painted_cells.emplace_back(cursor_.row, cursor_.column + offset);
                 }
                 painted.append(group.text);
                 cursor_.column += width;
@@ -132,6 +150,7 @@ public:
     auto PresentFrame() noexcept -> void { ++presentations; }
     auto ResetActivity() noexcept -> void {
         painted.clear();
+        painted_cells.clear();
         erased.clear();
         presentations = 0;
         screen_erases = 0;
@@ -175,6 +194,7 @@ public:
     }
 
     std::string painted;
+    std::vector<std::pair<int, int>> painted_cells;
     std::vector<std::pair<int, int>> erased;
     int presentations = 0;
     int screen_erases = 0;
@@ -238,6 +258,67 @@ private:
 export [[nodiscard]] auto RunFrameTests() -> bool {
     static_assert(FrameTerminal<FrameConsole>);
     auto passed = true;
+    passed &= Test("text editing preserves composed Unicode characters and their cell widths"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 8, .columns = 24};
+        auto terminal = DrawingConsole{size};
+        auto editor = TextInput{"é日👩‍💻"};
+        const auto draw = [&] {
+            auto frame = Frame{terminal, size};
+            frame.MoveTo({2, 3});
+            Require(editor.Draw(frame, terminal, {.columns = 10, .rows = 4}),
+                "Unicode text could not be laid out"sv);
+            Require(terminal.Flip(frame), "Unicode text could not be displayed"sv);
+            return frame;
+        };
+        const auto first = draw();
+        Require((terminal.Row(2) == "  \u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510") &&
+            (terminal.Row(3) == "  \u2502é日👩‍💻   \u2502") &&
+            (terminal.Row(5) == "  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518"),
+            "the box border did not meet at its corners or align around Unicode text"sv);
+        Require(first.caret == CursorPosition{3, 9},
+            "the caret used UTF-8 byte counts instead of displayed columns"sv);
+        Require(editor.Handle({MenuKey::Backspace}), "Backspace did not remove the final emoji"sv);
+        std::ignore = draw();
+        Require(editor.Value() == "é日", "Backspace split a joined emoji"sv);
+        Require(editor.Handle({MenuKey::Left}), "Left did not move across the wide character"sv);
+        std::ignore = draw();
+        Require(editor.Handle({MenuKey::Backspace}), "Backspace did not remove the accented letter"sv);
+        std::ignore = draw();
+        Require(editor.Value() == "日", "Backspace split a letter from its accent"sv);
+    });
+    passed &= Test("Delete and Backspace remove whole Unicode groups between neighboring letters"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 6, .columns = 30};
+        for (const auto group : std::array{"é"sv, "日"sv, "👩‍💻"sv, "🇨🇦"sv, "👍🏽"sv}) {
+            for (const auto key : std::array{MenuKey::Delete, MenuKey::Backspace}) {
+                auto terminal = DrawingConsole{size};
+                auto editor = TextInput{std::format("a{}z", group)};
+                const auto draw = [&] {
+                    auto frame = Frame{terminal, size};
+                    Require(editor.Draw(frame, terminal) && terminal.Flip(frame),
+                        "the Unicode deletion fixture could not be displayed"sv);
+                };
+                draw();
+                Require(editor.Handle({MenuKey::Left, key == MenuKey::Delete ? 2u : 1u}),
+                    "the caret did not reach the character to delete"sv);
+                draw();
+                Require(editor.Handle({key}), "deleting a Unicode group did not change the text"sv);
+                draw();
+                Require(editor.Value() == "az", std::format(
+                    "deleting {:?} left {:?} instead of preserving just the neighbors", group, editor.Value()));
+            }
+        }
+    });
+    passed &= Test("explicit newlines after a full input row do not create an extra blank row"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 5, .columns = 12};
+        auto terminal = DrawingConsole{size};
+        auto editor = TextInput{"abcd\nx"};
+        auto frame = Frame{terminal, size};
+        Require(editor.Draw(frame, terminal, {.columns = 4, .rows = 4, .border = false}) &&
+            terminal.Flip(frame), "the text control could not display a full row"sv);
+        Require((terminal.Row(1) == "abcd") && (terminal.Row(2) == "x") &&
+            (frame.caret == CursorPosition{2, 2}),
+            "a soft wrap was counted again as an explicit newline"sv);
+    });
     passed &= Test("kitty right-margin reports presenting full rows and reusing measured widths"sv, [] {
         auto terminal = FrameConsole{{.rows = 3, .columns = 4}};
         terminal.report_pending_wrap_on_next_row = true;
@@ -346,6 +427,58 @@ export [[nodiscard]] auto RunFrameTests() -> bool {
         Require(terminal.erased.empty() && (terminal.screen_erases == 0),
             "changing attributes erased existing glyphs"sv);
     });
+    passed &= Test("editing a boxed row refreshes its vertical sides and upper corners without repainting other cells"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 4, .columns = 16};
+        auto terminal = FrameConsole{size};
+        auto presenter = DeltaFramePresenter{};
+        auto frame = FrameBuffer{size};
+        frame.rows.at(0).text = "  \u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510";
+        frame.rows.at(1).text = "  \u2502abc\u2502def\u2502";
+        frame.rows.at(2).text = "  \u2502       \u2502";
+        frame.rows.at(3).text = "  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518";
+        Require(presenter.Flip(terminal, frame), "the initial box was not presented"sv);
+        terminal.ResetActivity();
+        frame.rows.at(1).text = "  \u2502zbc\u2502def\u2502";
+        Require(presenter.Flip(terminal, frame), "the boxed edit was not presented"sv);
+        // The edit is at column 4. The outer strokes are at columns 3 and 11;
+        // the vertical stroke inside the text at column 7 is unchanged content.
+        const auto expected = std::set<std::pair<int, int>>{
+            {1, 3}, {1, 11}, {2, 3}, {2, 4}, {2, 11}, {3, 3}, {3, 11}};
+        Require((terminal.painted_cells | std::ranges::to<std::set>()) == expected,
+            "a vertical border stroke was omitted or unrelated cells were repainted"sv);
+        Require(std::ranges::all_of(std::views::iota(0uz, frame.rows.size()), [&](const auto index) {
+                return terminal.Row(FailFastCast<int>(index) + 1) == frame.rows.at(index).text;
+            }) && terminal.erased.empty() && (terminal.screen_erases == 0),
+            "refreshing the vertical strokes changed or erased the box"sv);
+    });
+    passed &= Test("moving the caret refreshes the vertical sides and upper corners without repainting their interior"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 3, .columns = 8};
+        auto terminal = FrameConsole{size};
+        auto presenter = DeltaFramePresenter{};
+        auto frame = FrameBuffer{size};
+        for (auto &row : frame.rows) {
+            row.text = "\u2502      \u2502";
+        }
+        frame.rows.front().text = "\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2510";
+        frame.caret = CursorPosition{2, 2};
+        Require(presenter.Flip(terminal, frame), "the initial caret was not presented"sv);
+        for (const auto next_row : std::array{3, 2}) {
+            terminal.ResetActivity();
+            frame.caret = CursorPosition{next_row, 2};
+            Require(presenter.Flip(terminal, frame), "the moved caret was not presented"sv);
+            const auto expected = std::set<std::pair<int, int>>{
+                {1, 1}, {1, size.columns}, {2, 1}, {2, size.columns},
+                {3, 1}, {3, size.columns}};
+            Require((terminal.painted_cells | std::ranges::to<std::set>()) == expected,
+                "moving the caret omitted a vertical border stroke or repainted the interior"sv);
+            Require((terminal.QueryCursor() == frame.caret) && terminal.erased.empty() &&
+                (terminal.screen_erases == 0),
+                "refreshing the vertical borders misplaced the caret or erased cells"sv);
+        }
+        terminal.ResetActivity();
+        Require(presenter.Flip(terminal, frame) && terminal.painted_cells.empty(),
+            "a stationary caret caused unchanged box strokes to be repainted"sv);
+    });
     passed &= Test("shortening a Unicode row clearing displaced text from its blank tail"sv, [] {
         auto terminal = FrameConsole{{.rows = 2, .columns = 16}};
         auto presenter = DeltaFramePresenter{};
@@ -365,6 +498,21 @@ export [[nodiscard]] auto RunFrameTests() -> bool {
             std::ranges::all_of(terminal.erased, [](const auto &cell) {
                 return (cell.first == 1) && (cell.second > 4);
             }), "tail removal modified the retained Japanese glyphs"sv);
+    });
+    passed &= Test("replacing a Unicode row with a box erases displaced text inside the border"sv, [] {
+        auto terminal = FrameConsole{{.rows = 2, .columns = 16}};
+        auto presenter = DeltaFramePresenter{};
+        auto frame = FrameBuffer{TerminalSize{.rows = 2, .columns = 16}};
+        frame.rows.front().text = "日本 é ©";
+        Require(presenter.Flip(terminal, frame), "the initial Unicode row was not presented"sv);
+        // Console Host can relay Unicode text using different widths from the
+        // receiving terminal. Place a displaced copyright symbol in column 7,
+        // which the presenter recorded as a space in the preceding row.
+        terminal.Write("\x1b[1;7H©"sv);
+        frame.rows.front().text = "\u2502              \u2502";
+        Require(presenter.Flip(terminal, frame), "the bordered row was not presented"sv);
+        Require(terminal.Row(1) == frame.rows.front().text,
+            "a cached space left displaced Unicode text inside the border"sv);
     });
     passed &= Test("replacing a wide glyph preserving a suffix at the same columns"sv, [] {
         auto terminal = FrameConsole{{.rows = 2, .columns = 16}};

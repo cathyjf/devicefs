@@ -50,6 +50,8 @@ struct FrameLine {
 struct FrameBuffer {
     std::optional<TerminalSize> size;
     std::vector<FrameLine> rows;
+    // Text editors supply a visible caret; other frames hide the text cursor.
+    std::optional<CursorPosition> caret;
 
     explicit FrameBuffer(const std::optional<TerminalSize> dimensions)
         : size{dimensions}, rows(dimensions ?
@@ -160,6 +162,9 @@ public:
         using namespace frame_detail;
         auto failed = ScopeExit{[this] { Invalidate(); }};
         auto output = FrameOutput{terminal};
+        if (caret_ || frame.caret) {
+            output.Write(vt::kHideCursor);
+        }
         if (!initialized_ || !frame.size) {
             output.Write(vt::kClearScreen);
             displayed_.assign(frame.rows.size(), DisplayedRow{});
@@ -184,6 +189,7 @@ public:
         }
         displayed_.resize(frame.rows.size(), DisplayedRow{});
         auto complete = true;
+        auto refresh_vertical_edges = caret_ != frame.caret;
         for (auto index = std::size_t{}; index < frame.rows.size(); ++index) {
             const auto &line = frame.rows.at(index);
             auto &previous = displayed_.at(index);
@@ -192,6 +198,7 @@ public:
                 continue;
             }
             const auto columns = frame.size->columns;
+            const auto row = FailFastCast<int>(index) + 1;
             if (previous && (previous->source == line) &&
                 ((previous->columns == columns) ||
                     (!previous->shortened && (line.clipping != FrameClipping::Ellipsis) &&
@@ -201,13 +208,34 @@ public:
                 continue;
             }
             auto old = std::exchange(previous, std::nullopt);
-            previous = PaintRow<Policy>(output, line,
-                FailFastCast<int>(index) + 1, columns, old);
+            previous = PaintRow<Policy>(output, line, row, *frame.size, old);
             if (!previous) {
                 complete = false;
                 break;
             }
+            refresh_vertical_edges = true;
         }
+        // Apple Terminal can leave gaps between the vertical border characters of a
+        // text input box after a row is redrawn. Moving the cursor can also cause a gap
+        // on the row that the cursor leaves, even when the text is unchanged.
+        //
+        // Interactive testing confirmed that rewriting both vertical sides along their
+        // full height, including the upper corners, repairs these gaps. Rewriting only
+        // the affected row was ineffective; omitting the upper corners left a gap beside
+        // the first input row. The refresh therefore includes those unchanged border
+        // cells whenever the text or caret changes.
+        if (complete && refresh_vertical_edges) {
+            for (auto index = 0uz; index < displayed_.size(); ++index) {
+                if (const auto &row = displayed_.at(index)) {
+                    RepaintVerticalEdges(output, *row, FailFastCast<int>(index) + 1);
+                }
+            }
+        }
+        if (complete && frame.caret) {
+            output.Write(vt::MoveCursor(frame.caret->row, frame.caret->column));
+            output.Write(vt::kShowCursor);
+        }
+        caret_ = complete ? frame.caret : std::nullopt;
         if (output.written) {
             output.Write(vt::kResetAttributes);
             output.Flush();
@@ -249,7 +277,7 @@ public:
         -> std::optional<frame_detail::DisplayedRow> {
         using namespace frame_detail;
         auto output = FrameOutput{terminal};
-        auto measured = PaintRow<Policy>(output, line, row, size.columns, std::nullopt);
+        auto measured = PaintRow<Policy>(output, line, row, size, std::nullopt);
         if (output.sent) {
             InvalidateRows(row, 1);
             output.Flush();
@@ -279,6 +307,29 @@ public:
     }
 
 private:
+    static auto RepaintVerticalEdges(Terminal auto &output,
+        const frame_detail::DisplayedRow &displayed, const int row) -> void {
+        using frame_detail::DisplayedGroup;
+        const auto is_edge = [](const std::string_view text) {
+            return (text == "\u2502"sv) || (text == "\u250C"sv) || (text == "\u2510"sv);
+        };
+        const auto first = std::ranges::find_if(displayed.groups, is_edge, &DisplayedGroup::text);
+        if (first == displayed.groups.end()) {
+            return;
+        }
+        const auto last = std::ranges::find_last_if(displayed.groups, is_edge,
+            &DisplayedGroup::text).begin();
+        output.Write(displayed.source.reverse ? vt::kReverseVideo : vt::kResetAttributes);
+        const auto repaint = [&output, row](const DisplayedGroup &edge) {
+            output.Write(vt::MoveCursor(row, edge.column));
+            output.Write(edge.text);
+        };
+        repaint(*first);
+        if (first != last) {
+            repaint(*last);
+        }
+    }
+
     // Prepared ASCII text occupies one column per byte, so layout and drawing
     // can use its width without a terminal query. Preparation has already
     // removed commands and replaced controls with visible notation; deliberate
@@ -295,10 +346,11 @@ private:
 
     template <WidthPolicy Policy>
     [[nodiscard]] auto PaintRow(Terminal auto &output, const FrameLine &line,
-        const int row, const int columns,
+        const int row, const TerminalSize size,
         const std::optional<frame_detail::DisplayedRow> &previous)
         -> std::optional<frame_detail::DisplayedRow> {
         using namespace frame_detail;
+        const auto columns = size.columns;
         auto next = DisplayedRow{.source = line, .groups = {}, .columns = columns};
         const auto old_end = previous ?
             (previous->groups.empty() ? 1 : previous->groups.back().end_column) : columns + 1;
@@ -405,7 +457,19 @@ private:
             return ellipsis_columns;
         }();
         for (auto index = std::size_t{}; index < groups.size(); ++index) {
-            const auto &group = groups.at(index);
+            auto group = groups.at(index);
+            // A console relay's Unicode widths can differ from the receiving
+            // terminal's, leaving text in cells recorded as spaces. Comparing
+            // a whole run of spaces makes a changed blank area overwrite those
+            // cells too, instead of skipping individual cached spaces inside it.
+            if (group.text == " "sv) {
+                while (((index + 1) < groups.size()) &&
+                    (groups.at(index + 1).text == " "sv) &&
+                    (group.width_bound < (columns - reserve - column + 1))) {
+                    group.text = {group.text.begin(), groups.at(++index).text.end()};
+                    ++group.width_bound;
+                }
+            }
             const auto known = KnownWidth(group.text);
             const auto width = known.value_or(group.width_bound);
             if ((column > columns) ||
@@ -442,6 +506,17 @@ private:
             move(column);
             highlight(false);
             output.Write(vt::kEraseToEndOfLine);
+            // Erasing a row's tail does not clear Console Host's record that
+            // the row previously wrapped. Its SSH output can therefore pad the
+            // shortened row with spaces and append the next row without a line
+            // break. If the remote terminal measures Unicode text differently,
+            // the next row begins in the wrong column. An explicit line break
+            // clears that record. The bottom row is excluded because a line
+            // feed there would scroll the screen.
+            // https://github.com/microsoft/terminal/blob/main/src/terminal/adapter/adaptDispatch.cpp
+            if (row < size.rows) {
+                output.Write("\n"sv);
+            }
         }
         return next;
     }
@@ -449,6 +524,7 @@ private:
     std::vector<std::optional<frame_detail::DisplayedRow>> displayed_;
     std::map<std::string, int, std::less<>> widths_;
     bool initialized_ = false;
+    std::optional<CursorPosition> caret_;
 };
 
 }

@@ -85,6 +85,7 @@ target_sources(devicefs-terminal PUBLIC
         frame.ixx
         layout.ixx
         menu.ixx
+        text_input.ixx
         safecast.ixx
         scope_exit.ixx
         terminal_reports.ixx

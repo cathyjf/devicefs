@@ -38,7 +38,6 @@ using namespace std::chrono_literals;
 namespace devicefs::terminal::unix_detail {
 
 constexpr auto kInputPollInterval = 100ms;
-constexpr auto kEscapeTimeout = 30ms;
 
 [[nodiscard]] auto OpenTerminal() -> int {
     const auto descriptor = open("/dev/tty", O_RDWR | O_NOCTTY | O_CLOEXEC);
@@ -108,63 +107,6 @@ struct TcSetAttrInvoker {
     }
     return {};
 }
-
-// `KeySequenceLength` finds a complete CSI or SS3 sequence at the beginning of
-// queued input. Legacy navigation keys and kitty keyboard protocol reports
-// share this framing. Navigation and cancellation decoding both use the result
-// to distinguish a complete key sequence from one split between reads.
-// CSI (`ESC [`) and SS3 (`ESC O`) end with a byte from '@' through '~'.
-// https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-[[nodiscard]] auto KeySequenceLength(const std::string_view input) -> std::size_t {
-    if (!input.starts_with("\x1b["sv) && !input.starts_with("\x1bO"sv)) {
-        return 0;
-    }
-    const auto body = input.substr(2);
-    const auto final = std::ranges::find_if(body, [](const char value) {
-        return (value >= '@') && (value <= '~');
-    });
-    return final == body.end() ? 0 : 3 + FailFastCast<std::size_t>(final - body.begin());
-}
-
-// Navigation keys use CSI sequences, or SS3 sequences in application-cursor
-// mode. The final letter identifies an arrow, Home, or End; numeric tilde forms
-// identify the remaining navigation keys. Other complete sequences are ignored.
-// https://invisible-mirror.net/xterm/ctlseqs/ctlseqs.html#h2-PC-Style-Function-Keys
-[[nodiscard]] auto NavigationKey(const std::string_view sequence)
-    -> std::optional<MenuKey> {
-    switch (sequence.back()) {
-    case 'A':
-        return MenuKey::Up;
-    case 'B':
-        return MenuKey::Down;
-    case 'H':
-        return MenuKey::Home;
-    case 'F':
-        return MenuKey::End;
-    case 'Z':
-        return MenuKey::SwitchArea;
-    case '~': {
-        const auto parameters = sequence.substr(2, sequence.size() - 3);
-        const auto parameter = parameters.substr(0, parameters.find(';'));
-        if ((parameter == "1"sv) || (parameter == "7"sv)) {
-            return MenuKey::Home;
-        }
-        if ((parameter == "4"sv) || (parameter == "8"sv)) {
-            return MenuKey::End;
-        }
-        if (parameter == "5"sv) {
-            return MenuKey::PageUp;
-        }
-        if (parameter == "6"sv) {
-            return MenuKey::PageDown;
-        }
-        return std::nullopt;
-    }
-    default:
-        return std::nullopt;
-    }
-}
-
 }
 
 export namespace devicefs::terminal {
@@ -203,7 +145,7 @@ public:
 
     // A deadline lets an output view refresh while no key is pressed. Partial
     // key sequences remain queued between calls, with their own Escape timeout.
-    [[nodiscard]] auto ReadMenuInput(const std::chrono::steady_clock::time_point deadline =
+    [[nodiscard]] auto ReadTextInput(const std::chrono::steady_clock::time_point deadline =
         std::chrono::steady_clock::time_point::max()) -> MenuInput {
         for (;;) {
             if (std::chrono::steady_clock::now() >= deadline) {
@@ -225,20 +167,26 @@ public:
             }
             // ESC (0x1B) begins a terminal sequence; a lone ESC is the Escape key.
             // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-            if (pending_.front() == '\x1b') {
+            if (pending_.front() == vt::kEscape) {
                 if (const auto action = ReadEscape(deadline)) {
-                    return {.key = *action};
+                    return *action;
                 }
                 continue;
             }
-            const auto character = pending_.front();
-            escape_deadline_.reset();
-            pending_.erase(0, 1);
-            if ((character == '\r') || (character == '\n')) {
-                return {.key = MenuKey::Accept};
+            auto character = char32_t{};
+            auto conversion = std::mbstate_t{};
+            const auto length = DecodeNextCodePoint(character, pending_, conversion);
+            if (length == -2uz) {
+                std::ignore = ReceiveUntil(std::min(deadline,
+                    std::chrono::steady_clock::now() + unix_detail::kInputPollInterval));
+                continue;
             }
-            if (const auto action = CharacterMenuKey(std::bit_cast<unsigned char>(character))) {
-                return {.key = *action};
+            escape_deadline_.reset();
+            pending_.erase(0, (length == -1uz) ? 1 : std::max(1uz, length));
+            if (length != -1uz) {
+                if (const auto action = CharacterInput(character)) {
+                    return *action;
+                }
             }
         }
     }
@@ -252,9 +200,10 @@ private:
     // so successive menus in one session use the same keyboard mode.
     // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#progressive-enhancement
     static constexpr auto kEnterScreen = vt::Concatenate<
-        vt::kEnterAlternateScreen, vt::kPushDisambiguatedKeys,
+        vt::kEnterAlternateScreen, vt::kEnableModifiedKeys, vt::kPushDisambiguatedKeys,
         vt::kSaveCursorVisibility, vt::kHideCursor>();
-    static constexpr auto kLeaveScreen = vt::Concatenate<vt::kPopKeyboardMode, vt::kResetAttributes,
+    static constexpr auto kLeaveScreen = vt::Concatenate<vt::kPopKeyboardMode,
+        vt::kResetModifiedKeys, vt::kResetAttributes,
         vt::kShowCursor, vt::kRestoreCursorVisibility, vt::kLeaveAlternateScreen>();
 
 protected:
@@ -381,72 +330,6 @@ private:
         }
     }
 
-    // `KittyKey` translates kitty keyboard protocol reports into menu actions.
-    // Flag 1, requested on screen entry, supplies `CSI key;modifiers u` for
-    // Escape and modified keys. For example, `CSI 27 u` is Escape and
-    // `CSI 99;5 u` is Ctrl+C. The modifier field defaults to 1 when omitted and
-    // otherwise contains one plus the modifier bits. Ctrl+letter is translated
-    // to the legacy control character so `CharacterMenuKey` owns the shortcuts
-    // for both encodings. Unrecognized reports return an empty optional.
-    // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#disambiguate-escape-codes
-    [[nodiscard]] static auto KittyKey(const std::string_view sequence)
-        -> std::optional<MenuKey> {
-        if (!sequence.starts_with(detail::kReportPrefix) || !sequence.ends_with('u')) {
-            return std::nullopt;
-        }
-        auto body = sequence.substr(2, sequence.size() - 3);
-        auto key = unsigned{};
-        const auto [end, error] = std::from_chars(body.data(), body.data() + body.size(), key);
-        if (error != std::errc{}) {
-            return std::nullopt;
-        }
-        body.remove_prefix(FailFastCast<std::size_t>(end - body.data()));
-        if (body.starts_with(';')) {
-            body.remove_prefix(1);
-        } else if (!body.empty()) {
-            return std::nullopt;
-        }
-        auto modifiers = 1u;
-        if (!body.empty()) {
-            const auto parsed = std::from_chars(body.data(), body.data() + body.size(), modifiers);
-            if ((parsed.ec != std::errc{}) || (parsed.ptr != (body.data() + body.size())) ||
-                (modifiers == 0)) {
-                return std::nullopt;
-            }
-        }
-        // Lock states do not change menu shortcuts. Shift is also accepted with
-        // Ctrl+letter, whose reported key code is the unshifted lowercase letter.
-        // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#modifiers
-        constexpr auto kShift = 1u;
-        constexpr auto kControl = 4u;
-        constexpr auto kCapsLock = 64u;
-        constexpr auto kNumLock = 128u;
-        const auto active = (modifiers - 1) & ~(kCapsLock | kNumLock);
-        if (((active & ~kShift) == kControl) && (key >= U'a') && (key <= U'z')) {
-            key -= U'a' - 1;
-        } else if ((active == kShift) && (key == U'\t')) {
-            return MenuKey::SwitchArea;
-        } else if ((active != 0) && (key < 128) && (key != U'\x1b') && (key != U'\r')) {
-            return std::nullopt;
-        }
-        // The protocol assigns distinct codes to non-text keypad keys. Give
-        // those keys the same menu actions as the corresponding ordinary keys.
-        // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions
-        switch (key) {
-        case U'\x1b': return MenuKey::Back;
-        case U'\n':
-        case U'\r':
-        case 57414: return MenuKey::Accept; // `KP_ENTER`
-        case 57419: return MenuKey::Up; // `KP_UP`
-        case 57420: return MenuKey::Down; // `KP_DOWN`
-        case 57421: return MenuKey::PageUp; // `KP_PAGE_UP`
-        case 57422: return MenuKey::PageDown; // `KP_PAGE_DOWN`
-        case 57423: return MenuKey::Home; // `KP_HOME`
-        case 57424: return MenuKey::End; // `KP_END`
-        default: return CharacterMenuKey(key);
-        }
-    }
-
     struct CancellationRange {
         std::size_t position;
         std::size_t length;
@@ -460,15 +343,17 @@ private:
     // a kitty key report or another terminal sequence.
     // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#legacy-ctrl-mapping-of-ascii-keys
     [[nodiscard]] auto FindCancellation() const -> std::optional<CancellationRange> {
-        for (auto position = pending_.find_first_of("\x03\x1b"sv);
+        constexpr auto kCancellationPrefixes = "\x03\x1b"sv;
+        for (auto position = pending_.find_first_of(kCancellationPrefixes);
             position != std::string::npos;
-            position = pending_.find_first_of("\x03\x1b"sv, position + 1)) {
+            position = pending_.find_first_of(kCancellationPrefixes, position + 1)) {
             if (pending_[position] == '\x03') {
                 return CancellationRange{position, 1};
             }
             const auto sequence = std::string_view{pending_}.substr(position);
-            const auto length = unix_detail::KeySequenceLength(sequence);
-            if ((length != 0) && (KittyKey(sequence.substr(0, length)) == MenuKey::Cancel)) {
+            const auto length = KeySequenceLength(sequence);
+            if ((length != 0) && (SequenceInput(sequence.substr(0, length)).transform(
+                    [](const auto input) { return input.key; }) == MenuKey::Cancel)) {
                 return CancellationRange{position, length};
             }
         }
@@ -483,52 +368,12 @@ private:
         return false;
     }
 
-    // `ReadEscape` decodes input beginning with ESC: legacy navigation sequences,
-    // kitty keyboard protocol reports, or the legacy Escape key itself. Complete
-    // sequences are decoded immediately, including kitty's `CSI 27 u` Escape.
-    // An incomplete sequence gets up to `kEscapeTimeout` to receive more bytes;
-    // if that wait expires, the leading ESC is consumed as the Back action.
-    // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#disambiguate-escape-codes
-    [[nodiscard]] auto ReadEscape(const std::chrono::steady_clock::time_point deadline)
-        -> std::optional<MenuKey> {
-        if (!escape_deadline_) {
-            escape_deadline_ = std::chrono::steady_clock::now() + unix_detail::kEscapeTimeout;
-        }
-        for (;;) {
-            // Ctrl+C is user input even when a fragmented terminal reply
-            // surrounds it. Consume cancellation before removing a complete
-            // sequence, leaving the reply and other keys queued for later input.
-            if (ConsumeCancellation()) {
-                escape_deadline_.reset();
-                return MenuKey::Cancel;
-            }
-            if (pending_.size() > 1) {
-                // Navigation keys start with CSI (`ESC [`) or SS3 (`ESC O`),
-                // depending on normal or application cursor-key mode.
-                // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-PC-Style-Function-Keys
-                if ((pending_[1] != '[') && (pending_[1] != 'O')) {
-                    pending_.erase(0, 1);
-                    escape_deadline_.reset();
-                    return MenuKey::Back;
-                }
-                if (const auto length = unix_detail::KeySequenceLength(pending_)) {
-                    const auto sequence = std::string_view{pending_}.substr(0, length);
-                    const auto action = sequence.ends_with('u') ? KittyKey(sequence) :
-                        unix_detail::NavigationKey(sequence);
-                    pending_.erase(0, length);
-                    escape_deadline_.reset();
-                    return action;
-                }
-            }
-            if (!ReceiveUntil(std::min(deadline, *escape_deadline_))) {
-                if (std::chrono::steady_clock::now() < *escape_deadline_) {
-                    return std::nullopt;
-                }
-                escape_deadline_.reset();
-                pending_.erase(0, 1);
-                return MenuKey::Back;
-            }
-        }
+    [[nodiscard]] auto SequenceCharacters() const -> std::string_view {
+        return pending_;
+    }
+
+    auto DiscardSequenceCharacters(const std::size_t count) -> void {
+        pending_.erase(0, count);
     }
 
     // Destruction restores terminal settings before closing their descriptor.
@@ -539,7 +384,6 @@ private:
         unix_detail::SetTerminalModeScoped(descriptor_);
     TerminalSize window_size_ = ReadWindowSize();
     std::string pending_;
-    std::optional<std::chrono::steady_clock::time_point> escape_deadline_;
 };
 
 }

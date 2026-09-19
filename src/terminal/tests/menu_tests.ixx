@@ -11,6 +11,7 @@ import devicefs.terminal.test_support;
 import devicefs.terminal.frame;
 import devicefs.terminal.layout;
 import devicefs.terminal.menu;
+import devicefs.terminal.text_input;
 import devicefs.terminal.menu_measurements;
 
 using namespace std::string_view_literals;
@@ -169,6 +170,17 @@ public:
                 }
                 continue;
             }
+            if (text.starts_with('\r') || text.starts_with('\n')) {
+                if (text.front() == '\r') {
+                    screen.cursor.column = 1;
+                } else {
+                    Require(screen.cursor.row < size_.rows, "a menu line feed scrolled the screen"sv);
+                    ++screen.cursor.row;
+                }
+                screen.pending_wrap = false;
+                text.remove_prefix(1);
+                continue;
+            }
             wrote_text = true;
             if (screen.pending_wrap) {
                 ++screen.cursor.row;
@@ -268,6 +280,8 @@ public:
         return input;
     }
 
+    [[nodiscard]] auto ReadTextInput() -> MenuInput { return ReadMenuInput(); }
+
     bool active = false;
     std::size_t screen_entries = 0;
     std::size_t screen_exits = 0;
@@ -345,7 +359,49 @@ constexpr auto kPositionEntries = std::array{
 }
 
 export [[nodiscard]] auto TestMenu() -> bool {
-    auto passed = Test("output following, inspection, focus, and quiet input deadlines"sv, [] {
+    auto passed = true;
+    passed &= Test("positioned text entry wrapping without inserting newlines"sv, [] {
+        constexpr auto input = std::array{
+            MenuInput{MenuKey::Home}, MenuInput{.key = MenuKey::Text, .character = U'!'},
+            MenuInput{MenuKey::Left}, MenuInput{MenuKey::Delete},
+            MenuInput{MenuKey::Up}, MenuInput{MenuKey::End},
+            MenuInput{MenuKey::Newline}, MenuInput{.key = MenuKey::Text, .character = U'Z'},
+            MenuInput{MenuKey::Accept}};
+        auto terminal = MenuConsole{input, {.rows = 10, .columns = 32}};
+        const auto screen = terminal.EnterScreen();
+        const auto value = EditText(terminal, [](auto &frame) {
+            frame.Write("Header remains in place");
+            frame.MoveTo({3, 4});
+        }, "abcdefghijk", {.columns = 6, .rows = 3, .border = false});
+        Require(value == "abcde\nZfghijk", "editing used wrapped display bytes as the value"sv);
+        Require(terminal.frames.front().starts_with("Header remains in place\n\n   abcdef\n   ghijk\n"sv),
+            "the control ignored its position or width"sv);
+        Require(terminal.screen_entries == 1 && (terminal.screen_exits == 0),
+            "editing replaced the caller's screen owner"sv);
+    });
+    passed &= Test("text entry scrolling and rewrapping around the caret"sv, [] {
+        constexpr auto input = std::array{
+            MenuInput{MenuKey::Up}, MenuInput{MenuKey::Home},
+            MenuInput{MenuKey::Resize}, MenuInput{MenuKey::Backspace},
+            MenuInput{MenuKey::Accept}};
+        auto terminal = MenuConsole{input, {.rows = 4, .columns = 4}};
+        terminal.resize_to = TerminalSize{.rows = 4, .columns = 8};
+        const auto screen = terminal.EnterScreen();
+        Require(EditText(terminal, [](auto &) {}, "abcdefghijklmnopqr",
+            {.rows = 2, .border = false}) == "abcdefghijkmnopqr",
+            "the caret moved to a different character when the field was resized"sv);
+        Require(terminal.frames.front().starts_with("mnop\nqr\n"sv),
+            "the initial caret was scrolled out of the input area"sv);
+    });
+    passed &= Test("text entry cancellation while the window cannot fit a border"sv, [] {
+        constexpr auto input = std::array{MenuInput{MenuKey::Text, 1, U'x'},
+            MenuInput{MenuKey::Accept}, MenuInput{MenuKey::Back}};
+        auto terminal = MenuConsole{input, {.rows = 2, .columns = 2}};
+        const auto screen = terminal.EnterScreen();
+        Require(!EditText(terminal, [](auto &) {}, "unchanged"),
+            "an unusable text area accepted an edit"sv);
+    });
+    passed &= Test("output following, inspection, focus, and quiet input deadlines"sv, [] {
         constexpr auto input = std::array{
             MenuInput{MenuKey::Timeout}, MenuInput{MenuKey::Timeout},
             MenuInput{MenuKey::SwitchArea}, MenuInput{MenuKey::Up},

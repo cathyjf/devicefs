@@ -329,6 +329,17 @@ wrapping with supplied input. With no arguments, it writes sample text from
 the current cursor position. Use `--measure-menu` to try the menu and report
 its interaction costs afterward.
 
+The menu includes boxed and borderless multiline text editors. Enter accepts
+the value; Shift+Enter inserts a newline. The control wraps long values and
+scrolls vertically, while preserving the original text independently of display
+wrapping. Arrow keys move the caret, and Backspace and Delete remove complete
+composed characters. Ctrl+J also inserts a newline on terminals that cannot
+distinguish Shift+Enter.
+
+`EditText` in [text_input.ixx](text_input.ixx) accepts an initial value, dimensions,
+and a callback that draws the surrounding content and positions the field.
+The control handles wrapping, caret placement, scrolling, and resizing.
+
 Use `--output-menu` to try arriving output with selectable commands on the
 same screen. Tab changes focus between the output and commands. Scrolling back
 holds the passage being read while new lines arrive; End follows the newest

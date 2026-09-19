@@ -69,6 +69,15 @@ public:
     [[nodiscard]] auto Ready() const noexcept -> bool { return ready_; }
     [[nodiscard]] auto CurrentRow() const noexcept -> int { return row_; }
 
+    // Return the position after preceding writes, measuring their endpoint
+    // when necessary. No value means a terminal report was unavailable.
+    [[nodiscard]] auto Position() -> std::optional<CursorPosition> {
+        if (!ResolveColumn()) {
+            return std::nullopt;
+        }
+        return CursorPosition{row_, *column_};
+    }
+
     auto MoveTo(const CursorPosition position) noexcept -> void {
         row_ = position.row;
         column_ = position.column;

@@ -11,27 +11,47 @@ using namespace std::string_view_literals;
 
 export namespace devicefs::terminal::detail {
 
-enum class TerminalReport { Cursor, Size };
+enum class TerminalReport { Cursor, Size, KeyboardFlags, ModifiedKeys };
+enum class KeyboardProtocol { Legacy, Kitty, Xterm };
 
 // ESC followed by `[` is the seven-bit Control Sequence Introducer (CSI),
 // which begins both cursor-position and window-size reports.
 // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
-constexpr auto kReportPrefix = "\x1b["sv;
+constexpr auto kReportPrefix = vt::kCsiPrefix;
 // Three decimal `int` values, their separators, and VT framing fit in 37 bytes.
 constexpr auto kMaximumReportLength = 37uz;
 
 [[nodiscard]] constexpr auto ReportRequest(const TerminalReport report) noexcept {
-    return report == TerminalReport::Cursor ?
-        vt::kRequestCursorPosition : vt::kRequestTextAreaSize;
+    switch (report) {
+    case TerminalReport::Cursor: return vt::kRequestCursorPosition;
+    case TerminalReport::Size: return vt::kRequestTextAreaSize;
+    case TerminalReport::KeyboardFlags: return vt::kRequestKeyboardFlags;
+    case TerminalReport::ModifiedKeys: return vt::kRequestModifiedKeys;
+    }
+    std::unreachable();
+}
+
+[[nodiscard]] constexpr auto ReportPrefix(const TerminalReport report) noexcept {
+    switch (report) {
+    case TerminalReport::KeyboardFlags: return vt::kKeyboardFlagsReplyPrefix;
+    case TerminalReport::ModifiedKeys: return vt::kModifiedKeysReplyPrefix;
+    default: return kReportPrefix;
+    }
 }
 
 [[nodiscard]] constexpr auto ReportSuffix(const TerminalReport report) noexcept {
-    // CPR ends with `R`; the XTWINOPS text-area-size reply ends with `t`.
+    // The final character identifies each report within its CSI family.
     // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-    return report == TerminalReport::Cursor ? "R"sv : "t"sv;
+    switch (report) {
+    case TerminalReport::Cursor: return "R"sv;
+    case TerminalReport::Size: return "t"sv;
+    case TerminalReport::KeyboardFlags: return "u"sv;
+    case TerminalReport::ModifiedKeys: return "m"sv;
+    }
+    std::unreachable();
 }
 
-// Cursor and window-size queries return decimal parameters in a CSI sequence.
+// Terminal queries return decimal parameters in a CSI sequence.
 // Both native adapters use this parser so that a report has the same meaning
 // whether the input arrives as Windows key events or Unix bytes. Recognition
 // requires the entire sequence; unrelated keyboard input is left to the adapter.
@@ -39,15 +59,16 @@ constexpr auto kMaximumReportLength = 37uz;
 // https://invisible-mirror.net/xterm/ctlseqs/ctlseqs.html
 [[nodiscard]] auto ParseTerminalReport(const std::string_view text,
     const TerminalReport report) -> std::optional<std::array<int, 3>> {
-    if (!text.starts_with(kReportPrefix) ||
+    const auto prefix = ReportPrefix(report);
+    if (!text.starts_with(prefix) ||
         !text.ends_with(ReportSuffix(report)) ||
         (text.size() > kMaximumReportLength)) {
         return std::nullopt;
     }
-    auto body = text.substr(kReportPrefix.size(),
-        text.size() - kReportPrefix.size() - 1);
+    auto body = text.substr(prefix.size(), text.size() - prefix.size() - 1);
     auto values = std::array<int, 3>{};
-    const auto fields = report == TerminalReport::Cursor ? 2uz : 3uz;
+    const auto fields = (report == TerminalReport::Cursor) ? 2uz :
+        ((report == TerminalReport::Size) ? 3uz : 1uz);
     for (auto index = 0uz; index < fields; ++index) {
         if (body.empty() || (body.front() < '0') || (body.front() > '9')) {
             return std::nullopt;
@@ -68,7 +89,7 @@ constexpr auto kMaximumReportLength = 37uz;
     return body.empty() ? std::optional{values} : std::nullopt;
 }
 
-// ReportReader recognizes one cursor or size reply as input arrives. An ESC
+// `ReportReader` recognizes one requested terminal reply as input arrives. An ESC
 // starts a new candidate; invalid characters discard that candidate, and a
 // complete reply supplies its numeric fields. Tracking each character's input
 // position lets the caller remove precisely the recognized report from its
@@ -86,8 +107,8 @@ public:
         -> std::optional<std::array<int, 3>> {
         // ESC (0x1B) starts a new candidate for the seven-bit CSI report prefix.
         // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
-        if (character == U'\x1b') {
-            text_ = "\x1b";
+        if (character == vt::kEscape) {
+            text_.assign(1, vt::kEscape);
             positions_.clear();
             positions_.push_back(position);
             return std::nullopt;
@@ -96,7 +117,7 @@ public:
             return std::nullopt;
         }
         // The report syntax cited above consists of ASCII characters. Values
-        // above 0x7f therefore cannot be part of a cursor or size reply.
+        // above 0x7f therefore cannot be part of a report.
         if ((character > 0x7f) || (text_.size() == kMaximumReportLength)) {
             text_.clear();
             return std::nullopt;
@@ -105,8 +126,9 @@ public:
         // Every remaining value fits in char, so the conversion preserves it.
         text_.push_back(FailFastCast<char>(character));
         positions_.push_back(position);
-        if (text_.size() <= kReportPrefix.size()) {
-            if (!kReportPrefix.starts_with(text_)) {
+        const auto prefix = ReportPrefix(report_);
+        if (text_.size() <= prefix.size()) {
+            if (!prefix.starts_with(text_)) {
                 text_.clear();
             }
             return std::nullopt;
@@ -124,6 +146,10 @@ public:
 
     [[nodiscard]] auto Positions() const -> std::span<const Position> {
         return positions_;
+    }
+
+    [[nodiscard]] auto Report() const noexcept {
+        return report_;
     }
 
 private:

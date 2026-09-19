@@ -23,11 +23,13 @@ export namespace devicefs::terminal {
 enum class MenuKey {
     Up, Down, PageUp, PageDown, Home, End, Accept, Back, Cancel, Details,
     Resize, Redraw, SwitchArea, Timeout,
+    Left, Right, Backspace, Delete, Newline, Text,
 };
 
 struct MenuInput {
     MenuKey key;
     unsigned int repeat = 1;
+    char32_t character = U'\0';
 };
 
 // Arrow keys reveal the beginning of the selected entry when it leaves the

@@ -32,6 +32,7 @@ import devicefs.terminal;
 import devicefs.terminal.frame;
 import devicefs.terminal.test_support;
 import devicefs.terminal.menu;
+import devicefs.terminal.text_input;
 import devicefs.terminal.menu_tests;
 import devicefs.terminal.frame_tests;
 import devicefs.terminal.native_tests;
@@ -960,9 +961,10 @@ template <MenuTerminal Console = NativeConsole>
     constexpr auto title = "DeviceFs terminal menu demonstration"sv;
     const auto draw_header = [title](auto &frame) {
         frame.Write("{}", title);
-        frame.Write("\nChoose an entry to open a submenu.\n\n"sv);
+        frame.Write("\nChoose a demonstration.\n\n"sv);
     };
     auto entries = std::vector<std::string>{
+        "Edit text in a box", "Edit text without a border",
         "Installation", "Schedule backups", "Browse backups", "Open backup console",
         "Accented names: café and naïve", "日本語 — é — 👩‍💻 — ©️",
         // SGR 31 (`CSI 31 m`) requests red foreground; label preparation removes it.
@@ -994,8 +996,22 @@ template <MenuTerminal Console = NativeConsole>
         const auto selection = [&terminal, &draw_header, &labels, title]() -> std::optional<std::size_t> {
             const auto screen = terminal.EnterScreen();
             auto initial_selection = 0uz;
+            auto text = std::string{"C:\\Backups\\Encryption keys\\devicefs-key.json"};
             while (const auto entry = SelectMenuItem(terminal, draw_header, labels, {}, initial_selection)) {
                 initial_selection = *entry;
+                if (*entry < 2) {
+                    const auto edited = EditText(terminal, [title](auto &frame) {
+                        frame.Write("{}\n", title);
+                        frame.Write("Enter: Accept    Shift+Enter: New line    Esc: Cancel\n");
+                        frame.Write("Arrow keys: Move    Ctrl+J: New line on older terminals\n\n");
+                        frame.Write("Enter a path or try several lines of text.\n");
+                        frame.MoveTo({7, 4});
+                    }, text, {.columns = 60, .rows = 8, .border = *entry == 0});
+                    if (edited) {
+                        text = *edited;
+                    }
+                    continue;
+                }
                 const auto draw_submenu_header = [title,
                     label = labels.at(*entry)](auto &frame) {
                     frame.Write("{}", title);

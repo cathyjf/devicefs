@@ -23,6 +23,38 @@ constexpr auto kConcatenated = [] {
 // buffer. A caller can combine several commands before submitting a write.
 export namespace devicefs::terminal::vt {
 
+// Seven-bit prefixes for control sequences and application-mode key reports.
+// https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+constexpr auto kEscape = '\x1b';
+constexpr auto kCsiPrefix = "\x1b["sv;
+constexpr auto kSs3Prefix = "\x1bO"sv;
+
+// Apple Terminal's default "Shift Return sends Meta Return" binding sends
+// ESC followed by CR. Recognizing that pair permits Shift+Return to insert a
+// newline even though Apple Terminal supports neither keyboard extension.
+// A separately pressed Escape followed quickly by Return sends the same bytes.
+// https://github.com/anomalyco/opencode/issues/43286
+constexpr auto kMetaReturn = "\x1b\r"sv;
+
+// Xterm's modified-key reports start with `CSI 27;` and end with `~`.
+// https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Alt-and-Meta-Keys
+constexpr auto kModifiedKeyPrefix = "\x1b[27;"sv;
+
+// Kitty and xterm assign different modifier bits to Meta. Their Shift, Alt,
+// and Control bits agree, so only Meta needs a different value when an xterm
+// report is decoded through the shared keyboard decoder.
+// https://sw.kovidgoyal.net/kitty/keyboard-protocol/#modifiers
+// https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-PC-Style-Function-Keys
+constexpr auto kKittyMetaModifier = 32u;
+constexpr auto kXtermMetaModifier = 8u;
+
+// Express an xterm modified-key report in CSI-u order so that the keyboard
+// decoder can parse both forms. The numeric fields retain their original text.
+// https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Alt-and-Meta-Keys
+[[nodiscard]] auto CsiKeyReport(const std::string_view key, const std::string_view modifiers) {
+    return std::format("\x1b[{};{}u", key, modifiers);
+}
+
 // `Concatenate` joins constant strings at compile time. The returned view
 // refers to an array with static storage duration, so it can itself be used
 // as a constant command wherever the combined operations are needed.
@@ -96,6 +128,28 @@ constexpr auto kPushDisambiguatedKeys = "\x1b[>1u"sv;
 // it. Send this before leaving the screen on which the mode was pushed.
 // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#quickstart
 constexpr auto kPopKeyboardMode = "\x1b[<u"sv;
+
+// Kitty replies to `CSI ? u` with `CSI ? flags u`. A reply with zero flags
+// still establishes support: the protocol is available but currently disabled.
+// https://sw.kovidgoyal.net/kitty/keyboard-protocol/#detection-of-support-for-this-protocol
+constexpr auto kRequestKeyboardFlags = "\x1b[?u"sv;
+constexpr auto kKeyboardFlagsReplyPrefix = "\x1b[?"sv;
+
+// XTQMODKEYS asks for the current `modifyOtherKeys` setting. The reply is
+// `CSI > 4 ; value m`, including when the current setting is zero.
+// https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+constexpr auto kRequestModifiedKeys = "\x1b[?4m"sv;
+constexpr auto kModifiedKeysReplyPrefix = "\x1b[>4;"sv;
+
+constexpr auto kRequestKeyboardSupport = Concatenate<kRequestKeyboardFlags,
+    kRequestModifiedKeys>();
+
+// Xterm's `modifyOtherKeys` level 2 reports modified ordinary keys, including
+// Shift+Enter, on terminals that support this older protocol. Omitting the
+// value on exit restores xterm's initial setting.
+// https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Alt-and-Meta-Keys
+constexpr auto kEnableModifiedKeys = "\x1b[>4;2m"sv;
+constexpr auto kResetModifiedKeys = "\x1b[>4m"sv;
 
 // DECRST 25 (DECTCEM) hides the cursor.
 // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-visibility

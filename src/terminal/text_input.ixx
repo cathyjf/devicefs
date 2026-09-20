@@ -18,6 +18,11 @@ struct TextInputOptions {
     // The dimensions include the border. An omitted width uses the columns
     // remaining after the frame's current position. Resizing the terminal
     // reduces the displayed rectangle when necessary.
+    //
+    // If the terminal displays the box-drawing characters as two columns
+    // each, the box needs an even width to keep its top and bottom borders
+    // continuous. `Draw` therefore rounds an odd available width down by
+    // one column.
     std::optional<int> columns = std::nullopt;
     int rows = 5;
     bool border = true;
@@ -45,12 +50,22 @@ public:
             return false;
         }
         const auto border = options.border ? 1 : 0;
-        const auto columns = std::min(options.columns.value_or(frame.Size().columns),
+        const auto available_columns = std::min(options.columns.value_or(frame.Size().columns),
             frame.Size().columns - start->column + 1);
         const auto rows = std::min(options.rows, frame.Size().rows - start->row + 1);
-        const auto width = columns - (2 * border);
         height_ = rows - (2 * border);
-        if ((start->column < 1) || (start->row < 1) || (width < 1) || (height_ < 1)) {
+        if ((start->column < 1) || (start->row < 1) || (available_columns < 1) || (height_ < 1)) {
+            return false;
+        }
+        const auto outline = options.border
+            ? MakeBorder<Policy>(terminal, start->row, frame.Size(), available_columns)
+            : std::optional{Border{.columns = available_columns, .side_columns = 0,
+                .top = {}, .bottom = {}}};
+        if (!outline) {
+            return false;
+        }
+        const auto width = outline->columns - (2 * outline->side_columns);
+        if (width < 1) {
             return false;
         }
 
@@ -61,29 +76,38 @@ public:
         // Display text can occupy more bytes than the value, for example when
         // a control character is shown as visible notation. Each position keeps
         // its offset in the original value so editing never uses display bytes.
-        for (const auto &group : MeasureText<Policy>(value_)) {
-            const auto newline = group.text == "\n";
-            const auto display = newline ? std::string{} : PrepareTerminalText(group.text);
-            const auto measured = terminal.template MeasureFrameLine<Policy>(
-                {.text = display}, start->row, frame.Size());
-            if (!measured || measured->shortened) {
-                return false;
-            }
-            const auto cells = measured->groups.empty() ? 0 : measured->groups.back().end_column - 1;
-            if (cells > width) {
-                return false;
-            }
-            if (!newline && ((column + cells - 1) > width)) {
-                lines.emplace_back();
-                column = 1;
-            }
-            positions_.push_back({offset,
+        const auto record_position = [&positions = positions_, &lines, &offset, &column, width] {
+            positions.push_back({offset,
                 FailFastCast<int>(lines.size()) - (column > width ? 0 : 1),
                 column > width ? 1 : column});
-            lines.back().append(display);
-            offset += group.text.size();
-            column += cells;
-            if (newline) {
+        };
+        // A newline is an editing boundary even when the next line begins with
+        // a combining character. Grouping each logical line separately prevents
+        // that character from absorbing the newline into its display or deletion.
+        for (const auto line : std::views::split(value_, '\n')) {
+            for (const auto &group : MeasureText<Policy>(std::string_view{line})) {
+                const auto display = PrepareTerminalText(group.text);
+                const auto measured = terminal.template MeasureFrameLine<Policy>(
+                    {.text = display}, start->row, frame.Size());
+                if (!measured || measured->shortened) {
+                    return false;
+                }
+                const auto cells = measured->groups.empty() ? 0 : measured->groups.back().end_column - 1;
+                if (cells > width) {
+                    return false;
+                }
+                if ((column + cells - 1) > width) {
+                    lines.emplace_back();
+                    column = 1;
+                }
+                record_position();
+                lines.back().append(display);
+                offset += group.text.size();
+                column += cells;
+            }
+            if (offset < value_.size()) {
+                record_position();
+                ++offset;
                 lines.emplace_back();
                 column = 1;
             }
@@ -100,15 +124,10 @@ public:
         top_ = std::clamp(top_, std::max(0, caret->row - height_ + 1), caret->row);
         top_ = std::min(top_, std::max(0, FailFastCast<int>(lines.size()) - height_));
 
-        const auto edge = options.border
-            ? std::views::repeat(std::string_view{"\u2500"}, width) | std::views::join |
-                std::ranges::to<std::string>()
-            : std::string{};
         for (auto row = 0; row < rows; ++row) {
             frame.MoveTo({start->row + row, start->column});
             if (options.border && ((row == 0) || (row == (rows - 1)))) {
-                frame.WriteLine("{}{}{}", row == 0 ? "\u250C" : "\u2514", edge,
-                    row == 0 ? "\u2510" : "\u2518");
+                frame.WriteLine("{}", row == 0 ? outline->top : outline->bottom);
                 continue;
             }
             const auto index = FailFastCast<std::size_t>(top_ + row - border);
@@ -117,12 +136,13 @@ public:
             // Positioning the right edge lets the frame writer pad by displayed
             // columns, including when the row contains wide Unicode characters.
             if (options.border) {
-                frame.MoveTo({start->row + row, start->column + columns - 1});
+                frame.MoveTo({start->row + row,
+                    start->column + outline->columns - outline->side_columns});
                 frame.WriteLine("\u2502");
             }
         }
         frame.caret = CursorPosition{start->row + border + caret->row - top_,
-            start->column + border + caret->column - 1};
+            start->column + outline->side_columns + caret->column - 1};
         return frame.Ready();
     }
 
@@ -204,6 +224,55 @@ public:
     }
 
 private:
+    struct Border {
+        int columns;
+        int side_columns;
+        std::string top;
+        std::string bottom;
+    };
+
+    // Measure the border and compose horizontal edges that fit within the requested
+    // width. These Unicode characters have ambiguous widths: xterm's `-cjk_width`
+    // option makes them occupy two columns. The presenter's existing width cache
+    // allows subsequent draws to reuse these observations.
+    // https://www.invisible-island.net/xterm/manpage/xterm.html#h3-Command-line-options
+    template <WidthPolicy Policy>
+    [[nodiscard]] static auto MakeBorder(auto &terminal, const int row,
+        const TerminalSize size, const int available_columns) -> std::optional<Border> {
+        constexpr auto glyphs = std::to_array<std::string_view>({
+            "\u2502", "\u2500", "\u250C", "\u2510", "\u2514", "\u2518"});
+        auto widths = std::array<int, glyphs.size()>{};
+        for (auto index = 0uz; index < glyphs.size(); ++index) {
+            const auto measured = terminal.template MeasureFrameLine<Policy>(
+                {.text = std::string{glyphs.at(index)}}, row, size);
+            if (!measured || measured->shortened || measured->groups.empty()) {
+                return std::nullopt;
+            }
+            widths.at(index) = measured->groups.back().end_column - 1;
+        }
+        const auto [side, horizontal, upper_left, upper_right, lower_left, lower_right] = widths;
+        const auto upper_corners = upper_left + upper_right;
+        const auto lower_corners = lower_left + lower_right;
+        if ((horizontal < 1) || (available_columns < std::max(upper_corners, lower_corners))) {
+            return std::nullopt;
+        }
+        // Whole horizontal strokes keep the corners connected. For two-column
+        // strokes, an odd available width leaves one column outside the box.
+        const auto columns = available_columns - ((available_columns - upper_corners) % horizontal);
+        if ((columns < lower_corners) || (((columns - lower_corners) % horizontal) != 0)) {
+            return std::nullopt;
+        }
+        const auto edge = [columns, horizontal](const std::string_view left,
+            const std::string_view right, const int corners) {
+            return std::format("{}{}{}", left,
+                std::views::repeat(std::string_view{"\u2500"}, (columns - corners) / horizontal) |
+                    std::views::join | std::ranges::to<std::string>(), right);
+        };
+        return Border{.columns = columns, .side_columns = side,
+            .top = edge("\u250C", "\u2510", upper_corners),
+            .bottom = edge("\u2514", "\u2518", lower_corners)};
+    }
+
     struct Position {
         std::size_t offset;
         int row;

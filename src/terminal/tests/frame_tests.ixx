@@ -97,6 +97,11 @@ public:
             const auto printed = text.substr(0, end);
             for (const auto &group : MeasureText<WidthPolicy::WindowsTerminalGraphemes>(printed)) {
                 const auto width = [&] {
+                    if ((group.text == "\u250C"sv) || (group.text == "\u2500"sv) ||
+                        (group.text == "\u2510"sv) || (group.text == "\u2502"sv) ||
+                        (group.text == "\u2514"sv) || (group.text == "\u2518"sv)) {
+                        return box_character_columns;
+                    }
                     if ((group.text == "\u0600"sv) || (group.text == "\u0601"sv)) {
                         return 0;
                     }
@@ -108,8 +113,7 @@ public:
                         return 2;
                     }
                     Require((group.text == "é"sv) || (group.text == "©"sv) || (group.text == "·"sv) ||
-                        (group.text == "\u250C"sv) || (group.text == "\u2500"sv) || (group.text == "\u2510"sv) ||
-                        (group.text == "\u2502"sv) || (group.text == "\u2514"sv) || (group.text == "\u2518"sv) ||
+                        (group.text == "\u0301b"sv) ||
                         (group.text.size() == 1),
                         std::format("the frame fixture has no width for {:?}", group.text));
                     return 1;
@@ -203,6 +207,9 @@ public:
     int queries = 0;
     int cursor_moves = 0;
     int attribute_changes = 0;
+    // xterm's `-cjk_width` option gives the box-drawing characters two columns.
+    // Varying their observed width exercises layout independently of width estimates.
+    int box_character_columns = 1;
     // If true, report a pending wrap as kitty does: at the next row's beginning
     // except on the last screen row, where the report stays at the last column.
     // https://github.com/kovidgoyal/kitty/blob/master/kitty/screen.c#L3043-L3062
@@ -318,6 +325,85 @@ export [[nodiscard]] auto RunFrameTests() -> bool {
         Require((terminal.Row(1) == "abcd") && (terminal.Row(2) == "x") &&
             (frame.caret == CursorPosition{2, 2}),
             "a soft wrap was counted again as an explicit newline"sv);
+    });
+    passed &= Test("a combining character at the start of a line cannot absorb the preceding newline"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 5, .columns = 16};
+        auto terminal = DrawingConsole{size};
+        auto editor = TextInput{"a\n\u0301b"};
+        const auto draw = [&] {
+            auto frame = Frame{terminal, size};
+            Require(editor.Draw(frame, terminal, {.border = false}) && terminal.Flip(frame),
+                "the text containing a newline and combining character could not be displayed"sv);
+            return frame.caret;
+        };
+        Require((draw() == CursorPosition{2, 2}) && (terminal.Row(1) == "a") &&
+            (terminal.Row(2) == "\u0301b"), "the combining character suppressed the line break"sv);
+        Require(editor.Handle({MenuKey::Left}) && (draw() == CursorPosition{2, 1}),
+            "Left did not reach the group at the start of the second line"sv);
+        Require(editor.Handle({MenuKey::Left}) && (draw() == CursorPosition{1, 2}),
+            "Left could not navigate across the newline independently"sv);
+        Require(editor.Handle({MenuKey::Right}) && (draw() == CursorPosition{2, 1}),
+            "Right did not cross the newline independently"sv);
+        Require(editor.Handle({MenuKey::Delete}) && (draw() == CursorPosition{2, 1}) &&
+            (editor.Value() == "a\n"), "deleting the leading group also removed the newline"sv);
+        Require(editor.Handle({MenuKey::Backspace}) && (draw() == CursorPosition{1, 2}) &&
+            (editor.Value() == "a"), "the newline could not be deleted on its own"sv);
+    });
+    passed &= Test("leading, consecutive, and trailing newlines retain their empty input rows"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 6, .columns = 16};
+        auto terminal = DrawingConsole{size};
+        auto editor = TextInput{"\n\na\n"};
+        auto frame = Frame{terminal, size};
+        Require(editor.Draw(frame, terminal, {.rows = 6, .border = false}) && terminal.Flip(frame),
+            "the text containing empty lines could not be displayed"sv);
+        Require(terminal.Row(1).empty() && terminal.Row(2).empty() &&
+            (terminal.Row(3) == "a") && terminal.Row(4).empty() &&
+            (frame.caret == CursorPosition{4, 1}), "an empty logical line was lost"sv);
+    });
+    passed &= Test("box geometry and caret placement follow measured border widths"sv, [] {
+        constexpr auto size = TerminalSize{.rows = 7, .columns = 24};
+        for (const auto border_columns : std::array{1, 2}) {
+            for (const auto requested_columns : std::array{10, 11}) {
+                auto terminal = DrawingConsole{size};
+                terminal.box_character_columns = border_columns;
+                auto editor = TextInput{"abc"};
+                const auto draw = [&] {
+                    auto frame = Frame{terminal, size};
+                    frame.MoveTo({2, 3});
+                    Require(editor.Draw(frame, terminal,
+                        {.columns = requested_columns, .rows = 4}) && terminal.Flip(frame),
+                        "the box could not be displayed using measured border widths"sv);
+                    return frame;
+                };
+                const auto frame = draw();
+                // The box begins at column 3. Its horizontal strokes must fit whole,
+                // so a two-column border uses ten columns for either requested width.
+                const auto box_columns = border_columns == 2 ? 10 : requested_columns;
+                const auto interior_columns = box_columns - (2 * border_columns);
+                Require(frame.caret == CursorPosition{3, 3 + border_columns + 3},
+                    "the caret did not include the measured left border width"sv);
+                Require(terminal.Row(3) == std::format("  \u2502abc{}\u2502",
+                    std::string(FailFastCast<std::size_t>(interior_columns - 3), ' ')),
+                    "the content row did not fit between the measured sides"sv);
+                const auto horizontal = std::views::repeat(std::string_view{"\u2500"},
+                    border_columns == 2 ? 3 : requested_columns - 2) |
+                    std::views::join | std::ranges::to<std::string>();
+                Require((terminal.Row(2) == std::format("  \u250C{}\u2510", horizontal)) &&
+                    (terminal.Row(5) == std::format("  \u2514{}\u2518", horizontal)),
+                    "the horizontal borders did not fit as complete connected strokes"sv);
+                Require(std::ranges::all_of(terminal.painted_cells, [box_columns](const auto &cell) {
+                        return (cell.second >= 1) && (cell.second <= (2 + box_columns));
+                    }), "the border extended beyond the fitted rectangle"sv);
+                terminal.ResetActivity();
+                std::ignore = draw();
+                Require(terminal.queries == 0, "redrawing a box queried already measured border widths"sv);
+                editor = TextInput{"abcdefg"};
+                const auto wrapped = draw();
+                Require(wrapped.caret == (border_columns == 2 ?
+                    CursorPosition{4, 6} : CursorPosition{3, 11}),
+                    "text wrapping used the unmeasured interior width"sv);
+            }
+        }
     });
     passed &= Test("kitty right-margin reports presenting full rows and reusing measured widths"sv, [] {
         auto terminal = FrameConsole{{.rows = 3, .columns = 4}};

@@ -130,6 +130,15 @@ public:
         }
     }
 
+    [[nodiscard]] auto DevicePath() const -> std::span<const char> {
+        const auto path = ttyname(descriptors_[1]);
+        if (path == nullptr) {
+            throw std::system_error(errno, std::generic_category(),
+                "could not identify the test pseudoterminal's device path");
+        }
+        return {path, std::char_traits<char>::length(path) + 1};
+    }
+
     auto Attach() const -> void {
         if (setsid() < 0) {
             throw std::system_error(errno, std::generic_category(),
@@ -228,6 +237,8 @@ volatile std::sig_atomic_t received_signal = 0;
 
 class TestConsole : public NativeConsole {
 public:
+    using NativeConsole::NativeConsole;
+
     GSL_SUPPRESS("26434",
         "BaseConsole dispatches Write through its explicit object parameter. "
         "This test adapter replaces output so native queries receive only "
@@ -261,7 +272,10 @@ public:
     using std::runtime_error::runtime_error;
 };
 
-[[nodiscard]] auto TestNativeInput(NativeInput &input) -> bool {
+[[nodiscard]] auto TestNativeInput(NativeInput &input, const auto &...console_arguments) -> bool {
+    const auto make_console = [&console_arguments...]<class T = TestConsole> {
+        return T{console_arguments...};
+    };
     const auto original_modes = input.Modes();
     auto passed = true;
 #ifdef _WIN32
@@ -286,7 +300,7 @@ public:
                 std::format("{}{}", kKittyAvailable, kXtermAvailable), "\x1b[13;2u"sv},
         }) {
         passed &= Test(test.name, [&] {
-            auto console = TestConsole{};
+            auto console = make_console();
             console.on_keyboard_query = [&input, kDeviceAttributes] { input.Feed(kDeviceAttributes); };
             // No keyboard reply is supplied until after screen entry and an
             // ordinary keystroke. Both operations must finish during detection.
@@ -313,7 +327,7 @@ public:
     }
     passed &= Test("Windows keyboard detection does not delay cancellation"sv, [&] {
         {
-            auto console = TestConsole{};
+            auto console = make_console();
             console.on_keyboard_query = [] {};
             const auto screen = console.EnterScreen();
             input.Feed("\x03"sv);
@@ -324,7 +338,7 @@ public:
             "cancelling keyboard detection left the console modes changed"sv);
     });
     passed &= Test("Windows falls back to native input after the keyboard-reply deadline"sv, [&] {
-        auto console = TestConsole{};
+        auto console = make_console();
         console.on_keyboard_query = [] {};
         const auto screen = console.EnterScreen();
         Require((input.Modes()[0] & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0,
@@ -349,7 +363,7 @@ public:
     });
 #endif
     passed &= Test("native input deadlines and Tab focus changes"sv, [&] {
-        auto console = TestConsole{};
+        auto console = make_console();
         Require(console.ReadMenuInput(std::chrono::steady_clock::now() + 5ms).key == MenuKey::Timeout,
             "idle input did not reach its deadline"sv);
         input.Feed("\t"sv);
@@ -359,7 +373,7 @@ public:
             "a bounded input wait lost cancellation"sv);
     });
     passed &= Test("native fragmented keys surviving an earlier refresh deadline"sv, [&] {
-        auto console = TestConsole{};
+        auto console = make_console();
         // CSI B is Down, CSI Z is Shift+Tab, and kitty's CSI 27 u is Escape.
         // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-PC-Style-Function-Keys
         // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#disambiguate-escape-codes
@@ -377,7 +391,7 @@ public:
     });
     passed &= Test("native incomplete sequences expire without consuming following text"sv, [&] {
         for (const auto prefix : std::array{"\x1b"sv, "\x1b["sv, "\x1bO"sv}) {
-            auto console = TestConsole{};
+            auto console = make_console();
             input.Feed(prefix);
             Require(console.ReadTextInput(std::chrono::steady_clock::now() + 1s).key == MenuKey::Back,
                 std::format("an incomplete sequence {:?} did not resolve to Escape", prefix));
@@ -391,7 +405,7 @@ public:
         }
     });
     passed &= Test("native Escape followed immediately by ordinary text"sv, [&] {
-        auto console = TestConsole{};
+        auto console = make_console();
         input.Feed("\x1b日"sv);
         Require(console.ReadTextInput().key == MenuKey::Back,
             "Unicode text following Escape hid the Escape key"sv);
@@ -406,7 +420,7 @@ public:
             vt::kPopKeyboardMode, vt::kResetModifiedKeys, vt::kResetAttributes, vt::kShowCursor,
             vt::kRestoreCursorVisibility, vt::kLeaveAlternateScreen>();
         for (const auto unwind : std::array{false, true}) {
-            auto console = NativeConsole{};
+            auto console = make_console.template operator()<NativeConsole>();
             try {
                 const auto screen = console.EnterScreen();
                 if (unwind) {
@@ -426,7 +440,7 @@ public:
         // https://github.com/contour-terminal/vt-extensions/blob/master/synchronized-output.md
         constexpr auto update_sequences = vt::Concatenate<vt::kBeginSynchronizedUpdate,
             vt::kEndSynchronizedUpdate, vt::kEndSynchronizedUpdate>();
-        auto console = MeasuringConsole<NativeConsole>{};
+        auto console = make_console.template operator()<MeasuringConsole<NativeConsole>>();
         {
             const auto update = console.BeginUpdate();
             console.PresentFrame();
@@ -440,7 +454,7 @@ public:
             "update measurements omitted control-sequence bytes"sv);
     });
     passed &= Test("native fragmented cursor reply with keys before and after it"sv, [&] {
-        auto console = TestConsole{};
+        auto console = make_console();
         auto remainder = std::future<void>{};
         console.on_write = [&](const auto text) {
             Require(text == detail::ReportRequest(detail::TerminalReport::Cursor),
@@ -460,7 +474,7 @@ public:
         Require(console.ReadMenuInput().key == MenuKey::Details, "the following key was lost"sv);
     });
     passed &= Test("native cancellation interrupting a cursor query and preserving other keys"sv, [&] {
-        auto console = TestConsole{};
+        auto console = make_console();
         console.on_write = [&](const auto) { input.Feed("\x0c\x03"sv); };
         const auto start = std::chrono::steady_clock::now();
         try {
@@ -478,7 +492,7 @@ public:
     });
     passed &= Test("native menu cancellation during size and cursor queries"sv, [&] {
         for (const auto cancel_size : {true, false}) {
-            auto console = TestConsole{};
+            auto console = make_console();
             auto output = std::string{};
             console.on_write = [&](const auto text) {
                 output.append(text);
@@ -498,7 +512,7 @@ public:
         }
     });
     passed &= Test("native cancellation queued after a completed report"sv, [&] {
-        auto console = TestConsole{};
+        auto console = make_console();
         // CPR (`CSI 4;9 R`) reports the cursor, followed by Ctrl+C (ETX, 0x03).
         // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
         console.on_write = [&](const auto) { input.Feed("\x1b[4;9R\x03"sv); };
@@ -516,7 +530,7 @@ public:
     passed &= Test("native terminal modes restored after cancellation and an output exception"sv, [&] {
         Require(input.Modes() == original_modes, "normal exit or cancellation changed terminal modes"sv);
         try {
-            auto console = TestConsole{};
+            auto console = make_console();
             const auto screen = console.EnterScreen();
             console.on_write = [](const auto) { throw InjectedFailure{"injected output failure"}; };
             std::ignore = SelectTestMenuItem(console, {}, std::array{"Installation"sv});
@@ -535,7 +549,7 @@ public:
                 "\x1b[13;2:1u"sv, "\x1b[13;2:2u"sv,
                 "\x1b[27;2;13~"sv, "\n"sv, vt::kMetaReturn,
                 kKittyAltReturn, kKittyMetaReturn, kXtermAltReturn, kXtermMetaReturn}) {
-            auto console = TestConsole{};
+            auto console = make_console();
             input.Feed(std::format("{}日😀", sequence));
             const auto deadline = std::chrono::steady_clock::now() + 1s;
             Require(console.ReadTextInput(deadline).key == MenuKey::Newline,
@@ -548,14 +562,14 @@ public:
         }
     });
     passed &= Test("keyboard reports cannot insert invalid Unicode or unhandled function keys"sv, [&] {
-        auto console = TestConsole{};
+        auto console = make_console();
         input.Feed("\x1b[55296u\x1b[1114112u\x1b[57376uZ"sv);
         Require(console.ReadTextInput(std::chrono::steady_clock::now() + 1s).character == U'Z',
             "a non-text key report reached the editor as text"sv);
     });
     passed &= Test("encoded Ctrl+C cancels a query while preserving neighboring text"sv, [&] {
         for (const auto sequence : std::array{"\x1b[99;5u"sv, "\x1b[27;5;99~"sv}) {
-            auto console = TestConsole{};
+            auto console = make_console();
             console.on_write = [&](const auto) { input.Feed(std::format("a{}z", sequence)); };
             try {
                 std::ignore = console.QueryCursor();
@@ -573,7 +587,7 @@ public:
         constexpr auto kShiftEnterRelease = "\x1b[13;2:3u"sv;
         for (const auto sequence : {kShiftEnter, vt::kMetaReturn}) {
             for (const auto split : std::views::iota(1uz, sequence.size())) {
-                auto console = TestConsole{};
+                auto console = make_console();
                 input.Feed(sequence.substr(0, split));
                 Require(console.ReadTextInput(std::chrono::steady_clock::now() + 1ms).key == MenuKey::Timeout,
                     "an incomplete modified Enter was treated as a key"sv);
@@ -588,7 +602,7 @@ public:
     });
 #ifdef _WIN32
     passed &= Test("query cancellation preserves a resize inside an encoded Ctrl+C"sv, [&] {
-        auto console = TestConsole{};
+        auto console = make_console();
         console.on_write = [&](const auto) {
             auto resize = INPUT_RECORD{.EventType = WINDOW_BUFFER_SIZE_EVENT};
             resize.Event.WindowBufferSizeEvent.dwSize = {90, 30};
@@ -607,7 +621,7 @@ public:
             "removing a cancellation report also removed unrelated input"sv);
     });
     passed &= Test("Windows pasted emoji survive Alt key-up records and intervening modifiers"sv, [&] {
-        auto console = TestConsole{};
+        auto console = make_console();
         const auto screen = console.EnterScreen();
         constexpr auto text = "❤️❤️test❤️❤️😀👩‍💻"sv;
         // Console Host's `SynthesizeNumpadEvents` delivers each UTF-16 code unit
@@ -647,7 +661,7 @@ public:
     });
 #endif
     passed &= Test("native query timeout, a late reply, and subsequent successful query"sv, [&] {
-        auto console = TestConsole{};
+        auto console = make_console();
         const auto start = std::chrono::steady_clock::now();
         Require(!console.QueryCursor(), "a missing report produced a cursor position"sv);
         Require(std::chrono::steady_clock::now() - start < 8s, "the query exceeded its deadline"sv);
@@ -662,8 +676,8 @@ public:
         Require(console.QueryCursor() == CursorPosition{2, 3}, "a query could not recover after timeout"sv);
     });
 #ifdef _WIN32
-    passed &= Test("successive menus and scrolling through native Console Host"sv, [&input] {
-        auto console = MeasuringConsole<NativeConsole>{};
+    passed &= Test("successive menus and scrolling through native Console Host"sv, [&] {
+        auto console = make_console.template operator()<MeasuringConsole<NativeConsole>>();
         const auto records = std::array{VK_DOWN, VK_END, VK_HOME, VK_RETURN} |
             std::views::transform([](const int key) {
                 auto record = INPUT_RECORD{.EventType = KEY_EVENT};
@@ -713,7 +727,7 @@ public:
             "the native menus repeated measurements for cached text"sv);
     });
     passed &= Test("arriving Unicode output and a command selection through native Console Host"sv, [&] {
-        auto console = NativeConsole{};
+        auto console = make_console.template operator()<NativeConsole>();
         const auto screen = console.EnterScreen();
         auto view = OutputMenu{};
         view.SetCommands(std::array{OutputCommand{7, "Open folder"sv}});
@@ -737,7 +751,7 @@ public:
         Require(selected == 7, "the output view could not select its native command"sv);
     });
     passed &= Test("multiline text editing through native Console Host"sv, [&] {
-        auto console = NativeConsole{};
+        auto console = make_console.template operator()<NativeConsole>();
         const auto screen = console.EnterScreen();
         input.Feed("é日👩‍💻\x1b[D\x1b[3~\x1b[13;2uZ\r"sv);
         const auto result = EditText(console, [](auto &frame) {
@@ -746,8 +760,8 @@ public:
         Require(result == "é日\nZ",
             "the native editor did not preserve Unicode around deletion and a newline"sv);
     });
-    passed &= Test("Windows console host emitting character-only cursor-reply events"sv, [] {
-        auto console = NativeConsole{};
+    passed &= Test("Windows console host emitting character-only cursor-reply events"sv, [&] {
+        auto console = make_console.template operator()<NativeConsole>();
         console.Write(detail::ReportRequest(detail::TerminalReport::Cursor));
         auto reader = detail::ReportReader<std::size_t>{detail::TerminalReport::Cursor};
         for (auto length = 0uz; length < detail::kMaximumReportLength;) {
@@ -764,7 +778,7 @@ public:
         Require(false, "the console host did not supply a complete cursor report"sv);
     });
     passed &= Test("Windows report removal preserving repeat counts, Unicode, and resize events"sv, [&] {
-        auto console = TestConsole{};
+        auto console = make_console();
         const auto screen = console.EnterScreen();
         // This case supplies native key records, so detection must finish and
         // disable VT input before Console Host receives those records.
@@ -804,7 +818,7 @@ public:
 #endif
     passed &= Test("native cancellation inside complete and fragmented escape sequences"sv, [&] {
         for (const auto fragmented : {false, true}) {
-            auto console = TestConsole{};
+            auto console = make_console();
             auto remainder = [&input, fragmented] {
                 if (!fragmented) {
                     // CPR (`CSI 12;34 R`) contains an inserted Ctrl+C, then
@@ -834,10 +848,10 @@ public:
         }
     });
 #ifndef _WIN32
-    passed &= Test("Unix signals interrupting a query without extending its deadline"sv, [] {
+    passed &= Test("Unix signals interrupting a query without extending its deadline"sv, [&] {
         received_signal = 0;
         const auto handler = SetSignalHandlerScoped(SIGUSR1, [](int) { received_signal = 1; });
-        auto console = TestConsole{};
+        auto console = make_console();
         const auto start = std::chrono::steady_clock::now();
         // Repeated signals exercise interrupted waits throughout the query.
         // Stop the sender before restoring the handler or leaving this thread.
@@ -886,7 +900,7 @@ public:
                 std::pair{"\x1b[6;129~"sv, MenuKey::PageDown},
                 std::pair{"\r"sv, MenuKey::Accept},
                 std::pair{"1"sv, MenuKey::Details}}) {
-            auto console = TestConsole{};
+            auto console = make_console();
             input.Feed(std::format("{}1", sequence));
             const auto start = std::chrono::steady_clock::now();
             Require(console.ReadMenuInput().key == expected,
@@ -908,7 +922,7 @@ public:
                 "\x1b[999999999999999999999u"sv, "\x1b[27;0u"sv,
                 "\x1b[27;999999999999999999999u"sv, "\x1b[;5u"sv,
                 "\x1b[99;5:3u"sv, "\x1b[?1u"sv}) {
-            auto console = TestConsole{};
+            auto console = make_console();
             input.Feed(std::format("{}1", sequence));
             Require(console.ReadMenuInput().key == MenuKey::Details,
                 std::format("unrelated encoded input {:?} invoked a menu action", sequence));
@@ -920,7 +934,7 @@ public:
         // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions
         constexpr auto escape = "\x1b[27u"sv;
         for (const auto split : std::views::iota(1uz, escape.size())) {
-            auto console = TestConsole{};
+            auto console = make_console();
             input.Feed(escape.substr(0, split));
             auto remainder = std::async(std::launch::async, [&input, split, escape] {
                 std::this_thread::sleep_for(5ms);
@@ -940,7 +954,7 @@ public:
         constexpr auto cancel = "\x1b[99;5u"sv;
         for (const auto size_query : std::array{false, true}) {
             for (const auto split : std::views::iota(1uz, cancel.size())) {
-                auto console = TestConsole{};
+                auto console = make_console();
                 auto remainder = std::future<void>{};
                 console.on_write = [&](const auto) {
                     input.Feed(std::format("\x1b[108;5u{}", cancel.substr(0, split)));
@@ -971,7 +985,7 @@ public:
         // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#modifiers
         for (const auto reply_first : std::array{false, true}) {
-            auto console = TestConsole{};
+            auto console = make_console();
             console.on_write = [&](const auto) {
                 input.Feed(reply_first ? "\x1b[4;9R\x1b[99;5u1"sv :
                     "\x1b[99;5u\x1b[4;9R1"sv);
@@ -991,7 +1005,7 @@ public:
         }
     });
     passed &= Test("native fragmented navigation and a lone Escape"sv, [&] {
-        auto console = TestConsole{};
+        auto console = make_console();
         // The Down key is `CSI B` in normal cursor-key mode, split after `ESC [`.
         // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-PC-Style-Function-Keys
         input.Feed("\x1b["sv);
@@ -1020,7 +1034,7 @@ public:
 #endif
         const auto start = std::chrono::steady_clock::now();
         try {
-            auto console = TestConsole{};
+            auto console = make_console();
             const auto screen = console.EnterScreen();
             input.Disconnect();
             const auto output_failed = [&console] {
@@ -1058,8 +1072,9 @@ export auto RunNativeTests() -> int {
     auto input = NativeInput{};
     return TestNativeInput(input) ? 0 : 1;
 #else
-    // A child session owns this pseudoterminal as /dev/tty. Standard output and
-    // error remain connected to CTest, so test results contain no drawing codes.
+    // The child uses this pseudoterminal as its controlling terminal. Standard
+    // output and error remain connected to CTest, so test results contain no
+    // drawing codes.
     auto input = NativeInput{};
     const auto child = fork();
     if (child < 0) {
@@ -1068,7 +1083,7 @@ export auto RunNativeTests() -> int {
     if (child == 0) {
         const auto passed = Test("isolated Unix native input tests"sv, [&] {
             input.Attach();
-            Require(TestNativeInput(input),
+            Require(TestNativeInput(input, input.DevicePath()),
                 "one or more native input tests failed"sv);
         });
         return passed ? 0 : 1;

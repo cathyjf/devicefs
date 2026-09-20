@@ -39,11 +39,12 @@ namespace devicefs::terminal::unix_detail {
 
 constexpr auto kInputPollInterval = 100ms;
 
-[[nodiscard]] auto OpenTerminal() -> int {
-    const auto descriptor = open("/dev/tty", O_RDWR | O_NOCTTY | O_CLOEXEC);
+[[nodiscard]] auto OpenTerminal(const std::span<const char> device) -> int {
+    const auto descriptor = open(device.data(), O_RDWR | O_NOCTTY | O_CLOEXEC);
     if (descriptor < 0) {
         throw std::system_error(errno, std::generic_category(),
-            "could not open the controlling terminal '/dev/tty'");
+            std::format("could not open terminal '{}'",
+                std::string_view{device.data(), device.size() - 1}));
     }
     return descriptor;
 }
@@ -111,10 +112,12 @@ struct TcSetAttrInvoker {
 
 export namespace devicefs::terminal {
 
-// `UnixConsole` connects the text writer and menu to the process's controlling
-// terminal. The adapter writes UTF-8, receives cursor and size reports through
-// VT, and translates keyboard sequences into menu operations. Opening `/dev/tty`
-// keeps this connection independent of redirected standard streams.
+// `UnixConsole` connects the text writer and menu to a terminal device.
+// By default, the device is `/dev/tty`, the process's controlling terminal.
+// Callers can supply a different terminal device path to the constructor.
+// Opening the device directly keeps this connection independent of redirected
+// standard streams. The adapter writes UTF-8, receives cursor and size reports
+// through VT, and translates keyboard sequences into menu operations.
 //
 // Interactive screens request kitty's keyboard protocol with flag 1,
 // "Disambiguate escape codes". A supporting terminal encodes the Escape key as
@@ -132,7 +135,9 @@ export namespace devicefs::terminal {
 // Ctrl+C during a query raises `InputCancelled`.
 class UnixConsole : public BaseConsole {
 public:
-    UnixConsole() = default;
+    // `device` includes its terminating NUL so `open` can use its storage directly.
+    explicit UnixConsole(const std::span<const char> device = std::span{"/dev/tty"})
+        : descriptor_(unix_detail::OpenTerminal(device)) {}
     UnixConsole(const UnixConsole &) = delete;
     auto operator=(const UnixConsole &) -> UnixConsole & = delete;
 
@@ -377,7 +382,7 @@ private:
     }
 
     // Destruction restores terminal settings before closing their descriptor.
-    const int descriptor_ = unix_detail::OpenTerminal();
+    const int descriptor_;
     decltype(unix_detail::CloseTerminalScoped(0)) connection_ =
         unix_detail::CloseTerminalScoped(descriptor_);
     decltype(unix_detail::SetTerminalModeScoped(0)) modes_ =

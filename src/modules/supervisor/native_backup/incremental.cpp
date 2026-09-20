@@ -87,12 +87,10 @@ export [[nodiscard]] auto BuildDirtyBlockMap(
             descriptors.volume_size, allocation_blocks.volume_size));
     }
 
-    constexpr auto privilege_names =
-        std::array{wil::zwstring_view{SE_BACKUP_NAME}};
     constexpr auto privilege_description =
         "the backup privilege"sv;
     auto privileges = internal::ProcessPrivilegeEnabler{
-        GetCurrentProcess(), privilege_names,
+        GetCurrentProcess(), std::array{wil::zwstring_view{SE_BACKUP_NAME}},
         privilege_description};
     auto svi_blocks = devicefs::svi::ReadBlockOffsets(baseline_device);
     auto payload_svi_blocks =

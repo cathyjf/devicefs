@@ -368,12 +368,12 @@ struct WslProcess {
     {
         // LoadUserProfileW requires these privileges on its LocalSystem
         // caller. They are not added to the user token used to start WSL.
-        constexpr auto privilege_names = std::array{
-            wil::zwstring_view(SE_BACKUP_NAME),
-            wil::zwstring_view(SE_RESTORE_NAME),
-        };
         auto privileges = ProcessPrivilegeEnabler{
-            GetCurrentProcess(), privilege_names,
+            GetCurrentProcess(),
+            std::array{
+                wil::zwstring_view(SE_BACKUP_NAME),
+                wil::zwstring_view(SE_RESTORE_NAME),
+            },
             "the user-profile privileges"sv};
         if (!LoadUserProfileW(result.token.get(), &profile)) {
             WinError("could not load the profile for configured WSL account '{}'",

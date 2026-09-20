@@ -139,11 +139,8 @@ template <std::size_t Size>
             std::wstring_view{username.c_str(), username.size()});
     }
 
-    constexpr auto privilege_names = std::array{
-        wil::zwstring_view(SE_TCB_NAME),
-    };
     auto privileges = ProcessPrivilegeEnabler{
-        GetCurrentProcess(), privilege_names,
+        GetCurrentProcess(), std::array{wil::zwstring_view(SE_TCB_NAME)},
         "the S4U logon privilege"sv};
 
     auto lsa_name_text = std::to_array("DeviceFs");

@@ -2830,12 +2830,12 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
 
     auto automatic_inventory_finished = false;
     try {
-        constexpr auto privilege_names = std::array{
-            wil::zwstring_view{SE_BACKUP_NAME},
-            wil::zwstring_view{SE_MANAGE_VOLUME_NAME},
-        };
         auto privileges = internal::ProcessPrivilegeEnabler{
-            GetCurrentProcess(), privilege_names,
+            GetCurrentProcess(),
+            std::array{
+                wil::zwstring_view{SE_BACKUP_NAME},
+                wil::zwstring_view{SE_MANAGE_VOLUME_NAME},
+            },
             "the backup and volume-management privileges"sv};
         auto operation = std::async(std::launch::async,
             [&state, &io_cancellation, &virtual_disk_lock,
@@ -2983,12 +2983,12 @@ export [[nodiscard]] auto VerifyFilesystemViews(
             jobs, optimization_unavailable, preparation_failures);
     }
 
-    constexpr auto privilege_names = std::array{
-        wil::zwstring_view{SE_BACKUP_NAME},
-        wil::zwstring_view{SE_MANAGE_VOLUME_NAME},
-    };
     auto privileges = internal::ProcessPrivilegeEnabler{
-        GetCurrentProcess(), privilege_names,
+        GetCurrentProcess(),
+        std::array{
+            wil::zwstring_view{SE_BACKUP_NAME},
+            wil::zwstring_view{SE_MANAGE_VOLUME_NAME},
+        },
         "the backup and volume-management privileges"sv};
 
     auto io_cancellation = SynchronousIoCancellation{};

@@ -301,12 +301,12 @@ auto WaitForViewSession(
         L"DeviceFs is presenting the projected VHDX at {}.\n",
         projected_vhdx.native());
 
-    constexpr auto privilege_names = std::array{
-        wil::zwstring_view(SE_BACKUP_NAME),
-        wil::zwstring_view(SE_MANAGE_VOLUME_NAME),
-    };
     auto privileges = internal::ProcessPrivilegeEnabler{
-        GetCurrentProcess(), privilege_names,
+        GetCurrentProcess(),
+        std::array{
+            wil::zwstring_view(SE_BACKUP_NAME),
+            wil::zwstring_view(SE_MANAGE_VOLUME_NAME),
+        },
         "the backup-view privileges"sv};
     devicefs::WriteToStream(
         devicefs::stdout,

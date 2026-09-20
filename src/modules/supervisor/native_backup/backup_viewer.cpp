@@ -219,7 +219,7 @@ auto WaitForViewSession(
         invoking_user, GetCurrentProcessToken());
     if (FAILED(invoking_user_query)) {
         WinError("could not identify the invoking user",
-            ExplicitWin32Error::FromHresult(invoking_user_query));
+            ExplicitHresult{invoking_user_query});
     }
     const auto port = std::to_string(
         internal::SelectTcpPortCandidate());

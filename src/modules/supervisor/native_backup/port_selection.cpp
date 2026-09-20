@@ -55,7 +55,7 @@ namespace internal {
             endpoint.reset_address_nothrow(socket_handle.get());
         FAILED(result)) {
         WinError("could not obtain the selected view TCP port candidate",
-            ExplicitWin32Error::FromHresult(result));
+            ExplicitHresult{result});
     }
     return endpoint.port();
 }

@@ -78,7 +78,7 @@ constexpr auto kWslCreationFlags = DWORD{
         &result, nullptr, SECURITY_NT_AUTHORITY, SECURITY_LOCAL_SYSTEM_RID);
     if (FAILED(error)) {
         WinError("could not identify the backup-supervisor account",
-            ExplicitWin32Error::FromHresult(error));
+            ExplicitHresult{error});
     }
     return result;
 }
@@ -697,7 +697,7 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
             FAILED(error)) {
             WinError("could not read the {} environment variable",
                 std::wstring_view{name},
-                ExplicitWin32Error::FromHresult(error));
+                ExplicitHresult{error});
         }
         return Transcode<std::string>(value);
     }();

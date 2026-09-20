@@ -304,7 +304,7 @@ template <std::uint32_t Polynomial>
     const auto error = CoCreateGuid(&result);
     if (FAILED(error)) {
         WinError("could not create a VHDX identifier",
-            ExplicitWin32Error::FromHresult(error));
+            ExplicitHresult{error});
     }
     return result;
 }

@@ -69,7 +69,7 @@ export constexpr auto kMaterializeOciOption = "--materialize-oci"sv;
     } else if (FAILED(result)) {
         WinError("could not read the package version from 'HKLM\\{}'",
             std::wstring_view{registration},
-            ExplicitWin32Error::FromHresult(result));
+            ExplicitHresult{result});
     }
 
     return !std::ranges::lexicographical_compare(
@@ -237,7 +237,7 @@ auto HideAccountFromLogonScreen(const wil::zwstring_view username) {
             L"backup-supervisor: could not hide internal Windows account '{}' "
             L"from the logon screen (Windows error 0x{:08x})\n",
             std::wstring_view{username.c_str(), username.size()},
-            ExplicitWin32Error::FromHresult(result).value);
+            DWORD{ExplicitHresult{result}});
     }
 }
 
@@ -321,7 +321,7 @@ auto EnsureWslDistributionDirectory(
         FAILED(result)) {
         WinError("could not initialize DISM to prepare Windows component '{}'",
             std::wstring_view{feature},
-            ExplicitWin32Error::FromHresult(result));
+            ExplicitHresult{result});
     }
     const auto shutdown =
         wil::unique_call<decltype(&DismShutdown), DismShutdown>{};
@@ -331,7 +331,7 @@ auto EnsureWslDistributionDirectory(
             DISM_ONLINE_IMAGE, nullptr, nullptr, session.addressof());
         FAILED(result)) {
         WinError("could not open the running Windows installation in DISM",
-            ExplicitWin32Error::FromHresult(result));
+            ExplicitHresult{result});
     }
 
     auto information = std::unique_ptr<DismFeatureInfo,
@@ -342,7 +342,7 @@ auto EnsureWslDistributionDirectory(
         FAILED(result)) {
         WinError("could not query Windows component '{}'",
             std::wstring_view{feature},
-            ExplicitWin32Error::FromHresult(result));
+            ExplicitHresult{result});
     }
     if (information->FeatureState == DismStateInstalled) {
         devicefs::WriteToStream(
@@ -370,7 +370,7 @@ auto EnsureWslDistributionDirectory(
     if (FAILED(result)) {
         WinError("could not install Windows component '{}'",
             std::wstring_view{feature},
-            ExplicitWin32Error::FromHresult(result));
+            ExplicitHresult{result});
     }
     devicefs::WriteToStream(
         devicefs::stdout,
@@ -405,7 +405,7 @@ export [[nodiscard]] auto WslExecutablePath() {
         FAILED(result)) {
         WinError("could not read the WSL installation location from 'HKLM\\{}'",
             std::wstring_view{kWslRegistration},
-            ExplicitWin32Error::FromHresult(result));
+            ExplicitHresult{result});
     }
     return std::filesystem::path{location.get()} / L"wsl.exe";
 }

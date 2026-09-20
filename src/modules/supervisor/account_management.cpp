@@ -150,7 +150,7 @@ auto VerifyWinFspMsi(const std::filesystem::path &path) {
     } catch (const winrt::hresult_error &error) {
         WinError("could not verify the SHA-256 of WinFsp MSI '{}': {}",
             std::wstring_view{path.native()}, std::wstring_view{error.message()},
-            ExplicitWin32Error::FromHresult(error.code()));
+            ExplicitHresult{error.code()});
     }
 }
 
@@ -195,7 +195,7 @@ auto EnsureWinFsp() -> bool {
     } catch (const winrt::hresult_error &error) {
         WinError("could not acquire WinFsp MSI from '{}': {}",
             url, std::wstring_view{error.message()},
-            ExplicitWin32Error::FromHresult(error.code()));
+            ExplicitHresult{error.code()});
     }
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: verifying the pinned SHA-256 of '{}'\n", name);
@@ -271,6 +271,6 @@ auto InstallWslPackage() -> bool {
     } catch (const winrt::hresult_error &error) {
         WinError("could not acquire or install the WSL package from '{}': {}",
             releases_url, std::wstring_view{error.message()},
-            ExplicitWin32Error::FromHresult(error.code()));
+            ExplicitHresult{error.code()});
     }
 }

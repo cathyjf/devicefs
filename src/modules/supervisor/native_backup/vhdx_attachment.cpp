@@ -141,7 +141,7 @@ constexpr auto kShareMode =
     if (FAILED(error)) {
         WinError("could not obtain the volume name for attached root '{}'",
             std::wstring_view{partition_root},
-            ExplicitWin32Error::FromHresult(error));
+            ExplicitHresult{error});
     }
     return std::wstring{volume_root.get()};
 }

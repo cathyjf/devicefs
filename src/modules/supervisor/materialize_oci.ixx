@@ -85,7 +85,7 @@ auto SetDefaultTokenAcl() {
     if (const auto result = wil::get_token_information_nothrow(user, token.get());
         FAILED(result)) {
         WinError("could not identify the current user for the default token ACL",
-            ExplicitWin32Error::FromHresult(result));
+            ExplicitHresult{result});
     }
     auto sid = wil::unique_hlocal_ansistring{};
     if (!ConvertSidToStringSidA(user->User.Sid, sid.addressof())) {
@@ -129,7 +129,7 @@ auto SetDefaultTokenAcl() {
         return wil::shared_hkey{};
     } else if (FAILED(result)) {
         WinError("could not open WSL registrations to find distribution '{}'",
-            distribution, ExplicitWin32Error::FromHresult(result));
+            distribution, ExplicitHresult{result});
     }
     const auto requested = Transcode<std::wstring>(distribution);
     auto iterator = wil::reg::key_heap_string_nothrow_iterator{registrations.get()};
@@ -142,7 +142,7 @@ auto SetDefaultTokenAcl() {
         } else if (FAILED(result)) {
             WinError("could not read the WSL distribution name in registration '{}'",
                 std::wstring_view{iterator->name.get()},
-                ExplicitWin32Error::FromHresult(result));
+                ExplicitHresult{result});
         }
         if (CompareStringOrdinal(name.get(), -1, requested.c_str(), -1, TRUE) != CSTR_EQUAL) {
             continue;
@@ -153,13 +153,13 @@ auto SetDefaultTokenAcl() {
                 wil::reg::key_access{KEY_QUERY_VALUE | KEY_SET_VALUE});
             FAILED(result)) {
             WinError("could not open the registration of WSL distribution '{}'",
-                distribution, ExplicitWin32Error::FromHresult(result));
+                distribution, ExplicitHresult{result});
         }
         return registration;
     }
     if (const auto result = iterator.last_error(); FAILED(result)) {
         WinError("could not enumerate WSL registrations to find distribution '{}'",
-            distribution, ExplicitWin32Error::FromHresult(result));
+            distribution, ExplicitHresult{result});
     }
     return wil::shared_hkey{};
 }
@@ -273,7 +273,7 @@ auto ExtractArchiveMember(
     } catch (const winrt::hresult_error &error) {
         WinError("could not read OCI image metadata from '{}': {}",
             std::wstring_view{archive.native()}, std::wstring_view{error.message()},
-            ExplicitWin32Error::FromHresult(error.code()));
+            ExplicitHresult{error.code()});
     }
 }
 
@@ -288,7 +288,7 @@ auto ExtractArchiveMember(
     } catch (const winrt::hresult_error &error) {
         WinError("could not read OCI registry response from '{}': {}",
             std::wstring_view{url.AbsoluteUri()}, std::wstring_view{error.message()},
-            ExplicitWin32Error::FromHresult(error.code()));
+            ExplicitHresult{error.code()});
     }
 }
 
@@ -332,7 +332,7 @@ auto ExtractArchiveMember(
         } catch (const winrt::hresult_error &error) {
             WinError("could not obtain anonymous pull authorization for '{}': {}",
                 image, std::wstring_view{error.message()},
-                ExplicitWin32Error::FromHresult(error.code()));
+                ExplicitHresult{error.code()});
         }
     }();
     const auto layer = [&]() -> std::optional<std::pair<Uri, std::string>> {
@@ -364,7 +364,7 @@ auto ExtractArchiveMember(
         } catch (const winrt::hresult_error &error) {
             WinError("could not read OCI image metadata for '{}': {}",
                 image, std::wstring_view{error.message()},
-                ExplicitWin32Error::FromHresult(error.code()));
+                ExplicitHresult{error.code()});
         }
     }();
     if (!layer) {
@@ -414,13 +414,13 @@ auto ReplaceDistribution(
             previous.lock().get(), L"DistributionName", retired_name.c_str());
         FAILED(result)) {
         WinError("could not rename WSL distribution '{}' to '{}'",
-            distribution, retired, ExplicitWin32Error::FromHresult(result));
+            distribution, retired, ExplicitHresult{result});
     }
     if (const auto result = wil::reg::set_value_string_nothrow(
             registration.get(), L"DistributionName", canonical_name.c_str());
         FAILED(result)) {
         WinError("could not rename WSL distribution '{}' to '{}'",
-            replacement, distribution, ExplicitWin32Error::FromHresult(result));
+            replacement, distribution, ExplicitHresult{result});
     }
 
     devicefs::WriteToStream(devicefs::stdout,
@@ -506,7 +506,7 @@ export [[nodiscard]] auto MaterializeOci(
                 previous.get(), L"BasePath", directory);
             FAILED(result)) {
             WinError("could not read the directory of WSL distribution '{}'",
-                distribution, ExplicitWin32Error::FromHresult(result));
+                distribution, ExplicitHresult{result});
         }
         return directory.get();
     }();
@@ -532,7 +532,7 @@ export [[nodiscard]] auto MaterializeOci(
             auto directory = std::wstring{};
             if (const auto result = wil::GetSystemDirectoryW(directory); FAILED(result)) {
                 WinError("could not find the Windows directory containing tar.exe",
-                    ExplicitWin32Error::FromHresult(result));
+                    ExplicitHresult{result});
             }
             return std::filesystem::path{directory} / "tar.exe";
         }();
@@ -583,7 +583,7 @@ export [[nodiscard]] auto MaterializeOci(
             L"backup-supervisor: could not suppress the WSL welcome window "
             L"by setting 'HKCU\\{}\\OOBEComplete' (Windows error 0x{:08x})\n",
             std::wstring_view{kWslRegistration},
-            ExplicitWin32Error::FromHresult(result).value);
+            DWORD{ExplicitHresult{result}});
     }
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: importing WSL1 distribution '{}' into '{}'\n",

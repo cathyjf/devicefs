@@ -14,8 +14,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-module;
-
 export module devicefs.common;
 
 import std;
@@ -27,20 +25,22 @@ using devicefs::terminal::Transcode;
 export struct ExplicitWin32Error final {
     DWORD value;
 
-    [[nodiscard]] static constexpr auto FromHresult(const HRESULT hr) {
+    [[nodiscard]] constexpr operator DWORD() const noexcept {
+        return value;
+    }
+};
+
+export struct ExplicitHresult final {
+    HRESULT value;
+
+    [[nodiscard]] constexpr operator DWORD() const noexcept {
         // An HRESULT's facility identifies the source of its error code.
         // Only `FACILITY_WIN32` wraps a Win32 error number; stripping any
         // other facility could report an unrelated Win32 failure.
-        if (HRESULT_FACILITY(hr) != FACILITY_WIN32) {
-            return ExplicitWin32Error{std::bit_cast<DWORD>(hr)};
+        if (HRESULT_FACILITY(value) != FACILITY_WIN32) {
+            return value;
         }
-        [[gsl::suppress("26472",
-            justification:
-                "The definition of HRESULT_CODE ensures that the result will "
-                "always fit in a DWORD. `static_cast` is used here instead "
-                "of `wil::safe_cast_failfast` because this translation unit "
-                "does not otherwise depend on WIL.")]]
-        return ExplicitWin32Error{static_cast<DWORD>(HRESULT_CODE(hr))};
+        return HRESULT_CODE(value);
     }
 };
 
@@ -79,14 +79,14 @@ template <class Argument>
 }
 
 template <class... Arguments>
-constexpr auto kHasExplicitWin32Error = [] {
+constexpr auto kHasExplicitError = [] {
     if constexpr (sizeof...(Arguments) == 0) {
         return false;
     } else {
-        using LastArgument = std::tuple_element_t<
-            sizeof...(Arguments) - 1, std::tuple<Arguments...>>;
-        return std::is_same_v<
-            std::remove_cvref_t<LastArgument>, ExplicitWin32Error>;
+        using LastArgument = std::remove_cvref_t<std::tuple_element_t<
+            sizeof...(Arguments) - 1, std::tuple<Arguments...>>>;
+        return std::is_same_v<LastArgument, ExplicitWin32Error> ||
+            std::is_same_v<LastArgument, ExplicitHresult>;
     }
 }();
 
@@ -103,7 +103,7 @@ template <class... Arguments>
 using WinErrorFormatString = typename WinErrorFormat<
     std::tuple<Arguments...>,
     std::make_index_sequence<
-        sizeof...(Arguments) - kHasExplicitWin32Error<Arguments...>>>::type;
+        sizeof...(Arguments) - kHasExplicitError<Arguments...>>>::type;
 
 } // namespace detail
 
@@ -117,27 +117,30 @@ export template <class... Arguments>
         "wrap an explicit Win32 error in ExplicitWin32Error; "
         "cast a DWORD that is intentionally being formatted");
     constexpr auto has_explicit_error =
-        detail::kHasExplicitWin32Error<Arguments...>;
+        detail::kHasExplicitError<Arguments...>;
     constexpr auto format_argument_count =
         sizeof...(Arguments) - has_explicit_error;
     auto argument_tuple = std::forward_as_tuple(
         std::forward<Arguments>(arguments)...);
     const auto error = [&] {
         if constexpr (has_explicit_error) {
-            return std::get<sizeof...(Arguments) - 1>(argument_tuple).value;
+            return std::get<sizeof...(Arguments) - 1>(argument_tuple);
         } else {
-            return last_error;
+            return ExplicitWin32Error{last_error};
         }
     }();
     const auto operation = [&]<std::size_t... Index>(
         std::index_sequence<Index...>) {
-        return std::format(format,
+        const auto text = std::format(format,
             detail::AdaptWinErrorFormatArgument(
                 std::get<Index>(std::move(argument_tuple)))...);
+        if constexpr (std::is_same_v<decltype(error), const ExplicitHresult>) {
+            return std::format("{} (HRESULT 0x{:08x})",
+                text, static_cast<DWORD>(error.value));
+        }
+        return text;
     }(std::make_index_sequence<format_argument_count>{});
-    throw std::system_error(
-        std::bit_cast<int>(error), std::system_category(),
-        operation);
+    throw std::system_error(error, std::system_category(), operation);
 }
 
 export auto HardenProcess() {

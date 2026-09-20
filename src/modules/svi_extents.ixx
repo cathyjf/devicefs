@@ -68,7 +68,7 @@ auto ThrowIfFileInfoFailed(
         return;
     }
     WinError("{} for '{}'", operation, std::wstring_view{path.native()},
-        ExplicitWin32Error::FromHresult(error));
+        ExplicitHresult{error});
 }
 
 class SviExtentReader {

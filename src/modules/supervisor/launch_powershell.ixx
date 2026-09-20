@@ -96,7 +96,7 @@ function prompt {
             "HKLM\\{}\\{}",
             std::wstring_view{subkey_name},
             std::wstring_view{kPowerShellMsiRegistrationValueName},
-            ExplicitWin32Error::FromHresult(result));
+            ExplicitHresult{result});
     }
     return std::filesystem::path(location.get()) / L"pwsh.exe";
 }
@@ -199,7 +199,7 @@ function prompt {
             "backup-supervisor: could not query the {} MSIX installation "
             "(error 0x{:08x}): {}; trying the next console option\n",
             application,
-            ExplicitWin32Error::FromHresult(error.code()).value,
+            DWORD{ExplicitHresult{error.code()}},
             Transcode<std::string>(error.message()));
         return std::nullopt;
     }
@@ -314,7 +314,7 @@ export auto EnsureConsoleMsixRegistration(const wil::zwstring_view package_full_
     } catch (const winrt::hresult_error &error) {
         WinError("could not register MSIX package '{}': {}",
             std::wstring_view{package_full_name}, std::wstring_view{error.message()},
-            ExplicitWin32Error::FromHresult(error.code()));
+            ExplicitHresult{error.code()});
     }
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: MSIX package '{}' is registered for user '{}'\n",
@@ -403,7 +403,7 @@ export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) ->
         if (const auto error = wil::GetSystemDirectoryW(system_directory);
             FAILED(error)) {
             WinError("could not identify the Windows system directory",
-                ExplicitWin32Error::FromHresult(error));
+                ExplicitHresult{error});
         }
         return std::filesystem::path{system_directory} / L"cmd.exe";
     }();

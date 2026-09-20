@@ -272,7 +272,7 @@ public:
             0, console_.put());
         if (FAILED(error)) {
             WinError("could not create the backup pseudoconsole",
-                ExplicitWin32Error::FromHresult(error));
+                ExplicitHresult{error});
         }
         output_task_ = std::async(
             std::launch::async, CopyConsoleOutput,

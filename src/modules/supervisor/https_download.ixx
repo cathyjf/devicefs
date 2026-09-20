@@ -101,7 +101,7 @@ export [[nodiscard]] auto DownloadFile(
             devicefs::WriteToStream(devicefs::stderr,
                 "backup-supervisor: could not report download progress for '{}' "
                 "(Windows error 0x{:08x})\n",
-                name, ExplicitWin32Error::FromHresult(error.code()).value);
+                name, std::uint32_t{ExplicitHresult{error.code()}});
         }
         const auto bytes = copy.get();
         devicefs::WriteToStream(devicefs::stdout,
@@ -112,6 +112,6 @@ export [[nodiscard]] auto DownloadFile(
             std::wstring_view{url.AbsoluteUri()},
             std::wstring_view{destination.native()},
             std::wstring_view{error.message()},
-            ExplicitWin32Error::FromHresult(error.code()));
+            ExplicitHresult{error.code()});
     }
 }

@@ -884,7 +884,7 @@ auto DetachView(
         object, streams);
     if (FAILED(query)) {
         return std::unexpected{OperationFailure{
-            ExplicitWin32Error::FromHresult(query).value}};
+            ExplicitHresult{query}}};
     }
 
     auto result = std::vector<StreamRecord>{};
@@ -1356,7 +1356,7 @@ class FilesystemTraverser {
                 RecordIssue(relative_path,
                     FilesystemOperation::QueryDirectory,
                     OperationFailure{
-                        ExplicitWin32Error::FromHresult(query).value},
+                        ExplicitHresult{query}},
                     true);
                 return true;
             }

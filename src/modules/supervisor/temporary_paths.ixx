@@ -34,7 +34,7 @@ export [[nodiscard]] auto UniqueName() {
     const auto result = CoCreateGuid(&id);
     if (FAILED(result)) {
         WinError("could not create a unique backup identifier",
-            ExplicitWin32Error::FromHresult(result));
+            ExplicitHresult{result});
     }
     return std::format(
         "{:08x}{:04x}{:04x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
@@ -50,7 +50,7 @@ export [[nodiscard]] auto TemporarySystemDirectoryPath(
         const auto result = wil::GetWindowsDirectoryW(path);
         if (FAILED(result)) {
             WinError("could not obtain the Windows directory",
-                ExplicitWin32Error::FromHresult(result));
+                ExplicitHresult{result});
         }
         return path;
     }();
@@ -81,7 +81,7 @@ export class TemporaryDirectory {
                 L"backup-supervisor: could not remove temporary directory '{}' "
                 L"(Windows error 0x{:08x})\n",
                 std::wstring_view{path_.native()},
-                ExplicitWin32Error::FromHresult(result).value);
+                DWORD{ExplicitHresult{result}});
         }
     }
 

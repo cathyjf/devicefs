@@ -89,7 +89,7 @@ constexpr auto kTcpUsername = "devicefs"sv;
         if (FAILED(error)) {
             WinError("could not obtain RPC block-device endpoint from environment variable '{}'",
                 devicefs::rpc::kEndpointEnvironmentVariable,
-                ExplicitWin32Error::FromHresult(error));
+                ExplicitHresult{error});
         }
         if (endpoint.empty()) {
             throw std::runtime_error(std::format(
@@ -171,7 +171,7 @@ struct RPCBlockDevice {
             if (FAILED(error)) {
                 WinError("could not query the length of RPC block device '{}'",
                     symbol,
-                    ExplicitWin32Error::FromHresult(error));
+                    ExplicitHresult{error});
             }
             internal::CheckNt(status, "could not query the RPC block-device length");
             return result;
@@ -197,7 +197,7 @@ struct RPCBlockDevice {
             &rpc_transferred, static_cast<BYTE *>(buffer));
         if (FAILED(error)) {
             const auto win32_error =
-                ExplicitWin32Error::FromHresult(error).value;
+                DWORD{ExplicitHresult{error}};
             devicefs::WriteToStream(devicefs::stderr,
                 "devicefs: RPC read failed for '{:s}' at offset 0x{:x} "
                 "for {} bytes: Windows error {}\n",

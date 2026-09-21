@@ -116,7 +116,7 @@ struct DeviceFsStartRequest {
     auto command = wil::ArgvToCommandLine(arguments);
     if (request.rpc_endpoint &&
         !SetEnvironmentVariableA(
-            devicefs::rpc::kEndpointEnvironmentVariable.data(),
+            devicefs::rpc::kEndpointEnvironmentVariable,
             request.rpc_endpoint->c_str())) {
         WinError("could not set environment variable '{}' to RPC endpoint '{}'",
             devicefs::rpc::kEndpointEnvironmentVariable,

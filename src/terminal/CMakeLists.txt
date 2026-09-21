@@ -46,14 +46,6 @@ else()
     set(DEVICEFS_TERMINAL_LIBRARY_TYPE OBJECT)
 endif()
 
-add_library(windows-terminal-width ${DEVICEFS_TERMINAL_LIBRARY_TYPE}
-    dependencies/terminal/src/types/CodepointWidthDetector.cpp
-)
-target_include_directories(windows-terminal-width PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/compat"
-    "${CMAKE_CURRENT_SOURCE_DIR}/dependencies"
-)
-
 set(SIMDUTF_GENERATED_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/simdutf")
 set(SIMDUTF_GENERATED_HEADER "${SIMDUTF_GENERATED_DIRECTORY}/combined.h")
 set(SIMDUTF_ANALYSIS_EXCLUDE_DIRECTORIES "${SIMDUTF_GENERATED_DIRECTORY}")
@@ -72,7 +64,9 @@ add_custom_command(
 )
 add_custom_target(generate-simdutf DEPENDS "${SIMDUTF_GENERATED_HEADER}")
 
-add_library(devicefs-terminal ${DEVICEFS_TERMINAL_LIBRARY_TYPE})
+add_library(devicefs-terminal ${DEVICEFS_TERMINAL_LIBRARY_TYPE}
+    dependencies/terminal/src/types/CodepointWidthDetector.cpp
+)
 add_dependencies(devicefs-terminal generate-simdutf)
 target_include_directories(devicefs-terminal SYSTEM PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/generated"
@@ -96,17 +90,25 @@ target_sources(devicefs-terminal PUBLIC
 )
 if(WIN32)
     target_sources(devicefs-terminal PUBLIC FILE_SET CXX_MODULES FILES windows.ixx)
+    set(DEVICEFS_ROOT_INCLUDE_DIR "${DEVICEFS_ROOT}/src/include")
+    if(IS_DIRECTORY "${DEVICEFS_ROOT_INCLUDE_DIR}")
+        target_include_directories(devicefs-terminal PRIVATE
+            "${DEVICEFS_ROOT_INCLUDE_DIR}"
+        )
+    endif()
 else()
     target_sources(devicefs-terminal PUBLIC FILE_SET CXX_MODULES FILES unix.ixx)
 endif()
-target_link_libraries(devicefs-terminal PRIVATE windows-terminal-width)
-target_include_directories(devicefs-terminal PRIVATE
-    "${DEVICEFS_ROOT}/src/modules/include"
+target_include_directories(devicefs-terminal
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/compat"
+        "${CMAKE_CURRENT_SOURCE_DIR}/dependencies"
+    PRIVATE
+        "${DEVICEFS_ROOT}/src/modules/include"
 )
 
 set(DEVICEFS_TERMINAL_ANALYSIS_TARGETS
     devicefs-terminal
-    windows-terminal-width
 )
 if(DEVICEFS_TERMINAL_BUILD_TESTS)
     add_executable(devicefs-terminal-test
@@ -124,7 +126,6 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
     )
     target_link_libraries(devicefs-terminal-test PRIVATE
         devicefs-terminal
-        windows-terminal-width
     )
     target_include_directories(devicefs-terminal-test PRIVATE
         "${DEVICEFS_ROOT}/src/modules/include"

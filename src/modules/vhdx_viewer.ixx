@@ -18,11 +18,13 @@ module;
 
 #include <devicefs/strsafe_compat.h>
 
+#undef _WIN32_WINNT
+#include <winternl.h>
+
 export module devicefs.vhdx_viewer;
 
 import std;
 import <devicefs/windows_imports.h>;
-import <winternl.h>;
 import <sal.h>;
 import <devicefs/common.h>;
 

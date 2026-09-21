@@ -37,8 +37,12 @@ import devicefs.terminal.menu_measurements;
 import devicefs.terminal.vt;
 
 #ifdef _WIN32
-    import <windows.h>;
-    import <wil/resource.h>;
+    #if __has_include(<devicefs/windows_imports.h>)
+        import <devicefs/windows_imports.h>;
+    #else
+        import <windows.h>;
+        import <wil/resource.h>;
+    #endif
     import devicefs.terminal.windows;
 #else
     import devicefs.terminal.unix;

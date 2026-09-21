@@ -108,14 +108,6 @@ set(DEVICEFS_COMMON_LINK_LIBRARIES
     oleaut32 devicefs-terminal
 )
 
-add_library(devicefs-stream-writer STATIC)
-target_module_interfaces(devicefs-stream-writer PUBLIC
-    src/modules/stream_writer.ixx
-)
-target_sources(devicefs-stream-writer PRIVATE
-    src/modules/stream_writer.cpp
-)
-
 find_program(POWERSHELL_EXECUTABLE NAMES pwsh REQUIRED)
 
 set(DEVICEFS_RPC_DEFINITION
@@ -181,34 +173,6 @@ target_include_directories(devicefs-rpc-block-device PUBLIC
 )
 target_link_libraries(devicefs-rpc-block-device PUBLIC rpcrt4)
 
-add_library(devicefs-filesystem STATIC)
-target_module_interfaces(devicefs-filesystem PUBLIC
-    src/modules/filesystem.ixx
-    src/modules/filesystem/internal.cpp
-    src/modules/filesystem/rpc_client.cpp
-    src/modules/allocation.ixx
-    src/modules/rpc_block_device_server.ixx
-    src/modules/synthetic_backup_block_device.ixx
-    src/modules/vhdx_viewer.ixx
-    src/modules/windows_block_device.ixx
-)
-target_sources(devicefs-filesystem PRIVATE
-    src/modules/filesystem_allocation_changes.cpp
-)
-target_link_libraries(devicefs-filesystem PRIVATE
-    ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-stream-writer devicefs-rpc-block-device ole32
-)
-
-add_library(devicefs-vss-block-descriptors STATIC)
-target_module_interfaces(devicefs-vss-block-descriptors PUBLIC
-    src/modules/svi_extents.ixx
-    src/modules/vss_block_descriptors.ixx
-    src/modules/allocation.ixx
-)
-target_link_libraries(devicefs-vss-block-descriptors PRIVATE
-    ${DEVICEFS_COMMON_LINK_LIBRARIES}
-)
-
 add_library(vshadow STATIC
     dependencies/vshadow/create.cpp
     dependencies/vshadow/query.cpp
@@ -241,48 +205,40 @@ target_link_libraries(vshadow PRIVATE
     ole32 oleaut32 uuid vssapi
 )
 
-add_executable(devicefs src/main.cpp)
-devicefs_version_info(devicefs "DeviceFs Virtual Filesystem" 0.1)
-target_compile_definitions(devicefs PRIVATE DEVICEFS_PROGRAM_DEVICEFS)
-target_link_libraries(devicefs PRIVATE
-    ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-stream-writer devicefs-filesystem
-)
-
 add_executable(devicefs-read-path-test tests/read_path.cpp)
 target_link_libraries(devicefs-read-path-test PRIVATE
-    ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-filesystem
+    ${DEVICEFS_COMMON_LINK_LIBRARIES}
 )
 
 add_executable(devicefs-error-messages-test tests/error_messages.cpp)
 target_link_libraries(devicefs-error-messages-test PRIVATE ${DEVICEFS_COMMON_LINK_LIBRARIES})
 
-add_executable(vss-descriptor-dump
-    src/main.cpp
-    src/vss_descriptor_dump.cpp
-)
-devicefs_version_info(vss-descriptor-dump "DeviceFs VSS Descriptor Inspector" 0.1)
-target_compile_definitions(vss-descriptor-dump PRIVATE
-    DEVICEFS_PROGRAM_VSS_DESCRIPTOR_DUMP
-)
-target_link_libraries(vss-descriptor-dump PRIVATE
-    ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-stream-writer devicefs-vss-block-descriptors ole32
-)
-
 add_subdirectory(src/terminal)
 target_link_libraries(devicefs-common PRIVATE devicefs-terminal)
-target_link_libraries(devicefs-stream-writer PUBLIC devicefs-terminal)
-
 add_executable(backup-supervisor
     src/main.cpp
     src/backup_supervisor.cpp
     src/modules/supervisor/account_management.cpp
+    src/modules/filesystem_allocation_changes.cpp
+    src/vss_descriptor_dump.cpp
 )
 devicefs_version_info(backup-supervisor "DeviceFs Backup Supervisor" 0.1)
 target_link_libraries(backup-supervisor PRIVATE
-    ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-stream-writer devicefs-filesystem devicefs-rpc-block-device
-    devicefs-vss-block-descriptors devicefs-terminal vshadow
+    ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-rpc-block-device
+    devicefs-terminal vshadow
     Version
 )
+
+foreach(target IN ITEMS backup-supervisor devicefs-read-path-test)
+    target_sources(${target}
+        PRIVATE FILE_SET CXX_MODULES
+            FILES
+                src/modules/stream_writer.ixx
+                src/modules/allocation.ixx
+                src/modules/windows_block_device.ixx
+        PRIVATE src/modules/stream_writer.cpp
+    )
+endforeach()
 
 set(START_PBS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/supervisor/artifacts/start-pbs.fish"
@@ -295,6 +251,14 @@ file(GENERATE OUTPUT "${ARTIFACT_RESOURCE_SCRIPT}" CONTENT
 )
 target_sources(backup-supervisor PRIVATE "${ARTIFACT_RESOURCE_SCRIPT}")
 target_module_interfaces(backup-supervisor PRIVATE
+    src/modules/filesystem.ixx
+    src/modules/filesystem/internal.cpp
+    src/modules/filesystem/rpc_client.cpp
+    src/modules/rpc_block_device_server.ixx
+    src/modules/synthetic_backup_block_device.ixx
+    src/modules/vhdx_viewer.ixx
+    src/modules/svi_extents.ixx
+    src/modules/vss_block_descriptors.ixx
     src/modules/supervisor/account_management.ixx
     src/modules/supervisor/browse.ixx
     src/modules/supervisor/configuration.ixx
@@ -324,22 +288,23 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/winrt_apartment.ixx
 )
 
-if(DEVICEFS_MEASURE_FREE_CLUSTER_DATA OR DEVICEFS_MEASURE_READ_PATH)
-    target_module_interfaces(devicefs-filesystem PUBLIC
-        src/modules/filesystem_measurement.ixx
+foreach(target IN ITEMS backup-supervisor devicefs-read-path-test)
+    if(DEVICEFS_MEASURE_FREE_CLUSTER_DATA OR DEVICEFS_MEASURE_READ_PATH)
+        target_module_interfaces(${target} PRIVATE
+            src/modules/filesystem_measurement.ixx
+        )
+    endif()
+    target_compile_definitions(${target} PRIVATE
+        DEVICEFS_MEASURE_FREE_CLUSTER_DATA=$<BOOL:${DEVICEFS_MEASURE_FREE_CLUSTER_DATA}>
+        DEVICEFS_MEASURE_READ_PATH=$<BOOL:${DEVICEFS_MEASURE_READ_PATH}>
     )
-endif()
+endforeach()
 
 set(DEVICEFS_CODE_ANALYSIS_TARGETS
     devicefs-common
-    devicefs-stream-writer
     devicefs-rpc-block-device
-    devicefs-filesystem
-    devicefs-vss-block-descriptors
-    devicefs
     devicefs-read-path-test
     devicefs-error-messages-test
-    vss-descriptor-dump
     backup-supervisor
 )
 foreach(target IN LISTS DEVICEFS_CODE_ANALYSIS_TARGETS)
@@ -364,30 +329,28 @@ foreach(target IN LISTS DEVICEFS_CODE_ANALYSIS_TARGETS)
     )
 endforeach()
 
-foreach(target devicefs devicefs-read-path-test devicefs-error-messages-test vss-descriptor-dump backup-supervisor)
+foreach(target devicefs-read-path-test devicefs-error-messages-test backup-supervisor)
     target_sources(${target} PRIVATE src/resources/devicefs.manifest)
     set_target_properties(${target} PROPERTIES
         VS_GLOBAL_DeviceFsCommonProject "${CMAKE_CURRENT_BINARY_DIR}/devicefs-common.vcxproj"
     )
 endforeach()
 
-set_target_properties(devicefs-filesystem PROPERTIES
+set_target_properties(backup-supervisor devicefs-read-path-test PROPERTIES
     VS_GLOBAL_CAExcludePath "${WINFSP_INCLUDE_DIR};${WIL_INCLUDE_DIR};$(CAExcludePath)"
 )
 
-target_include_directories(devicefs-filesystem SYSTEM PRIVATE
-    "${WINFSP_INCLUDE_DIR}"
-)
-target_link_libraries(devicefs-filesystem INTERFACE
-    "${WINFSP_LIBRARY}" advapi32 delayimp
-)
-target_link_options(devicefs-filesystem INTERFACE
-    /DELAYLOAD:winfsp-${WINFSP_ARCHITECTURE}.dll
-)
-target_compile_definitions(devicefs-filesystem PRIVATE
-    DEVICEFS_MEASURE_FREE_CLUSTER_DATA=$<BOOL:${DEVICEFS_MEASURE_FREE_CLUSTER_DATA}>
-    DEVICEFS_MEASURE_READ_PATH=$<BOOL:${DEVICEFS_MEASURE_READ_PATH}>
-)
+foreach(target IN ITEMS backup-supervisor devicefs-read-path-test)
+    target_include_directories(${target} SYSTEM PRIVATE
+        "${WINFSP_INCLUDE_DIR}"
+    )
+    target_link_libraries(${target} PRIVATE
+        "${WINFSP_LIBRARY}" advapi32 delayimp
+    )
+    target_link_options(${target} PRIVATE
+        /DELAYLOAD:winfsp-${WINFSP_ARCHITECTURE}.dll
+    )
+endforeach()
 
 target_compile_definitions(backup-supervisor PRIVATE _WIN32_WINNT=0x0A00)
 target_include_directories(backup-supervisor SYSTEM PRIVATE "${DISM_INCLUDE_DIR}")

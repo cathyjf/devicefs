@@ -4,15 +4,19 @@
 export module devicefs.terminal.windows;
 
 import std;
-import devicefs.terminal.transcoding;
-import <windows.h>;
-import <wil/resource.h>;
-import <wil/stl.h>;
+#if __has_include(<devicefs/windows_imports.h>)
+    import <devicefs/windows_imports.h>;
+#else
+    import <windows.h>;
+    import <wil/resource.h>;
+    import <wil/stl.h>;
+#endif
 import devicefs.terminal;
 import devicefs.terminal.base_console;
 import devicefs.terminal.menu;
-import devicefs.terminal.safecast;
 import devicefs.terminal.reports;
+import devicefs.terminal.safecast;
+import devicefs.terminal.transcoding;
 import devicefs.terminal.vt;
 
 using namespace wil::literals;

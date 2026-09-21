@@ -228,6 +228,12 @@ target_compile_options(vshadow PRIVATE
     /analyze-
 )
 set_target_properties(vshadow PROPERTIES
+    # VShadow uses no C++ modules. With module scanning enabled, MSBuild 18.10
+    # gives all six sources the same `.d.json` dependency file and batches them
+    # into one compiler invocation. The resulting dependency records are
+    # incomplete, so unchanged sources are compiled again on every build.
+    # Disabling the unused scan restores normal source and header tracking.
+    CXX_SCAN_FOR_MODULES OFF
     VS_GLOBAL_EnableCppCoreCheck false
     VS_GLOBAL_RunCodeAnalysis false
 )

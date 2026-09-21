@@ -65,6 +65,7 @@ module;
 export module devicefs.vss_block_descriptors;
 
 import std;
+import devicefs.guid_formatter;
 import <devicefs/windows_imports.h>;
 import devicefs.allocation;
 import <devicefs/common.h>;
@@ -1028,7 +1029,7 @@ auto ReadBlockDescriptors(
             // format uniqueness assertion made by libvshadow.
             throw std::runtime_error(std::format(
                 "VSS snapshot ID '{}' matched multiple stores in '{}'",
-                Transcode<std::string>(winrt::to_hstring(snapshot_identifier)),
+                FormatGuid(snapshot_identifier),
                 source_path));
         }
         selected = &store;
@@ -1036,7 +1037,7 @@ auto ReadBlockDescriptors(
     if (selected == nullptr) {
         throw std::runtime_error(std::format(
             "VSS snapshot ID '{}' was not found in the catalog for '{}'",
-            Transcode<std::string>(winrt::to_hstring(snapshot_identifier)),
+            FormatGuid(snapshot_identifier),
             source_path));
     }
     return ReadDescriptorList(source, *selected);

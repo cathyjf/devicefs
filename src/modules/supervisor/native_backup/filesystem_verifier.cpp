@@ -31,6 +31,7 @@ import :internal;
 import :privileges;
 import :vhdx_attachment;
 import <devicefs/common.h>;
+import devicefs.guid_formatter;
 import devicefs.stream_writer;
 import devicefs.terminal.transcoding;
 
@@ -922,8 +923,8 @@ auto DetachView(
 
 [[nodiscard]] auto TryEstimateTraversalLayoutEntries(
     const std::wstring_view root,
-    const std::wstring_view endpoint_name,
-    const std::wstring_view volume_identifier,
+    const std::string_view endpoint_name,
+    const std::string_view volume_identifier,
     const HANDLE cancellation_event,
     SynchronousIoCancellation &io_cancellation)
     -> std::optional<std::uint64_t> {
@@ -935,8 +936,8 @@ auto DetachView(
     // A failed attempt is restarted because that estimate is useful during a
     // much longer ordinary traversal, but its partial count is discarded.
     devicefs::WriteToStream(devicefs::stdout,
-        L"Obtaining an optional {} layout-entry estimate for volume {} "
-        L"for traversal progress and ETA.\n",
+        "Obtaining an optional {} layout-entry estimate for volume {} "
+        "for traversal progress and ETA.\n",
         endpoint_name, volume_identifier);
 
     auto volume_path = std::wstring{root};
@@ -1002,9 +1003,9 @@ auto DetachView(
         auto estimate = query_once();
         if (estimate) {
             devicefs::WriteToStream(devicefs::stdout,
-                L"  Completed optional {} layout count for volume {}: {} "
-                L"entries. This count is used only for approximate "
-                L"traversal progress and ETA.\n",
+                "  Completed optional {} layout count for volume {}: {} "
+                "entries. This count is used only for approximate "
+                "traversal progress and ETA.\n",
                 endpoint_name, volume_identifier, *estimate);
             return *estimate;
         }
@@ -1017,16 +1018,16 @@ auto DetachView(
             constexpr auto retry_period = 10s;
             retry_deadline = now + retry_period;
             devicefs::WriteToStream(devicefs::stdout,
-                L"  The optional {} layout count for volume {} returned "
-                L"Windows error {}; complete attempts will be retried for "
-                L"approximately {} seconds.\n",
+                "  The optional {} layout count for volume {} returned "
+                "Windows error {}; complete attempts will be retried for "
+                "approximately {} seconds.\n",
                 endpoint_name, volume_identifier, estimate.error(),
                 retry_period.count());
         } else if (now >= *retry_deadline) {
             devicefs::WriteToStream(devicefs::stdout,
-                L"  The optional {} layout count for volume {} remained "
-                L"unavailable after retries (Windows error {}). This does "
-                L"not affect the verification result.\n",
+                "  The optional {} layout count for volume {} remained "
+                "unavailable after retries (Windows error {}). This does "
+                "not affect the verification result.\n",
                 endpoint_name, volume_identifier, estimate.error());
             return std::nullopt;
         }
@@ -1048,37 +1049,37 @@ auto DetachView(
 auto PublishTraversalLayoutEstimate(
     const std::wstring_view real_root,
     const std::wstring_view synthetic_root,
-    const std::wstring_view volume_identifier,
+    const std::string_view volume_identifier,
     const HANDLE cancellation_event,
     SynchronousIoCancellation &io_cancellation,
     VerificationState &state) -> void {
     try {
         auto estimate = TryEstimateTraversalLayoutEntries(
-            real_root, L"real-B", volume_identifier,
+            real_root, "real-B", volume_identifier,
             cancellation_event, io_cancellation);
         if (!estimate &&
             !internal::CancellationRequested(cancellation_event)) {
             devicefs::WriteToStream(devicefs::stdout,
-                L"Trying the synthetic view for volume {} because the "
-                L"real-B view supplied no complete layout count.\n",
+                "Trying the synthetic view for volume {} because the "
+                "real-B view supplied no complete layout count.\n",
                 volume_identifier);
             estimate = TryEstimateTraversalLayoutEntries(
-                synthetic_root, L"synthetic", volume_identifier,
+                synthetic_root, "synthetic", volume_identifier,
                 cancellation_event, io_cancellation);
         }
         if (estimate) {
             state.SetTraversalEstimate(*estimate);
         } else if (!internal::CancellationRequested(cancellation_event)) {
             devicefs::WriteToStream(devicefs::stdout,
-                L"No complete layout count is available for volume {}; "
-                L"ordinary traversal will continue without a percentage "
-                L"or ETA.\n",
+                "No complete layout count is available for volume {}; "
+                "ordinary traversal will continue without a percentage "
+                "or ETA.\n",
                 volume_identifier);
         }
     } catch (const std::exception &error) {
         devicefs::WriteToStream(devicefs::stdout,
-            L"The optional layout count failed for volume {}. This does not "
-            L"affect the verification result.\n",
+            "The optional layout count failed for volume {}. This does not "
+            "affect the verification result.\n",
             volume_identifier);
         devicefs::WriteToStream(devicefs::stdout, "  Failure: {}\n", error.what());
     }
@@ -2055,17 +2056,17 @@ auto CompareAttachedFilesystems(
     if (internal::CancellationRequested(cancellation_event)) {
         return;
     }
-    const auto volume_identifier =
-        winrt::to_hstring(volume.volume_identifier);
+    const auto volume_identifier = FormatGuid(volume.volume_identifier);
     state.BeginTraversal();
     devicefs::WriteToStream(
         devicefs::stdout,
-        L"\nBeginning concurrent filesystem traversal for volume {}.\n"
-        L"  Synthetic volume: {}\n"
-        L"  Real-B volume: {}\n"
-        L"  Traversal workers per view: {}\n",
-        std::wstring_view{volume_identifier},
-        synthetic_attachment.Root(), real_attachment.Root(),
+        "\nBeginning concurrent filesystem traversal for volume {}.\n"
+        "  Synthetic volume: {}\n"
+        "  Real-B volume: {}\n"
+        "  Traversal workers per view: {}\n",
+        volume_identifier,
+        Transcode<std::string>(synthetic_attachment.Root()),
+        Transcode<std::string>(real_attachment.Root()),
         kVerificationWorkerCount);
 
     auto synthetic_operation = std::async(
@@ -2093,14 +2094,14 @@ auto CompareAttachedFilesystems(
             return std::async(std::launch::async, [&] {
                 PublishTraversalLayoutEstimate(
                     real_attachment.Root(), synthetic_attachment.Root(),
-                    std::wstring_view{volume_identifier},
+                    volume_identifier,
                     cancellation_event, io_cancellation, state);
             });
         } catch (const std::exception &error) {
             devicefs::WriteToStream(devicefs::stdout,
-                L"Could not start the optional layout count for volume {}. "
-                L"Verification will continue without a percentage or ETA.\n",
-                std::wstring_view{volume_identifier});
+                "Could not start the optional layout count for volume {}. "
+                "Verification will continue without a percentage or ETA.\n",
+                volume_identifier);
             devicefs::WriteToStream(
                 devicefs::stdout, "  Failure: {}\n", error.what());
             return std::nullopt;
@@ -2113,21 +2114,21 @@ auto CompareAttachedFilesystems(
         state.CompleteTraversal();
         const auto observation = state.Observe();
         devicefs::WriteToStream(devicefs::stdout,
-            L"Filesystem traversal finished for volume {}.\n"
-            L"  Synthetic: {} directories, {} object(s), {} "
-            L"stream(s), {}{} logical stream byte(s) observed, "
-            L"{} operation failure(s)\n"
-            L"  Real B: {} directories, {} object(s), {} "
-            L"stream(s), {}{} logical stream byte(s) observed, "
-            L"{} operation failure(s)\n",
-            std::wstring_view{volume_identifier},
+            "Filesystem traversal finished for volume {}.\n"
+            "  Synthetic: {} directories, {} object(s), {} "
+            "stream(s), {}{} logical stream byte(s) observed, "
+            "{} operation failure(s)\n"
+            "  Real B: {} directories, {} object(s), {} "
+            "stream(s), {}{} logical stream byte(s) observed, "
+            "{} operation failure(s)\n",
+            volume_identifier,
             observation.synthetic.directories,
             observation.synthetic.objects,
             observation.synthetic.streams,
             observation.synthetic.stream_bytes ==
                 std::numeric_limits<std::uint64_t>::max()
-                ? L"at least "sv
-                : std::wstring_view{},
+                ? "at least "sv
+                : std::string_view{},
             observation.synthetic.stream_bytes,
             observation.synthetic.failures,
             observation.real.directories,
@@ -2135,8 +2136,8 @@ auto CompareAttachedFilesystems(
             observation.real.streams,
             observation.real.stream_bytes ==
                 std::numeric_limits<std::uint64_t>::max()
-                ? L"at least "sv
-                : std::wstring_view{},
+                ? "at least "sv
+                : std::string_view{},
             observation.real.stream_bytes,
             observation.real.failures);
         const auto comparison_surface_incomplete =
@@ -2144,9 +2145,9 @@ auto CompareAttachedFilesystems(
             ComparisonSurfaceIncomplete(*real);
         state.SetPhase(VerificationPhase::Planning);
         devicefs::WriteToStream(devicefs::stdout,
-            L"Filesystem inventories are ready for volume {}; "
-            L"preparing content comparisons.\n",
-            std::wstring_view{volume_identifier});
+            "Filesystem inventories are ready for volume {}; "
+            "preparing content comparisons.\n",
+            volume_identifier);
         auto plan = BuildComparisonPlan(
             *synthetic, *real, volume.payload_snapshot_identifier,
             percentage, cancellation_event, state);
@@ -2325,7 +2326,6 @@ auto PrintOperationComparison(
     const GUID &volume_identifier,
     const OperationComparison &comparison) -> void {
     const auto matched = IsMatchedError(comparison);
-    const auto identifier = winrt::to_hstring(volume_identifier);
     if (matched) {
         devicefs::WriteToStream(
             output, "\nMatched filesystem error:\n");
@@ -2338,8 +2338,7 @@ auto PrintOperationComparison(
             "\n*** FILESYSTEM VERIFICATION MISMATCH ***\n");
     }
     devicefs::WriteToStream(output,
-        L"  Volume ID: {}\n",
-        std::wstring_view{identifier});
+        "  Volume ID: {}\n", FormatGuid(volume_identifier));
     devicefs::WriteToStream(output,
         L"  Object: {}\n", DisplayPath(comparison.key.path));
     if (!comparison.key.stream.empty() ||
@@ -2374,7 +2373,6 @@ auto PrintMismatch(
     const auto output,
     const GUID &volume_identifier,
     const MismatchDetail &mismatch) -> void {
-    const auto identifier = winrt::to_hstring(volume_identifier);
     if (IsVssExcludedPath(mismatch.path)) {
         devicefs::WriteToStream(output,
             "\nIdentified difference in object known to be excluded "
@@ -2384,9 +2382,10 @@ auto PrintMismatch(
             "\n*** FILESYSTEM VERIFICATION MISMATCH ***\n");
     }
     devicefs::WriteToStream(output,
-        L"  Volume ID: {}\n"
-        L"  Object: {}\n",
-        std::wstring_view{identifier}, DisplayPath(mismatch.path));
+        "  Volume ID: {}\n"
+        "  Object: {}\n",
+        FormatGuid(volume_identifier),
+        Transcode<std::string>(DisplayPath(mismatch.path)));
     if ((mismatch.kind == MismatchKind::StreamMissingFromSynthetic) ||
         (mismatch.kind == MismatchKind::StreamMissingFromReal) ||
         (mismatch.kind == MismatchKind::StreamLength) ||
@@ -2537,11 +2536,8 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
         devicefs::stdout, "\nFilesystem verification progress:\n");
     for (const auto &job : jobs) {
         const auto observation = job.state->Observe();
-        const auto identifier =
-            winrt::to_hstring(job.volume_identifier);
         devicefs::WriteToStream(devicefs::stdout,
-            L"  Volume ID: {}\n",
-            std::wstring_view{identifier});
+            "  Volume ID: {}\n", FormatGuid(job.volume_identifier));
         devicefs::WriteToStream(devicefs::stdout,
             "    Phase: {}\n",
             PhaseName(observation.phase));
@@ -2641,11 +2637,8 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
         if (observation.exclusion_count != 0) {
             ++exclusion_volumes;
         }
-        const auto identifier =
-            winrt::to_hstring(job.volume_identifier);
         devicefs::WriteToStream(devicefs::stdout,
-            L"\n  Volume ID: {}\n",
-            std::wstring_view{identifier});
+            "\n  Volume ID: {}\n", FormatGuid(job.volume_identifier));
         if (observation.mismatch_count != 0) {
             ++mismatched;
             if (observation.failed) {

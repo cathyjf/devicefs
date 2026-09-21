@@ -35,6 +35,7 @@ import :manifest;
 import devicefs.allocation;
 import <devicefs/common.h>;
 import devicefs.filesystem;
+import devicefs.guid_formatter;
 import devicefs.rpc_block_device_server;
 import devicefs.stream_writer;
 import devicefs.synthetic_backup_block_device;
@@ -130,12 +131,8 @@ struct SnapshotDiagnosticResult {
     IncrementalDiagnosticResult diagnostics;
 };
 
-[[nodiscard]] auto GuidText(const GUID &identifier) {
-    return Transcode<std::string>(winrt::to_hstring(identifier));
-}
-
 [[nodiscard]] auto VolumeName(const GUID &identifier) {
-    return std::format("\\\\?\\Volume{}\\", GuidText(identifier));
+    return std::format("\\\\?\\Volume{}\\", FormatGuid(identifier));
 }
 
 [[nodiscard]] auto CollectAvailableBaselines(
@@ -163,8 +160,17 @@ struct SnapshotDiagnosticResult {
         return {};
     }
     return {{
-        .volume_identifier = winrt::guid{std::string_view{
-            snapshot->original_volume}.substr(11, 36)},
+        .volume_identifier = [&snapshot] {
+            auto identifier = GUID{};
+            const auto error = IIDFromString(
+                Transcode<wchar_t>(std::string_view{
+                    snapshot->original_volume}.substr(10, 38)).data(), &identifier);
+            if (FAILED(error)) {
+                WinError("could not read the volume GUID from '{}'",
+                    snapshot->original_volume, ExplicitHresult{error});
+            }
+            return identifier;
+        }(),
         .snapshot_identifier = snapshot_identifier,
         .volume = std::move(snapshot->original_volume),
         .device = std::move(snapshot->device),
@@ -244,7 +250,7 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
     auto volume_block_total = std::uint64_t{};
     for (const auto &report : reports) {
         devicefs::WriteToStream(devicefs::stdout, "\n  Volume ID: {}\n",
-            GuidText(report.volume_identifier));
+            FormatGuid(report.volume_identifier));
         if (!report.map) {
             devicefs::WriteToStream(devicefs::stdout,
                 "    Dirty map unavailable: {}\n", report.map.error());
@@ -357,7 +363,7 @@ enum class BackupViewPreparation {
     std::vector<internal::DeviceFsSource> &real_sources,
     std::vector<FilesystemVerificationVolume> &verification_volumes,
     const auto output) {
-    const auto volume_identifier = GuidText(report.volume_identifier);
+    const auto volume_identifier = FormatGuid(report.volume_identifier);
     if (!report.map) {
         devicefs::WriteToStream(output,
             "\n  Volume ID: {}\n",
@@ -408,9 +414,9 @@ enum class BackupViewPreparation {
         "    RPC symbol: {}\n",
         filename,
         volume_identifier,
-        GuidText(report.baseline_snapshot_identifier),
+        FormatGuid(report.baseline_snapshot_identifier),
         report.baseline_device,
-        GuidText(report.payload_snapshot_identifier),
+        FormatGuid(report.payload_snapshot_identifier),
         report.payload_device,
         filename);
     devicefs::WriteToStream(output,
@@ -1243,7 +1249,7 @@ auto PrintOwnershipUpdate(
         }
         if (!wrote_heading) {
             devicefs::WriteToStream(output,
-                "  Volume ID: {}\n", GuidText(volume_identifier));
+                "  Volume ID: {}\n", FormatGuid(volume_identifier));
             devicefs::WriteToStream(
                 output, "    NTFS ownership update:\n");
             wrote_heading = true;
@@ -1313,7 +1319,7 @@ auto PrintVerificationProgress(
         uncovered_total += observation.uncovered_blocks;
         devicefs::WriteToStream(devicefs::stdout,
             "  Volume ID: {}\n",
-            GuidText(job.volume.get().volume_identifier));
+            FormatGuid(job.volume.get().volume_identifier));
         devicefs::WriteToStream(devicefs::stdout,
             "    Compared: {} of {} bytes ({:.2f}%)\n"
             "    Differences observed: {} byte(s) in {} 16-KiB block(s)\n",
@@ -1405,7 +1411,7 @@ auto PrintVerificationResult(
     const bool cancelled) {
     devicefs::WriteToStream(output,
         "\n  Volume ID: {}\n",
-        GuidText(job.volume.get().volume_identifier));
+        FormatGuid(job.volume.get().volume_identifier));
     if (!observation.failure.empty()) {
         devicefs::WriteToStream(output,
             "    Status: failed after comparing {} byte(s): {}\n",

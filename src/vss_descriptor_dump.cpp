@@ -18,6 +18,7 @@
 #include <objbase.h>
 
 import std;
+import devicefs.guid_formatter;
 import devicefs.svi_extents;
 import devicefs.stream_writer;
 import devicefs.vss_block_descriptors;
@@ -104,15 +105,6 @@ auto Usage(const auto output) noexcept {
     return result;
 }
 
-[[nodiscard]] auto FormatGuid(const GUID &value) {
-    return std::format(
-        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-"
-        "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        value.Data1, value.Data2, value.Data3,
-        value.Data4[0], value.Data4[1], value.Data4[2], value.Data4[3],
-        value.Data4[4], value.Data4[5], value.Data4[6], value.Data4[7]);
-}
-
 [[nodiscard]] auto FormatResult(
     const devicefs::vss::StoreBlockDescriptors &result) {
     const auto forwarders = std::ranges::count_if(
@@ -134,8 +126,8 @@ auto Usage(const auto output) noexcept {
         "descriptor-count\t{}\n"
         "forwarder-count\t{}\n"
         "overlay-count\t{}\n",
-        FormatGuid(result.snapshot_identifier),
-        FormatGuid(result.store_identifier), result.volume_size,
+        FormatGuid<false>(result.snapshot_identifier),
+        FormatGuid<false>(result.store_identifier), result.volume_size,
         result.list_block_count, result.descriptors.size(),
         forwarders, overlays);
     for (const auto &descriptor : result.descriptors) {

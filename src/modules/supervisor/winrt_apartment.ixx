@@ -22,6 +22,7 @@ export module devicefs.supervisor.winrt_apartment;
 
 import std;
 import <devicefs/windows_imports.h>;
+import <devicefs/winrt_imports.h>;
 import <sal.h>;
 
 export class WinrtApartment {

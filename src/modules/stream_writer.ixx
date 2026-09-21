@@ -19,8 +19,6 @@ export module devicefs.stream_writer;
 import std;
 import devicefs.terminal.transcoding;
 
-using devicefs::terminal::Transcode;
-
 namespace devicefs::stream_writer_detail {
 
 struct Stdout {};
@@ -133,7 +131,9 @@ auto WriteToStream(
             const auto text = std::format(
                 format.get(), std::forward<Arguments>(arguments)...);
             return std::ranges::copy(
-                std::string_view{Transcode<char>(text)}, destination).out;
+                std::string_view{devicefs::terminal::Transcode<char>(text)},
+                destination
+            ).out;
         });
 }
 

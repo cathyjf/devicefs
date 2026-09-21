@@ -21,6 +21,7 @@ import <devicefs/windows_imports.h>;
 import <sal.h>;
 import <devicefs/common.h>;
 import devicefs.filesystem;
+import devicefs.guid_formatter;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
 import devicefs.supervisor.browse;
@@ -629,14 +630,16 @@ struct SelectiveViewOptions {
                 throw std::invalid_argument(
                     "--baseline requires a value");
             }
-            try {
-                result.baseline_snapshot_identifier =
-                    winrt::guid{arguments[index]};
-            } catch (const std::invalid_argument &) {
-                throw std::invalid_argument(std::format(
-                    "--baseline requires a snapshot GUID; received '{}'",
-                    arguments[index]));
-            }
+            result.baseline_snapshot_identifier = [argument = arguments[index]] {
+                const auto text = argument.starts_with('{') ?
+                    std::string{argument} : std::format("{{{}}}", argument);
+                auto identifier = GUID{};
+                if (FAILED(IIDFromString(Transcode<wchar_t>(text).data(), &identifier))) {
+                    throw std::invalid_argument(std::format(
+                        "--baseline requires a snapshot GUID; received '{}'", argument));
+                }
+                return identifier;
+            }();
         } else {
             throw std::invalid_argument(std::format(
                 "incremental diagnostics received an unknown argument: {}",
@@ -772,9 +775,8 @@ struct SelectiveViewOptions {
                     "  Volume ID: {}\n"
                     "    Snapshot ID: {}\n"
                     "    Device: {}\n",
-                    Transcode<std::string>(winrt::to_hstring(volume_identifier)),
-                    Transcode<std::string>(
-                        winrt::to_hstring(snapshot.snapshot_identifier)),
+                    FormatGuid(volume_identifier),
+                    FormatGuid(snapshot.snapshot_identifier),
                     snapshot.device);
             }
             return 0;

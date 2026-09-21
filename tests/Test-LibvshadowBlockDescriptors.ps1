@@ -20,9 +20,10 @@ snapshot's VSS descriptor store, changes to the NTFS allocation bitmap, and
 allocated file-data, named data-stream, or directory extents reachable at or
 beneath System Volume Information in either endpoint snapshot.
 
-The default parameter set tests vss-descriptor-dump. Supply only
--VShadowInfoPath to test stock vshadowinfo instead. Supplying both parser paths
-adds exact descriptor parity checks against the same source image.
+The default parameter set tests the supervisor's `--vss-descriptor-dump` mode.
+Supply only `-VShadowInfoPath` to test stock vshadowinfo instead. Supplying both
+`-SupervisorPath` and `-VShadowInfoPath` adds exact descriptor parity checks
+against the same source image.
 When vss-descriptor-dump is used, the test also reports non-failing probes that
 compare raw VSS metadata from snapshot B while it is latest and after snapshot
 C makes it no longer latest, as well as from C while C is latest.
@@ -44,26 +45,22 @@ a map covering the entire volume. The VHD and snapshots are removed during
 cleanup. Use -KeepArtifactsOnFailure to retain the detached VHD, process logs,
 and descriptor-tool output after a failure.
 
-.PARAMETER VssDescriptorDumpPath
-The `vss-descriptor-dump.exe` to test. Defaults to the repository's `Release`
-build for the machine's native architecture.
-
-.PARAMETER DeviceFsPath
-The `devicefs.exe` to test. Defaults to the repository's `Release` build for
-the machine's native architecture.
+.PARAMETER SupervisorPath
+The `backup-supervisor.exe` to test. Its `--devicefs` mode runs the filesystem,
+and its `--vss-descriptor-dump` mode reads VSS descriptors and SVI extents.
+Defaults to the repository's `Release` build for the machine's native
+architecture.
 #>
 
 [CmdletBinding(DefaultParameterSetName = 'DescriptorDump')]
 param(
     [Parameter(Position = 0, ParameterSetName = 'DescriptorDump')]
     [Parameter(Mandatory, Position = 0, ParameterSetName = 'Parity')]
-    [string] $VssDescriptorDumpPath,
+    [string] $SupervisorPath,
 
     [Parameter(Mandatory, ParameterSetName = 'VShadowInfo')]
     [Parameter(Mandatory, ParameterSetName = 'Parity')]
     [string] $VShadowInfoPath,
-
-    [string] $DeviceFsPath,
 
     [switch] $KeepArtifactsOnFailure
 )
@@ -514,13 +511,6 @@ $parity_requested = $PSCmdlet.ParameterSetName -eq 'Parity'
 if ($use_descriptor_dump) {
     . ([IO.Path]::Combine(
             $PSScriptRoot, 'include', 'VssDescriptorOutput.ps1'))
-    if (-not $VssDescriptorDumpPath) {
-        $VssDescriptorDumpPath = Get-DefaultTestExecutablePath 'vss-descriptor-dump.exe'
-    }
-    $VssDescriptorDumpPath =
-        (Resolve-Path -LiteralPath $VssDescriptorDumpPath).Path
-    Assert-Condition ([IO.File]::Exists($VssDescriptorDumpPath)) `
-        "vss-descriptor-dump was not found at '$VssDescriptorDumpPath'."
 }
 if ($PSCmdlet.ParameterSetName -ne 'DescriptorDump') {
     $VShadowInfoPath =
@@ -528,12 +518,12 @@ if ($PSCmdlet.ParameterSetName -ne 'DescriptorDump') {
     Assert-Condition ([IO.File]::Exists($VShadowInfoPath)) `
         "vshadowinfo was not found at '$VShadowInfoPath'."
 }
-if (-not $DeviceFsPath) {
-    $DeviceFsPath = Get-DefaultTestExecutablePath 'devicefs.exe'
+if (-not $SupervisorPath) {
+    $SupervisorPath = Get-DefaultTestExecutablePath 'backup-supervisor.exe'
 }
-$DeviceFsPath = (Resolve-Path -LiteralPath $DeviceFsPath).Path
-Assert-Condition ([IO.File]::Exists($DeviceFsPath)) `
-    "devicefs was not found at '$DeviceFsPath'."
+$SupervisorPath = (Resolve-Path -LiteralPath $SupervisorPath).Path
+Assert-Condition ([IO.File]::Exists($SupervisorPath)) `
+    "backup-supervisor was not found at '$SupervisorPath'."
 
 $native_source_path = [IO.Path]::Combine(
     $PSScriptRoot, 'types', 'DeviceFsTestNative.cs')
@@ -665,7 +655,7 @@ try {
                     $test_root, "$Artifact.stdout.txt")
                 $stderr = [IO.Path]::Combine(
                     $test_root, "$Artifact.stderr.txt")
-                & $VssDescriptorDumpPath --source $snapshot_b.DeviceObject `
+                & $SupervisorPath --vss-descriptor-dump --source $snapshot_b.DeviceObject `
                     --snapshot-id $copy_id >$stdout 2>$stderr
                 $exit_code = $LASTEXITCODE
                 if ($exit_code -ne 0) {
@@ -848,7 +838,7 @@ try {
     }
 
     $devicefs_invocation = Start-DeviceFsTestProcess `
-        -Executable $DeviceFsPath -MountPath $synthetic_mount `
+        -SupervisorPath $SupervisorPath -MountPath $synthetic_mount `
         -ReadUser $read_user -StopEvent "Local\devicefs-vss-$run_id" `
         -Mappings ([ordered]@{
             'snapshot-a.img' = $snapshot_a.DeviceObject
@@ -939,7 +929,7 @@ try {
                 $test_root, "svi-extents-$name.stdout.txt")
             $stderr = [IO.Path]::Combine(
                 $test_root, "svi-extents-$name.stderr.txt")
-            & $VssDescriptorDumpPath --source $endpoint.Device `
+            & $SupervisorPath --vss-descriptor-dump --source $endpoint.Device `
                 --svi-extents >$stdout 2>$stderr
             $exit_code = $LASTEXITCODE
             if ($exit_code -ne 0) {
@@ -1007,7 +997,7 @@ try {
                 $test_root, "vss-descriptor-dump-$name.stdout.txt")
             $stderr = [IO.Path]::Combine(
                 $test_root, "vss-descriptor-dump-$name.stderr.txt")
-            & $VssDescriptorDumpPath --source $vshadow_source `
+            & $SupervisorPath --vss-descriptor-dump --source $vshadow_source `
                 --snapshot-id $requests[$i] >$stdout 2>$stderr
             $exit_code = $LASTEXITCODE
             if ($exit_code -ne 0) {
@@ -1057,7 +1047,7 @@ try {
                     $test_root, "$($probe.Artifact).stdout.txt")
                 $stderr = [IO.Path]::Combine(
                     $test_root, "$($probe.Artifact).stderr.txt")
-                & $VssDescriptorDumpPath --source $probe.Source `
+                & $SupervisorPath --vss-descriptor-dump --source $probe.Source `
                     --snapshot-id $probe.CopyId >$stdout 2>$stderr
                 $exit_code = $LASTEXITCODE
                 if ($exit_code -ne 0) {

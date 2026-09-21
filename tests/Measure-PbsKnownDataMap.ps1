@@ -255,7 +255,7 @@ try {
             $log = Join-Path $OutputDirectory "$name.log"
             $map_size = if ($case.Map -eq 'hidden') { 0 } else { $pbs_chunk_size }
             $filesystem_timer = [Diagnostics.Stopwatch]::StartNew()
-            $invocation = Start-DeviceFsTestProcess -Executable $SupervisorPath -UseSupervisor `
+            $invocation = Start-DeviceFsTestProcess -SupervisorPath $SupervisorPath `
                 -MountPath $mount_path -ReadUser $read_user `
                 -StopEvent "Local\devicefs-map-test-$run_id-$name" `
                 -Mappings $mappings `

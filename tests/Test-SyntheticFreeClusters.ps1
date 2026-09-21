@@ -21,14 +21,15 @@ test different byte counts per bit, including sizes that cross NTFS clusters.
 The VHD is detached during cleanup. Use -KeepArtifactsOnFailure to retain the
 detached VHD and logs after a failure.
 
-.PARAMETER DeviceFsPath
-The `devicefs.exe` to test. Defaults to the repository's `Release` build for
-the machine's native architecture.
+.PARAMETER SupervisorPath
+The `backup-supervisor.exe` to test. Its `--devicefs` mode runs the filesystem.
+Defaults to the repository's `Release` build for the machine's native
+architecture.
 #>
 
 [CmdletBinding()]
 param(
-    [string] $DeviceFsPath,
+    [string] $SupervisorPath,
 
     [ValidateRange(256, 8192)]
     [int] $VhdSizeMiB = 512,
@@ -204,12 +205,12 @@ if (-not [Environment]::Is64BitProcess) {
     throw 'This integration test requires 64-bit PowerShell.'
 }
 
-if (-not $DeviceFsPath) {
-    $DeviceFsPath = Get-DefaultTestExecutablePath 'devicefs.exe'
+if (-not $SupervisorPath) {
+    $SupervisorPath = Get-DefaultTestExecutablePath 'backup-supervisor.exe'
 }
-$DeviceFsPath = (Resolve-Path -LiteralPath $DeviceFsPath).Path
-Assert-Condition ([IO.File]::Exists($DeviceFsPath)) `
-    "devicefs was not found at '$DeviceFsPath'."
+$SupervisorPath = (Resolve-Path -LiteralPath $SupervisorPath).Path
+Assert-Condition ([IO.File]::Exists($SupervisorPath)) `
+    "backup-supervisor was not found at '$SupervisorPath'."
 
 $native_source_path = [IO.Path]::Combine(
     $PSScriptRoot, 'types', 'DeviceFsTestNative.cs')
@@ -367,12 +368,12 @@ try {
     $source_device = $fixture.VolumeName.TrimEnd([char]'\')
     $read_user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $normal_invocation = Start-DeviceFsTestProcess `
-        -Executable $DeviceFsPath -MountPath $normal_mount `
+        -SupervisorPath $SupervisorPath -MountPath $normal_mount `
         -ReadUser $read_user -StopEvent "Local\devicefs-test-$run_id-normal" `
         -Mappings ([ordered]@{ 'volume.img' = $source_device })
     Wait-DeviceFsReady $normal_invocation
     $synthetic_invocation = Start-DeviceFsTestProcess `
-        -Executable $DeviceFsPath -MountPath $synthetic_mount `
+        -SupervisorPath $SupervisorPath -MountPath $synthetic_mount `
         -ReadUser $read_user -StopEvent "Local\devicefs-test-$run_id-synthetic" `
         -Mappings ([ordered]@{ 'volume.img' = $source_device }) `
         -SyntheticFreeClusters -KnownDataMapClusterSize $KnownDataMapClusterSize

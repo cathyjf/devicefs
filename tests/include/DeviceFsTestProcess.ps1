@@ -18,7 +18,7 @@ function Get-DefaultTestExecutablePath {
 function Start-DeviceFsTestProcess {
     param(
         [Parameter(Mandatory)]
-        [string] $Executable,
+        [string] $SupervisorPath,
 
         [Parameter(Mandatory)]
         [string] $MountPath,
@@ -32,8 +32,6 @@ function Start-DeviceFsTestProcess {
         [Parameter(Mandatory)]
         [Collections.IDictionary] $Mappings,
 
-        [switch] $UseSupervisor,
-
         [switch] $SyntheticFreeClusters,
 
         [switch] $Cache,
@@ -46,15 +44,13 @@ function Start-DeviceFsTestProcess {
     }
 
     $start_info = [Diagnostics.ProcessStartInfo]::new()
-    $start_info.FileName = $Executable
-    $start_info.WorkingDirectory = [IO.Path]::GetDirectoryName($Executable)
+    $start_info.FileName = $SupervisorPath
+    $start_info.WorkingDirectory = [IO.Path]::GetDirectoryName($SupervisorPath)
     $start_info.UseShellExecute = $false
     $start_info.CreateNoWindow = $true
     $start_info.RedirectStandardOutput = $true
     $start_info.RedirectStandardError = $true
-    if ($UseSupervisor) {
-        $start_info.ArgumentList.Add('--devicefs')
-    }
+    $start_info.ArgumentList.Add('--devicefs')
     foreach ($argument in @(
             '--mount', $MountPath,
             '--read-user', $ReadUser,

@@ -88,7 +88,7 @@ if (-not $TestClient) {
     if (-not $IsLinux) {
         throw 'The DeviceFs fixture mode requires Linux under WSL.'
     }
-    $DeviceFsPath = Get-CachedPath 'DEVICEFS_EXECUTABLE'
+    $SupervisorPath = Get-CachedPath 'DEVICEFS_SUPERVISOR_EXECUTABLE'
     $MkfsFatPath = Get-CachedPath 'MKFS_FAT_EXECUTABLE'
     $MountPath = Get-CachedPath 'MOUNT_EXECUTABLE'
     $UmountPath = Get-CachedPath 'UMOUNT_EXECUTABLE'
@@ -303,7 +303,7 @@ try {
         Write-Host "Backing device: $device"
         Write-Host "RPC endpoint: 127.0.0.1:$port"
         Write-Host "DeviceFs mount point: $devicefs_mount"
-        $password | & $DeviceFsPath --vhdx `
+        $password | & $SupervisorPath --devicefs --vhdx `
             --mount $devicefs_mount `
             --map fixture.vhdx "\\\tcp:127.0.0.1:$port"
         if ($LASTEXITCODE -ne 0) {

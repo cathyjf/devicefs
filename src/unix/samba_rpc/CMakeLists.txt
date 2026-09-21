@@ -213,9 +213,9 @@ if(BUILD_TESTING)
     find_program(MKTEMP_EXECUTABLE NAMES gmktemp mktemp REQUIRED)
     find_program(PDBEDIT_EXECUTABLE NAMES pdbedit REQUIRED)
     find_program(POWERSHELL_EXECUTABLE NAMES pwsh-preview pwsh REQUIRED)
-    set(DEVICEFS_EXECUTABLE
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../../build/windows-x64/Release/devicefs.exe"
-        CACHE FILEPATH "DeviceFs executable used by the interactive fixture"
+    set(DEVICEFS_SUPERVISOR_EXECUTABLE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../build/windows-x64/Release/backup-supervisor.exe"
+        CACHE FILEPATH "Supervisor executable used by the interactive fixture"
     )
     find_program(SAMBA_DCERPCD_EXECUTABLE
         NAMES samba-dcerpcd

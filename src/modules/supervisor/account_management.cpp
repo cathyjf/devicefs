@@ -24,15 +24,7 @@ module devicefs.supervisor.account_management;
 
 import std;
 import <devicefs/windows_imports.h>;
-import <winrt/Windows.Data.Json.h>;
-import <winrt/Windows.Foundation.h>;
-import <winrt/Windows.Foundation.Collections.h>;
-import <winrt/Windows.Security.Cryptography.h>;
-import <winrt/Windows.Security.Cryptography.Core.h>;
-import <winrt/Windows.Storage.h>;
-import <winrt/Windows.Storage.Streams.h>;
-import <winrt/Windows.Web.Http.h>;
-import <winrt/Windows.Web.Http.Headers.h>;
+import <devicefs/winrt_imports.h>;
 import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.supervisor.https_download;

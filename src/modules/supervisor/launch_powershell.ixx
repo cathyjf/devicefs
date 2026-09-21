@@ -21,12 +21,6 @@ module;
 #include <lmcons.h>
 #include <roapi.h>
 
-#include <winrt/Windows.ApplicationModel.h>
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.Foundation.Collections.h>
-#include <winrt/Windows.Management.Deployment.h>
-#include <winrt/Windows.Storage.h>
-
 #include <wil/registry.h>
 #include <wil/resource.h>
 #include <wil/stl.h>
@@ -36,6 +30,7 @@ export module devicefs.supervisor.launch_powershell;
 
 import std;
 import <devicefs/common.h>;
+import <devicefs/winrt_imports.h>;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
 import devicefs.supervisor.installation;

@@ -14,8 +14,6 @@
 // No additional header unit wrapper files should be created without an
 // individualized evidence-based rationale.
 
-#pragma once
-
 #include <windows.h>
 #include <roapi.h>
 #include <userenv.h>

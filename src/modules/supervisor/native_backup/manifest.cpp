@@ -22,8 +22,7 @@ export module devicefs.supervisor.native_backup:manifest;
 
 import std;
 import <devicefs/windows_imports.h>;
-import <winrt/Windows.Data.Json.h>;
-import <winrt/Windows.Foundation.Collections.h>;
+import <devicefs/winrt_imports.h>;
 import :internal;
 import :pbs;
 import devicefs.supervisor.installation;

@@ -28,16 +28,11 @@ module;
 
 #undef GetObject
 
-#include <winrt/Windows.Data.Json.h>
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.Foundation.Collections.h>
-#include <winrt/Windows.Web.Http.h>
-#include <winrt/Windows.Web.Http.Headers.h>
-
 export module devicefs.supervisor.materialize_oci;
 
 import std;
 import <devicefs/common.h>;
+import <devicefs/winrt_imports.h>;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
 import devicefs.supervisor.https_download;

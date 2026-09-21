@@ -22,8 +22,7 @@ export module devicefs.supervisor.configuration;
 
 import std;
 import <devicefs/windows_imports.h>;
-import <winrt/Windows.Data.Json.h>;
-import <winrt/Windows.Foundation.Collections.h>;
+import <devicefs/winrt_imports.h>;
 import devicefs.supervisor.winrt_apartment;
 import devicefs.terminal.transcoding;
 

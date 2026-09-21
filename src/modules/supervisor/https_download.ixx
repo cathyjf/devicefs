@@ -16,24 +16,24 @@
 
 module;
 
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.Storage.h>
-#include <winrt/Windows.Storage.Streams.h>
-#include <winrt/Windows.Web.Http.h>
-#include <winrt/Windows.Web.Http.Filters.h>
-#include <winrt/Windows.Web.Http.Headers.h>
+// As a result of an apparent compiler defect, when certain WinRT headers are
+// imported (instead of included), MSVC++ is able to find the declaration of
+// `memcpy_s` but not the definition of it, even though both the declaration
+// and definition are contained within `corecrt_memcpy_s.h` and the compiler
+// should presumably either find both or neither.
+//
+// Textually including `corecrt_memcpy_s.h` in this file resolves the defect.
+#include <corecrt_memcpy_s.h>
 
 export module devicefs.supervisor.https_download;
 
 import std;
 import <devicefs/common.h>;
+import <devicefs/winrt_imports.h>;
 import devicefs.stream_writer;
 import devicefs.terminal.transcoding;
 
 using devicefs::terminal::Transcode;
-
-#undef stderr
-#undef stdout
 
 // Return an HTTP client with caching disabled.
 //

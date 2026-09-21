@@ -166,7 +166,7 @@ public:
         const auto units = detail::UtfInput<std::allocator<Character>>(text);
         const auto input = std::basic_string_view{units};
         const auto capacity = input.empty() ? 0 :
-            detail::TranscodedCapacity<Character, std::size(inline_)>(input);
+            detail::TranscodedCapacity<Character, std::tuple_size_v<decltype(inline_)>>(input);
         if (capacity >= inline_.size()) {
             if (capacity == std::numeric_limits<std::size_t>::max()) [[unlikely]] {
                 throw std::length_error(std::format(

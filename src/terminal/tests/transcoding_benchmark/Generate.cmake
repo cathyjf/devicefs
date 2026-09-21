@@ -9,7 +9,7 @@ foreach(required
     "export module devicefs.terminal.transcoding;"
     "template <detail::UtfCharacter Character>\nclass TranscodedText"
     "const auto input = std::basic_string_view{units};"
-    "const auto capacity = input.empty() ? 0 :\n            detail::TranscodedCapacity<Character, std::size(inline_)>(input);"
+    "const auto capacity = input.empty() ? 0 :\n            detail::TranscodedCapacity<Character, std::tuple_size_v<decltype(inline_)>>(input);"
 )
     string(FIND "${source}" "${required}" position)
     if(position EQUAL -1)
@@ -47,13 +47,13 @@ string(REPLACE "const auto input = std::basic_string_view{units};"
                 throw std::invalid_argument(\"invalid benchmark input\");
             }
         }" source "${source}")
-string(REPLACE "const auto capacity = input.empty() ? 0 :\n            detail::TranscodedCapacity<Character, std::size(inline_)>(input);"
+string(REPLACE "const auto capacity = input.empty() ? 0 :\n            detail::TranscodedCapacity<Character, std::tuple_size_v<decltype(inline_)>>(input);"
     "const auto capacity = input.empty() ? 0 : [&] {
             const auto bound = WorstCaseCapacity<Character>(input);
             if constexpr (Policy == Sizing::Worst || Policy == Sizing::RetryWorst) { return bound; }
             else {
                 if constexpr (Policy == Sizing::Hybrid) {
-                    return detail::TranscodedCapacity<Character, std::size(inline_)>(input);
+                    return detail::TranscodedCapacity<Character, std::tuple_size_v<decltype(inline_)>>(input);
                 }
                 return detail::TranscodedCapacity<Character>(input);
             }

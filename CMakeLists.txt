@@ -228,10 +228,8 @@ add_subdirectory(src/terminal)
 target_link_libraries(devicefs-common PRIVATE devicefs-terminal)
 add_executable(backup-supervisor
     src/main.cpp
-    src/backup_supervisor.cpp
     src/modules/supervisor/account_management.cpp
     src/modules/filesystem_allocation_changes.cpp
-    src/vss_descriptor_dump.cpp
 )
 devicefs_version_info(backup-supervisor "DeviceFs Backup Supervisor" 0.1)
 target_link_libraries(backup-supervisor PRIVATE
@@ -271,6 +269,8 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/vhdx_viewer.ixx
     src/modules/svi_extents.ixx
     src/modules/vss_block_descriptors.ixx
+    src/modules/vss_block_descriptors/cli.ixx
+    src/modules/supervisor.ixx
     src/modules/supervisor/account_management.ixx
     src/modules/supervisor/browse.ixx
     src/modules/supervisor/configuration.ixx

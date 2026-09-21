@@ -18,13 +18,12 @@ import std;
 import <clocale>;
 import <sal.h>;
 import <devicefs/common.h>;
-#if defined(DEVICEFS_PROGRAM_DEVICEFS)
-import devicefs.filesystem;
-#endif
 import devicefs.stream_writer;
+import devicefs.supervisor;
 
-auto BackupSupervisorMain(std::span<const std::string_view>) -> int;
-auto VssDescriptorDumpMain(std::span<const std::string_view>) -> int;
+// Once MSVC++ implements P3618R0 ("Allow attaching main to the lobal module"),
+// the `main` function can move into the supervisor module file. Until then,
+// this separate `main.cpp` file remains necessary.
 
 [[gsl::suppress("26429",
     justification:
@@ -32,19 +31,18 @@ auto VssDescriptorDumpMain(std::span<const std::string_view>) -> int;
 auto main(
     _Pre_satisfies_(argc > 0) const int argc,
     _In_reads_(argc) char **const argv) -> int {
-    std::ignore = std::setlocale(LC_CTYPE, ".UTF8");
+    if (std::setlocale(LC_CTYPE, ".UTF8") == nullptr) {
+        devicefs::WriteToStream(
+            devicefs::stderr,
+            "{}: could not set the CRT locale to UTF-8; continuing anyway",
+            argv[0]);
+    }
     try {
         HardenProcess();
         const auto arguments =
             std::span{argv, argv + argc} |
             std::ranges::to<std::vector<std::string_view>>();
-#if defined(DEVICEFS_PROGRAM_DEVICEFS)
-        return devicefs::Main(arguments);
-#elif defined(DEVICEFS_PROGRAM_VSS_DESCRIPTOR_DUMP)
-        return VssDescriptorDumpMain(std::span{arguments}.subspan(1));
-#else
         return BackupSupervisorMain(std::span{arguments}.subspan(1));
-#endif
     } catch (const std::runtime_error &error) {
         devicefs::WriteToStream(
             devicefs::stderr, "{}: {}\n", argv[0], error.what());

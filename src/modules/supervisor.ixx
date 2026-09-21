@@ -14,7 +14,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+module;
+
 #include <devicefs/strsafe_compat.h>
+
+export module devicefs.supervisor;
 
 import std;
 import <devicefs/windows_imports.h>;
@@ -34,6 +38,7 @@ import devicefs.supervisor.process_diagnostics;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.vshadow;
 import devicefs.terminal.transcoding;
+import devicefs.vss_block_descriptors.cli;
 
 using devicefs::terminal::Transcode;
 
@@ -955,18 +960,20 @@ auto PrintHelp() noexcept {
 
 } // namespace
 
-auto BackupSupervisorMain(
+export auto BackupSupervisorMain(
     const std::span<const std::string_view> arguments) -> int {
     try {
-        if (!arguments.empty() &&
-            (arguments.front() == "--devicefs")) {
-            return devicefs::Main(arguments);
-        }
         if (arguments.empty()) {
             PrintHelp();
             return 0;
         }
         const auto option = arguments.front();
+        if (option == "--devicefs") {
+            return devicefs::Main(arguments);
+        }
+        if (option == "--vss-descriptor-dump") {
+            return VssDescriptorDumpMain(arguments.subspan(1));
+        }
         if (option == "--backup-console") {
             return RunBackupConsole();
         }

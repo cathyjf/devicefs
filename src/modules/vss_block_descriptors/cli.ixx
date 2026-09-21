@@ -14,8 +14,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+module;
+
 #include <windows.h>
 #include <objbase.h>
+
+export module devicefs.vss_block_descriptors.cli;
 
 import std;
 import devicefs.guid_formatter;
@@ -23,8 +27,6 @@ import devicefs.svi_extents;
 import devicefs.stream_writer;
 import devicefs.vss_block_descriptors;
 import devicefs.terminal.transcoding;
-
-using devicefs::terminal::Transcode;
 
 namespace {
 
@@ -93,7 +95,7 @@ auto Usage(const auto output) noexcept {
 }
 
 [[nodiscard]] auto ParseGuid(const std::string_view value) {
-    auto text = Transcode<std::wstring>(value);
+    auto text = devicefs::terminal::Transcode<std::wstring>(value);
     if (!text.starts_with(L'{')) {
         text = std::format(L"{{{}}}", text);
     }
@@ -180,7 +182,7 @@ auto Run(const std::span<const std::string_view> arguments) {
 
 } // namespace
 
-auto VssDescriptorDumpMain(
+export auto VssDescriptorDumpMain(
     const std::span<const std::string_view> arguments) -> int {
     try {
         return Run(arguments);

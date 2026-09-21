@@ -205,6 +205,17 @@ target_link_libraries(vshadow PRIVATE
     ole32 oleaut32 uuid vssapi
 )
 
+# The WinRT header unit takes about 13 seconds to compile. Building it in its
+# own target lets that work overlap with the terminal library, which the
+# supervisor also needs before its compilation can begin.
+add_library(devicefs-winrt-imports STATIC
+    src/modules/include/devicefs/winrt_imports.h
+)
+set_source_files_properties(src/modules/include/devicefs/winrt_imports.h PROPERTIES
+    LANGUAGE CXX
+    VS_SETTINGS "CompileAs=CompileAsHeaderUnit"
+)
+
 add_executable(devicefs-read-path-test tests/read_path.cpp)
 target_link_libraries(devicefs-read-path-test PRIVATE
     ${DEVICEFS_COMMON_LINK_LIBRARIES}
@@ -225,7 +236,7 @@ add_executable(backup-supervisor
 devicefs_version_info(backup-supervisor "DeviceFs Backup Supervisor" 0.1)
 target_link_libraries(backup-supervisor PRIVATE
     ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-rpc-block-device
-    devicefs-terminal vshadow
+    devicefs-terminal devicefs-winrt-imports vshadow
     Version
 )
 
@@ -302,6 +313,7 @@ endforeach()
 
 set(DEVICEFS_CODE_ANALYSIS_TARGETS
     devicefs-common
+    devicefs-winrt-imports
     devicefs-rpc-block-device
     devicefs-read-path-test
     devicefs-error-messages-test

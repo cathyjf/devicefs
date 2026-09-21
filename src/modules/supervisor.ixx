@@ -636,14 +636,12 @@ struct SelectiveViewOptions {
                     "--baseline requires a value");
             }
             result.baseline_snapshot_identifier = [argument = arguments[index]] {
-                const auto text = argument.starts_with('{') ?
-                    std::string{argument} : std::format("{{{}}}", argument);
-                auto identifier = GUID{};
-                if (FAILED(IIDFromString(Transcode<wchar_t>(text).data(), &identifier))) {
+                const auto identifier = ParseGuid(argument);
+                if (!identifier) {
                     throw std::invalid_argument(std::format(
                         "--baseline requires a snapshot GUID; received '{}'", argument));
                 }
-                return identifier;
+                return *identifier;
             }();
         } else {
             throw std::invalid_argument(std::format(

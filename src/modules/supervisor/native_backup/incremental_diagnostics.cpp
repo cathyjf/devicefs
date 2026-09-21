@@ -161,15 +161,13 @@ struct SnapshotDiagnosticResult {
     }
     return {{
         .volume_identifier = [&snapshot] {
-            auto identifier = GUID{};
-            const auto error = IIDFromString(
-                Transcode<wchar_t>(std::string_view{
-                    snapshot->original_volume}.substr(10, 38)).data(), &identifier);
-            if (FAILED(error)) {
+            const auto identifier = ParseGuid(std::string_view{
+                snapshot->original_volume}.substr(10, 38));
+            if (!identifier) {
                 WinError("could not read the volume GUID from '{}'",
-                    snapshot->original_volume, ExplicitHresult{error});
+                    snapshot->original_volume, ExplicitHresult{identifier.error()});
             }
-            return identifier;
+            return *identifier;
         }(),
         .snapshot_identifier = snapshot_identifier,
         .volume = std::move(snapshot->original_volume),

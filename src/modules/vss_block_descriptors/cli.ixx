@@ -14,11 +14,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-module;
-
-#include <windows.h>
-#include <objbase.h>
-
 export module devicefs.vss_block_descriptors.cli;
 
 import std;
@@ -26,7 +21,6 @@ import devicefs.guid_formatter;
 import devicefs.svi_extents;
 import devicefs.stream_writer;
 import devicefs.vss_block_descriptors;
-import devicefs.terminal.transcoding;
 
 namespace {
 
@@ -90,19 +84,6 @@ auto Usage(const auto output) noexcept {
     if (!result.snapshot_identifier.empty() && result.svi_extents) {
         throw std::invalid_argument(
             "--snapshot-id and --svi-extents cannot be combined");
-    }
-    return result;
-}
-
-[[nodiscard]] auto ParseGuid(const std::string_view value) {
-    auto text = devicefs::terminal::Transcode<std::wstring>(value);
-    if (!text.starts_with(L'{')) {
-        text = std::format(L"{{{}}}", text);
-    }
-    auto result = GUID{};
-    if (FAILED(CLSIDFromString(text.c_str(), &result))) {
-        throw std::invalid_argument(std::format(
-            "--snapshot-id is not a GUID: {}", value));
     }
     return result;
 }
@@ -174,8 +155,12 @@ auto Run(const std::span<const std::string_view> arguments) {
         return 0;
     }
     const auto snapshot_identifier = ParseGuid(options.snapshot_identifier);
+    if (!snapshot_identifier) {
+        throw std::invalid_argument(std::format(
+            "--snapshot-id is not a GUID: {}", options.snapshot_identifier));
+    }
     const auto result = devicefs::vss::ReadBlockDescriptors(
-        options.source, snapshot_identifier);
+        options.source, *snapshot_identifier);
     WriteOutput(FormatResult(result));
     return 0;
 }

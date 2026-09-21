@@ -21,7 +21,7 @@ import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.supervisor;
 
-// Once MSVC++ implements P3618R0 ("Allow attaching main to the lobal module"),
+// Once MSVC++ implements P3618R0 ("Allow attaching main to the global module"),
 // the `main` function can move into the supervisor module file. Until then,
 // this separate `main.cpp` file remains necessary.
 

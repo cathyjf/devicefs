@@ -3,6 +3,10 @@
 
 include_guard(DIRECTORY)
 
+# Link the VC++ runtime statically so that the programs do not require a
+# separate VC++ runtime installation.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # Build multiple source files concurrently.
 # https://learn.microsoft.com/en-us/cpp/build/reference/mp-build-with-multiple-processes
 add_compile_options(/MP)

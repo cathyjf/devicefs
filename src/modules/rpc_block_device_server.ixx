@@ -43,7 +43,7 @@ export namespace devicefs {
 
 template <BlockDevice DeviceType>
 class RpcBlockDeviceServer {
-  public:
+public:
     using Devices =
         std::vector<std::pair<
             std::basic_string<unsigned char>, DeviceType>>;
@@ -73,7 +73,7 @@ class RpcBlockDeviceServer {
         active_.reset();
     }
 
-  private:
+private:
     RpcBlockDeviceServer(
         std::wstring endpoint,
         const DWORD client_process_identifier,

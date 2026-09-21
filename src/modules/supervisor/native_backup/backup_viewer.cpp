@@ -107,7 +107,7 @@ auto TryRemoveDirectory(
 }
 
 class ViewDirectory {
-  public:
+public:
     ViewDirectory(
         const std::string_view prefix,
         const PSID user)
@@ -140,7 +140,7 @@ class ViewDirectory {
         return path_;
     }
 
-  private:
+private:
     std::filesystem::path path_;
 };
 

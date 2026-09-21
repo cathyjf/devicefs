@@ -72,7 +72,7 @@ auto ThrowIfFileInfoFailed(
 }
 
 class SviExtentReader {
-  public:
+public:
     SviExtentReader(
         const std::uint64_t cluster_size,
         std::set<std::uint64_t> &block_offsets) noexcept
@@ -88,7 +88,7 @@ class SviExtentReader {
         ReadObject(root, attributes.FileAttributes, root_handle.get());
     }
 
-  private:
+private:
     auto AddRange(
         const std::uint64_t starting_cluster,
         const std::uint64_t cluster_count) -> void {

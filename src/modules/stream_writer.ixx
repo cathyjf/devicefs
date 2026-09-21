@@ -62,7 +62,7 @@ namespace stream_writer_detail {
 
 template <typename Character, typename... Arguments>
 class BasicFormatString {
-  public:
+public:
     template <typename String>
         requires std::convertible_to<
             const String &, std::basic_string_view<Character>>
@@ -79,7 +79,7 @@ class BasicFormatString {
         return format_;
     }
 
-  private:
+private:
     std::basic_format_string<Character, Arguments...> format_;
 };
 

@@ -294,7 +294,7 @@ struct VerificationObservation {
 };
 
 class VerificationFailure final : public std::runtime_error {
-  public:
+public:
     using std::runtime_error::runtime_error;
 };
 
@@ -313,9 +313,9 @@ class VerificationFailure final : public std::runtime_error {
 }
 
 class SynchronousIoCancellation {
-  public:
+public:
     class Registration {
-      public:
+    public:
         Registration(
             SynchronousIoCancellation &owner,
             wil::unique_handle thread)
@@ -348,7 +348,7 @@ class SynchronousIoCancellation {
             thread_.reset();
         }
 
-      private:
+    private:
         SynchronousIoCancellation &owner_;
         wil::unique_handle thread_;
     };
@@ -383,7 +383,7 @@ class SynchronousIoCancellation {
         return result;
     }
 
-  private:
+private:
     wil::srwlock lock_;
     std::vector<HANDLE> threads_;
 };
@@ -405,7 +405,7 @@ auto RequestPendingIoCancellation(
 }
 
 class VerificationState {
-  public:
+public:
     auto BeginTraversal() -> void {
         {
             const auto lock = std::scoped_lock{mutex_};
@@ -638,7 +638,7 @@ class VerificationState {
         return result;
     }
 
-  private:
+private:
     static auto AddSaturating(
         std::atomic<std::uint64_t> &value,
         const std::uint64_t addend) noexcept -> void {
@@ -718,7 +718,7 @@ class VerificationState {
 };
 
 class AttachedVhdx {
-  public:
+public:
     [[nodiscard]] static auto Attach(
         const std::filesystem::path &path,
         const std::string_view name,
@@ -779,7 +779,7 @@ class AttachedVhdx {
         return attachment_.Detach();
     }
 
-  private:
+private:
     AttachedVhdx(
         internal::AttachedVhdx attachment,
         wil::srwlock &virtual_disk_lock) noexcept
@@ -1085,7 +1085,7 @@ auto PublishTraversalLayoutEstimate(
 }
 
 class FilesystemTraverser {
-  public:
+public:
     FilesystemTraverser(
         const std::wstring_view root,
         const VerificationEndpoint endpoint,
@@ -1133,7 +1133,7 @@ class FilesystemTraverser {
         return std::move(inventory_);
     }
 
-  private:
+private:
     [[nodiscard]] auto Cancelled() const {
         return internal::CancellationRequested(cancellation_event_);
     }
@@ -1802,7 +1802,7 @@ auto AppendStreamTasks(
 }
 
 class ComparisonWorker {
-  public:
+public:
     ComparisonWorker(
         const FilesystemInventory &synthetic,
         const FilesystemInventory &real,
@@ -1909,7 +1909,7 @@ class ComparisonWorker {
         return true;
     }
 
-  private:
+private:
     [[nodiscard]] auto OpenStream(const ReadTask &task) -> bool {
         synthetic_handle_.reset();
         real_handle_.reset();

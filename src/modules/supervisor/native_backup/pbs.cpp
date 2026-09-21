@@ -165,7 +165,7 @@ template <typename Operation>
 class PipeReader {
     using Result = decltype(std::declval<Operation &>().Finish(DWORD{}));
 
-  public:
+public:
     PipeReader(wil::unique_handle source, Operation operation) {
         auto task = std::packaged_task<Result()>(
             [source = std::move(source),
@@ -195,7 +195,7 @@ class PipeReader {
         return result_.get();
     }
 
-  private:
+private:
     std::future<Result> result_;
     std::thread worker_;
 };
@@ -204,7 +204,7 @@ using PipeCopy = PipeReader<ForwardPipeOutput>;
 using PipeCapture = PipeReader<CapturePipeOutput>;
 
 class SambaReadinessReader {
-  public:
+public:
     explicit SambaReadinessReader(wil::unique_handle source) {
         if (!completion_.try_create(
                 wil::EventOptions::ManualReset, nullptr)) {
@@ -262,7 +262,7 @@ class SambaReadinessReader {
         return result_.get();
     }
 
-  private:
+private:
     wil::unique_event_nothrow completion_;
     std::future<DWORD> result_;
     std::thread worker_;

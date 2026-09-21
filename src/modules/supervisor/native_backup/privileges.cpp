@@ -29,7 +29,7 @@ class ProcessPrivilegeEnabler {
         offsetof(TOKEN_PRIVILEGES, Privileges) +
         PrivilegeCount * sizeof(LUID_AND_ATTRIBUTES);
 
-  public:
+public:
     explicit ProcessPrivilegeEnabler(
         const HANDLE process,
         const std::span<const wil::zwstring_view, PrivilegeCount> privilege_names,
@@ -102,7 +102,7 @@ class ProcessPrivilegeEnabler {
         }
     }
 
-  private:
+private:
     [[nodiscard]] auto RestoreNoThrow() noexcept -> DWORD {
         if (previous_state_ == nullptr) {
             return DWORD{ERROR_SUCCESS};

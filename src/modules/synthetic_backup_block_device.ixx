@@ -27,7 +27,7 @@ export namespace devicefs {
 
 template <BlockDevice DeviceType>
 class SyntheticBackupBlockDevice {
-  public:
+public:
     const std::uint64_t length;
 
     [[nodiscard]] static auto FromBlockDevices(
@@ -110,7 +110,7 @@ class SyntheticBackupBlockDevice {
         return STATUS_SUCCESS;
     }
 
-  private:
+private:
     SyntheticBackupBlockDevice(
         DeviceType baseline, DeviceType payload,
         const std::uint64_t block_size,

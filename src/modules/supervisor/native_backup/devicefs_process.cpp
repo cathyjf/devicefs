@@ -330,7 +330,7 @@ auto TryStopDeviceFs(const DeviceFsProcess &devicefs) noexcept {
 }
 
 class DeviceFsChild {
-  public:
+public:
     explicit DeviceFsChild(DeviceFsProcess devicefs) noexcept
         : devicefs_{std::move(devicefs)} {}
 
@@ -373,7 +373,7 @@ class DeviceFsChild {
         }
     }
 
-  private:
+private:
     DeviceFsProcess devicefs_;
     bool stop_required_ = true;
 };

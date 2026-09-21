@@ -711,7 +711,7 @@ export namespace devicefs {
 
 template <typename DeviceType>
 class VhdxViewer {
-  public:
+public:
     const std::uint64_t length;
 
     [[nodiscard]] static auto FromBlockDevice(DeviceType source) {
@@ -788,7 +788,7 @@ class VhdxViewer {
         return STATUS_SUCCESS;
     }
 
-  private:
+private:
     VhdxViewer(
         DeviceType source,
         vhdx_detail::VhdxLayout layout,

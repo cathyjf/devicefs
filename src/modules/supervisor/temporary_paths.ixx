@@ -60,7 +60,7 @@ export [[nodiscard]] auto TemporarySystemDirectoryPath(
 }
 
 export class TemporaryDirectory {
-  public:
+public:
     explicit TemporaryDirectory(std::filesystem::path path)
         : path_{std::move(path)} {
         if (!CreateDirectoryW(path_.c_str(), nullptr)) {
@@ -89,6 +89,6 @@ export class TemporaryDirectory {
         return path_;
     }
 
-  private:
+private:
     std::filesystem::path path_;
 };

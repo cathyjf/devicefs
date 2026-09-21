@@ -283,7 +283,7 @@ namespace internal {
 }
 
 class AttachedVhdx {
-  public:
+public:
     template <typename BeforeFailedAttachmentCleanup>
     [[nodiscard]] static auto Attach(
         const std::filesystem::path &path,
@@ -390,7 +390,7 @@ class AttachedVhdx {
         return status;
     }
 
-  private:
+private:
     AttachedVhdx(
         wil::unique_handle disk,
         std::wstring root) noexcept
@@ -401,7 +401,7 @@ class AttachedVhdx {
 };
 
 class MountedVolume {
-  public:
+public:
     MountedVolume(
         const std::filesystem::path &directory,
         const std::wstring_view volume_root)
@@ -435,7 +435,7 @@ class MountedVolume {
         }
     }
 
-  private:
+private:
     std::wstring mount_path_;
 };
 

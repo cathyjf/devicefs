@@ -416,7 +416,7 @@ export [[nodiscard]] auto WslExecutablePath() {
 // temporary. Windows mutex ownership belongs to the acquiring thread, so the
 // result cannot be copied or moved to another thread.
 class BackupAccountPassword : private wil::secure_wstring {
-  public:
+public:
     using wil::secure_wstring::c_str;
 
     BackupAccountPassword(
@@ -443,7 +443,7 @@ class BackupAccountPassword : private wil::secure_wstring {
         mutex_.reset();
     }
 
-  private:
+private:
     wil::unique_mutex_nothrow mutex_;
     wil::mutex_release_scope_exit lock_;
 };

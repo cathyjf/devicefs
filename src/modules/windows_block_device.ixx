@@ -49,7 +49,7 @@ using devicefs::terminal::Transcode;
 export namespace devicefs {
 
 class SnapshotAllocationBitmap {
-  public:
+public:
     SnapshotAllocationBitmap(SnapshotAllocationBitmap &&) noexcept;
     auto operator=(SnapshotAllocationBitmap &&) noexcept
         -> SnapshotAllocationBitmap &;
@@ -61,7 +61,7 @@ class SnapshotAllocationBitmap {
         std::span<unsigned char> output,
         std::uint64_t offset) const noexcept -> void;
 
-  private:
+private:
     struct State;
 
     explicit SnapshotAllocationBitmap(

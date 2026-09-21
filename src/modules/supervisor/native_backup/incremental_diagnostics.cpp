@@ -614,7 +614,7 @@ struct ComparisonObservation {
 };
 
 class VerificationState {
-  public:
+public:
     [[nodiscard]] auto Failed() const noexcept {
         return failed_.load(std::memory_order_acquire);
     }
@@ -651,7 +651,7 @@ class VerificationState {
         return observation_;
     }
 
-  private:
+private:
     mutable std::mutex mutex_;
     ComparisonObservation observation_;
     std::atomic_bool failed_ = false;

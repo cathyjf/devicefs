@@ -25,7 +25,7 @@ import <devicefs/windows_imports.h>;
 import <sal.h>;
 
 export class WinrtApartment {
-  public:
+public:
     explicit WinrtApartment(
         _In_z_ const char *const initialization_error,
         const RO_INIT_TYPE apartment_type = RO_INIT_SINGLETHREADED)
@@ -52,6 +52,6 @@ export class WinrtApartment {
         winrt::clear_factory_cache();
     }
 
-  private:
+private:
     wil::unique_rouninitialize_call uninitialize_;
 };

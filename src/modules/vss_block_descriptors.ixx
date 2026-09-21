@@ -186,7 +186,7 @@ constexpr auto kVssIdentifier = std::array{
 }
 
 class RawSource {
-  public:
+public:
     explicit RawSource(const std::string_view path) {
         auto normalized_path = Transcode<std::wstring>(path);
         constexpr auto volume_guid_prefix =
@@ -337,7 +337,7 @@ class RawSource {
         return result;
     }
 
-  private:
+private:
     void ReadExact(
         const std::uint64_t offset, std::span<std::byte> destination) {
         const auto requested =
@@ -775,7 +775,7 @@ struct NormalizedDescriptor {
 };
 
 class DescriptorState {
-  public:
+public:
     explicit DescriptorState(const std::uint64_t volume_size)
         : volume_size_{volume_size} {
         // libvshadow_store_descriptor_read_block_descriptors passes the
@@ -878,7 +878,7 @@ class DescriptorState {
         }
     }
 
-  private:
+private:
     using Map = std::unordered_map<
         std::uint64_t, std::shared_ptr<NormalizedDescriptor>>;
 

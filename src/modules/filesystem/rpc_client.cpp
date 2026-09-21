@@ -214,7 +214,7 @@ struct RPCBlockDevice {
         return status;
     }
 
-  private:
+private:
     RPCBlockDevice(
         const std::uint64_t length,
         std::basic_string<unsigned char> symbol,

@@ -46,7 +46,7 @@ struct SnapshotSet {
 };
 
 class OperationError : public std::runtime_error {
-  public:
+public:
     using std::runtime_error::runtime_error;
 };
 
@@ -55,7 +55,7 @@ class OperationError : public std::runtime_error {
 namespace {
 
 class VssClientOwner final : private VssClient {
-  public:
+public:
     template <typename... Arguments>
         requires(sizeof...(Arguments) > 0)
     [[gsl::suppress("26455",
@@ -85,7 +85,7 @@ class Backup {
         Success,
     };
 
-  public:
+public:
     Backup(const HANDLE cancellation_event, const bool use_writers)
         : client_{
               use_writers ? VSS_CTX_APP_ROLLBACK : VSS_CTX_NAS_ROLLBACK,
@@ -159,7 +159,7 @@ class Backup {
         return result;
     }
 
-  private:
+private:
     auto TryDeleteCreatedSnapshotSet() noexcept -> void {
         const auto error = client_.TryDeleteCreatedSnapshotSet();
         if (FAILED(error)) {

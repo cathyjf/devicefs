@@ -67,7 +67,7 @@ template <typename Allocator, UtfCharacter Input>
 // MSVC, Clang and GCC builds, while avoiding unnecessary allocations.
 template <UtfCharacter Output, std::size_t InlineCapacity = 0, UtfCharacter Input>
 [[nodiscard]] constexpr auto TranscodedCapacity(
-    const std::basic_string_view<Input> input) noexcept {
+    const std::basic_string_view<Input> input) {
     // Each UTF-16 unit needs at most three UTF-8 bytes; a surrogate pair needs
     // four bytes for its two units. Each UTF-32 unit needs at most four UTF-8
     // bytes or two UTF-16 units. These expanding conversions also produce at
@@ -76,11 +76,14 @@ template <UtfCharacter Output, std::size_t InlineCapacity = 0, UtfCharacter Inpu
         ((sizeof(Input) == 2) ? 3uz : ((sizeof(Input) == 4) ? 4uz : 1uz)) :
         (((sizeof(Output) == 2) && (sizeof(Input) == 4)) ? 2uz : 1uz);
     if constexpr ((expansion > 1) && (InlineCapacity != 0)) {
-        if (input.size() <= (std::numeric_limits<std::size_t>::max() / expansion)) {
-            const auto bound = input.size() * expansion;
-            if ((bound < InlineCapacity) || (input.size() >= InlineCapacity)) {
-                return bound;
-            }
+        if (input.size() > (std::numeric_limits<std::size_t>::max() / expansion)) [[unlikely]] {
+            throw std::length_error(std::format(
+                "worst-case transcoded length exceeds the size limit of {}",
+                std::numeric_limits<std::size_t>::max()));
+        }
+        const auto bound = input.size() * expansion;
+        if ((bound < InlineCapacity) || (input.size() >= InlineCapacity)) {
+            return bound;
         }
     }
     if constexpr ((sizeof(Output) == 1) && (sizeof(Input) == 2)) {
@@ -164,10 +167,13 @@ public:
         const auto input = std::basic_string_view{units};
         const auto capacity = input.empty() ? 0 :
             detail::TranscodedCapacity<Character, std::size(inline_)>(input);
-        if (capacity >= (std::numeric_limits<std::size_t>::max() / sizeof(Character))) {
-            throw std::length_error("transcoded text and its terminator exceed the allocation limit");
-        }
         if (capacity >= inline_.size()) {
+            if (capacity == std::numeric_limits<std::size_t>::max()) [[unlikely]] {
+                throw std::length_error(std::format(
+                    "transcoded text and its terminator exceed the character "
+                    "limit of {}",
+                    std::numeric_limits<std::size_t>::max()));
+            }
             heap_ = std::make_unique_for_overwrite<Character[]>(capacity + 1);
         }
         const auto output = std::span{heap_ ? heap_.get() : inline_.data(), capacity + 1};

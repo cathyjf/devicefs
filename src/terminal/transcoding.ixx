@@ -72,23 +72,23 @@ template <UtfCharacter Output, UtfCharacter Input>
     // four bytes for its two units. Each UTF-32 unit needs at most four UTF-8
     // bytes or two UTF-16 units. These expanding conversions also produce at
     // least as many output units as input units for valid text.
-    constexpr auto expansion = sizeof(Output) == 1 ?
-        (sizeof(Input) == 2 ? 3uz : sizeof(Input) == 4 ? 4uz : 1uz) :
-        (sizeof(Output) == 2 && sizeof(Input) == 4 ? 2uz : 1uz);
+    constexpr auto expansion = (sizeof(Output) == 1) ?
+        ((sizeof(Input) == 2) ? 3uz : ((sizeof(Input) == 4) ? 4uz : 1uz)) :
+        (((sizeof(Output) == 2) && (sizeof(Input) == 4)) ? 2uz : 1uz);
     if constexpr (expansion > 1) {
         if ((inline_capacity != 0) &&
-            (input.size() <= std::numeric_limits<std::size_t>::max() / expansion)) {
+            (input.size() <= (std::numeric_limits<std::size_t>::max() / expansion))) {
             const auto bound = input.size() * expansion;
             if ((bound < inline_capacity) || (input.size() >= inline_capacity)) {
                 return bound;
             }
         }
     }
-    if constexpr (sizeof(Output) == 1 && sizeof(Input) == 2) {
+    if constexpr ((sizeof(Output) == 1) && (sizeof(Input) == 2)) {
         return simdutf::utf8_length_from_utf16(input);
-    } else if constexpr (sizeof(Output) == 1 && sizeof(Input) == 4) {
+    } else if constexpr ((sizeof(Output) == 1) && (sizeof(Input) == 4)) {
         return simdutf::utf8_length_from_utf32(input);
-    } else if constexpr (sizeof(Output) == 2 && sizeof(Input) == 4) {
+    } else if constexpr ((sizeof(Output) == 2) && (sizeof(Input) == 4)) {
         return simdutf::utf16_length_from_utf32(input);
     } else {
         return input.size();
@@ -105,17 +105,17 @@ template <typename Allocator = std::allocator<std::byte>, UtfCharacter Output, U
         return count;
     } else {
         const auto result = [&] {
-            if constexpr (sizeof(Input) == 1 && sizeof(Output) == 2) {
+            if constexpr ((sizeof(Input) == 1) && (sizeof(Output) == 2)) {
                 return simdutf::convert_utf8_to_utf16_with_errors(input, output);
-            } else if constexpr (sizeof(Input) == 1 && sizeof(Output) == 4) {
+            } else if constexpr ((sizeof(Input) == 1) && (sizeof(Output) == 4)) {
                 return simdutf::convert_utf8_to_utf32_with_errors(input, output);
-            } else if constexpr (sizeof(Input) == 2 && sizeof(Output) == 1) {
+            } else if constexpr ((sizeof(Input) == 2) && (sizeof(Output) == 1)) {
                 return simdutf::convert_utf16_to_utf8_with_errors(input, output);
-            } else if constexpr (sizeof(Input) == 2 && sizeof(Output) == 4) {
+            } else if constexpr ((sizeof(Input) == 2) && (sizeof(Output) == 4)) {
                 return simdutf::convert_utf16_to_utf32_with_errors(input, output);
-            } else if constexpr (sizeof(Input) == 4 && sizeof(Output) == 1) {
+            } else if constexpr ((sizeof(Input) == 4) && (sizeof(Output) == 1)) {
                 return simdutf::convert_utf32_to_utf8_with_errors(input, output);
-            } else if constexpr (sizeof(Input) == 4 && sizeof(Output) == 2) {
+            } else if constexpr ((sizeof(Input) == 4) && (sizeof(Output) == 2)) {
                 return simdutf::convert_utf32_to_utf16_with_errors(input, output);
             } else {
                 const auto validated = [&] {

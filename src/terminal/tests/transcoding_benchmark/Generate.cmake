@@ -26,7 +26,7 @@ enum class Sizing { Exact, Worst, Hybrid, RetryExact, RetryWorst };
 // to four UTF-8 bytes or two UTF-16 code units. Fixtures use these directions.
 template <typename Output, typename Input>
 [[nodiscard]] constexpr auto WorstCaseCapacity(const std::basic_string_view<Input> input) {
-    constexpr auto factor = sizeof(Output) == 1 ? sizeof(Input) == 2 ? 3uz : 4uz : 2uz;
+    constexpr auto factor = (sizeof(Output) == 1) ? ((sizeof(Input) == 2) ? 3uz : 4uz) : 2uz;
     return input.size() * factor;
 }
 }

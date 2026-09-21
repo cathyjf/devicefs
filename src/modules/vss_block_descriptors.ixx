@@ -67,7 +67,7 @@ export module devicefs.vss_block_descriptors;
 import std;
 import <devicefs/windows_imports.h>;
 import devicefs.allocation;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.terminal.transcoding;
 
 using devicefs::terminal::Transcode;

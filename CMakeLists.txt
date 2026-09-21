@@ -88,12 +88,31 @@ if(NOT EXISTS "${DISM_INCLUDE_DIR}/DismApi.h" OR NOT EXISTS "${DISM_LIBRARY}")
     )
 endif()
 
-add_library(devicefs-common STATIC)
-target_module_interfaces(devicefs-common PUBLIC
-    src/modules/common.ixx
+add_library(devicefs-common STATIC src/modules/common.cpp)
+target_link_libraries(devicefs-common PRIVATE oleaut32)
+
+# The Windows headers used by `common.cpp` are expensive to compile. Making the
+# rest of the program wait for that compilation unnecessarily lengthens the build:
+# consumers need only the declarations in `common.h` until they reach linking.
+# However, linking the CMake target creates an MSBuild project dependency that
+# requires the whole library to be built before consumer compilation can begin.
+# CMake's `LINK_ONLY` expression does not remove that scheduling dependency.
+#
+# Linking by pathname removes that unnecessary wait. The MSBuild action
+# `DeviceFsBuildCommonBeforeLink`, defined in `misc/ApplyMsvcOverrides.props`,
+# ensures that the common library has finished building before an executable's
+# linker runs. The remaining libraries resolve the common library's external
+# symbols.
+set(DEVICEFS_COMMON_LINK_LIBRARIES
+    "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/devicefs-common.lib"
+    oleaut32 devicefs-terminal
+)
+
+add_library(devicefs-stream-writer STATIC)
+target_module_interfaces(devicefs-stream-writer PUBLIC
     src/modules/stream_writer.ixx
 )
-target_sources(devicefs-common PRIVATE
+target_sources(devicefs-stream-writer PRIVATE
     src/modules/stream_writer.cpp
 )
 
@@ -177,7 +196,7 @@ target_sources(devicefs-filesystem PRIVATE
     src/modules/filesystem_allocation_changes.cpp
 )
 target_link_libraries(devicefs-filesystem PRIVATE
-    devicefs-common devicefs-rpc-block-device ole32
+    ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-stream-writer devicefs-rpc-block-device ole32
 )
 
 add_library(devicefs-vss-block-descriptors STATIC)
@@ -186,7 +205,9 @@ target_module_interfaces(devicefs-vss-block-descriptors PUBLIC
     src/modules/vss_block_descriptors.ixx
     src/modules/allocation.ixx
 )
-target_link_libraries(devicefs-vss-block-descriptors PRIVATE devicefs-common)
+target_link_libraries(devicefs-vss-block-descriptors PRIVATE
+    ${DEVICEFS_COMMON_LINK_LIBRARIES}
+)
 
 add_library(vshadow STATIC
     dependencies/vshadow/create.cpp
@@ -217,10 +238,17 @@ target_link_libraries(vshadow PRIVATE
 add_executable(devicefs src/main.cpp)
 devicefs_version_info(devicefs "DeviceFs Virtual Filesystem" 0.1)
 target_compile_definitions(devicefs PRIVATE DEVICEFS_PROGRAM_DEVICEFS)
-target_link_libraries(devicefs PRIVATE devicefs-common devicefs-filesystem)
+target_link_libraries(devicefs PRIVATE
+    ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-stream-writer devicefs-filesystem
+)
 
 add_executable(devicefs-read-path-test tests/read_path.cpp)
-target_link_libraries(devicefs-read-path-test PRIVATE devicefs-common devicefs-filesystem)
+target_link_libraries(devicefs-read-path-test PRIVATE
+    ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-filesystem
+)
+
+add_executable(devicefs-error-messages-test tests/error_messages.cpp)
+target_link_libraries(devicefs-error-messages-test PRIVATE ${DEVICEFS_COMMON_LINK_LIBRARIES})
 
 add_executable(vss-descriptor-dump
     src/main.cpp
@@ -231,11 +259,12 @@ target_compile_definitions(vss-descriptor-dump PRIVATE
     DEVICEFS_PROGRAM_VSS_DESCRIPTOR_DUMP
 )
 target_link_libraries(vss-descriptor-dump PRIVATE
-    devicefs-common devicefs-vss-block-descriptors ole32
+    ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-stream-writer devicefs-vss-block-descriptors ole32
 )
 
 add_subdirectory(src/terminal)
-target_link_libraries(devicefs-common PUBLIC devicefs-terminal)
+target_link_libraries(devicefs-common PRIVATE devicefs-terminal)
+target_link_libraries(devicefs-stream-writer PUBLIC devicefs-terminal)
 
 add_executable(backup-supervisor
     src/main.cpp
@@ -244,7 +273,7 @@ add_executable(backup-supervisor
 )
 devicefs_version_info(backup-supervisor "DeviceFs Backup Supervisor" 0.1)
 target_link_libraries(backup-supervisor PRIVATE
-    devicefs-common devicefs-filesystem devicefs-rpc-block-device
+    ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-stream-writer devicefs-filesystem devicefs-rpc-block-device
     devicefs-vss-block-descriptors devicefs-terminal vshadow
     Version
 )
@@ -297,11 +326,13 @@ endif()
 
 set(DEVICEFS_CODE_ANALYSIS_TARGETS
     devicefs-common
+    devicefs-stream-writer
     devicefs-rpc-block-device
     devicefs-filesystem
     devicefs-vss-block-descriptors
     devicefs
     devicefs-read-path-test
+    devicefs-error-messages-test
     vss-descriptor-dump
     backup-supervisor
 )
@@ -327,8 +358,11 @@ foreach(target IN LISTS DEVICEFS_CODE_ANALYSIS_TARGETS)
     )
 endforeach()
 
-foreach(target devicefs devicefs-read-path-test vss-descriptor-dump backup-supervisor)
+foreach(target devicefs devicefs-read-path-test devicefs-error-messages-test vss-descriptor-dump backup-supervisor)
     target_sources(${target} PRIVATE src/resources/devicefs.manifest)
+    set_target_properties(${target} PROPERTIES
+        VS_GLOBAL_DeviceFsCommonProject "${CMAKE_CURRENT_BINARY_DIR}/devicefs-common.vcxproj"
+    )
 endforeach()
 
 set_target_properties(devicefs-filesystem PROPERTIES

@@ -26,7 +26,7 @@ export module devicefs.supervisor.installation;
 
 import std;
 import <devicefs/windows_imports.h>;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
 import devicefs.supervisor.configuration;

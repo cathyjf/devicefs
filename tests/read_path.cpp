@@ -18,7 +18,7 @@
 import std;
 import <cstddef>;
 import devicefs.allocation;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.windows_block_device;
 
 namespace {
@@ -277,7 +277,8 @@ auto TestReads() -> void {
         // These requests end at EOF. Rounding must still produce a backing read
         // that the file can satisfy in full.
         check(contents.size() - 1, 1);
-        check(contents.size() - sector_size - 1, sector_size + 1);
+        check(contents.size() - sector_size - 1,
+            CompileTimeCast<std::size_t>(sector_size) + 1);
         std::println("PASS: reads ending at the file's final byte match the source "
             "with {}-byte sectors.", sector_size);
     }

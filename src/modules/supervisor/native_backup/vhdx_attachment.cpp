@@ -29,7 +29,7 @@ import std;
 import <devicefs/windows_imports.h>;
 import <wil/filesystem.h>;
 import :internal;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.stream_writer;
 
 #undef stderr

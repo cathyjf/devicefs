@@ -40,7 +40,7 @@ module devicefs.filesystem:rpc_client;
 
 import std;
 import :internal;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.rpc_constants;
 import devicefs.stream_writer;
 import devicefs.terminal.transcoding;

@@ -23,7 +23,7 @@ module devicefs.supervisor.native_backup:devicefs_process;
 import std;
 import <devicefs/windows_imports.h>;
 import :internal;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.rpc_constants;
 import devicefs.stream_writer;
 import devicefs.supervisor.installation;

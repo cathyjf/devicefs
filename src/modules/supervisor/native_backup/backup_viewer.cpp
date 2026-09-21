@@ -35,7 +35,7 @@ import :pbs;
 import :port_selection;
 import :privileges;
 import :vhdx_attachment;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.temporary_paths;

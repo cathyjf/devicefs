@@ -26,7 +26,7 @@ module;
 export module devicefs.supervisor.https_download;
 
 import std;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.terminal.transcoding;
 

@@ -29,4 +29,24 @@
       </ClCompile>
     </ItemGroup>
   </Target>
+  <!--
+    `CMakeLists.txt` sets the custom `DeviceFsCommonProject` property on each
+    executable that links the common library. The property's value is the full
+    path to the generated `devicefs-common.vcxproj` file. The condition below
+    limits this action to those executables.
+
+    Executables link `devicefs-common.lib` by pathname so that their compilation
+    can proceed while the library is being built. Before linking, this action
+    asks MSBuild to finish building the library. The `MSBuild` task shares the
+    current build's results, so a library that has already finished is reused.
+    Specifying the same configuration and platform lets concurrent callers
+    share the same library build.
+    https://learn.microsoft.com/en-us/visualstudio/msbuild/msbuild-task
+  -->
+  <Target Name="DeviceFsBuildCommonBeforeLink" BeforeTargets="Link"
+    Condition="'$(DeviceFsCommonProject)' != ''">
+    <MSBuild Projects="$(DeviceFsCommonProject)" Targets="Build"
+      Properties="Configuration=$(Configuration);Platform=$(Platform)"
+      BuildInParallel="$(BuildInParallel)" />
+  </Target>
 </Project>

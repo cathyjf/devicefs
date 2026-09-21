@@ -33,7 +33,7 @@ module devicefs.supervisor.native_backup:s4u_logon;
 
 import std;
 import :privileges;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.stream_writer;
 
 namespace internal {

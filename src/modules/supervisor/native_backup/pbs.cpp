@@ -25,7 +25,7 @@ import <devicefs/windows_imports.h>;
 import :internal;
 import :privileges;
 import :s4u_logon;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
 import devicefs.supervisor.configuration;

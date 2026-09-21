@@ -21,7 +21,7 @@ export module devicefs.supervisor.embedded_artifacts;
 import std;
 import <devicefs/windows_imports.h>;
 import <sal.h>;
-import devicefs.common;
+import <devicefs/common.h>;
 
 namespace {
 

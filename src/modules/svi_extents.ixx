@@ -26,7 +26,7 @@ export module devicefs.svi_extents;
 import std;
 import <wil/filesystem.h>;
 import <wil/safecast.h>;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.vss_block_descriptors;
 
 namespace {

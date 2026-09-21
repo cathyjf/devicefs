@@ -32,7 +32,7 @@ module;
 export module devicefs.rpc_block_device_server;
 
 import std;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.filesystem;
 import devicefs.rpc_constants;
 import devicefs.terminal.transcoding;

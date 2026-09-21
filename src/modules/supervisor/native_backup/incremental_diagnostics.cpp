@@ -33,7 +33,7 @@ import :incremental;
 import :internal;
 import :manifest;
 import devicefs.allocation;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.filesystem;
 import devicefs.rpc_block_device_server;
 import devicefs.stream_writer;

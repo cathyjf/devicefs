@@ -17,7 +17,7 @@
 import std;
 import <clocale>;
 import <sal.h>;
-import devicefs.common;
+import <devicefs/common.h>;
 #if defined(DEVICEFS_PROGRAM_DEVICEFS)
 import devicefs.filesystem;
 #endif

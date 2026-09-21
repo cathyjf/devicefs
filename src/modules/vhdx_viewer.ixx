@@ -24,7 +24,7 @@ import std;
 import <devicefs/windows_imports.h>;
 import <winternl.h>;
 import <sal.h>;
-import devicefs.common;
+import <devicefs/common.h>;
 
 namespace devicefs::vhdx_detail {
 

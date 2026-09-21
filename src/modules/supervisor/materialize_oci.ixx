@@ -37,7 +37,7 @@ module;
 export module devicefs.supervisor.materialize_oci;
 
 import std;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
 import devicefs.supervisor.https_download;

@@ -30,7 +30,7 @@ import :devicefs_process;
 import :internal;
 import :privileges;
 import :vhdx_attachment;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.terminal.transcoding;
 

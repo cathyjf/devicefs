@@ -22,7 +22,7 @@ module;
 module devicefs.supervisor.native_backup:port_selection;
 
 import std;
-import devicefs.common;
+import <devicefs/common.h>;
 
 namespace internal {
 

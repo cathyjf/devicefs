@@ -35,7 +35,7 @@ import std;
 import :internal;
 import :rpc_client;
 export import devicefs.windows_block_device;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.vhdx_viewer;
 

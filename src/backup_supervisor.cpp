@@ -19,7 +19,7 @@
 import std;
 import <devicefs/windows_imports.h>;
 import <sal.h>;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.filesystem;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;

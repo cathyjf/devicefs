@@ -19,7 +19,7 @@ module devicefs.supervisor.native_backup:privileges;
 import std;
 import <cstddef>;
 import <devicefs/windows_imports.h>;
-import devicefs.common;
+import <devicefs/common.h>;
 
 namespace internal {
 

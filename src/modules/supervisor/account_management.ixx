@@ -38,7 +38,7 @@ module;
 export module devicefs.supervisor.account_management;
 
 import std;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.supervisor.process_launch;
 import devicefs.terminal.transcoding;
@@ -225,7 +225,7 @@ template <std::size_t Dividend, std::size_t Divisor>
     return true;
 }
 
-auto HideAccountFromLogonScreen(const wil::zwstring_view username) {
+auto HideAccountFromLogonScreen(const wil::zwstring_view username) noexcept {
     const auto result = wil::reg::set_value_dword_nothrow(
         HKEY_LOCAL_MACHINE,
         L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\\"

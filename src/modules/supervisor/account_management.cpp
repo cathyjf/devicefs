@@ -33,7 +33,7 @@ import <winrt/Windows.Storage.h>;
 import <winrt/Windows.Storage.Streams.h>;
 import <winrt/Windows.Web.Http.h>;
 import <winrt/Windows.Web.Http.Headers.h>;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.supervisor.https_download;
 import devicefs.supervisor.temporary_paths;

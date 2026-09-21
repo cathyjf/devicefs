@@ -27,7 +27,7 @@ import :devicefs_process;
 export import :incremental_diagnostics;
 export import :manifest;
 import :pbs;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.supervisor.configuration;
 import devicefs.supervisor.launch_powershell;

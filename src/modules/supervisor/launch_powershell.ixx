@@ -35,7 +35,7 @@ module;
 export module devicefs.supervisor.launch_powershell;
 
 import std;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
 import devicefs.supervisor.installation;

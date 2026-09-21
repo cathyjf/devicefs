@@ -35,7 +35,7 @@ export module devicefs.windows_block_device;
 import std;
 import <cstddef>;
 import devicefs.allocation;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.stream_writer;
 
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
@@ -326,6 +326,13 @@ struct WindowsBlockDevice {
     }
 
     template <typename... Observers>
+    [[gsl::suppress("26445",
+        justification:
+            "This function contains a structured binding that copies a pair, "
+            "including a `std::span`. C26445 incorrectly diagnoses a reference "
+            "to the `std::span` even though the declaration uses `const auto`, "
+            "without `&`. A suppression placed closer to the structured binding "
+            "was ineffective.")]]
     _Success_(return == STATUS_SUCCESS)
     auto Read(
         _Out_writes_bytes_to_(wanted, transferred) void *const buffer,

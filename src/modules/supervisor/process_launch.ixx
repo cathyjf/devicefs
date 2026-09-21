@@ -22,7 +22,7 @@ export module devicefs.supervisor.process_launch;
 
 import std;
 import <devicefs/windows_imports.h>;
-import devicefs.common;
+import <devicefs/common.h>;
 
 export [[nodiscard]] auto WaitForProcess(
     const HANDLE process,

@@ -22,7 +22,7 @@ export module devicefs.supervisor.logging_console;
 
 import std;
 import <devicefs/windows_imports.h>;
-import devicefs.common;
+import <devicefs/common.h>;
 import devicefs.terminal.text;
 import devicefs.terminal.transcoding;
 

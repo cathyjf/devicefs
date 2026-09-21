@@ -530,15 +530,12 @@ namespace devicefs::filesystem_internal {
         cluster_count / kBitsPerByte +
         ((cluster_count % kBitsPerByte) != 0);
     const auto bitmap_data_size = kVolumeBitmapHeaderSize + bitmap_bytes;
-    const auto output_size = std::max(sizeof(VOLUME_BITMAP_BUFFER), bitmap_data_size);
-    if (!std::in_range<DWORD>(output_size)) {
-        throw std::runtime_error(std::format(
-            "the NTFS allocation bitmap for '{}' is too large ({})",
-            Transcode<std::string>(filename.native()), description));
-    }
-    // std::in_range above proves output_size is representable by DWORD.
-    const auto output_size_for_api =
-        wil::safe_cast_failfast<DWORD>(output_size);
+    // The maximum number of clusters in an NTFS volume is 2**32 - 1.
+    // https://learn.microsoft.com/en-us/windows-server/storage/file-server/ntfs-overview#support-for-large-volumes
+    // Thus, the largest possible bitmap requires only 512 MiB, which is well
+    // below the maximum value of DWORD (approximately 4 GiB).
+    const auto output_size_for_api = wil::safe_cast_failfast<DWORD>(
+        std::max(sizeof(VOLUME_BITMAP_BUFFER), bitmap_data_size));
 
     auto storage = std::make_unique_for_overwrite<BYTE[]>(output_size_for_api);
     [[gsl::suppress("26403",

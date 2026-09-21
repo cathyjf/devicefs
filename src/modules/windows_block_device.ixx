@@ -541,6 +541,10 @@ namespace devicefs::filesystem_internal {
         wil::safe_cast_failfast<DWORD>(output_size);
 
     auto storage = std::make_unique_for_overwrite<BYTE[]>(output_size_for_api);
+    [[gsl::suppress("26403",
+        justification:
+            "The pointer `output` is not the owner of the memory to which it "
+            "points. The owner is `storage`, which is a smart pointer.")]]
     auto *const output = ::new (storage.get()) VOLUME_BITMAP_BUFFER;
     auto input = STARTING_LCN_INPUT_BUFFER{.StartingLcn = {.QuadPart = 0}};
     auto returned = DWORD{};

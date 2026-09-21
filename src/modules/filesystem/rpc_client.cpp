@@ -197,7 +197,7 @@ struct RPCBlockDevice {
             &rpc_transferred, static_cast<BYTE *>(buffer));
         if (FAILED(error)) {
             const auto win32_error =
-                DWORD{ExplicitHresult{error}};
+                CompileTimeCast<DWORD>(ExplicitHresult{error});
             devicefs::WriteToStream(devicefs::stderr,
                 "devicefs: RPC read failed for '{:s}' at offset 0x{:x} "
                 "for {} bytes: Windows error {}\n",

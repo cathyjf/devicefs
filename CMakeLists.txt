@@ -293,6 +293,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/native_backup/privileges.cpp
     src/modules/supervisor/native_backup/s4u_logon.cpp
     src/modules/supervisor/native_backup/vhdx_attachment.cpp
+    src/modules/supervisor/process_attribute_list.ixx
     src/modules/supervisor/process_diagnostics.ixx
     src/modules/supervisor/process_launch.ixx
     src/modules/supervisor/temporary_paths.ixx

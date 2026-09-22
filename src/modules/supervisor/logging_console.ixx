@@ -23,6 +23,7 @@ export module devicefs.supervisor.logging_console;
 import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import devicefs.supervisor.process_attribute_list;
 import devicefs.terminal.text;
 import devicefs.terminal.transcoding;
 
@@ -280,41 +281,17 @@ public:
     }
 
     [[nodiscard]] auto StartProcess(
-        const HANDLE job,
+        HANDLE job,
         const wil::zstring_view application,
         std::string &command) {
-        constexpr auto kAttributeCount = DWORD{2};
-        auto attribute_bytes = SIZE_T{};
-        InitializeProcThreadAttributeList(
-            nullptr, kAttributeCount, 0, &attribute_bytes);
-        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
-            WinError("could not size the process attribute list");
-        }
-        const auto attribute_storage =
-            std::make_unique_for_overwrite<std::byte[]>(attribute_bytes);
-        auto *const attributes = static_cast<PPROC_THREAD_ATTRIBUTE_LIST>(
-            CompileTimeCast<LPVOID>(attribute_storage.get()));
-        _Analysis_assume_(attributes != nullptr);
-        if (!InitializeProcThreadAttributeList(
-                attributes, kAttributeCount, 0, &attribute_bytes)) {
-            WinError("could not initialize the process attribute list");
-        }
-        auto jobs = std::array{job};
-        const auto delete_attributes = wil::scope_exit(
-            [=] { DeleteProcThreadAttributeList(attributes); });
-        if (!UpdateProcThreadAttribute(attributes, 0,
-                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-                console_.get(), sizeof(HPCON), nullptr, nullptr)) {
-            WinError("could not attach the child process to the pseudoconsole");
-        }
-        if (!UpdateProcThreadAttribute(attributes, 0,
-                PROC_THREAD_ATTRIBUTE_JOB_LIST, jobs.data(),
-                sizeof(jobs), nullptr, nullptr)) {
-            WinError("could not assign the child process to its job");
-        }
+        const auto attributes = ProcessAttributeList{
+            std::tuple{PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                console_.get(), sizeof(HPCON)},
+            std::tuple{PROC_THREAD_ATTRIBUTE_JOB_LIST,
+                &job, sizeof(job)}};
         auto startup = STARTUPINFOEXA{
             .StartupInfo = {.cb = sizeof(STARTUPINFOEXA)},
-            .lpAttributeList = attributes,
+            .lpAttributeList = attributes.get(),
         };
         auto process = wil::unique_process_information{};
         if (!CreateProcessA(application.c_str(), command.data(),

@@ -23,6 +23,7 @@ export module devicefs.supervisor.process_launch;
 import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import devicefs.supervisor.process_attribute_list;
 
 export [[nodiscard]] auto WaitForProcess(
     const HANDLE process,
@@ -79,30 +80,9 @@ export template <typename Start>
     auto inherited_handles = std::array{
         child_handles[0].get(), child_handles[1].get(), child_handles[2].get(),
     };
-    constexpr auto kAttributeCount = DWORD{1};
-    auto attribute_bytes = SIZE_T{};
-    InitializeProcThreadAttributeList(
-        nullptr, kAttributeCount, 0, &attribute_bytes);
-    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
-        WinError("could not size the process attribute list");
-    }
-    const auto attribute_storage =
-        std::make_unique_for_overwrite<std::byte[]>(attribute_bytes);
-    auto *const attributes = static_cast<PPROC_THREAD_ATTRIBUTE_LIST>(
-        CompileTimeCast<LPVOID>(attribute_storage.get()));
-    _Analysis_assume_(attributes != nullptr);
-    if (!InitializeProcThreadAttributeList(
-            attributes, kAttributeCount, 0, &attribute_bytes)) {
-        WinError("could not initialize the process attribute list");
-    }
-    const auto delete_attributes = wil::scope_exit(
-        [=] { DeleteProcThreadAttributeList(attributes); });
-    if (!UpdateProcThreadAttribute(attributes, 0,
-            PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            inherited_handles.data(),
-            sizeof(inherited_handles), nullptr, nullptr)) {
-        WinError("could not restrict inherited process handles");
-    }
+    const auto attributes = ProcessAttributeList{
+        std::tuple{PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            inherited_handles.data(), sizeof(inherited_handles)}};
 
     auto startup = STARTUPINFOEXA{
         .StartupInfo = {
@@ -113,7 +93,7 @@ export template <typename Start>
             .hStdOutput = inherited_handles[1],
             .hStdError = inherited_handles[2],
         },
-        .lpAttributeList = attributes,
+        .lpAttributeList = attributes.get(),
     };
     auto process = wil::unique_process_information{};
     if (!start(&startup.StartupInfo, &process)) {

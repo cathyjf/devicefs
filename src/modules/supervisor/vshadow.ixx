@@ -53,7 +53,7 @@ namespace {
 class VssClientOwner final : private VssClient {
 public:
     template <typename... Arguments>
-        requires(sizeof...(Arguments) > 0)
+        requires (sizeof...(Arguments) > 0)
     [[gsl::suppress("26455",
         justification:
             "VssClientOwner does not have a default constructor. This variadic "

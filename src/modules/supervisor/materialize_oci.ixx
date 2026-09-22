@@ -471,9 +471,9 @@ export [[nodiscard]] auto ReadWslOciLayerDigest(
     if (FAILED(wil::reg::open_unique_key_nothrow(HKEY_USERS, sid.get(), profile))) {
         return {};
     }
-    const auto registration = [distribution, &profile] {
+    const auto registration = [distribution, profile_ = profile.get()] {
         try {
-            return FindDistribution(distribution, profile.get());
+            return FindDistribution(distribution, profile_);
         } catch (const std::runtime_error &) {
             // The OCI layer is informational; unavailable metadata must not
             // prevent the backup from running.
@@ -495,21 +495,23 @@ export [[nodiscard]] auto MaterializeOci(
     const std::string_view distribution,
     const std::optional<std::filesystem::path> &oci) -> bool {
     const auto previous = FindDistribution(distribution);
-    const auto previous_directory = [&]() -> std::filesystem::path {
-        if (!previous) {
+    const auto previous_directory = [previous_ = previous.get(), distribution]
+        -> std::filesystem::path {
+        if (!previous_) {
             return {};
         }
         auto directory = wil::unique_cotaskmem_string{};
         if (const auto result = wil::reg::get_value_string_nothrow(
-                previous.get(), L"BasePath", directory);
+                previous_, L"BasePath", directory);
             FAILED(result)) {
             WinError("could not read the directory of WSL distribution '{}'",
                 distribution, ExplicitHresult{result});
         }
         return directory.get();
     }();
-    const auto previous_digest = [&]() -> std::optional<std::string> {
-        if (!previous || oci) {
+    const auto previous_digest = [has_previous = (previous.get() != nullptr),
+        &oci, &previous_directory] -> std::optional<std::string> {
+        if (!has_previous || oci) {
             return std::nullopt;
         }
         // Missing or unreadable metadata does not establish which filesystem

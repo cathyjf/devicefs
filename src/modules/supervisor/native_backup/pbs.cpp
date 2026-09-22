@@ -398,13 +398,15 @@ struct WslProcess {
         standard_input,
         standard_output,
         standard_error,
-        [&](STARTUPINFOA *const startup, PROCESS_INFORMATION *const process) {
+        [token = result.token.get(), environment_ = environment.get(),
+        &wsl_path_text, &command, &wsl_directory](
+            STARTUPINFOA *const startup, PROCESS_INFORMATION *const process) {
             return CreateProcessAsUserA(
-                result.token.get(), wsl_path_text.c_str(), command.data(),
+                token, wsl_path_text.c_str(), command.data(),
                 nullptr, nullptr, TRUE,
                 kWslCreationFlags | CREATE_BREAKAWAY_FROM_JOB |
                     EXTENDED_STARTUPINFO_PRESENT,
-                environment.get(), Transcode<std::string>(wsl_directory.native()).c_str(), startup, process);
+                environment_, Transcode<std::string>(wsl_directory.native()).c_str(), startup, process);
         },
         "could not start WSL as the configured account");
     return result;
@@ -492,7 +494,7 @@ struct StartedWslFish {
         ForwardPipeOutput{
             .destination = GetStdHandle(STD_ERROR_HANDLE)});
 
-    const auto write_input = [&](const auto input) {
+    const auto write_input = [handle = started.standard_input.get()](const auto input) {
         if (input.empty()) {
             return;
         }
@@ -508,7 +510,7 @@ struct StartedWslFish {
             return converted;
         }();
         auto written = DWORD{};
-        if (!WriteFile(started.standard_input.get(), input.data(), size,
+        if (!WriteFile(handle, input.data(), size,
                 &written, nullptr)) {
             WinError("could not write the WSL input");
         }

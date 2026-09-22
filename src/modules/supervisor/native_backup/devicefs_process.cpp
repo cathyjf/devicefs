@@ -133,14 +133,14 @@ struct DeviceFsStartRequest {
                 nullptr, 0)) {
             WinError("could not create the devicefs password channel");
         }
-        const auto write_password = [&](const std::span<const char> value) {
+        const auto write_password = [output = password_output.get()](
+            const std::span<const char> value) {
             if (value.empty()) {
                 return;
             }
             const auto size = wil::safe_cast_failfast<DWORD>(value.size_bytes());
             auto written = DWORD{};
-            if (!WriteFile(password_output.get(), value.data(), size,
-                    &written, nullptr)) {
+            if (!WriteFile(output, value.data(), size, &written, nullptr)) {
                 WinError("could not write the devicefs RPC password");
             }
             if (written != size) {

@@ -162,12 +162,12 @@ struct RPCBlockDevice {
         const std::string_view symbol) {
         auto stored_symbol = std::basic_string<unsigned char>{
             symbol.begin(), symbol.end()};
-        const auto length = [&] {
+        const auto length = [binding_ = binding.get(), &stored_symbol, symbol] {
             auto result = std::uint64_t{};
             auto status = NTSTATUS{};
             const auto error = wil::invoke_rpc_result_nothrow(
                 status, DeviceFsRpcClient_GetLength,
-                binding.get(), stored_symbol.c_str(), &result);
+                binding_, stored_symbol.c_str(), &result);
             if (FAILED(error)) {
                 WinError("could not query the length of RPC block device '{}'",
                     symbol,

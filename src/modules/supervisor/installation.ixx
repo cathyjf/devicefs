@@ -425,8 +425,8 @@ export auto InstallService(
         WinError("could not install service '{}' with binary path '{}'",
             kServiceName, binary_path);
     }
-    auto remove_incomplete_service = wil::scope_exit([&] {
-        static_cast<void>(DeleteService(service.get()));
+    auto remove_incomplete_service = wil::scope_exit([service_ = service.get()] {
+        std::ignore = DeleteService(service_);
     });
     ConfigurePreshutdownTimeout(service.get(), preshutdown_timeout);
     remove_incomplete_service.release();

@@ -28,10 +28,10 @@ export [[nodiscard]] auto ParseGuid(const std::string_view value)
     const auto text = value.starts_with('{') ?
         std::string{value} : std::format("{{{}}}", value);
     auto identifier = GUID{};
-    const auto error = IIDFromString(
+    const auto result = IIDFromString(
         devicefs::terminal::Transcode<wchar_t>(text).data(), &identifier);
-    if (FAILED(error)) {
-        return std::unexpected{error};
+    if (FAILED(result)) {
+        return std::unexpected{result};
     }
     return identifier;
 }

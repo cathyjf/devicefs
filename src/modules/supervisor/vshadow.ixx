@@ -21,6 +21,7 @@ export module devicefs.supervisor.vshadow;
 import std;
 import <vshadow/shadow.h>;
 import <devicefs/windows_imports.h>;
+import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.terminal.transcoding;
 
@@ -43,11 +44,6 @@ struct SnapshotProperties {
 struct SnapshotSet {
     GUID identifier{};
     std::vector<Snapshot> snapshots;
-};
-
-class OperationError : public std::runtime_error {
-public:
-    using std::runtime_error::runtime_error;
 };
 
 } // namespace devicefs::vshadow
@@ -176,16 +172,6 @@ private:
     Completion completion_ = Completion::None;
 };
 
-[[noreturn]] auto TranslateVssError(const HRESULT error) {
-    if (error == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
-        throw std::system_error(
-            ERROR_CANCELLED, std::system_category(), "backup cancelled");
-    }
-    throw devicefs::vshadow::OperationError(std::format(
-        "VSS operation failed with HRESULT 0x{:08X}",
-        std::bit_cast<std::uint32_t>(error)));
-}
-
 } // namespace
 
 export namespace devicefs::vshadow {
@@ -229,15 +215,20 @@ export namespace devicefs::vshadow {
     try {
         auto canonical_volumes = volumes |
             std::views::transform([](const std::string &volume) {
-                return GetUniqueVolumeNameForPath(
-                    Transcode<std::wstring>(volume), true);
+                try {
+                    return GetUniqueVolumeNameForPath(
+                        Transcode<std::wstring>(volume), true);
+                } catch (const HRESULT error) {
+                    WinError("could not resolve backup volume '{}'",
+                        volume, ExplicitHresult{error});
+                }
             }) |
             std::ranges::to<std::vector<std::wstring>>();
 
         auto backup = Backup{cancellation_event, use_writers};
         return backup.Run(canonical_volumes, operation);
     } catch (const HRESULT error) {
-        TranslateVssError(error);
+        WinError("VSS operation failed", ExplicitHresult{error});
     }
 }
 

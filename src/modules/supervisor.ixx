@@ -1075,9 +1075,5 @@ export auto BackupSupervisorMain(
         devicefs::WriteToStream(
             devicefs::stderr, "backup-supervisor: {}\n", error.what());
         return 2;
-    } catch (const devicefs::vshadow::OperationError &error) {
-        devicefs::WriteToStream(
-            devicefs::stderr, "backup-supervisor: {}\n", error.what());
-        return 2;
     }
 }

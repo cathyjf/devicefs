@@ -54,9 +54,6 @@ template <typename Operation>
         if (cancellation_requested && (error.code() == cancelled)) {
             return kCancelledExitCode;
         }
-        if (error.code() == cancelled) {
-            throw devicefs::vshadow::OperationError(error.what());
-        }
         throw;
     }
 }

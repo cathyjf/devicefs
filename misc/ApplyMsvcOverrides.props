@@ -49,4 +49,22 @@
       Properties="Configuration=$(Configuration);Platform=$(Platform)"
       BuildInParallel="$(BuildInParallel)" />
   </Target>
+  <!--
+   Store temporary files created by `cl.exe` in a directory named `temp` under
+   each target's intermediate build directory, rather than in the normal Windows
+   temporary directory. Microsoft states that this change can increase build speed.
+   https://devblogs.microsoft.com/cppblog/cpp-build-throughput-investigation-and-tune-up
+  -->
+  <Target Name="SetProjectTempDirectory" BeforeTargets="BeforeClCompile"
+    Condition="'$(DesignTimeBuild)' != 'true'">
+    <PropertyGroup>
+      <OriginalTmp>$(TMP)</OriginalTmp>
+    </PropertyGroup>
+    <MakeDir Directories="$(IntDirFullPath)temp"/>
+    <SetEnv Name="TMP" Value="$(IntDirFullPath)temp" Prefix="false"></SetEnv>
+  </Target>
+  <Target Name="RestoreTempDirectory" BeforeTargets="AfterClCompile"
+    Condition="'$(DesignTimeBuild)' != 'true'" >
+    <SetEnv Name="TMP" Value="$(OriginalTmp)" Prefix="false"></SetEnv>
+  </Target>
 </Project>

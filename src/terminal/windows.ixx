@@ -331,9 +331,6 @@ private:
             throw std::system_error(GetLastError(),
                 std::system_category(), "could not read terminal input");
         }
-        if (read != 1) {
-            throw std::runtime_error("the terminal returned no input record");
-        }
         return record;
     }
 

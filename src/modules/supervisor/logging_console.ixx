@@ -287,22 +287,14 @@ public:
         auto attribute_bytes = SIZE_T{};
         InitializeProcThreadAttributeList(
             nullptr, kAttributeCount, 0, &attribute_bytes);
-        if ((attribute_bytes == 0) ||
-            (GetLastError() != ERROR_INSUFFICIENT_BUFFER)) {
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
             WinError("could not size the process attribute list");
         }
-        const auto attribute_storage = [&] {
-            try {
-                return std::make_unique_for_overwrite<std::byte[]>(
-                    attribute_bytes);
-            } catch (const std::bad_alloc &) {
-                WinError("could not allocate the process attribute list",
-                    ExplicitWin32Error{ERROR_NOT_ENOUGH_MEMORY});
-            }
-        }();
-        void *const raw_attributes = attribute_storage.get();
+        const auto attribute_storage =
+            std::make_unique_for_overwrite<std::byte[]>(attribute_bytes);
         auto *const attributes = static_cast<PPROC_THREAD_ATTRIBUTE_LIST>(
-            raw_attributes);
+            CompileTimeCast<LPVOID>(attribute_storage.get()));
+        _Analysis_assume_(attributes != nullptr);
         if (!InitializeProcThreadAttributeList(
                 attributes, kAttributeCount, 0, &attribute_bytes)) {
             WinError("could not initialize the process attribute list");

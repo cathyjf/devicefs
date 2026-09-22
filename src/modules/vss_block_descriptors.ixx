@@ -241,18 +241,6 @@ public:
         if (DeviceIoControl(handle_.get(), IOCTL_DISK_GET_LENGTH_INFO,
                 nullptr, 0, &device_length, sizeof(device_length),
                 &returned, nullptr)) {
-            if (returned < sizeof(device_length)) {
-                throw std::runtime_error(std::format(
-                    "IOCTL_DISK_GET_LENGTH_INFO returned {} byte(s); "
-                    "{} were required for VSS descriptor source '{}'",
-                    returned, sizeof(device_length),
-                    Transcode<std::string>(normalized_path)));
-            }
-            if (device_length.Length.QuadPart < 0) {
-                throw std::runtime_error(std::format(
-                    "VSS descriptor source '{}' reported a negative length",
-                    Transcode<std::string>(normalized_path)));
-            }
             size_ = wil::safe_cast_failfast<std::uint64_t>(
                 device_length.Length.QuadPart);
 
@@ -268,13 +256,6 @@ public:
                 WinError("could not obtain geometry for VSS descriptor source '{}'",
                     std::wstring_view{normalized_path});
             }
-            if (returned < sizeof(geometry)) {
-                throw std::runtime_error(std::format(
-                    "IOCTL_DISK_GET_DRIVE_GEOMETRY returned {} byte(s); "
-                    "{} were required for VSS descriptor source '{}'",
-                    returned, sizeof(geometry),
-                    Transcode<std::string>(normalized_path)));
-            }
             sector_size_ = geometry.BytesPerSector;
             const auto alignment = QueryBufferAlignment(handle_.get());
             if (!alignment) {
@@ -282,13 +263,6 @@ public:
                     std::wstring_view{normalized_path});
             }
             buffer_alignment_ = *alignment;
-            if ((sector_size_ == 0) || ((size_ % sector_size_) != 0)) {
-                throw std::runtime_error(std::format(
-                    "VSS descriptor source '{}' had invalid sector geometry "
-                    "(length {}, bytes per sector {})",
-                    Transcode<std::string>(normalized_path),
-                    size_, sector_size_));
-            }
 
             // ValidateNtfsVolume reads the backup NTFS header in the final
             // sector, so request permission to read beyond the filesystem's
@@ -315,11 +289,6 @@ public:
             if (!GetFileSizeEx(handle_.get(), &file_size)) {
                 WinError("could not obtain the length of VSS descriptor image '{}'",
                     std::wstring_view{normalized_path});
-            }
-            if (file_size.QuadPart < 0) {
-                throw std::runtime_error(std::format(
-                    "VSS descriptor image '{}' reported a negative length",
-                    Transcode<std::string>(normalized_path)));
             }
             size_ = wil::safe_cast_failfast<std::uint64_t>(file_size.QuadPart);
         }

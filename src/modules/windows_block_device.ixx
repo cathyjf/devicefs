@@ -250,7 +250,7 @@ struct AllocationBitmap {
 };
 
 [[nodiscard]] auto LoadAllocationBitmap(
-    HANDLE device, UINT64 device_size,
+    HANDLE device,
     const std::filesystem::path &filename,
     std::string_view description) -> AllocationBitmap;
 
@@ -483,7 +483,7 @@ struct WindowsDeviceOrBitmap {
 namespace devicefs::filesystem_internal {
 
 [[nodiscard]] auto LoadAllocationBitmap(
-    const HANDLE device, const UINT64 device_size,
+    const HANDLE device,
     const std::filesystem::path &filename,
     const std::string_view description) -> AllocationBitmap {
     const auto file_system = [device, &filename, description] {
@@ -516,12 +516,6 @@ namespace devicefs::filesystem_internal {
         (std::wstring_view{file_system.data()} == L"ReFS")
         ? query_geometry(REFS_VOLUME_DATA_BUFFER{}, FSCTL_GET_REFS_VOLUME_DATA)
         : query_geometry(NTFS_VOLUME_DATA_BUFFER{}, FSCTL_GET_NTFS_VOLUME_DATA);
-
-    if (cluster_count > (device_size / cluster_size)) {
-        throw std::runtime_error(std::format(
-            "the cluster span exceeds the exposed length of '{}' ({})",
-            Transcode<std::string>(filename.native()), description));
-    }
 
     // The bitmap is applied directly to device offsets, so LCN 0 must begin at byte 0.
     {
@@ -614,7 +608,7 @@ auto WindowsBlockDevice::FromFilename(
     std::filesystem::path filename, const bool extended_dasd,
     const bool cache, const bool synthetic_free_clusters,
     const std::string_view description) -> WindowsBlockDevice {
-    auto handle = wil::unique_hfile(CreateFileA(Transcode<std::string>(filename.native()).c_str(), GENERIC_READ,
+    auto handle = wil::unique_hfile(CreateFileW(filename.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
     if (!handle) {
@@ -636,11 +630,6 @@ auto WindowsBlockDevice::FromFilename(
             std::wstring_view{filename.native()}, description,
             ExplicitWin32Error{length_error});
     }
-    if (length.Length.QuadPart < 0) {
-        throw std::runtime_error(std::format(
-            "IOCTL_DISK_GET_LENGTH_INFO returned an invalid length for '{}' ({})",
-            Transcode<std::string>(filename.native()), description));
-    }
 
     auto geometry = DISK_GEOMETRY{};
     const auto geometry_error =
@@ -651,16 +640,8 @@ auto WindowsBlockDevice::FromFilename(
             ExplicitWin32Error{geometry_error});
     }
 
-    // The negative case is rejected above, so this conversion preserves the
-    // device length.
     const auto size =
         wil::safe_cast_failfast<UINT64>(length.Length.QuadPart);
-    if ((geometry.BytesPerSector == 0) || ((size % geometry.BytesPerSector) != 0)) {
-        throw std::runtime_error(std::format(
-            "block device '{}' has a {}-byte length that is not a multiple of "
-            "its {}-byte sector size ({})",
-            Transcode<std::string>(filename.native()), size, geometry.BytesPerSector, description));
-    }
     if ((size % kAdvertisedSectorSize) != 0) {
         throw std::runtime_error(std::format(
             "block device '{}' has a {}-byte length that is not a multiple of "
@@ -696,7 +677,7 @@ auto WindowsBlockDevice::FromFilename(
         }
     }
     auto allocation_bitmap = synthetic_free_clusters
-        ? LoadAllocationBitmap(handle.get(), size, filename, description)
+        ? LoadAllocationBitmap(handle.get(), filename, description)
         : AllocationBitmap{};
     return WindowsBlockDevice{
         .length = size,

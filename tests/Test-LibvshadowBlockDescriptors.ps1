@@ -210,7 +210,7 @@ function Get-ObjectBlockOffsets {
         [string] $Path,
 
         [Parameter(Mandatory)]
-        [NtfsBitmap] $Bitmap,
+        [VolumeAllocationBitmap] $Bitmap,
 
         [Parameter(Mandatory)]
         [int] $BlockSize,
@@ -248,7 +248,7 @@ function Get-TreeBlockOffsets {
         [string] $Root,
 
         [Parameter(Mandatory)]
-        [NtfsBitmap] $Bitmap,
+        [VolumeAllocationBitmap] $Bitmap,
 
         [Parameter(Mandatory)]
         [int] $BlockSize
@@ -313,10 +313,10 @@ function Find-AllocationTransitionCluster {
         [string] $Path,
 
         [Parameter(Mandatory)]
-        [NtfsBitmap] $Before,
+        [VolumeAllocationBitmap] $Before,
 
         [Parameter(Mandatory)]
-        [NtfsBitmap] $After,
+        [VolumeAllocationBitmap] $After,
 
         [Parameter(Mandatory)]
         [bool] $BecameAllocated
@@ -362,10 +362,10 @@ function Assert-ControlledOverwrite {
         [string] $AfterPath,
 
         [Parameter(Mandatory)]
-        [NtfsBitmap] $BeforeBitmap,
+        [VolumeAllocationBitmap] $BeforeBitmap,
 
         [Parameter(Mandatory)]
-        [NtfsBitmap] $AfterBitmap,
+        [VolumeAllocationBitmap] $AfterBitmap,
 
         [Parameter(Mandatory)]
         $Differences,
@@ -793,11 +793,11 @@ try {
         (Read-FileRange $snapshot_c_hot 0 $hot_file_length) `
         'Snapshot C hot file'
 
-    $bitmap_a = [DeviceFsTestNative]::GetNtfsBitmap(
+    $bitmap_a = [DeviceFsTestNative]::GetAllocationBitmap(
         $snapshot_a.DeviceObject, $true)
-    $bitmap_b = [DeviceFsTestNative]::GetNtfsBitmap(
+    $bitmap_b = [DeviceFsTestNative]::GetAllocationBitmap(
         $snapshot_b.DeviceObject, $true)
-    $bitmap_c = [DeviceFsTestNative]::GetNtfsBitmap(
+    $bitmap_c = [DeviceFsTestNative]::GetAllocationBitmap(
         $snapshot_c.DeviceObject, $true)
     Assert-Condition (
         ($bitmap_a.Length -eq $source_identity.Length) -and

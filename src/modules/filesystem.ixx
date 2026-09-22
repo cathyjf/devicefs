@@ -163,7 +163,7 @@ auto Usage(const auto output) noexcept {
         "  --stop-event NAME          Named shutdown event (default: {})\n"
         "  --cache                    Enable file-data caching (requires read-only volumes)\n"
         "  --no-extended-dasd-io      Do not issue FSCTL_ALLOW_EXTENDED_DASD_IO\n"
-        "  --synthetic-free-clusters  Return zeros for free clusters on read-only NTFS volumes\n"
+        "  --synthetic-free-clusters  Return zeros for free clusters on read-only NTFS and ReFS volumes\n"
         "  --expose-known-data-map CLUSTER-SIZE\n"
         "                             Add FILENAME.known-data.bitmap for each image\n"
         "                             CLUSTER-SIZE is bytes per bitmap bit; requires\n"

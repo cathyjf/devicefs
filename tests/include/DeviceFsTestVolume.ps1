@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# Create and attach a new VHD or VHDX containing one writable NTFS partition,
+# Create and attach a new VHD or VHDX containing one writable partition,
 # without assigning a drive letter. Return the partition for the caller to
 # mount or populate. The filename selects VHD or VHDX; `Fixed` selects fully
 # allocated storage rather than a dynamic image.
@@ -21,7 +21,10 @@ function New-DeviceFsTestVolume {
         [Parameter(Mandatory)]
         [string] $Label,
 
-        [switch] $Fixed
+        [switch] $Fixed,
+
+        [ValidateSet('NTFS', 'ReFS')]
+        [string] $FileSystem = 'NTFS'
     )
 
     $allocation = if ($Fixed) { @{ Fixed = $true } } else { @{ Dynamic = $true } }
@@ -61,7 +64,7 @@ function New-DeviceFsTestVolume {
         ([char]$partition.DriveLetter -ne [char]0)) {
         throw "The test partition in '$Path' did not become visible without a drive letter."
     }
-    Format-Volume -Partition $partition -FileSystem NTFS -AllocationUnitSize $ClusterSize `
+    Format-Volume -Partition $partition -FileSystem $FileSystem -AllocationUnitSize $ClusterSize `
         -NewFileSystemLabel $Label -Force -Confirm:$false | Out-Null
     return $partition
 }

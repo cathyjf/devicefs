@@ -184,8 +184,9 @@ struct AllocationBitmap {
             } else {
                 std::memcpy(&word, remaining.data(), remaining.size());
             }
-            // NTFS numbers bits from the low bit of each byte. Reversing the
-            // bytes on a big-endian host preserves that order within the word.
+            // `VOLUME_BITMAP_BUFFER` numbers bits from the low bit of each byte.
+            // Reversing the bytes on a big-endian host preserves that order within
+            // the word.
             if constexpr (std::endian::native == std::endian::big) {
                 word = std::byteswap(word);
             }
@@ -225,7 +226,7 @@ struct AllocationBitmap {
 
         const auto end = offset + output.size();
         const auto first_cluster = offset >> cluster_shift;
-        // Bytes beyond the NTFS cluster count must retain their source contents.
+        // Bytes beyond the volume's cluster count must retain their source contents.
         const auto limit = std::min(cluster_count, ((end - 1) >> cluster_shift) + 1);
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
         measurement->ObserveRead(output, offset);
@@ -485,57 +486,79 @@ namespace devicefs::filesystem_internal {
     const HANDLE device, const UINT64 device_size,
     const std::filesystem::path &filename,
     const std::string_view description) -> AllocationBitmap {
-    auto volume = NTFS_VOLUME_DATA_BUFFER{};
-    const auto volume_error =
-        Ioctl(device, FSCTL_GET_NTFS_VOLUME_DATA, &volume, sizeof(volume));
-    if (volume_error != ERROR_SUCCESS) {
-        WinError("FSCTL_GET_NTFS_VOLUME_DATA failed for '{}' ({})",
-            std::wstring_view{filename.native()}, description,
-            ExplicitWin32Error{volume_error});
-    }
-    if ((volume.TotalClusters.QuadPart <= 0) || (volume.BytesPerCluster == 0)) {
-        throw std::runtime_error(std::format(
-            "FSCTL_GET_NTFS_VOLUME_DATA returned invalid data for '{}' ({})",
-            Transcode<std::string>(filename.native()), description));
-    }
+    const auto file_system = [device, &filename, description] {
+        auto file_system = std::array<wchar_t, MAX_PATH + 1>{};
+        if (!GetVolumeInformationByHandleW(device, nullptr, 0, nullptr, nullptr,
+            nullptr, file_system.data(),
+            CompileTimeCast<DWORD, std::size(file_system)>())) {
+            WinError("could not identify the filesystem for '{}' ({})",
+                std::wstring_view{filename.native()}, description);
+        }
+        return file_system;
+    }();
+    // `GetDiskSpaceInformationW` returns `STATUS_INVALID_PARAMETER` for the
+    // read-only ReFS test volumes. The filesystem-specific control codes
+    // successfully return their cluster counts and sizes through the volume handle.
+    const auto query_geometry = [device, &filename,
+        file_system_ = std::wstring_view{file_system.data()}, description](
+        auto volume, const DWORD code) {
+        const auto error = Ioctl(device, code, &volume, sizeof(volume));
+        if (error != ERROR_SUCCESS) {
+            WinError("querying the {} volume data failed for '{}' ({})",
+                file_system_, std::wstring_view{filename.native()}, description,
+                ExplicitWin32Error{error});
+        }
+        return std::pair{
+            wil::safe_cast_failfast<UINT64>(volume.TotalClusters.QuadPart),
+            volume.BytesPerCluster};
+    };
+    const auto [cluster_count, cluster_size] =
+        (std::wstring_view{file_system.data()} == L"ReFS")
+        ? query_geometry(REFS_VOLUME_DATA_BUFFER{}, FSCTL_GET_REFS_VOLUME_DATA)
+        : query_geometry(NTFS_VOLUME_DATA_BUFFER{}, FSCTL_GET_NTFS_VOLUME_DATA);
 
-    // The nonpositive case is rejected above, so this conversion preserves
-    // the cluster count.
-    const auto cluster_count =
-        wil::safe_cast_failfast<UINT64>(volume.TotalClusters.QuadPart);
-    if (cluster_count > (device_size / volume.BytesPerCluster)) {
+    if (cluster_count > (device_size / cluster_size)) {
         throw std::runtime_error(std::format(
-            "the NTFS cluster span exceeds the exposed length of '{}' ({})",
+            "the cluster span exceeds the exposed length of '{}' ({})",
             Transcode<std::string>(filename.native()), description));
     }
 
     // The bitmap is applied directly to device offsets, so LCN 0 must begin at byte 0.
-    auto retrieval_base = RETRIEVAL_POINTER_BASE{};
-    const auto retrieval_base_error = Ioctl(device,
-        FSCTL_GET_RETRIEVAL_POINTER_BASE, &retrieval_base, sizeof(retrieval_base));
-    if (retrieval_base_error != ERROR_SUCCESS) {
-        WinError("FSCTL_GET_RETRIEVAL_POINTER_BASE failed for '{}' ({})",
-            std::wstring_view{filename.native()}, description,
-            ExplicitWin32Error{retrieval_base_error});
-    }
-    if (retrieval_base.FileAreaOffset.QuadPart != 0) {
-        throw std::runtime_error(std::format(
-            "NTFS LCN 0 is offset {} sectors from the start of the exposed device "
-            "'{}' ({})",
-            retrieval_base.FileAreaOffset.QuadPart,
-            Transcode<std::string>(filename.native()), description));
+    {
+        auto retrieval_base = RETRIEVAL_POINTER_BASE{};
+        const auto retrieval_base_error = Ioctl(device,
+            FSCTL_GET_RETRIEVAL_POINTER_BASE, &retrieval_base, sizeof(retrieval_base));
+        if (retrieval_base_error != ERROR_SUCCESS) {
+            WinError("FSCTL_GET_RETRIEVAL_POINTER_BASE failed for '{}' ({})",
+                std::wstring_view{filename.native()}, description,
+                ExplicitWin32Error{retrieval_base_error});
+        }
+        if (retrieval_base.FileAreaOffset.QuadPart != 0) {
+            throw std::runtime_error(std::format(
+                "LCN 0 is offset {} sectors from the start of the exposed device "
+                "'{}' ({})",
+                retrieval_base.FileAreaOffset.QuadPart,
+                Transcode<std::string>(filename.native()), description));
+        }
     }
 
     const auto bitmap_bytes =
         cluster_count / kBitsPerByte +
         ((cluster_count % kBitsPerByte) != 0);
     const auto bitmap_data_size = kVolumeBitmapHeaderSize + bitmap_bytes;
-    // The maximum number of clusters in an NTFS volume is 2**32 - 1.
-    // https://learn.microsoft.com/en-us/windows-server/storage/file-server/ntfs-overview#support-for-large-volumes
-    // Thus, the largest possible bitmap requires only 512 MiB, which is well
-    // below the maximum value of DWORD (approximately 4 GiB).
-    const auto output_size_for_api = wil::safe_cast_failfast<DWORD>(
-        std::max(sizeof(VOLUME_BITMAP_BUFFER), bitmap_data_size));
+    const auto output_size_for_api =
+        [output_size = std::max(sizeof(VOLUME_BITMAP_BUFFER), bitmap_data_size),
+        &filename, description] {
+        auto converted = DWORD{};
+        if (FAILED(wil::safe_cast_nothrow(output_size, &converted))) {
+            throw std::runtime_error(std::format(
+                "the allocation bitmap for '{}' requires {} bytes, exceeding "
+                "the DeviceIoControl buffer limit of {} bytes ({})",
+                Transcode<std::string>(filename.native()), output_size,
+                std::numeric_limits<DWORD>::max(), description));
+        }
+        return converted;
+    }();
 
     auto storage = std::make_unique_for_overwrite<BYTE[]>(output_size_for_api);
     [[gsl::suppress("26403",
@@ -547,22 +570,24 @@ namespace devicefs::filesystem_internal {
     auto returned = DWORD{};
     const auto bitmap_error = Ioctl(device, FSCTL_GET_VOLUME_BITMAP,
         output, output_size_for_api, &input, sizeof(input), &returned);
-    if (bitmap_error != ERROR_SUCCESS) {
+    // Only the bitmap prefix covering this image is needed. `ERROR_MORE_DATA`
+    // is acceptable when that entire prefix was returned; additional bits
+    // describe clusters beyond the volume geometry and are never consulted.
+    if ((bitmap_error != ERROR_SUCCESS) && (bitmap_error != ERROR_MORE_DATA)) {
         WinError("FSCTL_GET_VOLUME_BITMAP failed for '{}' ({})",
             std::wstring_view{filename.native()}, description,
             ExplicitWin32Error{bitmap_error});
     }
-    if ((output->StartingLcn.QuadPart != 0) ||
-        (output->BitmapSize.QuadPart != volume.TotalClusters.QuadPart) ||
-        (returned < bitmap_data_size)) {
+    if ((returned < bitmap_data_size) || (output->StartingLcn.QuadPart != 0) ||
+        std::cmp_less(output->BitmapSize.QuadPart, cluster_count)) {
         throw std::runtime_error(std::format(
             "FSCTL_GET_VOLUME_BITMAP returned incomplete data for '{}' ({})",
             Transcode<std::string>(filename.native()), description));
     }
 
     auto result = AllocationBitmap{
-        .cluster_size = volume.BytesPerCluster,
-        .cluster_shift = std::countr_zero(volume.BytesPerCluster),
+        .cluster_size = cluster_size,
+        .cluster_shift = std::countr_zero(cluster_size),
         .cluster_count = cluster_count,
         .storage = std::move(storage),
     };
@@ -572,7 +597,7 @@ namespace devicefs::filesystem_internal {
             result.storage.get() + kVolumeBitmapHeaderSize,
             bitmap_bytes,
         },
-        volume.BytesPerCluster, cluster_count);
+        cluster_size, cluster_count);
 #endif
     return result;
 }

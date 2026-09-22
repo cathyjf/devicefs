@@ -11,14 +11,16 @@ using Microsoft.Win32.SafeHandles;
 
 public sealed class VolumeIdentity {
     public string Label { get; }
+    public string FileSystem { get; }
     public long Length { get; }
     public uint DiskNumber { get; }
     public long DiskStartingOffset { get; }
     public long DiskExtentLength { get; }
 
-    internal VolumeIdentity(string label, long length, uint diskNumber,
+    internal VolumeIdentity(string label, string fileSystem, long length, uint diskNumber,
         long diskStartingOffset, long diskExtentLength) {
         Label = label;
+        FileSystem = fileSystem;
         Length = length;
         DiskNumber = diskNumber;
         DiskStartingOffset = diskStartingOffset;
@@ -26,7 +28,7 @@ public sealed class VolumeIdentity {
     }
 }
 
-public sealed class NtfsBitmap {
+public sealed class VolumeAllocationBitmap {
     private readonly byte[] bits;
 
     public long Length { get; }
@@ -34,7 +36,7 @@ public sealed class NtfsBitmap {
     public uint ClusterSize { get; }
     public long ClusterCount { get; }
 
-    internal NtfsBitmap(long length, uint sectorSize, uint clusterSize,
+    internal VolumeAllocationBitmap(long length, uint sectorSize, uint clusterSize,
         long clusterCount, byte[] bits) {
         Length = length;
         SectorSize = sectorSize;
@@ -111,6 +113,7 @@ public static class DeviceFsTestNative {
     private const int DiskGeometrySize = 24;
     private const int DiskGeometrySectorSizeOffset = 20;
     private const int NtfsVolumeDataSize = 96;
+    private const int RefsVolumeDataSize = 152;
     private const int VolumeBitmapHeaderSize = 16;
     private const int VolumeBitmapStructureSize = 24;
     private const int VolumeDiskExtentsSize = 32;
@@ -133,6 +136,7 @@ public static class DeviceFsTestNative {
 
     // These control codes are normally produced by Windows SDK CTL_CODE macros.
     private const uint FsctlGetNtfsVolumeData = 0x00090064;
+    private const uint FsctlGetRefsVolumeData = 0x000902D8;
     private const uint FsctlGetVolumeBitmap = 0x0009006F;
     private const uint FsctlGetRetrievalPointers = 0x00090073;
     private const uint FsctlAllowExtendedDasdIo = 0x00090083;
@@ -157,6 +161,20 @@ public static class DeviceFsTestNative {
         public long Mft2StartLcn;
         public long MftZoneStart;
         public long MftZoneEnd;
+    }
+
+    // `REFS_VOLUME_DATA_BUFFER` also contains version, serial-number and
+    // reserved fields. The geometry query only reads these three fields.
+    [StructLayout(LayoutKind.Explicit, Size = RefsVolumeDataSize)]
+    private struct RefsVolumeData {
+        [FieldOffset(32)]
+        public long TotalClusters;
+
+        [FieldOffset(56)]
+        public uint BytesPerSector;
+
+        [FieldOffset(60)]
+        public uint BytesPerCluster;
     }
 
     private readonly struct IoResult {
@@ -423,13 +441,15 @@ public static class DeviceFsTestNative {
     }
 
     private static IoResult Control(SafeFileHandle device, uint code,
-        byte[] input, int outputSize) {
+        byte[] input, int outputSize, bool allowMoreData = false) {
         var output = outputSize == 0 ? null : new byte[outputSize];
         if (!DeviceIoControl(device, code, input,
                 (uint)(input == null ? 0 : input.Length), output,
                 (uint)outputSize, out var returned, IntPtr.Zero)) {
             var error = Marshal.GetLastWin32Error();
-            throw Win32Error($"DeviceIoControl 0x{code:X8} failed", error);
+            if (!allowMoreData || (error != ErrorMoreData)) {
+                throw Win32Error($"DeviceIoControl 0x{code:X8} failed", error);
+            }
         }
 
         return new IoResult(output ?? Array.Empty<byte>(), returned);
@@ -486,14 +506,31 @@ public static class DeviceFsTestNative {
         return MemoryMarshal.Read<NtfsVolumeData>(result.Buffer);
     }
 
-    private static void ValidateNtfsGeometry(long length, uint sectorSize,
-        NtfsVolumeData ntfs) {
-        if ((ntfs.TotalClusters <= 0) || (ntfs.BytesPerCluster == 0) ||
-            (ntfs.BytesPerSector != sectorSize) ||
+    private static (long ClusterCount, uint ClusterSize, uint SectorSize)
+        QueryVolumeGeometry(SafeFileHandle device, string fileSystemName) {
+        if (string.Equals(fileSystemName, "NTFS", StringComparison.OrdinalIgnoreCase)) {
+            var ntfs = QueryNtfsData(device);
+            return (ntfs.TotalClusters, ntfs.BytesPerCluster, ntfs.BytesPerSector);
+        }
+        if (string.Equals(fileSystemName, "ReFS", StringComparison.OrdinalIgnoreCase)) {
+            var result = Control(device, FsctlGetRefsVolumeData, null, RefsVolumeDataSize);
+            if (result.BytesReturned < RefsVolumeDataSize) {
+                throw new InvalidDataException("FSCTL_GET_REFS_VOLUME_DATA returned incomplete data");
+            }
+            var refs = MemoryMarshal.Read<RefsVolumeData>(result.Buffer);
+            return (refs.TotalClusters, refs.BytesPerCluster, refs.BytesPerSector);
+        }
+        throw new InvalidDataException($"unsupported test filesystem '{fileSystemName}'");
+    }
+
+    private static void ValidateVolumeGeometry(long length, uint sectorSize,
+        (long ClusterCount, uint ClusterSize, uint SectorSize) geometry) {
+        if ((geometry.ClusterCount <= 0) || (geometry.ClusterSize == 0) ||
+            (geometry.SectorSize != sectorSize) ||
             ((length % sectorSize) != 0) ||
-            ((ntfs.BytesPerCluster % sectorSize) != 0) ||
-            (ntfs.TotalClusters > (length / ntfs.BytesPerCluster))) {
-            throw new InvalidDataException("invalid NTFS volume geometry");
+            ((geometry.ClusterSize % sectorSize) != 0) ||
+            (geometry.ClusterCount > (length / geometry.ClusterSize))) {
+            throw new InvalidDataException("invalid volume geometry");
         }
     }
 
@@ -513,14 +550,10 @@ public static class DeviceFsTestNative {
         fileSystemName = fileSystemBuffer.ToString();
     }
 
-    private static NtfsBitmap QueryBitmap(SafeFileHandle device,
+    private static VolumeAllocationBitmap QueryBitmap(SafeFileHandle device,
         bool requireReadOnly) {
         QueryVolumeInformation(device, out _, out var fileSystemName,
             out var fileSystemFlags);
-        if (!string.Equals(fileSystemName, "NTFS",
-                StringComparison.OrdinalIgnoreCase)) {
-            throw new InvalidDataException("volume is not NTFS");
-        }
         if (requireReadOnly && ((fileSystemFlags & FileReadOnlyVolume) == 0)) {
             throw new InvalidDataException(
                 "volume is not reported read-only");
@@ -528,30 +561,30 @@ public static class DeviceFsTestNative {
 
         var length = QueryLength(device);
         var sectorSize = QuerySectorSize(device);
-        var ntfs = QueryNtfsData(device);
-        ValidateNtfsGeometry(length, sectorSize, ntfs);
+        var geometry = QueryVolumeGeometry(device, fileSystemName);
+        ValidateVolumeGeometry(length, sectorSize, geometry);
 
         var retrievalBase = Control(device, FsctlGetRetrievalPointerBase,
             null, RetrievalPointerBaseSize);
         if ((retrievalBase.BytesReturned < RetrievalPointerBaseSize) ||
             (BitConverter.ToInt64(retrievalBase.Buffer, 0) != 0)) {
             throw new InvalidDataException(
-                "NTFS LCN 0 does not begin at device offset 0");
+                "LCN 0 does not begin at device offset 0");
         }
 
-        var bitmapBytes = checked((ntfs.TotalClusters / 8) +
-            ((ntfs.TotalClusters % 8) == 0 ? 0 : 1));
+        var bitmapBytes = checked((geometry.ClusterCount / 8) +
+            ((geometry.ClusterCount % 8) == 0 ? 0 : 1));
         var requiredSize = checked(VolumeBitmapHeaderSize + bitmapBytes);
         if (requiredSize > int.MaxValue) {
-            throw new InvalidDataException("NTFS allocation bitmap is too large");
+            throw new InvalidDataException("allocation bitmap is too large");
         }
 
         var input = new byte[sizeof(long)];
         var result = Control(device, FsctlGetVolumeBitmap, input,
-            Math.Max(VolumeBitmapStructureSize, (int)requiredSize));
+            Math.Max(VolumeBitmapStructureSize, (int)requiredSize), allowMoreData: true);
         if ((result.BytesReturned < requiredSize) ||
             (BitConverter.ToInt64(result.Buffer, 0) != 0) ||
-            (BitConverter.ToInt64(result.Buffer, 8) != ntfs.TotalClusters)) {
+            (BitConverter.ToInt64(result.Buffer, 8) < geometry.ClusterCount)) {
             throw new InvalidDataException(
                 "FSCTL_GET_VOLUME_BITMAP returned incomplete or inconsistent data");
         }
@@ -559,17 +592,17 @@ public static class DeviceFsTestNative {
         var bits = new byte[checked((int)bitmapBytes)];
         Buffer.BlockCopy(
             result.Buffer, VolumeBitmapHeaderSize, bits, 0, bits.Length);
-        return new NtfsBitmap(length, sectorSize, ntfs.BytesPerCluster,
-            ntfs.TotalClusters, bits);
+        Console.WriteLine($"{fileSystemName}: {geometry.ClusterCount} clusters of " +
+            $"{geometry.ClusterSize} bytes; bitmap reports " +
+            $"{BitConverter.ToInt64(result.Buffer, 8)} clusters, " +
+            $"returned {result.BytesReturned} bytes.");
+        return new VolumeAllocationBitmap(length, sectorSize, geometry.ClusterSize,
+            geometry.ClusterCount, bits);
     }
 
     private static VolumeIdentity InspectHandle(SafeFileHandle device) {
         QueryVolumeInformation(device, out var label, out var fileSystemName,
             out _);
-        if (!string.Equals(fileSystemName, "NTFS",
-                StringComparison.OrdinalIgnoreCase)) {
-            throw new InvalidDataException("volume is not NTFS");
-        }
 
         var length = QueryLength(device);
         var extents = Control(device, IoctlVolumeGetVolumeDiskExtents,
@@ -580,7 +613,7 @@ public static class DeviceFsTestNative {
                 "test volume does not have exactly one disk extent");
         }
 
-        return new VolumeIdentity(label, length,
+        return new VolumeIdentity(label, fileSystemName, length,
             BitConverter.ToUInt32(extents.Buffer, 8),
             BitConverter.ToInt64(extents.Buffer, 16),
             BitConverter.ToInt64(extents.Buffer, 24));
@@ -649,7 +682,7 @@ public static class DeviceFsTestNative {
         return InspectHandle(device);
     }
 
-    public static NtfsBitmap GetNtfsBitmap(string devicePath,
+    public static VolumeAllocationBitmap GetAllocationBitmap(string devicePath,
         bool requireReadOnly) {
         using var device = OpenDevice(devicePath);
         return QueryBitmap(device, requireReadOnly);
@@ -963,7 +996,7 @@ public static class DeviceFsTestNative {
     }
 
     public static AllocationChangeBlocks GetAllocationChangeBlocks(
-        NtfsBitmap before, NtfsBitmap after, int blockSize) {
+        VolumeAllocationBitmap before, VolumeAllocationBitmap after, int blockSize) {
         if ((before == null) || (after == null)) {
             throw new ArgumentNullException();
         }
@@ -974,7 +1007,7 @@ public static class DeviceFsTestNative {
             (before.SectorSize != after.SectorSize) ||
             (before.ClusterSize != after.ClusterSize) ||
             (before.ClusterCount != after.ClusterCount)) {
-            throw new InvalidDataException("NTFS bitmap geometries differ");
+            throw new InvalidDataException("allocation bitmap geometries differ");
         }
 
         var becameAllocated = new List<long>();
@@ -1073,7 +1106,7 @@ public static class DeviceFsTestNative {
     }
 
     private static void CompareChunk(byte[] source, byte[] normal,
-        byte[] synthetic, long offset, int count, NtfsBitmap bitmap,
+        byte[] synthetic, long offset, int count, VolumeAllocationBitmap bitmap,
         ComparisonSummary summary) {
         var end = checked(offset + count);
         var position = offset;
@@ -1114,7 +1147,7 @@ public static class DeviceFsTestNative {
     }
 
     public static ComparisonSummary CompareViews(string sourceDevicePath,
-        string normalImagePath, string syntheticImagePath, NtfsBitmap bitmap,
+        string normalImagePath, string syntheticImagePath, VolumeAllocationBitmap bitmap,
         int chunkSize) {
         if (chunkSize <= 0) {
             throw new ArgumentOutOfRangeException(nameof(chunkSize));
@@ -1159,7 +1192,7 @@ public static class DeviceFsTestNative {
 
     public static ComparisonSummary CompareRange(string sourceDevicePath,
         string normalImagePath, string syntheticImagePath,
-        NtfsBitmap bitmap, long offset, int requestedLength) {
+        VolumeAllocationBitmap bitmap, long offset, int requestedLength) {
         if ((offset < 0) || (requestedLength < 0) ||
             (offset > bitmap.Length)) {
             throw new ArgumentOutOfRangeException();

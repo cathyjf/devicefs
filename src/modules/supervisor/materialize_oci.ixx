@@ -23,6 +23,7 @@ module;
 #include <wil/stl.h>
 #include <wil/registry.h>
 #include <wil/resource.h>
+#include <wil/safecast.h>
 #include <wil/token_helpers.h>
 #include <wil/win32_helpers.h>
 
@@ -127,6 +128,7 @@ auto SetDefaultTokenAcl() {
             distribution, ExplicitHresult{result});
     }
     const auto requested = Transcode<std::wstring>(distribution);
+    const auto requested_length = wil::safe_cast_failfast<int>(requested.length());
     auto iterator = wil::reg::key_heap_string_nothrow_iterator{registrations.get()};
     for (; !iterator.at_end(); ++iterator) {
         auto name = wil::unique_cotaskmem_string{};
@@ -139,7 +141,8 @@ auto SetDefaultTokenAcl() {
                 std::wstring_view{iterator->name.get()},
                 ExplicitHresult{result});
         }
-        if (CompareStringOrdinal(name.get(), -1, requested.c_str(), -1, TRUE) != CSTR_EQUAL) {
+        if (CompareStringOrdinal(name.get(), -1,
+                requested.c_str(), requested_length, TRUE) != CSTR_EQUAL) {
             continue;
         }
         auto registration = wil::shared_hkey{};

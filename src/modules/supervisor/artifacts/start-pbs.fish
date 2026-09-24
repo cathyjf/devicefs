@@ -130,15 +130,32 @@ end
 
 # Print the version of the proxmox-backup-client installed in the image, as
 # reported by the `proxmox-backup.commit` file created during the Containerfile
-# building process, if that file exists.
+# building process, if that file exists. If the file does not exist, the
+# function prints only a newline.
 function maybe_print_pbs_client_version
     set -l pbs_client_marker /usr/share/devicefs-build/proxmox-backup.commit
     if test ! -f $pbs_client_marker
+        echo --
         return
     end
     read --line -l pbs_version <$pbs_client_marker
-    printf 'Reported proxmox-backup-client build: %s\n' \
-        (string replace -ar '[^\w ,\.\-+]' '' $pbs_version)
+    string replace -ar '[^\w ,\.\-+]' '' $pbs_version
+end
+
+# Attempt to transform a manifest by using `jq` to add the proxmox-backup-client
+# build version information to the `notes` field. If the transformation succeeds,
+# the function prints the transformed manifest; otherwise, it prints the
+# original manifest.
+function print_transformed_manifest --argument-names manifest
+    set -l transformed_manifest (echo -- $manifest |
+        jq --arg build (maybe_print_pbs_client_version) \
+            'if $build == "" then . else .notes["pbs-client-build"] = $build end' |
+        string collect)
+    if ! string match -q -r '[^0]' $pipestatus
+        echo -- $transformed_manifest
+    else
+        echo -- $manifest
+    end
 end
 
 # Upload the mounted DeviceFs images and `DEVICEFS_MANIFEST` to `host/$backup_id`
@@ -148,15 +165,12 @@ end
 # when the upload itself succeeded. PBS output and the printed manifest are
 # forwarded to the Windows supervisor.
 function run_backup --argument-names parallel_images
-    set -l manifest_ (echo -- $DEVICEFS_MANIFEST | jq | string collect)
-    if ! string match -q -r '[^0]' $pipestatus
-        set DEVICEFS_MANIFEST $manifest_
-    end
     set -l manifest_file (mktemp -t devicefs-manifest.XXXXXXXXXX) || return
     # Remove the manifest when this Fish process exits, including after cancellation.
     function remove_backup_manifest --on-event fish_exit --inherit-variable manifest_file
         rm -f -- $manifest_file
     end
+    set DEVICEFS_MANIFEST (print_transformed_manifest $DEVICEFS_MANIFEST | string collect)
     echo -- $DEVICEFS_MANIFEST >$manifest_file || return
     sudo -n mount $vss_mount_point || exit
     cancel_before_start unmount_vss
@@ -172,7 +186,7 @@ function run_backup --argument-names parallel_images
     end
     printf 'Backup manifest:\n%s\n' $DEVICEFS_MANIFEST
     set -a backup_argv {$pbs_manifest_filename}:$manifest_file
-    maybe_print_pbs_client_version
+    echo -n -- 'Executing command: '
     echo -- $DEVICEFS_PBS_CLIENT $backup_argv
     $DEVICEFS_PBS_CLIENT $backup_argv &
     supervise_pbs $last_pid unmount_vss

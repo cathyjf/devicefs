@@ -8,6 +8,7 @@ module;
 export module devicefs.supervisor.browse;
 
 import std;
+import <devicefs/common.h>;
 import <devicefs/windows_imports.h>;
 import <devicefs/winrt_imports.h>;
 import devicefs.supervisor.winrt_apartment;
@@ -39,10 +40,9 @@ struct BackupGroup {
     try {
         return std::invoke(read, object.GetNamedValue(name));
     } catch (const winrt::hresult_error &error) {
-        throw std::runtime_error(std::format(
-            "could not read PBS backup catalog field '{}.{}': {}",
-            location, Transcode<std::string>(name),
-            Transcode<std::string>(error.message())));
+        WinError("could not read PBS backup catalog field '{}.{}': {}",
+            location, name, std::wstring_view{error.message()},
+            ExplicitHresult{error.code()});
     }
 }
 

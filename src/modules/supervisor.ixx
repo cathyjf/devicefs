@@ -686,11 +686,11 @@ struct SelectiveViewOptions {
 }
 
 [[nodiscard]] auto GetForegroundConsoleInput(
-    const wil::zstring_view unavailable_message) {
+    const std::string_view unavailable_message) {
     const auto input = GetStdHandle(STD_INPUT_HANDLE);
     auto console_mode = DWORD{};
     if (!GetConsoleMode(input, &console_mode)) {
-        throw std::runtime_error(unavailable_message.c_str());
+        WinError("{}", unavailable_message);
     }
     return std::pair{input, console_mode};
 }

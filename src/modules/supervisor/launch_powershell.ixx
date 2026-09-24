@@ -227,14 +227,19 @@ export auto EnsurePowerShellProfile() {
     std::filesystem::create_directories(directory);
     const auto path = directory / L"Profile.ps1";
     auto profile = std::ofstream{path, std::ios::binary | std::ios::noreplace};
-    if (!profile && std::filesystem::exists(path)) {
-        return;
+    if (!profile) {
+        const auto error = _doserrno;
+        if (std::filesystem::exists(path)) {
+            return;
+        }
+        WinError("could not create the PowerShell profile '{}'",
+            std::wstring_view{path.native()}, ExplicitWin32Error{error});
     }
     std::println(profile, "{}", kPowerShellProfile);
     profile.flush();
     if (!profile) {
-        throw std::runtime_error(std::format(
-            "could not write the PowerShell profile '{}'", Transcode<std::string>(path.native())));
+        WinError("could not write the PowerShell profile '{}'",
+            std::wstring_view{path.native()}, ExplicitWin32Error{_doserrno});
     }
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: created PowerShell profile '{}'\n", Transcode<std::string>(path.native()));

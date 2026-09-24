@@ -127,11 +127,9 @@ template <std::size_t Dividend, std::size_t Divisor>
             nullptr, random.data(),
             wil::safe_cast_failfast<ULONG>(random.size()),
             BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-        if (status < 0) {
-            throw std::runtime_error(std::format(
-                "could not generate the backup account password "
-                "(NTSTATUS 0x{:08x})",
-                std::bit_cast<std::uint32_t>(status)));
+        if (!BCRYPT_SUCCESS(status)) {
+            WinError("could not generate the backup account password",
+                ExplicitHresult{HRESULT_FROM_NT(status)});
         }
 
         // The 128-character destination also has room for the initial encoding:

@@ -37,8 +37,8 @@ constexpr auto kProcessCommandLineInformation =
         return std::wstring{};
     }
     auto storage = std::vector<std::byte>(bytes);
-    if (NtQueryInformationProcess(process, kProcessCommandLineInformation,
-            storage.data(), bytes, &bytes) < 0) {
+    if (!NT_SUCCESS(NtQueryInformationProcess(process, kProcessCommandLineInformation,
+            storage.data(), bytes, &bytes))) {
         return std::wstring{};
     }
     const auto *const command_line =

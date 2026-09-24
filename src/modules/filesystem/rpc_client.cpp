@@ -201,7 +201,7 @@ struct RPCBlockDevice {
             return FspNtStatusFromWin32(win32_error);
         }
         transferred = rpc_transferred;
-        if (status >= 0) {
+        if (NT_SUCCESS(status)) {
             (observers.FinishSourceRead(rpc_transferred), ...);
         }
         return status;

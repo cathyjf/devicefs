@@ -53,15 +53,13 @@ export [[nodiscard]] auto RunFishProgram(
     const std::span<const std::string_view> arguments) -> int {
     auto file = std::ifstream{path, std::ios::binary};
     if (!file.is_open()) {
-        throw std::runtime_error(std::format(
-            "could not open the Fish program '{}'",
-            Transcode<std::string>(path.native())));
+        WinError("could not open the Fish program '{}'",
+            std::wstring_view{path.native()}, ExplicitWin32Error{_doserrno});
     }
     const auto program = std::string{std::istreambuf_iterator<char>{file}, {}};
     if (file.bad()) {
-        throw std::runtime_error(std::format(
-            "could not read the Fish program '{}'",
-            Transcode<std::string>(path.native())));
+        WinError("could not read the Fish program '{}'",
+            std::wstring_view{path.native()}, ExplicitWin32Error{_doserrno});
     }
     const auto fish_arguments = std::array{
         std::span<const std::string_view>{

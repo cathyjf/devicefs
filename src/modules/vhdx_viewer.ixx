@@ -599,12 +599,9 @@ auto ReadExact(
     const auto status = source.Read(
         output.data(), offset,
         wil::safe_cast_failfast<ULONG>(output.size()), transferred);
-    // NTSTATUS < 0 indicates failure.
-    // See <https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/using-ntstatus-values>.
-    if (status < 0) {
-        throw std::runtime_error(std::format(
-            "could not read {} (NTSTATUS 0x{:08x})",
-            description, std::bit_cast<std::uint32_t>(status)));
+    if (!NT_SUCCESS(status)) {
+        WinError("could not read {}", description,
+            ExplicitHresult{HRESULT_FROM_NT(status)});
     }
     if (transferred != output.size()) {
         throw std::runtime_error(std::format(
@@ -765,9 +762,7 @@ public:
             const auto status = source_.Read(
                 buffer, source_offset, source_wanted, transferred,
                 observers...);
-            // NTSTATUS >= 0 indicates success.
-            // See <https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/using-ntstatus-values>.
-            if (status >= 0) {
+            if (NT_SUCCESS(status)) {
                 vhdx_detail::ApplyNtfsIdentityOverlay(
                     output.first(transferred), source_offset, ntfs_identity_);
             }

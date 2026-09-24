@@ -145,12 +145,9 @@ private:
         nullptr, random.data(),
         wil::safe_cast_failfast<ULONG>(random.size()),
         BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-    if (status < 0) {
-        static_assert(sizeof(status) == sizeof(std::uint32_t));
-        throw std::runtime_error(std::format(
-            "could not generate the view RPC password "
-            "(NTSTATUS 0x{:08x})",
-            std::bit_cast<std::uint32_t>(status)));
+    if (!BCRYPT_SUCCESS(status)) {
+        WinError("could not generate the view RPC password",
+            ExplicitHresult{HRESULT_FROM_NT(status)});
     }
 
     constexpr auto digits = "0123456789abcdef"sv;

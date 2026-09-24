@@ -21,6 +21,7 @@ module;
 export module devicefs.supervisor.configuration;
 
 import std;
+import <devicefs/common.h>;
 import <devicefs/windows_imports.h>;
 import <devicefs/winrt_imports.h>;
 import devicefs.supervisor.winrt_apartment;
@@ -745,14 +746,14 @@ auto ReadFields(
         "the backup configuration"};
     auto file = std::ifstream(path, std::ios::binary);
     if (!file.is_open()) {
-        throw std::runtime_error(std::format(
-            "could not open the backup configuration '{}'", Transcode<std::string>(path.native())));
+        WinError("could not open the backup configuration '{}'",
+            std::wstring_view{path.native()}, ExplicitWin32Error{_doserrno});
     }
     const auto source = wil::secure_string(
         std::istreambuf_iterator<char>{file}, {});
     if (file.bad()) {
-        throw std::runtime_error(std::format(
-            "could not read the backup configuration '{}'", Transcode<std::string>(path.native())));
+        WinError("could not read the backup configuration '{}'",
+            std::wstring_view{path.native()}, ExplicitWin32Error{_doserrno});
     }
     const auto document = [&] {
         try {
@@ -795,8 +796,8 @@ export [[nodiscard]] auto ReadBackupConfiguration(
     try {
         return ReadBackupConfigurationImpl(path);
     } catch (const winrt::hresult_error &error) {
-        throw std::runtime_error(std::format(
-            "could not parse the backup configuration '{}': {}",
-            Transcode<std::string>(path.native()), Transcode<std::string>(error.message())));
+        WinError("could not parse the backup configuration '{}': {}",
+            std::wstring_view{path.native()}, std::wstring_view{error.message()},
+            ExplicitHresult{error.code()});
     }
 }

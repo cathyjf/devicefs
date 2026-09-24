@@ -241,13 +241,13 @@ auto ExtractArchiveMember(
         ExtractArchiveMember(tar, archive, member, path);
         auto file = std::ifstream{path, std::ios::binary};
         if (!file.is_open()) {
-            throw std::runtime_error(std::format(
-                "could not open OCI metadata '{}'", Transcode<std::string>(path.native())));
+            WinError("could not open OCI metadata '{}'",
+                std::wstring_view{path.native()}, ExplicitWin32Error{_doserrno});
         }
         const auto source = std::string{std::istreambuf_iterator<char>{file}, {}};
         if (file.bad()) {
-            throw std::runtime_error(std::format(
-                "could not read OCI metadata '{}'", Transcode<std::string>(path.native())));
+            WinError("could not read OCI metadata '{}'",
+                std::wstring_view{path.native()}, ExplicitWin32Error{_doserrno});
         }
         return winrt::Windows::Data::Json::JsonObject::Parse(Transcode<std::wstring>(source));
     };

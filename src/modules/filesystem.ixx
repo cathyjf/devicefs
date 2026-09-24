@@ -898,8 +898,9 @@ auto Run(const Options &options) {
             auto password = wil::secure_string{};
             if (std::ranges::any_of(options.mappings, rpc_client::IsTcpDevice) &&
                 !std::getline(std::cin, password)) {
-                throw std::runtime_error{
-                    "could not read the RPC password from standard input"};
+                WinError("could not read the RPC password from standard input",
+                    ExplicitWin32Error{std::cin.bad() ? _doserrno :
+                        (std::cin.eof() ? ERROR_HANDLE_EOF : ERROR_INSUFFICIENT_BUFFER)});
             }
             return password;
         }());

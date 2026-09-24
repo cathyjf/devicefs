@@ -21,6 +21,7 @@ module;
 export module devicefs.supervisor.native_backup:manifest;
 
 import std;
+import <devicefs/common.h>;
 import <devicefs/windows_imports.h>;
 import <devicefs/winrt_imports.h>;
 import :internal;
@@ -189,9 +190,9 @@ auto PreviousBackupManifestResult::ParseManifest() const
     try {
         return ParseSnapshotManifest(manifest);
     } catch (const winrt::hresult_error &error) {
-        throw std::runtime_error(std::format(
+        WinError(
             "the Windows Runtime failed while parsing the backup manifest: {}",
-            Transcode<std::string>(error.message())));
+            std::wstring_view{error.message()}, ExplicitHresult{error.code()});
     }
 }
 
@@ -382,9 +383,8 @@ namespace internal {
 
         return Transcode<std::u8string>(result.Stringify());
     } catch (const winrt::hresult_error &error) {
-        throw std::runtime_error(std::format(
-            "could not serialize the backup manifest: {}",
-            Transcode<std::string>(error.message())));
+        WinError("could not serialize the backup manifest: {}",
+            std::wstring_view{error.message()}, ExplicitHresult{error.code()});
     }
 }
 

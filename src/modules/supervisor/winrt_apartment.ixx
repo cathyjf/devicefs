@@ -21,6 +21,7 @@ module;
 export module devicefs.supervisor.winrt_apartment;
 
 import std;
+import <devicefs/common.h>;
 import <devicefs/windows_imports.h>;
 import <devicefs/winrt_imports.h>;
 import <sal.h>;
@@ -34,8 +35,8 @@ public:
             try {
                 return wil::RoInitialize(apartment_type);
             } catch (const wil::ResultException &error) {
-                throw std::runtime_error(std::format(
-                    "{}: {}", initialization_error, error.what()));
+                WinError("{}: {}", initialization_error, error.what(),
+                    ExplicitHresult{error.GetErrorCode()});
             }
         }()) {}
 

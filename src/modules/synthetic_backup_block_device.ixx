@@ -99,7 +99,7 @@ public:
 
             // The source owns short-read policy. Preserve its partial result
             // instead of retrying or reading a later selection segment.
-            if ((status < 0) ||
+            if (!NT_SUCCESS(status) ||
                 (segment_transferred != segment_wanted)) {
                 return status;
             }

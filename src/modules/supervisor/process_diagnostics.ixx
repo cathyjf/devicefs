@@ -14,12 +14,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-module;
-
-#include <windows.h>
-#include <tlhelp32.h>
-#include <winternl.h>
-
 export module devicefs.supervisor.process_diagnostics;
 
 import std;

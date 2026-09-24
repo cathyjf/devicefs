@@ -90,12 +90,6 @@ target_sources(devicefs-terminal PUBLIC
 )
 if(WIN32)
     target_sources(devicefs-terminal PUBLIC FILE_SET CXX_MODULES FILES windows.ixx)
-    set(DEVICEFS_ROOT_INCLUDE_DIR "${DEVICEFS_ROOT}/src/include")
-    if(IS_DIRECTORY "${DEVICEFS_ROOT_INCLUDE_DIR}")
-        target_include_directories(devicefs-terminal PRIVATE
-            "${DEVICEFS_ROOT_INCLUDE_DIR}"
-        )
-    endif()
 else()
     target_sources(devicefs-terminal PUBLIC FILE_SET CXX_MODULES FILES unix.ixx)
 endif()

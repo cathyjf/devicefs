@@ -16,28 +16,12 @@
 
 module;
 
-#include <windows.h>
-#include <aclapi.h>
-#include <bcrypt.h>
-#include <DismApi.h>
-#include <intrin.h>
-#include <lm.h>
-#include <objbase.h>
-#include <sddl.h>
-#include <wincrypt.h>
-
-#include <wil/registry.h>
-#include <wil/resource.h>
-#include <wil/safecast.h>
-#include <wil/stl.h>
-#include <wil/win32_helpers.h>
-
-#undef stderr
-#undef stdout
+#include <devicefs/strsafe_compat.h>
 
 export module devicefs.supervisor.account_management;
 
 import std;
+import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.supervisor.process_launch;

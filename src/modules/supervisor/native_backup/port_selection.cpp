@@ -16,12 +16,12 @@
 
 module;
 
-#include <winsock2.h>
-#include <wil/network.h>
+#include <devicefs/strsafe_compat.h>
 
 module devicefs.supervisor.native_backup:port_selection;
 
 import std;
+import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 
 namespace internal {

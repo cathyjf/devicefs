@@ -16,9 +16,6 @@
 
 module;
 
-#include <windows.h>
-#include <winioctl.h>
-
 #include <devicefs/strsafe_compat.h>
 
 #include <cstddef>

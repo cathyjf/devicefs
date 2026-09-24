@@ -16,22 +16,12 @@
 
 module;
 
-#include <windows.h>
-#include <ntsecapi.h>
-
-// `wil/resource.h` defines `wil::unique_hlsa` only when `_NTLSA_` is defined.
-#define _NTLSA_
-#include <wil/resource.h>
-
-#include <wil/safecast.h>
-#include <wil/stl.h>
-
-#undef stderr
-#undef stdout
+#include <devicefs/strsafe_compat.h>
 
 module devicefs.supervisor.native_backup:s4u_logon;
 
 import std;
+import <devicefs/windows_imports.h>;
 import :privileges;
 import <devicefs/common.h>;
 import devicefs.stream_writer;

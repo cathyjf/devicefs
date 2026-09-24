@@ -18,10 +18,6 @@ module;
 
 #include <devicefs/strsafe_compat.h>
 
-#include <windows.h>
-#include <sddl.h>
-#include <shlobj.h>
-
 export module devicefs.supervisor.installation;
 
 import std;

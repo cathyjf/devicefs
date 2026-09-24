@@ -22,7 +22,6 @@ export module devicefs.supervisor.temporary_paths;
 
 import std;
 import <devicefs/windows_imports.h>;
-import <wil/filesystem.h>;
 import <devicefs/common.h>;
 import devicefs.stream_writer;
 

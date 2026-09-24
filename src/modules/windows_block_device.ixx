@@ -16,23 +16,12 @@
 
 module;
 
-#include <sal.h>
-#include <windows.h>
-#include <winioctl.h>
-
-// wil uses symbols defined in <algorithm> without including it.
-#include <algorithm>
-
-#include <devicefs/winfsp_compat.h>
-#include <wil/resource.h>
-#include <wil/safecast.h>
-
-#undef stderr
-#undef stdout
+#include <devicefs/strsafe_compat.h>
 
 export module devicefs.windows_block_device;
 
 import std;
+import <devicefs/windows_imports.h>;
 import <cstddef>;
 import devicefs.allocation;
 import <devicefs/common.h>;

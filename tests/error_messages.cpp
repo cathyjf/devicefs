@@ -6,17 +6,10 @@
 // just as a failing COM call would, and inspect the resulting exception.
 // Run `devicefs-error-messages-test` without arguments.
 
-#define WIN32_NO_STATUS
-#include <windows.h>
-#undef WIN32_NO_STATUS
-#include <lmerr.h>
-#include <ntstatus.h>
-#include <oleauto.h>
-#include <vsserror.h>
-#include <wininet.h>
-#include <wil/com.h>
+#include <devicefs/strsafe_compat.h>
 
 import std;
+import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 
 namespace {

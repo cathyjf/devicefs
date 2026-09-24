@@ -30,9 +30,6 @@ using devicefs::terminal::Transcode;
 
 using namespace std::string_view_literals;
 
-// The Windows GetObject macro conflicts with C++/WinRT IJsonValue::GetObject.
-#undef GetObject
-
 export using SecureUtf8String = std::basic_string<
     char8_t, std::char_traits<char8_t>, wil::secure_allocator<char8_t>>;
 

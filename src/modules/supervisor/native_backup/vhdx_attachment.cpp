@@ -16,18 +16,12 @@
 
 module;
 
-#include <windows.h>
-#include <winioctl.h>
-#include <initguid.h>
-#include <virtdisk.h>
-
 #include <devicefs/strsafe_compat.h>
 
 module devicefs.supervisor.native_backup:vhdx_attachment;
 
 import std;
 import <devicefs/windows_imports.h>;
-import <wil/filesystem.h>;
 import :internal;
 import <devicefs/common.h>;
 import devicefs.stream_writer;

@@ -32,9 +32,6 @@ import devicefs.terminal.transcoding;
 
 using devicefs::terminal::Transcode;
 
-// The Windows GetObject macro conflicts with C++/WinRT IJsonValue::GetObject.
-#undef GetObject
-
 export struct PreviousBackupManifestResult {
     int exit_code;
     std::u8string manifest;

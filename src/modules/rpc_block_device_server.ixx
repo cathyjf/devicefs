@@ -14,24 +14,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-module;
-
-#define RPC_USE_NATIVE_WCHAR
-
-#include <sal.h>
-#define WIN32_NO_STATUS
-#include <windows.h>
-#undef WIN32_NO_STATUS
-#include <ntstatus.h>
-#include <rpc.h>
-#include <rpcasync.h>
-#include <intrin.h>
-
-#include <devicefs/rpc_block_device.h>
-
 export module devicefs.rpc_block_device_server;
 
 import std;
+import <devicefs/windows_imports.h>;
+import <devicefs/rpc_block_device.h>;
 import <devicefs/common.h>;
 import devicefs.filesystem;
 import devicefs.rpc_constants;

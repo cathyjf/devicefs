@@ -16,16 +16,12 @@
 
 module;
 
-#include <windows.h>
-#include <winioctl.h>
-
 #include <devicefs/strsafe_compat.h>
 
 export module devicefs.svi_extents;
 
 import std;
-import <wil/filesystem.h>;
-import <wil/safecast.h>;
+import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import devicefs.vss_block_descriptors;
 

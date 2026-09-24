@@ -4,13 +4,9 @@
 export module devicefs.terminal.windows;
 
 import std;
-#if __has_include(<devicefs/windows_imports.h>)
-    import <devicefs/windows_imports.h>;
-#else
-    import <windows.h>;
-    import <wil/resource.h>;
-    import <wil/stl.h>;
-#endif
+import <windows.h>;
+import <wil/resource.h>;
+import <wil/stl.h>;
 import devicefs.terminal;
 import devicefs.terminal.base_console;
 import devicefs.terminal.menu;

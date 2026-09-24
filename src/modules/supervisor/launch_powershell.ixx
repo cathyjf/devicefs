@@ -16,19 +16,12 @@
 
 module;
 
-#include <windows.h>
-#include <appmodel.h>
-#include <lmcons.h>
-#include <roapi.h>
-
-#include <wil/registry.h>
-#include <wil/resource.h>
-#include <wil/stl.h>
-#include <wil/win32_helpers.h>
+#include <devicefs/strsafe_compat.h>
 
 export module devicefs.supervisor.launch_powershell;
 
 import std;
+import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import <devicefs/winrt_imports.h>;
 import devicefs.stream_writer;

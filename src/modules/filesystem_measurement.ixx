@@ -14,14 +14,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-module;
-
-#include <windows.h>
-
 export module devicefs.filesystem_measurement;
 
 import std;
-import <wil/stl.h>;
+import <devicefs/windows_imports.h>;
 import devicefs.stream_writer;
 
 export class FreeClusterMeasurement {

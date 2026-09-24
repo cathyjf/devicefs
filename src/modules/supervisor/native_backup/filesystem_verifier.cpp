@@ -16,16 +16,12 @@
 
 module;
 
-#include <windows.h>
-#include <winioctl.h>
-
 #include <devicefs/strsafe_compat.h>
 
 export module devicefs.supervisor.native_backup:filesystem_verifier;
 
 import std;
 import <devicefs/windows_imports.h>;
-import <wil/filesystem.h>;
 import :devicefs_process;
 import :internal;
 import :privileges;

@@ -11,11 +11,10 @@
 // including if a comparison throws. Each completed test group prints a PASS
 // message; a failure prints its details and makes the program return 1.
 
-#include <windows.h>
-#include <winioctl.h>
-#include <wil/safecast.h>
+#include <devicefs/strsafe_compat.h>
 
 import std;
+import <devicefs/windows_imports.h>;
 import <cstddef>;
 import devicefs.allocation;
 import <devicefs/common.h>;

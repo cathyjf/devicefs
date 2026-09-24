@@ -205,27 +205,32 @@ target_link_libraries(vshadow PRIVATE
     ole32 oleaut32 uuid vssapi
 )
 
-# The WinRT header unit takes about 13 seconds to compile. Building it in its
-# own target lets that work overlap with the terminal library, which the
-# supervisor also needs before its compilation can begin.
-add_library(devicefs-winrt-imports STATIC
+# Compiling the Windows and WinRT header units explicitly makes both eligible
+# to build alongside the terminal library, before the supervisor's sources
+# begin importing them.
+set(DEVICEFS_WINDOWS_HEADER_UNITS
+    src/modules/include/devicefs/windows_imports.h
     src/modules/include/devicefs/winrt_imports.h
 )
-set_source_files_properties(src/modules/include/devicefs/winrt_imports.h PROPERTIES
+add_library(devicefs-windows-imports STATIC ${DEVICEFS_WINDOWS_HEADER_UNITS})
+set_source_files_properties(${DEVICEFS_WINDOWS_HEADER_UNITS}
+    PROPERTIES
     LANGUAGE CXX
     VS_SETTINGS "CompileAs=CompileAsHeaderUnit"
 )
 
 add_executable(devicefs-read-path-test tests/read_path.cpp)
 target_link_libraries(devicefs-read-path-test PRIVATE
-    ${DEVICEFS_COMMON_LINK_LIBRARIES}
+    ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-windows-imports
 )
 
 add_executable(devicefs-error-messages-test tests/error_messages.cpp)
-target_link_libraries(devicefs-error-messages-test PRIVATE ${DEVICEFS_COMMON_LINK_LIBRARIES})
+target_link_libraries(devicefs-error-messages-test PRIVATE
+    ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-windows-imports
+)
 
 add_subdirectory(src/terminal)
-target_link_libraries(devicefs-common PRIVATE devicefs-terminal)
+target_link_libraries(devicefs-common PRIVATE devicefs-terminal devicefs-windows-imports)
 add_executable(backup-supervisor
     src/main.cpp
     src/modules/supervisor/account_management.cpp
@@ -234,7 +239,7 @@ add_executable(backup-supervisor
 devicefs_version_info(backup-supervisor "DeviceFs Backup Supervisor" 0.1)
 target_link_libraries(backup-supervisor PRIVATE
     ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-rpc-block-device
-    devicefs-terminal devicefs-winrt-imports vshadow
+    devicefs-terminal devicefs-windows-imports vshadow
     Version
 )
 
@@ -264,6 +269,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/filesystem.ixx
     src/modules/filesystem/internal.cpp
     src/modules/filesystem/rpc_client.cpp
+    src/modules/filesystem/winfsp_loader.cpp
     src/modules/rpc_block_device_server.ixx
     src/modules/synthetic_backup_block_device.ixx
     src/modules/vhdx_viewer.ixx
@@ -315,7 +321,7 @@ endforeach()
 
 set(DEVICEFS_CODE_ANALYSIS_TARGETS
     devicefs-common
-    devicefs-winrt-imports
+    devicefs-windows-imports
     devicefs-rpc-block-device
     devicefs-read-path-test
     devicefs-error-messages-test
@@ -326,9 +332,11 @@ foreach(target IN LISTS DEVICEFS_CODE_ANALYSIS_TARGETS)
         VS_GLOBAL_EnableCppCoreCheck true
         VS_GLOBAL_RunCodeAnalysis true
         VS_GLOBAL_CodeAnalysisRuleSet "${CMAKE_CURRENT_SOURCE_DIR}/.ruleset"
-        VS_GLOBAL_CAExcludePath "${WIL_INCLUDE_DIR};$(CAExcludePath)"
+        VS_GLOBAL_CAExcludePath "${WINFSP_INCLUDE_DIR};${WIL_INCLUDE_DIR};$(CAExcludePath)"
     )
-    target_include_directories(${target} SYSTEM PRIVATE "${WIL_INCLUDE_DIR}")
+    target_include_directories(${target} SYSTEM PRIVATE
+        "${WIL_INCLUDE_DIR}" "${DISM_INCLUDE_DIR}" "${WINFSP_INCLUDE_DIR}"
+    )
     target_include_directories(${target} PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/include"
     )
@@ -350,14 +358,7 @@ foreach(target devicefs-read-path-test devicefs-error-messages-test backup-super
     )
 endforeach()
 
-set_target_properties(backup-supervisor devicefs-read-path-test PROPERTIES
-    VS_GLOBAL_CAExcludePath "${WINFSP_INCLUDE_DIR};${WIL_INCLUDE_DIR};$(CAExcludePath)"
-)
-
 foreach(target IN ITEMS backup-supervisor devicefs-read-path-test)
-    target_include_directories(${target} SYSTEM PRIVATE
-        "${WINFSP_INCLUDE_DIR}"
-    )
     target_link_libraries(${target} PRIVATE
         "${WINFSP_LIBRARY}" advapi32 delayimp
     )
@@ -367,7 +368,6 @@ foreach(target IN ITEMS backup-supervisor devicefs-read-path-test)
 endforeach()
 
 target_compile_definitions(backup-supervisor PRIVATE _WIN32_WINNT=0x0A00)
-target_include_directories(backup-supervisor SYSTEM PRIVATE "${DISM_INCLUDE_DIR}")
 target_link_libraries(backup-supervisor PRIVATE
     "${DISM_LIBRARY}"
     advapi32 bcrypt crypt32 msi netapi32 ntdll ole32 pathcch secur32 shell32 userenv virtdisk windowsapp ws2_32

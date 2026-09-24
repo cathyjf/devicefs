@@ -14,14 +14,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-#include <windows.h>
-#include <wininet.h>
-#include <lmerr.h>
-#include <oleauto.h>
-#include <wil/com.h>
-#include <wil/resource.h>
-
 import std;
+import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import devicefs.terminal.transcoding;
 

@@ -16,25 +16,16 @@
 
 module;
 
-#include <sal.h>
-#include <windows.h>
-#include <lmcons.h>
-#include <sddl.h>
-
-#include <devicefs/winfsp_compat.h>
-#include <wil/resource.h>
-#include <wil/safecast.h>
-#include <wil/stl.h>
-
-#undef stderr
-#undef stdout
+#include <devicefs/strsafe_compat.h>
 
 export module devicefs.filesystem;
 
 import std;
 import :internal;
 import :rpc_client;
+import :winfsp_loader;
 export import devicefs.windows_block_device;
+import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.vhdx_viewer;
@@ -891,9 +882,7 @@ template <BlockDevice DeviceType>
 }
 
 auto Run(const Options &options) {
-    if (!NT_SUCCESS(FspLoad(nullptr))) {
-        throw std::runtime_error("could not load WinFsp DLL");
-    }
+    devicefs::winfsp_loader::LoadWinFspLibrary();
     const auto run = [&]<BlockDevice DeviceType = WindowsBlockDevice>(
             wil::secure_string password = {}) {
         if (options.vhdx) {

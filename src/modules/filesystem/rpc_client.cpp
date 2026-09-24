@@ -16,34 +16,27 @@
 
 module;
 
-#define RPC_USE_NATIVE_WCHAR
-
-#include <sal.h>
-#include <windows.h>
-
-#define SECURITY_WIN32
-#include <sspi.h>
-
-#include <devicefs/rpc_block_device.h>
-#include <devicefs/midl_compat.h>
-#include <devicefs/winfsp_compat.h>
-#include <wil/resource.h>
-#include <wil/safecast.h>
-#include <wil/stl.h>
-#include <wil/rpc_helpers.h>
-#include <wil/win32_helpers.h>
-
-#undef stderr
-#undef stdout
+#include <devicefs/strsafe_compat.h>
 
 module devicefs.filesystem:rpc_client;
 
 import std;
+import <devicefs/windows_imports.h>;
+import <devicefs/rpc_block_device.h>;
 import :internal;
 import <devicefs/common.h>;
 import devicefs.rpc_constants;
 import devicefs.stream_writer;
 import devicefs.terminal.transcoding;
+
+#pragma warning(push)
+#pragma warning(disable : 5244, \
+    justification : \
+        "The symbols defined in the `midl_compat.h` header have `C` linkage " \
+        "and therefore are not attached to the named module declared in " \
+        "this file.")
+#include <devicefs/midl_compat.h>
+#pragma warning(pop)
 
 using devicefs::terminal::Transcode;
 

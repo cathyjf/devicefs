@@ -16,8 +16,6 @@
 
 module;
 
-#include <windows.h>
-#include <msi.h>
 #include <devicefs/strsafe_compat.h>
 
 module devicefs.supervisor.account_management;
@@ -33,10 +31,6 @@ import devicefs.supervisor.winrt_apartment;
 import devicefs.terminal.transcoding;
 
 using devicefs::terminal::Transcode;
-
-#undef GetObject
-#undef stderr
-#undef stdout
 
 using namespace std::chrono_literals;
 using namespace std::string_view_literals;

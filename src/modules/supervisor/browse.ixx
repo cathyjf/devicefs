@@ -16,8 +16,6 @@ import devicefs.terminal.menu;
 import devicefs.terminal.windows;
 import devicefs.terminal.transcoding;
 
-#undef GetObject
-
 namespace browse_detail {
 
 using namespace std::string_view_literals;

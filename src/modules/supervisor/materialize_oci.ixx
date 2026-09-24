@@ -16,22 +16,12 @@
 
 module;
 
-#include <windows.h>
-#include <objbase.h>
-#include <sddl.h>
-
-#include <wil/stl.h>
-#include <wil/registry.h>
-#include <wil/resource.h>
-#include <wil/safecast.h>
-#include <wil/token_helpers.h>
-#include <wil/win32_helpers.h>
-
-#undef GetObject
+#include <devicefs/strsafe_compat.h>
 
 export module devicefs.supervisor.materialize_oci;
 
 import std;
+import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import <devicefs/winrt_imports.h>;
 import devicefs.stream_writer;
@@ -44,9 +34,6 @@ import devicefs.supervisor.winrt_apartment;
 import devicefs.terminal.transcoding;
 
 using devicefs::terminal::Transcode;
-
-#undef stderr
-#undef stdout
 
 namespace {
 

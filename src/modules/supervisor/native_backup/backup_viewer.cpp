@@ -16,19 +16,12 @@
 
 module;
 
-#include <windows.h>
-#include <aclapi.h>
-#include <bcrypt.h>
-
-#include <wil/resource.h>
-#include <wil/safecast.h>
-#include <wil/stl.h>
-
 #include <devicefs/strsafe_compat.h>
 
 module devicefs.supervisor.native_backup:backup_viewer;
 
 import std;
+import <devicefs/windows_imports.h>;
 import :devicefs_process;
 import :internal;
 import :pbs;

@@ -57,9 +57,6 @@
 
 module;
 
-#include <windows.h>
-#include <winioctl.h>
-
 #include <devicefs/strsafe_compat.h>
 
 export module devicefs.vss_block_descriptors;

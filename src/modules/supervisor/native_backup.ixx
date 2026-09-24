@@ -28,6 +28,7 @@ export import :incremental_diagnostics;
 export import :manifest;
 import :pbs;
 import <devicefs/common.h>;
+import devicefs.file_reader;
 import devicefs.stream_writer;
 import devicefs.supervisor.configuration;
 import devicefs.supervisor.launch_powershell;
@@ -51,15 +52,10 @@ export [[nodiscard]] auto RunFishProgram(
     const HANDLE cancellation_event,
     const std::filesystem::path &path,
     const std::span<const std::string_view> arguments) -> int {
-    auto file = std::ifstream{path, std::ios::binary};
-    if (!file.is_open()) {
-        WinError("could not open the Fish program '{}'",
-            std::wstring_view{path.native()}, ExplicitWin32Error{_doserrno});
-    }
-    const auto program = std::string{std::istreambuf_iterator<char>{file}, {}};
-    if (file.bad()) {
-        WinError("could not read the Fish program '{}'",
-            std::wstring_view{path.native()}, ExplicitWin32Error{_doserrno});
+    const auto program = ReadEntireFile(path);
+    if (!program) {
+        WinError("failed to open or read the Fish program: {}",
+            std::wstring_view{path.native()}, ExplicitWin32Error{program.error()});
     }
     const auto fish_arguments = std::array{
         std::span<const std::string_view>{
@@ -70,7 +66,7 @@ export [[nodiscard]] auto RunFishProgram(
         cancellation_event, std::nullopt,
         internal::PbsFishRequest{
             .additional_arguments = fish_arguments,
-            .additional_program = program,
+            .additional_program = *program,
             .send_encryption_key = true,
         });
     return result ? result->exit_code : kCancelledExitCode;

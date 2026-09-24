@@ -24,6 +24,7 @@ import std;
 import <devicefs/common.h>;
 import <devicefs/windows_imports.h>;
 import <devicefs/winrt_imports.h>;
+import devicefs.file_reader;
 import devicefs.supervisor.winrt_apartment;
 import devicefs.terminal.transcoding;
 
@@ -744,21 +745,15 @@ auto ReadFields(
     const auto apartment = WinrtApartment{
         "could not initialize the Windows Runtime while reading "
         "the backup configuration"};
-    auto file = std::ifstream(path, std::ios::binary);
-    if (!file.is_open()) {
-        WinError("could not open the backup configuration '{}'",
-            std::wstring_view{path.native()}, ExplicitWin32Error{_doserrno});
-    }
-    const auto source = wil::secure_string(
-        std::istreambuf_iterator<char>{file}, {});
-    if (file.bad()) {
-        WinError("could not read the backup configuration '{}'",
-            std::wstring_view{path.native()}, ExplicitWin32Error{_doserrno});
+    const auto source = ReadEntireFile<wil::secure_string>(path);
+    if (!source) {
+        WinError("failed to open or read the backup configuration: {}",
+            std::wstring_view{path.native()}, ExplicitWin32Error{source.error()});
     }
     const auto document = [&] {
         try {
             return Transcode<wil::secure_wstring>(
-                std::string_view{source.data(), source.size()});
+                std::string_view{source->data(), source->size()});
         } catch (const std::invalid_argument &error) {
             throw std::runtime_error(std::format(
                 "expected configuration file containing UTF-8 text "

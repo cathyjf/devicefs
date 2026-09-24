@@ -24,6 +24,7 @@ import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import <devicefs/winrt_imports.h>;
+import devicefs.file_reader;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
 import devicefs.supervisor.https_download;
@@ -239,17 +240,12 @@ auto ExtractArchiveMember(
     const auto read_metadata = [&](const std::string_view member) {
         const auto path = directory / "metadata.json";
         ExtractArchiveMember(tar, archive, member, path);
-        auto file = std::ifstream{path, std::ios::binary};
-        if (!file.is_open()) {
-            WinError("could not open OCI metadata '{}'",
-                std::wstring_view{path.native()}, ExplicitWin32Error{_doserrno});
+        const auto source = ReadEntireFile(path);
+        if (!source) {
+            WinError("failed to open or read the OCI metadata: {}",
+                std::wstring_view{path.native()}, ExplicitWin32Error{source.error()});
         }
-        const auto source = std::string{std::istreambuf_iterator<char>{file}, {}};
-        if (file.bad()) {
-            WinError("could not read OCI metadata '{}'",
-                std::wstring_view{path.native()}, ExplicitWin32Error{_doserrno});
-        }
-        return winrt::Windows::Data::Json::JsonObject::Parse(Transcode<std::wstring>(source));
+        return winrt::Windows::Data::Json::JsonObject::Parse(Transcode<std::wstring>(*source));
     };
     try {
         const auto manifests = read_metadata("index.json").GetNamedArray(L"manifests");

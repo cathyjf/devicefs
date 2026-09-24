@@ -57,14 +57,14 @@ constexpr auto kShareMode =
 }
 
 auto ThrowIfFileInfoFailed(
-    const HRESULT error,
+    const HRESULT result,
     const std::string_view operation,
     const std::filesystem::path &path) -> void {
-    if (SUCCEEDED(error)) {
+    if (SUCCEEDED(result)) {
         return;
     }
     WinError("{} for '{}'", operation, std::wstring_view{path.native()},
-        ExplicitHresult{error});
+        ExplicitHresult{result});
 }
 
 class SviExtentReader {

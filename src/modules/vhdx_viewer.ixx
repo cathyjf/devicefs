@@ -298,13 +298,13 @@ template <std::uint32_t Polynomial>
 }
 
 [[nodiscard]] auto NewGuid() {
-    auto result = GUID{};
-    const auto error = CoCreateGuid(&result);
-    if (FAILED(error)) {
+    auto identifier = GUID{};
+    const auto result = CoCreateGuid(&identifier);
+    if (FAILED(result)) {
         WinError("could not create a VHDX identifier",
-            ExplicitHresult{error});
+            ExplicitHresult{result});
     }
-    return result;
+    return identifier;
 }
 
 [[nodiscard]] auto MakeVhdxHeader(

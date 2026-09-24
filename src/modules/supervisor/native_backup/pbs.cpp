@@ -73,14 +73,14 @@ constexpr auto kWslCreationFlags = DWORD{
     CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT};
 
 [[nodiscard]] auto RunningAsLocalSystem() {
-    auto result = false;
-    const auto error = wil::test_token_membership_nothrow(
-        &result, nullptr, SECURITY_NT_AUTHORITY, SECURITY_LOCAL_SYSTEM_RID);
-    if (FAILED(error)) {
+    auto is_local_system = false;
+    const auto result = wil::test_token_membership_nothrow(
+        &is_local_system, nullptr, SECURITY_NT_AUTHORITY, SECURITY_LOCAL_SYSTEM_RID);
+    if (FAILED(result)) {
         WinError("could not identify the backup-supervisor account",
-            ExplicitHresult{error});
+            ExplicitHresult{result});
     }
-    return result;
+    return is_local_system;
 }
 
 [[nodiscard]] auto StartWslWithLogon(
@@ -695,11 +695,11 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
     const auto computer_name = [] {
         constexpr auto name = L"COMPUTERNAME";
         auto value = std::wstring{};
-        if (const auto error = wil::GetEnvironmentVariableW(name, value);
-            FAILED(error)) {
+        if (const auto result = wil::GetEnvironmentVariableW(name, value);
+            FAILED(result)) {
             WinError("could not read the {} environment variable",
                 std::wstring_view{name},
-                ExplicitHresult{error});
+                ExplicitHresult{result});
         }
         return Transcode<std::string>(value);
     }();

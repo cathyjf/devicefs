@@ -152,7 +152,7 @@ auto TranscodeString(const std::wstring_view argument) -> std::string {
 // call. `GetErrorInfo` consumes the current thread's error object, so this runs
 // before formatting the operation's arguments or looking up message resources.
 // https://learn.microsoft.com/en-us/windows/win32/api/oleauto/nf-oleauto-geterrorinfo
-[[nodiscard]] auto FormatHresult(const HRESULT error) -> std::string {
+[[nodiscard]] auto FormatHresult(const HRESULT result) -> std::string {
     const auto description = [] -> std::string {
         auto information = wil::com_ptr_nothrow<IErrorInfo>{};
         if (GetErrorInfo(0, information.put()) != S_OK) {
@@ -164,7 +164,7 @@ auto TranscodeString(const std::wstring_view argument) -> std::string {
         }
         return TranscodeString(std::wstring_view{text.get(), SysStringLen(text.get())});
     }();
-    return std::format(" (HRESULT 0x{:08x}){}{}", static_cast<DWORD>(error),
+    return std::format(" (HRESULT 0x{:08x}){}{}", static_cast<DWORD>(result),
         description.empty() ? "" : ": ", description);
 }
 

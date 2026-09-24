@@ -130,12 +130,12 @@ constexpr auto kShareMode =
         "  Filesystem root opened.\n"
         "  Querying its volume-GUID name.\n");
     auto volume_root = wil::unique_cotaskmem_string{};
-    const auto error = wil::GetFinalPathNameByHandleW(
+    const auto result = wil::GetFinalPathNameByHandleW(
         partition.get(), volume_root, wil::VolumePrefix::VolumeGuid);
-    if (FAILED(error)) {
+    if (FAILED(result)) {
         WinError("could not obtain the volume name for attached root '{}'",
             std::wstring_view{partition_root},
-            ExplicitHresult{error});
+            ExplicitHresult{result});
     }
     return std::wstring{volume_root.get()};
 }

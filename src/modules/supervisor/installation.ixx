@@ -95,21 +95,21 @@ constexpr auto kPrivateFileSecurity =
     // Microsoft requires COM to be initialized on the calling thread before
     // SHGetKnownFolderPath. ServiceMain is dispatched on a different thread
     // from main, so the initialization belongs at this narrow call boundary.
-    const auto com_error = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const auto com_result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const auto uninitialize =
-        wil::unique_couninitialize_call(SUCCEEDED(com_error));
-    if ((FAILED(com_error)) && (com_error != RPC_E_CHANGED_MODE)) {
+        wil::unique_couninitialize_call(SUCCEEDED(com_result));
+    if (FAILED(com_result) && (com_result != RPC_E_CHANGED_MODE)) {
         WinError("could not initialize COM before resolving the {} path",
-            description, ExplicitHresult{com_error});
+            description, ExplicitHresult{com_result});
     }
-    auto result = wil::unique_cotaskmem_string{};
-    const auto error = SHGetKnownFolderPath(
-        identifier, flags, nullptr, result.addressof());
-    if (FAILED(error)) {
+    auto path = wil::unique_cotaskmem_string{};
+    const auto result = SHGetKnownFolderPath(
+        identifier, flags, nullptr, path.addressof());
+    if (FAILED(result)) {
         WinError("could not obtain the {} path", description,
-            ExplicitHresult{error});
+            ExplicitHresult{result});
     }
-    return std::filesystem::path(result.get());
+    return std::filesystem::path(path.get());
 }
 
 class SecurityDescriptor final {
@@ -270,13 +270,13 @@ auto ConfigurePreshutdownTimeout(
 } // namespace
 
 export [[nodiscard]] auto CurrentExecutablePath() {
-    auto result = std::wstring{};
-    const auto error = wil::GetModuleFileNameW(nullptr, result);
-    if (FAILED(error)) {
+    auto path = std::wstring{};
+    const auto result = wil::GetModuleFileNameW(nullptr, path);
+    if (FAILED(result)) {
         WinError("could not obtain the backup supervisor path",
-            ExplicitHresult{error});
+            ExplicitHresult{result});
     }
-    return std::filesystem::path(std::move(result));
+    return std::filesystem::path(std::move(path));
 }
 
 export template <class T = std::string>

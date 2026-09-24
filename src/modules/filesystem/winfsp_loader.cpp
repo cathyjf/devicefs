@@ -25,12 +25,12 @@ auto LoadWinFspLibrary() {
 
     const auto directory = [] {
         auto directory = wil::unique_cotaskmem_string{};
-        if (const auto error = wil::reg::get_value_string_nothrow(HKEY_LOCAL_MACHINE,
+        if (const auto result = wil::reg::get_value_string_nothrow(HKEY_LOCAL_MACHINE,
                 L"" FSP_FSCTL_PRODUCT_FULL_REGKEY, L"InstallDir", directory);
-            FAILED(error)) {
+            FAILED(result)) {
             WinError("could not read the WinFsp installation directory from 'HKLM\\{}'",
                 std::string_view{FSP_FSCTL_PRODUCT_FULL_REGKEY},
-                ExplicitHresult{error});
+                ExplicitHresult{result});
         }
         return std::filesystem::path{directory.get()};
     }();

@@ -268,12 +268,12 @@ public:
                 output_write_.addressof(), nullptr, 0)) {
             WinError("could not create the pseudoconsole output channel");
         }
-        const auto error = CreatePseudoConsole(
+        const auto result = CreatePseudoConsole(
             COORD{1000, 30}, input_read_.get(), output_write_.get(),
             0, console_.put());
-        if (FAILED(error)) {
+        if (FAILED(result)) {
             WinError("could not create the backup pseudoconsole",
-                ExplicitHresult{error});
+                ExplicitHresult{result});
         }
         output_task_ = std::async(
             std::launch::async, CopyConsoleOutput,

@@ -76,13 +76,13 @@ constexpr auto kTcpUsername = "devicefs"sv;
 [[nodiscard]] auto LocalRpcBinding() -> const wil::shared_rpc_binding & {
     static const auto binding = [] {
         auto endpoint = std::wstring{};
-        const auto error = wil::GetEnvironmentVariableW(
+        const auto result = wil::GetEnvironmentVariableW(
             Transcode<wchar_t>(devicefs::rpc::kEndpointEnvironmentVariable).data(),
             endpoint);
-        if (FAILED(error)) {
+        if (FAILED(result)) {
             WinError("could not obtain RPC block-device endpoint from environment variable '{}'",
                 devicefs::rpc::kEndpointEnvironmentVariable,
-                ExplicitHresult{error});
+                ExplicitHresult{result});
         }
         if (endpoint.empty()) {
             throw std::runtime_error(std::format(
@@ -156,18 +156,18 @@ struct RPCBlockDevice {
         auto stored_symbol = std::basic_string<unsigned char>{
             symbol.begin(), symbol.end()};
         const auto length = [binding_ = binding.get(), &stored_symbol, symbol] {
-            auto result = std::uint64_t{};
+            auto rpc_length = std::uint64_t{};
             auto status = NTSTATUS{};
-            const auto error = wil::invoke_rpc_result_nothrow(
+            const auto result = wil::invoke_rpc_result_nothrow(
                 status, DeviceFsRpcClient_GetLength,
-                binding_, stored_symbol.c_str(), &result);
-            if (FAILED(error)) {
+                binding_, stored_symbol.c_str(), &rpc_length);
+            if (FAILED(result)) {
                 WinError("could not query the length of RPC block device '{}'",
                     symbol,
-                    ExplicitHresult{error});
+                    ExplicitHresult{result});
             }
             internal::CheckNt(status, "could not query the RPC block-device length");
-            return result;
+            return rpc_length;
         }();
         return RPCBlockDevice{
             length, std::move(stored_symbol), binding};
@@ -184,13 +184,13 @@ struct RPCBlockDevice {
         auto status = NTSTATUS{};
         auto rpc_transferred = ULONG{};
         (observers.BeginSourceRead(), ...);
-        const auto error = wil::invoke_rpc_result_nothrow(
+        const auto result = wil::invoke_rpc_result_nothrow(
             status, DeviceFsRpcClient_Read,
             binding_.get(), symbol_.c_str(), offset, wanted,
             &rpc_transferred, static_cast<BYTE *>(buffer));
-        if (FAILED(error)) {
+        if (FAILED(result)) {
             const auto win32_error =
-                CompileTimeCast<DWORD>(ExplicitHresult{error});
+                CompileTimeCast<DWORD>(ExplicitHresult{result});
             devicefs::WriteToStream(devicefs::stderr,
                 "devicefs: RPC read failed for '{:s}' at offset 0x{:x} "
                 "for {} bytes: Windows error {}\n",

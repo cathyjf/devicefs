@@ -388,10 +388,10 @@ export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) ->
     }
     const auto shell = [] {
         auto system_directory = std::wstring{};
-        if (const auto error = wil::GetSystemDirectoryW(system_directory);
-            FAILED(error)) {
+        if (const auto result = wil::GetSystemDirectoryW(system_directory);
+            FAILED(result)) {
             WinError("could not identify the Windows system directory",
-                ExplicitHresult{error});
+                ExplicitHresult{result});
         }
         return std::filesystem::path{system_directory} / L"cmd.exe";
     }();

@@ -105,13 +105,13 @@ public:
             } else if ((completion_ == Completion::Success) && use_writers_) {
                 client_.BackupComplete(true);
             }
-        } catch (const HRESULT error) {
+        } catch (const HRESULT result) {
             if (completion_ == Completion::Success) {
                 devicefs::WriteToStream(devicefs::stderr,
                     "backup-supervisor: VSS writer completion failed "
                     "(HRESULT 0x{:08X}); the backup succeeded and the "
                     "snapshot set was retained.\n",
-                    std::bit_cast<unsigned int>(error));
+                    std::bit_cast<unsigned int>(result));
             }
         } catch (...) {
             if (completion_ == Completion::Success) {
@@ -157,13 +157,13 @@ public:
 
 private:
     auto TryDeleteCreatedSnapshotSet() noexcept -> void {
-        const auto error = client_.TryDeleteCreatedSnapshotSet();
-        if (FAILED(error)) {
+        const auto result = client_.TryDeleteCreatedSnapshotSet();
+        if (FAILED(result)) {
             devicefs::WriteToStream(devicefs::stderr,
                 "backup-supervisor: could not delete the persistent VSS "
                 "snapshot set (HRESULT 0x{:08X}); the snapshot set may "
                 "remain.\n",
-                std::bit_cast<unsigned int>(error));
+                std::bit_cast<unsigned int>(result));
         }
     }
 
@@ -218,17 +218,17 @@ export namespace devicefs::vshadow {
                 try {
                     return GetUniqueVolumeNameForPath(
                         Transcode<std::wstring>(volume), true);
-                } catch (const HRESULT error) {
+                } catch (const HRESULT result) {
                     WinError("could not resolve backup volume '{}'",
-                        volume, ExplicitHresult{error});
+                        volume, ExplicitHresult{result});
                 }
             }) |
             std::ranges::to<std::vector<std::wstring>>();
 
         auto backup = Backup{cancellation_event, use_writers};
         return backup.Run(canonical_volumes, operation);
-    } catch (const HRESULT error) {
-        WinError("VSS operation failed", ExplicitHresult{error});
+    } catch (const HRESULT result) {
+        WinError("VSS operation failed", ExplicitHresult{result});
     }
 }
 

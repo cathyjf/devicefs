@@ -20,6 +20,10 @@ import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 
+auto AttributeListCast(void *const storage) noexcept {
+    return static_cast<PPROC_THREAD_ATTRIBUTE_LIST>(storage);
+}
+
 // Each tuple `Attribute` supplies an attribute key, value pointer, and length.
 // Construction calls `UpdateProcThreadAttribute` for each `Attribute`.
 // Attribute values must outlive this object.
@@ -45,17 +49,13 @@ public:
             }
             auto storage =
                 std::make_unique_for_overwrite<std::byte[]>(attribute_bytes);
-            auto *const attributes = static_cast<PPROC_THREAD_ATTRIBUTE_LIST>(
-                CompileTimeCast<LPVOID>(storage.get()));
-            _Analysis_assume_(attributes != nullptr);
+            auto *const attributes = AttributeListCast(storage.get());
             if (!InitializeProcThreadAttributeList(
                     attributes, attribute_count, 0, &attribute_bytes)) {
                 WinError("could not initialize the process attribute list");
             }
-            return storage;
-        }()),
-        attributes_(static_cast<PPROC_THREAD_ATTRIBUTE_LIST>(
-            CompileTimeCast<LPVOID>(storage_.get()))) {
+            return decltype(storage_){storage.release()};
+        }()) {
         const auto update = [attributes = get()](
             const DWORD_PTR key, void *const value, const SIZE_T size) {
             if (!UpdateProcThreadAttribute(
@@ -67,14 +67,12 @@ public:
     }
 
     _Ret_notnull_ [[nodiscard]] auto get() const noexcept {
-        return attributes_.get();
+        return AttributeListCast(storage_.get());
     }
 
 private:
-    // The `attributes_` object is destroyed before `storage_` so that Windows
-    // cleanup runs, if at all, while the `storage_` buffer exists.
-    const std::unique_ptr<std::byte[]> storage_;
-    const wil::unique_any<PPROC_THREAD_ATTRIBUTE_LIST,
-        decltype(&::DeleteProcThreadAttributeList),
-        ::DeleteProcThreadAttributeList> attributes_;
+    const std::unique_ptr<std::byte[], decltype([](std::byte *const storage) {
+        DeleteProcThreadAttributeList(AttributeListCast(storage));
+        std::default_delete<std::byte[]>{}(storage);
+    })> storage_;
 };

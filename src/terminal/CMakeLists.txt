@@ -177,7 +177,7 @@ foreach(target IN LISTS DEVICEFS_TERMINAL_ANALYSIS_TARGETS)
     )
 endforeach()
 
-if(WIN32)
+if(WIN32 AND PROJECT_IS_TOP_LEVEL)
     add_custom_target(check-terminal-code-analysis ALL
         COMMAND "${POWERSHELL_EXECUTABLE}"
             -NoProfile -NonInteractive -File

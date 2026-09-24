@@ -79,8 +79,8 @@ export [[nodiscard]] auto RunFishProgram(
 }
 
 export [[nodiscard]] auto InventoryVhdx(
-    HANDLE cancellation_event,
-    std::string_view device) -> int;
+    const HANDLE cancellation_event,
+    const std::string_view device) -> int;
 
 // Retrieve the PBS snapshot catalog as UTF-8 JSON for all groups in the
 // configured namespace, or the supplied override, and its descendants. The

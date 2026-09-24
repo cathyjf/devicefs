@@ -20,7 +20,7 @@ module;
 
 #include <cstddef>
 
-export module devicefs.supervisor.native_backup:incremental_diagnostics;
+module devicefs.supervisor.native_backup;
 
 import std;
 import <devicefs/windows_imports.h>;
@@ -42,18 +42,6 @@ import devicefs.vss_block_descriptors;
 import devicefs.terminal.transcoding;
 
 using devicefs::terminal::Transcode;
-
-export struct IncrementalDiagnosticOptions {
-    bool print_statistics = false;
-    bool verify = false;
-    bool expose_synthetic_backup = false;
-    bool verify_synthetic_backup = false;
-    std::optional<std::filesystem::path> backup_view_mount_root;
-    double filesystem_verification_percentage = 100.0;
-    std::optional<GUID> baseline_snapshot_identifier;
-    std::optional<std::u8string> namespace_override;
-    std::vector<std::string> volume_override;
-};
 
 namespace {
 
@@ -1655,7 +1643,7 @@ auto PrintVerificationResult(
 
 } // namespace
 
-export [[nodiscard]] auto RunIncrementalDiagnostics(
+[[nodiscard]] auto RunIncrementalDiagnostics(
     const HANDLE cancellation_event,
     const IncrementalDiagnosticOptions &options) -> int {
     const auto baseline_result = [&]

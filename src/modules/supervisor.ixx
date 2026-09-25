@@ -792,15 +792,15 @@ struct SelectiveViewOptions {
     devicefs::terminal::WindowsConsole &terminal,
     SelectiveViewOptions options, const BackupViewUser &view_user) {
     const auto cancellation_event = CreateCancellationEvent(nullptr);
-    const auto &account = (view_user.linked_user && *view_user.linked_user)
-        ? **view_user.linked_user : view_user.invoking_user;
+    const auto &account = (view_user.shell_user && *view_user.shell_user)
+        ? **view_user.shell_user : view_user.invoking_user;
     return RunViewWithOutput(terminal, cancellation_event.get(),
         [&options, &view_user, &account](const HANDLE cancellation_event) {
-            if (!view_user.linked_user) {
+            if (!view_user.shell_user) {
                 devicefs::WriteToStream(devicefs::stdout,
                     "Information: Backup viewing will continue with inspection permission for the invoking user.\n"
-                    "The optional linked-account lookup could not be completed. Details: {}\n",
-                    view_user.linked_user.error()->what());
+                    "The optional account lookup for the desktop process could not be completed. Details: {}\n",
+                    view_user.shell_user.error()->what());
             }
             const auto snapshot_override = options.snapshot_override
                 ? std::optional<std::string_view>{

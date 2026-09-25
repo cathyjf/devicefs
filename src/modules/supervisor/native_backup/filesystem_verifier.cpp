@@ -24,7 +24,7 @@ import std;
 import <devicefs/windows_imports.h>;
 import :devicefs_process;
 import :internal;
-import :privileges;
+import devicefs.supervisor.process_privileges;
 import :vhdx_attachment;
 import <devicefs/common.h>;
 import devicefs.guid_formatter;
@@ -2819,7 +2819,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
 
     auto automatic_inventory_finished = false;
     try {
-        auto privileges = internal::ProcessPrivilegeEnabler{
+        auto privileges = ProcessPrivilegeEnabler{
             GetCurrentProcess(),
             std::array{
                 wil::zwstring_view{SE_BACKUP_NAME},
@@ -2972,7 +2972,7 @@ export [[nodiscard]] auto VerifyFilesystemViews(
             jobs, optimization_unavailable, preparation_failures);
     }
 
-    auto privileges = internal::ProcessPrivilegeEnabler{
+    auto privileges = ProcessPrivilegeEnabler{
         GetCurrentProcess(),
         std::array{
             wil::zwstring_view{SE_BACKUP_NAME},

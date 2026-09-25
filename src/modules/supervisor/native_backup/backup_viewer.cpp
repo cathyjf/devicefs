@@ -26,7 +26,7 @@ import :devicefs_process;
 import :internal;
 import :pbs;
 import :port_selection;
-import :privileges;
+import devicefs.supervisor.process_privileges;
 import :vhdx_attachment;
 import <devicefs/common.h>;
 import devicefs.stream_writer;
@@ -287,7 +287,7 @@ auto WaitForViewSession(
         L"DeviceFs is presenting the projected VHDX at {}.\n",
         projected_vhdx.native());
 
-    auto privileges = internal::ProcessPrivilegeEnabler{
+    auto privileges = ProcessPrivilegeEnabler{
         GetCurrentProcess(),
         std::array{
             wil::zwstring_view(SE_BACKUP_NAME),

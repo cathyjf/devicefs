@@ -22,7 +22,7 @@ export module devicefs.supervisor.native_backup:incremental;
 
 import std;
 import <devicefs/windows_imports.h>;
-import :privileges;
+import devicefs.supervisor.process_privileges;
 import devicefs.filesystem;
 import devicefs.svi_extents;
 import devicefs.vss_block_descriptors;
@@ -89,7 +89,7 @@ export [[nodiscard]] auto BuildDirtyBlockMap(
 
     constexpr auto privilege_description =
         "the backup privilege"sv;
-    auto privileges = internal::ProcessPrivilegeEnabler{
+    auto privileges = ProcessPrivilegeEnabler{
         GetCurrentProcess(), std::array{wil::zwstring_view{SE_BACKUP_NAME}},
         privilege_description};
     auto svi_blocks = devicefs::svi::ReadBlockOffsets(baseline_device);

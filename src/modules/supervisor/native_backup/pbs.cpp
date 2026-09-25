@@ -23,7 +23,7 @@ module devicefs.supervisor.native_backup:pbs;
 import std;
 import <devicefs/windows_imports.h>;
 import :internal;
-import :privileges;
+import devicefs.supervisor.process_privileges;
 import :s4u_logon;
 import <devicefs/common.h>;
 import devicefs.stream_writer;

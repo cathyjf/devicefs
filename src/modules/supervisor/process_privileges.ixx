@@ -14,16 +14,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-module devicefs.supervisor.native_backup:privileges;
+export module devicefs.supervisor.process_privileges;
 
 import std;
 import <cstddef>;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 
-namespace internal {
-
-template <std::size_t PrivilegeCount>
+export template <std::size_t PrivilegeCount>
 class ProcessPrivilegeEnabler {
     static constexpr auto kStateSize =
         offsetof(TOKEN_PRIVILEGES, Privileges) +
@@ -33,12 +31,26 @@ public:
     explicit ProcessPrivilegeEnabler(
         const HANDLE process,
         const std::span<const wil::zwstring_view, PrivilegeCount> privilege_names,
-        const std::string_view description)
+        const std::string_view description,
+        const std::optional<std::reference_wrapper<
+            std::unique_ptr<std::runtime_error>>> output_error = std::nullopt)
         : description_{description} {
+        const auto handle_error = [output_error]<class... Arguments>(
+            const detail::WinErrorFormatString<Arguments...> format,
+            Arguments &&...arguments) {
+            if (output_error) {
+                output_error->get() = ConstructWinError(
+                    format, std::forward<Arguments>(arguments)...);
+            } else {
+                WinError(format, std::forward<Arguments>(arguments)...);
+            }
+        };
+
         if (!OpenProcessToken(process,
                 TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
                 token_.addressof())) {
-            WinError("could not open the backup-supervisor process token");
+            handle_error("could not open the backup-supervisor process token");
+            return;
         }
 
         alignas(TOKEN_PRIVILEGES) auto state_storage = std::array<std::byte, kStateSize>{};
@@ -51,9 +63,10 @@ public:
         };
         for (auto &&[entry, name] : std::views::zip(entries, privilege_names)) {
             if (!LookupPrivilegeValueW(nullptr, name.c_str(), &entry.Luid)) {
-                WinError("could not identify {} ('{}')",
+                handle_error("could not identify {} ('{}')",
                     description_,
                     std::wstring_view{name.data(), name.length()});
+                return;
             }
             entry.Attributes = SE_PRIVILEGE_ENABLED;
         }
@@ -72,14 +85,15 @@ public:
                 token_.get(), FALSE, state,
                 CompileTimeCast<DWORD, kStateSize>(), previous_state,
                 &previous_state_size)) {
-            WinError("could not enable {}", description_);
+            handle_error("could not enable {}", description_);
+            return;
         }
         previous_state_ = previous_state;
-        const auto error = GetLastError();
-        if (error != ERROR_SUCCESS) {
+        const auto last_error = GetLastError();
+        if (last_error != ERROR_SUCCESS) {
             std::ignore = RestoreNoThrow();
-            WinError("could not enable {}", description_,
-                ExplicitWin32Error{error});
+            handle_error("could not enable {}", description_,
+                ExplicitWin32Error{last_error});
         }
     }
 
@@ -125,9 +139,9 @@ private:
     TOKEN_PRIVILEGES *previous_state_ = nullptr;
 };
 
-template <std::size_t PrivilegeCount>
+export template <std::size_t PrivilegeCount>
 ProcessPrivilegeEnabler(HANDLE,
     const std::array<wil::zwstring_view, PrivilegeCount> &,
-    std::string_view) -> ProcessPrivilegeEnabler<PrivilegeCount>;
-
-} // namespace internal
+    std::string_view,
+    std::optional<std::reference_wrapper<std::unique_ptr<std::runtime_error>>> = std::nullopt)
+    -> ProcessPrivilegeEnabler<PrivilegeCount>;

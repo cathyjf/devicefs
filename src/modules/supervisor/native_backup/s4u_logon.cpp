@@ -22,7 +22,7 @@ module devicefs.supervisor.native_backup:s4u_logon;
 
 import std;
 import <devicefs/windows_imports.h>;
-import :privileges;
+import devicefs.supervisor.process_privileges;
 import <devicefs/common.h>;
 import devicefs.stream_writer;
 

@@ -13,6 +13,7 @@ import <devicefs/windows_imports.h>;
 import <devicefs/winrt_imports.h>;
 import devicefs.supervisor.winrt_apartment;
 import devicefs.supervisor.native_backup;
+import devicefs.supervisor.process_privileges;
 import devicefs.terminal.menu;
 import devicefs.terminal.windows;
 import devicefs.terminal.transcoding;
@@ -216,7 +217,7 @@ export struct BackupViewUser {
         std::string account_name;
     } invoking_user;
     std::expected<std::optional<decltype(invoking_user)>,
-        std::unique_ptr<std::runtime_error>> linked_user;
+        std::unique_ptr<std::runtime_error>> shell_user;
 };
 
 export struct BackupSelection {
@@ -238,59 +239,72 @@ export [[nodiscard]] auto SelectBackupViewUser(
             user, GetCurrentProcessToken()); FAILED(result)) {
         WinError("could not identify the invoking user", ExplicitHresult{result});
     }
-    // Discovering a linked account is optional. Lookup failures are retained
-    // for the scrolling view while access is granted to the invoking account.
-    auto linked_user = [sid = user->User.Sid] -> decltype(BackupViewUser::linked_user) {
-        auto elevation = TOKEN_ELEVATION_TYPE{};
-        if (const auto result = wil::get_token_information_nothrow(
-                &elevation, GetCurrentProcessToken()); FAILED(result)) {
-            return std::unexpected(ConstructWinError(
-                "could not determine the invoking user's elevation type",
-                ExplicitHresult{result}));
-        }
-        if (elevation != TokenElevationTypeFull) {
+    // Discovering the desktop process's account is optional. Lookup failures are
+    // retained for the scrolling view while access is granted to the invoking account.
+    auto shell_user = [sid = user->User.Sid] -> decltype(BackupViewUser::shell_user) {
+        const auto shell_window = GetShellWindow();
+        if (shell_window == nullptr) {
             return std::nullopt;
         }
-        auto linked_token = wil::unique_token_linked_token{};
-        if (const auto result = wil::get_token_information_nothrow(
-                linked_token, GetCurrentProcessToken()); FAILED(result)) {
+        auto process_id = DWORD{};
+        if (GetWindowThreadProcessId(shell_window, &process_id) == 0) {
             return std::unexpected(ConstructWinError(
-                "could not obtain the invoking user's linked token",
-                ExplicitHresult{result}));
+                "failed to identify the desktop process"));
+        }
+        auto error = std::unique_ptr<std::runtime_error>{};
+        const auto privileges = ProcessPrivilegeEnabler{
+            GetCurrentProcess(), std::array{wil::zwstring_view(SE_DEBUG_NAME)},
+            "SeDebugPrivilege for querying the desktop process"sv, std::ref(error)};
+        if (error) {
+            return std::unexpected(std::move(error));
+        }
+        const auto process = wil::unique_handle{
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id)};
+        if (!process) {
+            return std::unexpected(ConstructWinError(
+                "failed to open desktop process {}",
+                CompileTimeCast<std::uint32_t>(process_id)));
+        }
+        auto token = wil::unique_handle{};
+        if (!OpenProcessToken(process.get(), TOKEN_QUERY, token.addressof())) {
+            return std::unexpected(ConstructWinError(
+                "failed to open the token for desktop process {}",
+                CompileTimeCast<std::uint32_t>(process_id)));
         }
         auto information = wil::unique_tokeninfo_ptr<TOKEN_USER>{};
         if (const auto result = wil::get_token_information_nothrow(
-                information, linked_token.LinkedToken); FAILED(result)) {
+                information, token.get()); FAILED(result)) {
             return std::unexpected(ConstructWinError(
-                "could not identify the linked user", ExplicitHresult{result}));
+                "failed to identify the user of desktop process {}",
+                CompileTimeCast<std::uint32_t>(process_id), ExplicitHresult{result}));
         }
         if (EqualSid(sid, information->User.Sid)) {
             return std::nullopt;
         }
-        auto linked_account = LookupAccountNameFromSid(information->User.Sid);
-        if (!linked_account) {
-            return std::unexpected(std::move(linked_account.error()));
+        auto shell_account = LookupAccountNameFromSid(information->User.Sid);
+        if (!shell_account) {
+            return std::unexpected(std::move(shell_account.error()));
         }
         return decltype(BackupViewUser::invoking_user){
             .information = std::move(information),
-            .account_name = std::move(*linked_account)};
+            .account_name = std::move(*shell_account)};
     }();
     auto view_user = BackupViewUser{
         .invoking_user = {.information = std::move(user)},
-        .linked_user = std::move(linked_user)};
-    if (!view_user.linked_user || !*view_user.linked_user) {
+        .shell_user = std::move(shell_user)};
+    if (!view_user.shell_user || !*view_user.shell_user) {
         return view_user;
     }
     auto account = LookupAccountNameFromSid(
         view_user.invoking_user.information->User.Sid);
     if (!account) {
-        view_user.linked_user = std::unexpected(std::move(account.error()));
+        view_user.shell_user = std::unexpected(std::move(account.error()));
         return view_user;
     }
-    const auto &linked_account = (**view_user.linked_user).account_name;
+    const auto &shell_account = (**view_user.shell_user).account_name;
     const auto choices = std::array{
-        std::format("Grant permission to '{}'", linked_account),
-        std::format("Continue without granting permission to '{}'", linked_account)};
+        std::format("Grant permission to '{}'", shell_account),
+        std::format("Continue without granting permission to '{}'", shell_account)};
     const auto labels = std::array{
         std::string_view{choices[0]}, std::string_view{choices[1]}};
     const auto selected = SelectMenuItem(terminal,
@@ -300,17 +314,18 @@ export [[nodiscard]] auto SelectBackupViewUser(
                 "Namespace: {}\nBackup: {}\nImage: {}\n\n",
                 namespace_name, backup, archive_label);
             frame.Write(
-                "The account '{}' may be using Administrator Protection.\n\n"
+                "This program is running as '{}'.\n"
+                "Windows File Explorer is running as '{}'.\n\n"
                 "You can grant inspection permission to '{}' to enable browsing\n"
                 "this backup using Windows File Explorer, if desired.\n\n"
                 "Grant permission to '{}' to inspect this backup?",
-                *account, linked_account, linked_account);
+                *account, shell_account, shell_account, shell_account);
         }, labels);
     if (!selected) {
         return std::nullopt;
     }
     if (*selected != 0) {
-        view_user.linked_user = std::nullopt;
+        view_user.shell_user = std::nullopt;
     }
     return view_user;
 }

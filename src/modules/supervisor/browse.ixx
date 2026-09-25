@@ -283,18 +283,17 @@ export [[nodiscard]] auto SelectBackupViewUser(
 }
 
 // Select a group, snapshot, image archive, and the account allowed to browse it.
-// All menus share one screen lifetime. Returning restores the ordinary console
-// so the caller can start the selected view. Cancellation returns no selection.
-// retrieve_manifest receives the full namespace and selected snapshot identifier
+// The caller keeps `terminal` and its `EnterScreen` owner alive through selection
+// and the selected view. Cancellation returns no selection.
+// `retrieve_manifest` receives the full namespace and selected snapshot identifier
 // and returns its manifest, or no value if retrieval was cancelled.
 export template <class RetrieveManifest>
-[[nodiscard]] auto SelectBackup(const std::u8string_view catalog,
+[[nodiscard]] auto SelectBackup(devicefs::terminal::WindowsConsole &terminal,
+    const std::u8string_view catalog,
     const RetrieveManifest retrieve_manifest)
     -> std::optional<BackupSelection> {
     using namespace browse_detail;
     const auto groups = ParseCatalog(catalog);
-    auto terminal = WindowsConsole{};
-    const auto screen = terminal.EnterScreen();
     const auto group_names = groups | std::views::keys |
         std::ranges::to<std::vector<std::string_view>>();
     auto group_index = 0uz;

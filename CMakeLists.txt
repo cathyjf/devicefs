@@ -305,6 +305,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/process_diagnostics.ixx
     src/modules/supervisor/process_launch.ixx
     src/modules/supervisor/temporary_paths.ixx
+    src/modules/supervisor/view_output.ixx
     src/modules/supervisor/vshadow.ixx
     src/modules/supervisor/winrt_apartment.ixx
 )

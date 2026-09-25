@@ -572,15 +572,14 @@ struct OutputCommand {
 enum class OutputCommandPosition { AboveOutput, BelowOutput };
 
 // An output menu displays arriving logical lines and a selectable command list.
-// AppendLine and SetCommands copy their inputs. Use this object on the UI thread;
-// the update callback can drain a producer's queue without holding its lock
+// AppendText, AppendLine, and SetCommands copy their inputs. Use this object on
+// the UI thread; the update callback can drain a producer's queue without holding its lock
 // during rendering. Retain the object across Select calls to preserve scrollback,
 // focus, and selection while the caller handles a command.
 //
-// This interface accepts complete lines, with no trailing newline. Embedded
-// controls receive the same visible notation as menu labels. Byte-stream
-// decoding, unfinished lines, and carriage-return progress updates belong to
-// the producer feeding this interface.
+// AppendText continues the current line until a newline ends it. AppendLine
+// adds a separate complete line; embedded controls in that line receive the
+// same visible notation as menu labels.
 class OutputMenu {
 public:
     // Retain at most this many logical lines, discarding the oldest first.
@@ -620,12 +619,38 @@ public:
         if (retained_lines_ == 0) {
             return;
         }
-        lines_.push_back({.text = PrepareTerminalText(text), .layout = std::nullopt});
-        if (lines_.size() > retained_lines_) {
-            lines_.pop_front();
-            ++first_line_;
+        unfinished_.reset();
+        AddLine(PrepareTerminalText(text));
+    }
+
+    // Display text immediately, including a final line without a newline.
+    // Later calls continue that line. LF and CRLF end a line.
+    auto AppendText(const std::string_view text) -> void {
+        if (retained_lines_ == 0) {
+            return;
         }
-        dirty_ = true;
+        for (const auto part : text | std::views::split('\n')) {
+            const auto complete = part.end() != text.end();
+            if (part.empty() && !complete) {
+                break;
+            }
+            if (!unfinished_) {
+                AddLine({});
+                unfinished_.emplace();
+            }
+            unfinished_->append(std::string_view{part});
+            auto content = std::string_view{*unfinished_};
+            if (complete && content.ends_with('\r')) {
+                content.remove_suffix(1);
+            }
+            auto &line = lines_.back();
+            line.text = PrepareTerminalText(content);
+            line.layout.reset();
+            dirty_ = true;
+            if (complete) {
+                unfinished_.reset();
+            }
+        }
     }
 
     // Supply the commands currently available to the user. An existing selection
@@ -739,6 +764,15 @@ public:
     }
 
 private:
+    auto AddLine(std::string text) -> void {
+        lines_.push_back({.text = std::move(text), .layout = std::nullopt});
+        if (lines_.size() > retained_lines_) {
+            lines_.pop_front();
+            ++first_line_;
+        }
+        dirty_ = true;
+    }
+
     struct Line {
         std::string text;
         std::optional<TextLayout> layout;
@@ -896,6 +930,9 @@ private:
 
     std::size_t retained_lines_;
     std::deque<Line> lines_;
+    // Preparing the whole unfinished line lets text split inside a UTF-8
+    // character or terminal command be interpreted together on the next append.
+    std::optional<std::string> unfinished_;
     std::size_t first_line_ = 0;
     std::vector<Row> rows_;
     std::size_t top_ = 0;

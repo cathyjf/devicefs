@@ -401,6 +401,69 @@ export [[nodiscard]] auto TestMenu() -> bool {
         Require(!EditText(terminal, [](auto &) {}, "unchanged"),
             "an unusable text area accepted an edit"sv);
     });
+    passed &= Test("output displaying unfinished lines and continuing them on later updates"sv, [] {
+        constexpr auto input = std::array{MenuInput{MenuKey::Timeout},
+            MenuInput{MenuKey::Timeout}, MenuInput{MenuKey::Back}};
+        constexpr auto chunks = std::array{"Loading"sv, " backup\n\nLast"sv, " line\n"sv};
+        auto terminal = MenuConsole{input, {.rows = 16, .columns = 80}};
+        const auto screen = terminal.EnterScreen();
+        auto view = OutputMenu{};
+        view.SetCommands(std::array{OutputCommand{0, "Close"sv}});
+        Require(!view.Select(terminal, [](auto &) {}, [&terminal, &chunks](auto &output) {
+            output.AppendText(chunks.at(terminal.frames.size()));
+        }), "Back selected a command"sv);
+        Require(terminal.frames.at(0).contains("Loading\n"sv),
+            "an unfinished line was withheld from the display"sv);
+        Require(terminal.frames.at(1).contains("Loading backup\n\nLast\n"sv),
+            "appending text split a line or lost an empty line"sv);
+        Require(terminal.frames.at(2).contains("Loading backup\n\nLast line\n"sv),
+            "continuing the last line did not update its displayed text"sv);
+    });
+    passed &= Test("output retaining characters and terminal commands across appends"sv, [] {
+        constexpr auto input = std::array{MenuInput{MenuKey::Timeout}, MenuInput{MenuKey::Back}};
+        auto terminal = MenuConsole{input, {.rows = 12, .columns = 80}};
+        const auto screen = terminal.EnterScreen();
+        auto view = OutputMenu{};
+        Require(!view.Select(terminal, [](auto &) {}, [&terminal](auto &output) {
+            if (terminal.frames.empty()) {
+                output.AppendText("caf\xc3"sv);
+            } else {
+                output.AppendText("\xa9\x1b[3"sv);
+                output.AppendText("1m ready\r"sv);
+                output.AppendText("\nNext"sv);
+            }
+        }), "Back selected a command"sv);
+        Require(terminal.frames.back().contains("cafe ready\nNext\n"sv),
+            "split UTF-8, a terminal command, or CRLF corrupted the displayed output"sv);
+    });
+    passed &= Test("output retention counting lines rather than text appends"sv, [] {
+        constexpr auto input = std::array{MenuInput{MenuKey::Timeout},
+            MenuInput{MenuKey::Timeout}, MenuInput{MenuKey::Back}};
+        auto terminal = MenuConsole{input, {.rows = 12, .columns = 80}};
+        const auto screen = terminal.EnterScreen();
+        auto view = OutputMenu{2};
+        Require(!view.Select(terminal, [](auto &) {}, [&terminal](auto &output) {
+            switch (terminal.frames.size()) {
+            case 0:
+                output.AppendText("First\nSecond\n"sv);
+                break;
+            case 1:
+                output.AppendText("Part"sv);
+                output.AppendText("ial"sv);
+                output.AppendText({});
+                break;
+            case 2:
+                output.AppendLine("Separate"sv);
+                break;
+            }
+        }), "Back selected a command"sv);
+        Require(terminal.frames.at(0).contains("First\nSecond\n"sv),
+            "a trailing newline consumed an extra retained line"sv);
+        Require(terminal.frames.at(1).contains("Second\nPartial\n"sv),
+            "continuing a line consumed another retention slot"sv);
+        Require(terminal.frames.at(2).contains("Partial\nSeparate\n"sv),
+            "AppendLine did not begin a separate complete line"sv);
+    });
     passed &= Test("output following, inspection, focus, and quiet input deadlines"sv, [] {
         constexpr auto input = std::array{
             MenuInput{MenuKey::Timeout}, MenuInput{MenuKey::Timeout},

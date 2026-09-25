@@ -37,6 +37,7 @@ import devicefs.supervisor.native_backup;
 import devicefs.supervisor.process_diagnostics;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.vshadow;
+import devicefs.supervisor.view_output;
 import devicefs.terminal.transcoding;
 import devicefs.terminal.windows;
 import devicefs.vss_block_descriptors.cli;
@@ -788,14 +789,12 @@ struct SelectiveViewOptions {
 }
 
 [[nodiscard]] auto RunSelectiveViewMode(
+    devicefs::terminal::WindowsConsole &terminal,
     SelectiveViewOptions options, const PSID view_user,
     const std::string_view read_user) {
-    const auto [input, console_mode] = GetForegroundConsoleInput(
-        "--view requires an attached console");
-    return RunForegroundOperation(
-        input, console_mode,
-        [options = std::move(options), view_user, read_user](
-            const HANDLE cancellation_event) {
+    const auto cancellation_event = CreateCancellationEvent(nullptr);
+    return RunViewWithOutput(terminal, cancellation_event.get(),
+        [&options, view_user, read_user](const HANDLE cancellation_event) {
             const auto snapshot_override = options.snapshot_override
                 ? std::optional<std::string_view>{
                     *options.snapshot_override}
@@ -812,13 +811,25 @@ struct SelectiveViewOptions {
                 timestamp,
                 options.address,
                 options.namespace_override);
-        });
+        }, [&options](auto &frame) {
+            const auto namespace_name = options.namespace_override
+                ? (options.namespace_override->empty() ? std::string{"(root)"} :
+                    Transcode<std::string>(*options.namespace_override))
+                : std::string{"(configured namespace)"};
+            const auto backup = options.snapshot_override.value_or("(default backup group)");
+            frame.Write("DeviceFs Backup Supervisor\nBrowse backup\n\n"
+                "Namespace: {}\nBackup: {}\nImage: {}\n\n",
+                namespace_name,
+                options.timestamp ? std::format("{}/{}", backup, *options.timestamp) : backup,
+                options.archive);
+        }).value_or(kCancelledExitCode);
 }
 
 [[nodiscard]] auto RunSelectiveViewMode(SelectiveViewOptions options) {
-    const auto view_user = [&options] {
-        auto terminal = devicefs::terminal::WindowsConsole{};
-        const auto screen = terminal.EnterScreen();
+    std::ignore = GetForegroundConsoleInput("--view requires an attached console");
+    auto terminal = devicefs::terminal::WindowsConsole{};
+    const auto screen = terminal.EnterScreen();
+    const auto view_user = [&options, &terminal] {
         const auto namespace_name = options.namespace_override
             ? (options.namespace_override->empty() ? std::string{"(root)"} :
                 Transcode<std::string>(*options.namespace_override))
@@ -831,7 +842,7 @@ struct SelectiveViewOptions {
     if (!view_user) {
         return kCancelledExitCode;
     }
-    return RunSelectiveViewMode(std::move(options),
+    return RunSelectiveViewMode(terminal, std::move(options),
         view_user->information->User.Sid, view_user->account_name);
 }
 
@@ -848,7 +859,9 @@ struct SelectiveViewOptions {
     if (result != 0) {
         return result;
     }
-    const auto selection = SelectBackup(*catalog,
+    auto terminal = devicefs::terminal::WindowsConsole{};
+    const auto screen = terminal.EnterScreen();
+    const auto selection = SelectBackup(terminal, *catalog,
         [input](const std::u8string_view namespace_name, const std::string_view snapshot)
             -> std::optional<std::u8string> {
             auto manifest = std::u8string{};
@@ -879,7 +892,7 @@ struct SelectiveViewOptions {
     if (!selection) {
         return 0;
     }
-    return RunSelectiveViewMode(SelectiveViewOptions{
+    return RunSelectiveViewMode(terminal, SelectiveViewOptions{
         .archive = selection->archive,
         .snapshot_override = selection->snapshot,
         .namespace_override = selection->namespace_name,

@@ -38,6 +38,7 @@ import devicefs.supervisor.process_diagnostics;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.vshadow;
 import devicefs.terminal.transcoding;
+import devicefs.terminal.windows;
 import devicefs.vss_block_descriptors.cli;
 
 using devicefs::terminal::Transcode;
@@ -787,12 +788,13 @@ struct SelectiveViewOptions {
 }
 
 [[nodiscard]] auto RunSelectiveViewMode(
-    SelectiveViewOptions options) {
+    SelectiveViewOptions options, const PSID view_user,
+    const std::string_view read_user) {
     const auto [input, console_mode] = GetForegroundConsoleInput(
         "--view requires an attached console");
     return RunForegroundOperation(
         input, console_mode,
-        [options = std::move(options)](
+        [options = std::move(options), view_user, read_user](
             const HANDLE cancellation_event) {
             const auto snapshot_override = options.snapshot_override
                 ? std::optional<std::string_view>{
@@ -803,12 +805,34 @@ struct SelectiveViewOptions {
                 : std::optional<std::string_view>{};
             return RunSelectiveView(
                 cancellation_event,
+                view_user,
+                read_user,
                 options.archive,
                 snapshot_override,
                 timestamp,
                 options.address,
                 options.namespace_override);
         });
+}
+
+[[nodiscard]] auto RunSelectiveViewMode(SelectiveViewOptions options) {
+    const auto view_user = [&options] {
+        auto terminal = devicefs::terminal::WindowsConsole{};
+        const auto screen = terminal.EnterScreen();
+        const auto namespace_name = options.namespace_override
+            ? (options.namespace_override->empty() ? std::string{"(root)"} :
+                Transcode<std::string>(*options.namespace_override))
+            : std::string{"(configured namespace)"};
+        const auto backup = options.snapshot_override.value_or("(default backup group)");
+        return SelectBackupViewUser(terminal, namespace_name,
+            options.timestamp ? std::format("{}/{}", backup, *options.timestamp) : backup,
+            options.archive);
+    }();
+    if (!view_user) {
+        return kCancelledExitCode;
+    }
+    return RunSelectiveViewMode(std::move(options),
+        view_user->information->User.Sid, view_user->account_name);
 }
 
 [[nodiscard]] auto RunBrowseMode(std::optional<std::u8string> namespace_override) {
@@ -859,7 +883,7 @@ struct SelectiveViewOptions {
         .archive = selection->archive,
         .snapshot_override = selection->snapshot,
         .namespace_override = selection->namespace_name,
-    });
+    }, selection->view_user.information->User.Sid, selection->view_user.account_name);
 }
 
 [[nodiscard]] auto RunIncrementalDiagnosticMode(

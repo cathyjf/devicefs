@@ -138,6 +138,37 @@ struct BackupGroup {
     }, labels, {}, selected);
 }
 
+[[nodiscard]] auto LookupAccountNameFromSid(const PSID user) {
+    const auto get_sid_text = [user] {
+        const auto last_error = wil::last_error_context{};
+        auto sid_text = wil::unique_hlocal_ansistring{};
+        if (!ConvertSidToStringSidA(user, sid_text.addressof())) {
+            WinError("failed to format the SID for the account name lookup");
+        }
+        return sid_text;
+    };
+    auto name_length = DWORD{};
+    auto domain_length = DWORD{};
+    auto use = SID_NAME_USE{};
+    if (!LookupAccountSidA(nullptr, user, nullptr, &name_length,
+            nullptr, &domain_length, &use) &&
+        (GetLastError() != ERROR_INSUFFICIENT_BUFFER)) {
+        WinError("failed to determine the account name buffer sizes for SID '{}'",
+            get_sid_text().get());
+    }
+    auto name = std::string(name_length, '\0');
+    auto domain = std::string(domain_length, '\0');
+    if (!LookupAccountSidA(nullptr, user, name.data(), &name_length,
+            domain.data(), &domain_length, &use)) {
+        WinError("failed to look up the account name for SID '{}'",
+            get_sid_text().get());
+    }
+    const auto name_view = std::string_view{name.data(), name_length};
+    const auto domain_view = std::string_view{domain.data(), domain_length};
+    return domain_view.empty() ? std::string{name_view} :
+        std::format("{}\\{}", domain_view, name_view);
+}
+
 // Return display labels, or no value if the manifest retrieval was cancelled.
 [[nodiscard]] auto MakeArchiveLabels(const std::u8string_view namespace_name,
     const std::string_view snapshot,
@@ -176,13 +207,82 @@ struct BackupGroup {
 
 } // namespace browse_detail
 
+export struct BackupViewUser {
+    wil::unique_tokeninfo_ptr<TOKEN_USER> information;
+    std::string account_name;
+};
+
 export struct BackupSelection {
     std::u8string namespace_name;
     std::string snapshot;
     std::string archive;
+    BackupViewUser view_user;
 };
 
-// Select a group, snapshot, and image archive from RetrieveBackupCatalog's JSON.
+// No value means that the user cancelled the permission menu.
+export [[nodiscard]] auto SelectBackupViewUser(
+    devicefs::terminal::WindowsConsole &terminal,
+    const std::string_view namespace_name, const std::string_view backup,
+    const std::string_view archive_label)
+    -> std::optional<BackupViewUser> {
+    using namespace browse_detail;
+    auto user = wil::unique_tokeninfo_ptr<TOKEN_USER>{};
+    if (const auto result = wil::get_token_information_nothrow(
+            user, GetCurrentProcessToken()); FAILED(result)) {
+        WinError("could not identify the invoking user", ExplicitHresult{result});
+    }
+    const auto account = LookupAccountNameFromSid(user->User.Sid);
+    auto elevation = TOKEN_ELEVATION_TYPE{};
+    if (const auto result = wil::get_token_information_nothrow(
+            &elevation, GetCurrentProcessToken()); FAILED(result)) {
+        WinError("could not determine the invoking user's elevation type",
+            ExplicitHresult{result});
+    }
+    if (elevation != TokenElevationTypeFull) {
+        return BackupViewUser{.information = std::move(user), .account_name = account};
+    }
+    auto linked_token = wil::unique_token_linked_token{};
+    if (const auto result = wil::get_token_information_nothrow(
+            linked_token, GetCurrentProcessToken()); FAILED(result)) {
+        WinError("could not obtain the invoking user's linked token",
+            ExplicitHresult{result});
+    }
+    auto linked_user = wil::unique_tokeninfo_ptr<TOKEN_USER>{};
+    if (const auto result = wil::get_token_information_nothrow(
+            linked_user, linked_token.LinkedToken); FAILED(result)) {
+        WinError("could not identify the linked user", ExplicitHresult{result});
+    }
+    if (EqualSid(user->User.Sid, linked_user->User.Sid)) {
+        return BackupViewUser{.information = std::move(user), .account_name = account};
+    }
+    const auto linked_account = LookupAccountNameFromSid(linked_user->User.Sid);
+    const auto choices = std::array{
+        std::format("Grant permission to '{}'", linked_account),
+        std::format("Continue without granting permission to '{}'", linked_account)};
+    const auto labels = std::array{
+        std::string_view{choices[0]}, std::string_view{choices[1]}};
+    const auto selected = SelectMenuItem(terminal,
+        [&](auto &frame) {
+            frame.Write(
+                "DeviceFs Backup Supervisor\nBrowse backup\n\n"
+                "Namespace: {}\nBackup: {}\nImage: {}\n\n",
+                namespace_name, backup, archive_label);
+            frame.Write(
+                "The account '{}' may be using Administrator Protection.\n\n"
+                "You can grant inspection permission to '{}' to enable browsing\n"
+                "this backup using Windows File Explorer, if desired.\n\n"
+                "Grant permission to '{}' to inspect this backup?",
+                account, linked_account, linked_account);
+        }, labels);
+    if (!selected) {
+        return std::nullopt;
+    }
+    return (*selected == 0)
+        ? BackupViewUser{.information = std::move(linked_user), .account_name = linked_account}
+        : BackupViewUser{.information = std::move(user), .account_name = account};
+}
+
+// Select a group, snapshot, image archive, and the account allowed to browse it.
 // All menus share one screen lifetime. Returning restores the ordinary console
 // so the caller can start the selected view. Cancellation returns no selection.
 // retrieve_manifest receives the full namespace and selected snapshot identifier
@@ -238,18 +338,26 @@ export template <class RetrieveManifest>
             }();
             const auto archives = choices | std::views::keys |
                 std::ranges::to<std::vector<std::string_view>>();
-            const auto archive = Choose(terminal,
-                std::format("{} / {} — {}", name, selected.timestamp,
-                    archives.empty() ? "This snapshot contains no image archives." :
-                    "Choose an image archive"), archives, 0);
-            if (!archive) {
-                continue;
+            auto archive_index = 0uz;
+            while (const auto archive = Choose(terminal,
+                    std::format("{} / {} — {}", name, selected.timestamp,
+                        archives.empty() ? "This snapshot contains no image archives." :
+                        "Choose an image archive"), archives, archive_index)) {
+                archive_index = *archive;
+                auto view_user = SelectBackupViewUser(terminal,
+                    selected_group.namespace_name.empty() ? std::string{"(root)"} :
+                        Transcode<std::string>(selected_group.namespace_name),
+                    identifier, choices.at(*archive).first);
+                if (!view_user) {
+                    continue;
+                }
+                return BackupSelection{
+                    .namespace_name = selected_group.namespace_name,
+                    .snapshot = identifier,
+                    .archive = std::string{choices.at(*archive).second},
+                    .view_user = std::move(*view_user),
+                };
             }
-            return BackupSelection{
-                .namespace_name = selected_group.namespace_name,
-                .snapshot = identifier,
-                .archive = std::string{choices.at(*archive).second},
-            };
         }
     }
     return std::nullopt;

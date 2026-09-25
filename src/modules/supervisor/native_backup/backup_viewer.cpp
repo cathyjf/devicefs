@@ -195,6 +195,8 @@ auto WaitForViewSession(
 
 [[nodiscard]] auto RunSelectiveView(
     const HANDLE cancellation_event,
+    const PSID view_user,
+    const std::string_view read_user,
     const std::string_view archive,
     const std::optional<std::string_view> snapshot_override,
     const std::optional<std::string_view> timestamp,
@@ -204,21 +206,14 @@ auto WaitForViewSession(
         return internal::kCancelledExitCode;
     }
 
-    auto invoking_user = wil::unique_tokeninfo_ptr<TOKEN_USER>{};
-    const auto invoking_user_query = wil::get_token_information_nothrow(
-        invoking_user, GetCurrentProcessToken());
-    if (FAILED(invoking_user_query)) {
-        WinError("could not identify the invoking user",
-            ExplicitHresult{invoking_user_query});
-    }
     const auto port = std::to_string(
         internal::SelectTcpPortCandidate());
     auto devicefs_directory = internal::ViewDirectory{
-        "devicefs-view", invoking_user->User.Sid};
+        "devicefs-view", view_user};
     const auto devicefs_mount = devicefs_directory.Path() / "view";
     const auto projected_vhdx = devicefs_mount / "view.vhdx";
     auto volume_directory = internal::ViewDirectory{
-        "devicefs-view-volume", invoking_user->User.Sid};
+        "devicefs-view-volume", view_user};
 
     devicefs::WriteToStream(
         devicefs::stdout,
@@ -262,6 +257,7 @@ auto WaitForViewSession(
         internal::StartDeviceFs(internal::DeviceFsStartRequest{
             .sources = source,
             .mount_target = Transcode<std::string>(devicefs_mount.native()),
+            .read_user = std::string{read_user},
             .rpc_password = std::string_view{
                 rpc_password->data(), rpc_password->size()},
             .vhdx = true,

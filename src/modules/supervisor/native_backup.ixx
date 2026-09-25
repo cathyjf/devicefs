@@ -105,6 +105,8 @@ export [[nodiscard]] auto RetrieveBackupCatalog(
 
 export [[nodiscard]] auto RunSelectiveView(
     const HANDLE cancellation_event,
+    const PSID view_user,
+    const std::string_view read_user,
     const std::string_view archive,
     const std::optional<std::string_view> snapshot_override,
     const std::optional<std::string_view> timestamp,

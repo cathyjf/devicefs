@@ -136,16 +136,21 @@ private:
 
 namespace detail {
 
+auto ConstructWinError(const unsigned long error, const std::string &operation)
+    -> std::unique_ptr<std::runtime_error> {
+    return std::make_unique<WindowsError>(error, operation);
+}
+
+[[noreturn]] auto ThrowWinError(const unsigned long error, const std::string &operation) -> void {
+    throw WindowsError(error, operation);
+}
+
 auto LastWin32Error() noexcept -> ExplicitWin32Error {
     return {GetLastError()};
 }
 
 auto TranscodeString(const std::wstring_view argument) -> std::string {
     return devicefs::terminal::Transcode<std::string>(argument);
-}
-
-[[noreturn]] auto ThrowWinError(const unsigned long error, const std::string &operation) -> void {
-    throw WindowsError(error, operation);
 }
 
 // Format the complete HRESULT and any description supplied by the failed COM

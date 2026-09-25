@@ -38,6 +38,9 @@ namespace detail {
 [[nodiscard]] auto LastWin32Error() noexcept -> ExplicitWin32Error;
 [[nodiscard]] auto FormatHresult(long) -> std::string;
 [[nodiscard]] auto TranscodeString(std::wstring_view) -> std::string;
+
+[[nodiscard]] auto ConstructWinError(unsigned long, const std::string &)
+    -> std::unique_ptr<std::runtime_error>;
 [[noreturn]] auto ThrowWinError(unsigned long, const std::string &) -> void;
 
 template <class Argument>
@@ -99,10 +102,8 @@ using WinErrorFormatString = typename WinErrorFormat<
     std::make_index_sequence<
         sizeof...(Arguments) - kHasExplicitError<Arguments...>>>::type;
 
-} // namespace detail
-
-template <class... Arguments>
-[[noreturn]] auto WinError(
+template <auto DispatchError, class... Arguments>
+auto DispatchWinError(
     const detail::WinErrorFormatString<Arguments...> format,
     Arguments &&...arguments) {
     const auto last_error = detail::LastWin32Error();
@@ -139,7 +140,25 @@ template <class... Arguments>
         }
         return text;
     }(std::make_index_sequence<format_argument_count>{});
-    detail::ThrowWinError(error, operation);
+    return DispatchError(error, operation);
+}
+
+} // namespace detail
+
+template <class... Arguments>
+[[nodiscard]] auto ConstructWinError(
+    const detail::WinErrorFormatString<Arguments...> format,
+    Arguments &&...arguments) {
+    return detail::DispatchWinError<detail::ConstructWinError>(
+        format, std::forward<Arguments>(arguments)...);
+}
+
+template <class... Arguments>
+[[noreturn]] auto WinError(
+    const detail::WinErrorFormatString<Arguments...> format,
+    Arguments &&...arguments) {
+    detail::DispatchWinError<detail::ThrowWinError>(
+        format, std::forward<Arguments>(arguments)...);
 }
 
 auto HardenProcess() -> void;

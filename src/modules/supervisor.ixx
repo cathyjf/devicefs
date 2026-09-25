@@ -790,11 +790,18 @@ struct SelectiveViewOptions {
 
 [[nodiscard]] auto RunSelectiveViewMode(
     devicefs::terminal::WindowsConsole &terminal,
-    SelectiveViewOptions options, const PSID view_user,
-    const std::string_view read_user) {
+    SelectiveViewOptions options, const BackupViewUser &view_user) {
     const auto cancellation_event = CreateCancellationEvent(nullptr);
+    const auto &account = (view_user.linked_user && *view_user.linked_user)
+        ? **view_user.linked_user : view_user.invoking_user;
     return RunViewWithOutput(terminal, cancellation_event.get(),
-        [&options, view_user, read_user](const HANDLE cancellation_event) {
+        [&options, &view_user, &account](const HANDLE cancellation_event) {
+            if (!view_user.linked_user) {
+                devicefs::WriteToStream(devicefs::stdout,
+                    "Information: Backup viewing will continue with inspection permission for the invoking user.\n"
+                    "The optional linked-account lookup could not be completed. Details: {}\n",
+                    view_user.linked_user.error()->what());
+            }
             const auto snapshot_override = options.snapshot_override
                 ? std::optional<std::string_view>{
                     *options.snapshot_override}
@@ -804,8 +811,8 @@ struct SelectiveViewOptions {
                 : std::optional<std::string_view>{};
             return RunSelectiveView(
                 cancellation_event,
-                view_user,
-                read_user,
+                account.information->User.Sid,
+                account.account_name,
                 options.archive,
                 snapshot_override,
                 timestamp,
@@ -843,7 +850,7 @@ struct SelectiveViewOptions {
         return kCancelledExitCode;
     }
     return RunSelectiveViewMode(terminal, std::move(options),
-        view_user->information->User.Sid, view_user->account_name);
+        *view_user);
 }
 
 [[nodiscard]] auto RunBrowseMode(std::optional<std::u8string> namespace_override) {
@@ -896,7 +903,7 @@ struct SelectiveViewOptions {
         .archive = selection->archive,
         .snapshot_override = selection->snapshot,
         .namespace_override = selection->namespace_name,
-    }, selection->view_user.information->User.Sid, selection->view_user.account_name);
+    }, selection->view_user);
 }
 
 [[nodiscard]] auto RunIncrementalDiagnosticMode(

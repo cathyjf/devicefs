@@ -138,12 +138,13 @@ struct BackupGroup {
     }, labels, {}, selected);
 }
 
-[[nodiscard]] auto LookupAccountNameFromSid(const PSID user) {
+[[nodiscard]] auto LookupAccountNameFromSid(const PSID user)
+    -> std::expected<std::string, std::unique_ptr<std::runtime_error>> {
     const auto get_sid_text = [user] {
         const auto last_error = wil::last_error_context{};
         auto sid_text = wil::unique_hlocal_ansistring{};
         if (!ConvertSidToStringSidA(user, sid_text.addressof())) {
-            WinError("failed to format the SID for the account name lookup");
+            return wil::make_hlocal_ansistring("[unformattable SID]");
         }
         return sid_text;
     };
@@ -153,15 +154,17 @@ struct BackupGroup {
     if (!LookupAccountSidA(nullptr, user, nullptr, &name_length,
             nullptr, &domain_length, &use) &&
         (GetLastError() != ERROR_INSUFFICIENT_BUFFER)) {
-        WinError("failed to determine the account name buffer sizes for SID '{}'",
-            get_sid_text().get());
+        return std::unexpected{ConstructWinError(
+            "failed to determine the account name buffer sizes for SID '{}'",
+            get_sid_text().get())};
     }
     auto name = std::string(name_length, '\0');
     auto domain = std::string(domain_length, '\0');
     if (!LookupAccountSidA(nullptr, user, name.data(), &name_length,
             domain.data(), &domain_length, &use)) {
-        WinError("failed to look up the account name for SID '{}'",
-            get_sid_text().get());
+        return std::unexpected{ConstructWinError(
+            "failed to look up the account name for SID '{}'",
+            get_sid_text().get())};
     }
     const auto name_view = std::string_view{name.data(), name_length};
     const auto domain_view = std::string_view{domain.data(), domain_length};
@@ -208,8 +211,12 @@ struct BackupGroup {
 } // namespace browse_detail
 
 export struct BackupViewUser {
-    wil::unique_tokeninfo_ptr<TOKEN_USER> information;
-    std::string account_name;
+    struct {
+        wil::unique_tokeninfo_ptr<TOKEN_USER> information;
+        std::string account_name;
+    } invoking_user;
+    std::expected<std::optional<decltype(invoking_user)>,
+        std::unique_ptr<std::runtime_error>> linked_user;
 };
 
 export struct BackupSelection {
@@ -231,31 +238,56 @@ export [[nodiscard]] auto SelectBackupViewUser(
             user, GetCurrentProcessToken()); FAILED(result)) {
         WinError("could not identify the invoking user", ExplicitHresult{result});
     }
-    const auto account = LookupAccountNameFromSid(user->User.Sid);
-    auto elevation = TOKEN_ELEVATION_TYPE{};
-    if (const auto result = wil::get_token_information_nothrow(
-            &elevation, GetCurrentProcessToken()); FAILED(result)) {
-        WinError("could not determine the invoking user's elevation type",
-            ExplicitHresult{result});
+    // Discovering a linked account is optional. Lookup failures are retained
+    // for the scrolling view while access is granted to the invoking account.
+    auto linked_user = [sid = user->User.Sid] -> decltype(BackupViewUser::linked_user) {
+        auto elevation = TOKEN_ELEVATION_TYPE{};
+        if (const auto result = wil::get_token_information_nothrow(
+                &elevation, GetCurrentProcessToken()); FAILED(result)) {
+            return std::unexpected(ConstructWinError(
+                "could not determine the invoking user's elevation type",
+                ExplicitHresult{result}));
+        }
+        if (elevation != TokenElevationTypeFull) {
+            return std::nullopt;
+        }
+        auto linked_token = wil::unique_token_linked_token{};
+        if (const auto result = wil::get_token_information_nothrow(
+                linked_token, GetCurrentProcessToken()); FAILED(result)) {
+            return std::unexpected(ConstructWinError(
+                "could not obtain the invoking user's linked token",
+                ExplicitHresult{result}));
+        }
+        auto information = wil::unique_tokeninfo_ptr<TOKEN_USER>{};
+        if (const auto result = wil::get_token_information_nothrow(
+                information, linked_token.LinkedToken); FAILED(result)) {
+            return std::unexpected(ConstructWinError(
+                "could not identify the linked user", ExplicitHresult{result}));
+        }
+        if (EqualSid(sid, information->User.Sid)) {
+            return std::nullopt;
+        }
+        auto linked_account = LookupAccountNameFromSid(information->User.Sid);
+        if (!linked_account) {
+            return std::unexpected(std::move(linked_account.error()));
+        }
+        return decltype(BackupViewUser::invoking_user){
+            .information = std::move(information),
+            .account_name = std::move(*linked_account)};
+    }();
+    auto view_user = BackupViewUser{
+        .invoking_user = {.information = std::move(user)},
+        .linked_user = std::move(linked_user)};
+    if (!view_user.linked_user || !*view_user.linked_user) {
+        return view_user;
     }
-    if (elevation != TokenElevationTypeFull) {
-        return BackupViewUser{.information = std::move(user), .account_name = account};
+    auto account = LookupAccountNameFromSid(
+        view_user.invoking_user.information->User.Sid);
+    if (!account) {
+        view_user.linked_user = std::unexpected(std::move(account.error()));
+        return view_user;
     }
-    auto linked_token = wil::unique_token_linked_token{};
-    if (const auto result = wil::get_token_information_nothrow(
-            linked_token, GetCurrentProcessToken()); FAILED(result)) {
-        WinError("could not obtain the invoking user's linked token",
-            ExplicitHresult{result});
-    }
-    auto linked_user = wil::unique_tokeninfo_ptr<TOKEN_USER>{};
-    if (const auto result = wil::get_token_information_nothrow(
-            linked_user, linked_token.LinkedToken); FAILED(result)) {
-        WinError("could not identify the linked user", ExplicitHresult{result});
-    }
-    if (EqualSid(user->User.Sid, linked_user->User.Sid)) {
-        return BackupViewUser{.information = std::move(user), .account_name = account};
-    }
-    const auto linked_account = LookupAccountNameFromSid(linked_user->User.Sid);
+    const auto &linked_account = (**view_user.linked_user).account_name;
     const auto choices = std::array{
         std::format("Grant permission to '{}'", linked_account),
         std::format("Continue without granting permission to '{}'", linked_account)};
@@ -272,14 +304,15 @@ export [[nodiscard]] auto SelectBackupViewUser(
                 "You can grant inspection permission to '{}' to enable browsing\n"
                 "this backup using Windows File Explorer, if desired.\n\n"
                 "Grant permission to '{}' to inspect this backup?",
-                account, linked_account, linked_account);
+                *account, linked_account, linked_account);
         }, labels);
     if (!selected) {
         return std::nullopt;
     }
-    return (*selected == 0)
-        ? BackupViewUser{.information = std::move(linked_user), .account_name = linked_account}
-        : BackupViewUser{.information = std::move(user), .account_name = account};
+    if (*selected != 0) {
+        view_user.linked_user = std::nullopt;
+    }
+    return view_user;
 }
 
 // Select a group, snapshot, image archive, and the account allowed to browse it.

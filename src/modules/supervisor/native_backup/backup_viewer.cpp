@@ -257,7 +257,7 @@ auto WaitForViewSession(
         internal::StartDeviceFs(internal::DeviceFsStartRequest{
             .sources = source,
             .mount_target = Transcode<std::string>(devicefs_mount.native()),
-            .read_user = std::string{read_user},
+            .read_user = read_user.empty() ? std::nullopt : std::optional{std::string{read_user}},
             .rpc_password = std::string_view{
                 rpc_password->data(), rpc_password->size()},
             .vhdx = true,

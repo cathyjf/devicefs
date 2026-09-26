@@ -73,6 +73,18 @@ using PNTSTATUS = NTSTATUS *;
 #include <wil/token_helpers.h>
 #include <wil/win32_helpers.h>
 
+namespace ntdef_detail {
+// `ntdef.h` contains definitions that conflict with `winternl.h`.
+// Including `ntdef.h` within its own namespace avoids that problem.
+#include <ntdef.h>
+}
+#undef _NTDEF_
+
+// The `RTL_CONSTANT_STRING` macro requires the following two symbols to be
+// in the global namespace.
+using ntdef_detail::_RTL_CONSTANT_STRING_remove_const_template_class;
+using ntdef_detail::_RTL_CONSTANT_STRING_type_check;
+
 // When `materialize_oci.ixx` uses WIL's registry iterator, MSVC incorrectly
 // reports that `unique_array_ptr` has too few template arguments. This
 // explicit instantiation compiles the iterator's implementation as part of

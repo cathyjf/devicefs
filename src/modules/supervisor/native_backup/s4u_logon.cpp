@@ -97,25 +97,8 @@ template <std::size_t Size>
     // code and can establish persistence without this account right. Granting
     // the narrower ability to create a batch logon adds no independent
     // persistence boundary.
-    auto right = [] {
-        constexpr auto right_text =
-            wil::zwstring_view{SE_BATCH_LOGON_NAME};
-        [[gsl::suppress("26492",
-            justification:
-                "`LsaAddAccountRights` annotates `UserRights` with `_In_reads_`, "
-                "indicating that it does not modify this parameter. However, the "
-                "parameter does not carry a modern `const` qualifier, so "
-                "`const_cast` is required.")]]
-        return LSA_UNICODE_STRING{
-            .Length = wil::safe_cast_failfast<USHORT>(
-                right_text.size() * sizeof(wchar_t)),
-            .MaximumLength = wil::safe_cast_failfast<USHORT>(
-                (right_text.size() + 1) * sizeof(wchar_t)),
-            .Buffer = const_cast<wchar_t *>(right_text.c_str()),
-        };
-    }();
-    return LsaAddAccountRights(
-        policy.get(), sid->data(), &right, 1) == 0;
+    auto right = LSA_UNICODE_STRING RTL_CONSTANT_STRING(SE_BATCH_LOGON_NAME);
+    return LsaAddAccountRights(policy.get(), sid->data(), &right, 1) == 0;
 }
 
 [[nodiscard]] auto LogOnWindowsAccountWithS4u(

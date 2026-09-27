@@ -290,6 +290,9 @@ WORKDIR /usr/src/proxmox-backup
 # temporary copy omits pbs-api-types because the live Proxmox checkout supplies
 # that crate. The other packaged Proxmox crates may still be installed as build
 # dependencies, but Cargo's path overrides select the live checkout instead.
+# The ARM64 repository has older packages for network-api, rate-limiter,
+# rest-server, and s3-client. Omit their package version requirements so they
+# can still supply transitive dependencies; Cargo enforces the source versions.
 #
 # mk-build-deps normally enables APT's dependency-resolver diagnostics. The
 # explicit noninteractive APT command below retains that option so a repository
@@ -305,7 +308,9 @@ WORKDIR /usr/src/proxmox-backup
 #
 RUN <<'EOF'
 shopt -s inherit_errexit; set -efux -o pipefail
-sed '/librust-pbs-api-types-1+default-dev/d' \
+sed -E \
+    -e '/librust-pbs-api-types-1\+default-dev/d' \
+    -e 's/(librust-proxmox-(network-api|rate-limiter|rest-server|s3-client)-1\+[^ ,]+) \(>= [^)]*\)/\1/' \
     debian/control > /tmp/proxmox-backup-control
 apt-get update
 apt_tool='nala install -y --no-install-recommends -o Debug::pkgProblemResolver=yes'

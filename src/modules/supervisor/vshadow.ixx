@@ -74,6 +74,24 @@ public:
     using VssClient::TryDeleteCreatedSnapshotSet;
 };
 
+namespace {
+
+auto TryFormatHresult(const HRESULT result) noexcept -> std::string {
+    try {
+        return ConstructWinError("", ExplicitHresult{result})->what();
+    } catch (...) {
+        try {
+            return "unexpected error";
+        } catch (...) {
+            // This nonthrowing fallback is reached if the `std::string`
+            // constructor throws while copying the above string literal.
+            return {};
+        }
+    }
+}
+
+} // namespace
+
 class Backup {
     enum class Completion {
         None,
@@ -106,20 +124,20 @@ public:
                 client_.BackupComplete(true);
             }
         } catch (const HRESULT result) {
-            if (completion_ == Completion::Success) {
-                devicefs::WriteToStream(devicefs::stderr,
-                    "backup-supervisor: VSS writer completion failed "
-                    "(HRESULT 0x{:08X}); the backup succeeded and the "
-                    "snapshot set was retained.\n",
-                    std::bit_cast<unsigned int>(result));
+            if (completion_ != Completion::Success) {
+                return;
             }
+            devicefs::WriteToStream(devicefs::stderr,
+                "backup-supervisor: the backup succeeded but VSS writer "
+                "completion failed: {}\n", TryFormatHresult(result));
         } catch (...) {
-            if (completion_ == Completion::Success) {
-                devicefs::WriteToStream(devicefs::stderr,
-                    "backup-supervisor: VSS writer completion failed with "
-                    "an unexpected error; the backup succeeded and the "
-                    "snapshot set was retained.\n");
+            if (completion_ != Completion::Success) {
+                return;
             }
+            devicefs::WriteToStream(devicefs::stderr,
+                "backup-supervisor: the backup succeeded but VSS writer "
+                "completion failed with an unexpected error; the snapshot "
+                "set was retained.\n");
         }
     }
 
@@ -160,13 +178,12 @@ public:
 private:
     auto TryDeleteCreatedSnapshotSet() noexcept -> void {
         const auto result = client_.TryDeleteCreatedSnapshotSet();
-        if (FAILED(result)) {
-            devicefs::WriteToStream(devicefs::stderr,
-                "backup-supervisor: could not delete the persistent VSS "
-                "snapshot set (HRESULT 0x{:08X}); the snapshot set may "
-                "remain.\n",
-                std::bit_cast<unsigned int>(result));
+        if (!FAILED(result)) {
+            return;
         }
+        devicefs::WriteToStream(devicefs::stderr,
+            "backup-supervisor: failed to delete the VSS snapshot set: {}\n",
+            TryFormatHresult(result));
     }
 
     VssClientOwner client_;

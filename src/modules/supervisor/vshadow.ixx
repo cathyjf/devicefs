@@ -14,8 +14,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-module;
-
 export module devicefs.supervisor.vshadow;
 
 import std;
@@ -48,7 +46,9 @@ struct SnapshotSet {
 
 } // namespace devicefs::vshadow
 
-namespace {
+template <class Operation>
+concept SnapshotOperation = std::is_invocable_r_v<
+    int, Operation &, const devicefs::vshadow::SnapshotSet &>;
 
 class VssClientOwner final : private VssClient {
 public:
@@ -125,8 +125,7 @@ public:
 
     [[nodiscard]] auto Run(
         const std::vector<std::wstring> &canonical_volumes,
-        const std::function<int(
-            const devicefs::vshadow::SnapshotSet &)> &operation) -> int {
+        SnapshotOperation auto &&operation) -> int {
         completion_ = Completion::Failure;
         const auto [snapshot_set_identifier, snapshot_identifiers] =
             client_.CreateSnapshotSet(canonical_volumes, L"", {}, {});
@@ -175,8 +174,6 @@ private:
     Completion completion_ = Completion::None;
 };
 
-} // namespace
-
 export namespace devicefs::vshadow {
 
 [[nodiscard]] auto QuerySnapshotProperties(
@@ -214,7 +211,7 @@ export namespace devicefs::vshadow {
     const HANDLE cancellation_event,
     const bool use_writers,
     const std::span<const std::string> volumes,
-    const std::function<int(const SnapshotSet &)> &operation) -> int {
+    SnapshotOperation auto &&operation) -> int {
     try {
         auto canonical_volumes = volumes |
             std::views::transform([](const std::string &volume) {

@@ -339,12 +339,24 @@ struct WindowsBlockDevice {
                 return STATUS_SUCCESS;
             }
         }
-        const auto failure = [&](const DWORD error) {
+        const auto failure = [&](const DWORD error) noexcept {
             devicefs::WriteToStream(
                 devicefs::stderr,
                 L"devicefs: read failed for '{}' at offset 0x{:x} "
-                L"for {} bytes: Windows error {}\n",
-                std::wstring_view{filename.native()}, offset, wanted, error);
+                L"for {} bytes: {}\n",
+                std::wstring_view{filename.native()}, offset, wanted,
+                [error] noexcept -> std::wstring {
+                    try {
+                        return Transcode<std::wstring>(ConstructWinError("",
+                            ExplicitWin32Error{error})->what());
+                    } catch (...) {
+                        try {
+                            return std::to_wstring(error);
+                        } catch (...) {
+                            return {};
+                        }
+                    }
+                }());
             return FspNtStatusFromWin32(error);
         };
         const auto read = [&](void *const output, const UINT64 position,

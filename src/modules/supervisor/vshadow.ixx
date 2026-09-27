@@ -131,22 +131,25 @@ public:
         const auto [snapshot_set_identifier, snapshot_identifiers] =
             client_.CreateSnapshotSet(canonical_volumes, L"", {}, {});
 
-        const auto snapshot_devices = client_.GetLatestSnapshotDevices();
-        auto snapshot_set = devicefs::vshadow::SnapshotSet{
+        [[gsl::suppress("6001",
+            justification:
+                "This expression initializes `snapshot_set`; it does not read it.")]]
+        const auto snapshot_set = devicefs::vshadow::SnapshotSet{
             .identifier = snapshot_set_identifier,
-        };
-        for (auto &&[identifier, original_volume, device] :
-            std::views::zip(
+            // The three ranges supplied here to `zip_transform` are guaranteed
+            // by construction to have the same length.
+            .snapshots = std::views::zip_transform(
+                [](const auto &identifier, const auto &volume, const auto &device) {
+                    return devicefs::vshadow::Snapshot{
+                        .identifier = identifier,
+                        .original_volume = Transcode<std::string>(volume),
+                        .device = Transcode<std::string>(device),
+                    };
+                },
                 snapshot_identifiers,
                 canonical_volumes,
-                snapshot_devices)) {
-            snapshot_set.snapshots.push_back({
-                .identifier = identifier,
-                .original_volume = Transcode<std::string>(
-                    original_volume),
-                .device = Transcode<std::string>(device),
-            });
-        }
+                client_.GetLatestSnapshotDevices()) | std::ranges::to<std::vector>(),
+        };
 
         const auto result = operation(snapshot_set);
         if (result == 0) {

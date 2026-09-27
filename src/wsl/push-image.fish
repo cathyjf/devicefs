@@ -1,4 +1,6 @@
 #!/usr/bin/env -S fish --no-config
+# SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 
 set -l podman_build (podman system info --format '{{.Client.Built}}')
 if test "$status" -ne 0
@@ -60,6 +62,12 @@ for i in $labels
     set -a annotation_args --annotation $i
 end
 
+set -l timezone_args
+if set -l maybe_timezone (string replace -r -- '^.*zoneinfo/' '' \
+        (path resolve -- /etc/localtime))
+    set -a timezone_args --build-arg TZ={$maybe_timezone}
+end
+
 podman --log-level=debug farm build \
     --format=oci \
     --local=false \
@@ -70,6 +78,7 @@ podman --log-level=debug farm build \
     --network=host \
     --squash-all \
     --tag $version_tag \
+    $timezone_args \
     $label_args \
     $annotation_args \
     (status dirname) || exit

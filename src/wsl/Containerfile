@@ -27,8 +27,8 @@
 # https://cmake.org/download/
 ARG CMAKE_VERSION=4.4.3
 
-# Debian no longer packages PIDL. It also is not available from CPAN. PIDL
-# changes rarely, so using one known Samba tag is simpler and more predictable
+# Debian no longer packages PIDL, and no recent version is available from CPAN.
+# PIDL changes rarely, so using one known Samba tag is simpler and more predictable
 # than making the helper build depend on the current head of Samba development.
 # Only Samba's pidl directory is checked out.
 #
@@ -37,6 +37,8 @@ ARG CMAKE_VERSION=4.4.3
 # https://gitlab.com/samba-team/samba/-/tree/samba-4.24.6/pidl
 ARG SAMBA_PIDL_TAG=samba-4.24.6
 
+# This timezone is used only for diagnostics while building this image.
+ARG TZ=America/Los_Angeles
 
 # ---------------------------------------------------------------------------
 # Common shell
@@ -44,6 +46,19 @@ ARG SAMBA_PIDL_TAG=samba-4.24.6
 # ---------------------------------------------------------------------------
 
 FROM debian:trixie AS bash-base
+
+ARG TZ
+
+#
+# The `devicefs-build-init` script is sourced by every later RUN block.
+#
+RUN bash -e <<'EOF'
+printf 'export TZ=%q\n%s\n' "$TZ" \
+    'PS4='\''+ [\D{%FT%T%z}] '\''
+    shopt -s inherit_errexit
+    set -efux -o pipefail' > \
+        /usr/local/bin/devicefs-build-init
+EOF
 
 #
 # A shell-form RUN instruction invokes /bin/sh. Debian initially points that
@@ -56,7 +71,7 @@ FROM debian:trixie AS bash-base
 # https://manpages.debian.org/trixie/debconf/dpkg-reconfigure.8.en.html
 #
 RUN bash <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 printf '%s\n' 'dash dash/sh boolean false' | debconf-set-selections
 DEBIAN_FRONTEND=noninteractive dpkg-reconfigure dash
 ln --symbolic --force bash /bin/sh
@@ -123,7 +138,7 @@ simple_summary = true
 EOF
 
 RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 apt-get update
 apt-get \
     -o Dpkg::Options::=--force-confold \
@@ -142,7 +157,7 @@ EOF
 # https://packages.debian.org/trixie/gnupg
 #
 RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 apt-get update
 nala install -y --no-autoremove --no-install-recommends \
     ca-certificates \
@@ -164,7 +179,7 @@ EOF
 # https://manpages.debian.org/trixie/apt/apt-secure.8.en.html
 #
 RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 curl --fail --location --show-error \
     --output /usr/share/keyrings/fish-release-4.asc \
     https://download.opensuse.org/repositories/shells:/fish:/release:/4/Debian_13/Release.key
@@ -209,7 +224,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # https://manpages.debian.org/trixie/apt/apt-secure.8.en.html
 #
 RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 curl --fail --location --show-error \
     --output /usr/share/keyrings/proxmox-archive-keyring.gpg \
     https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg
@@ -245,7 +260,7 @@ EOF
 # https://bitbucket.org/cathyjf/proxmox-backup/src/main/debian/control
 #
 RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 apt-get update
 nala install -y --no-autoremove --no-install-recommends \
     binutils \
@@ -269,13 +284,19 @@ EOF
 # https://bitbucket.org/cathyjf/proxmox-backup/src/main/Cargo.toml
 # https://git-scm.com/docs/git-clone
 #
-RUN git clone \
+RUN <<'EOF'
+. /usr/local/bin/devicefs-build-init
+git clone \
     git://git.proxmox.com/git/proxmox \
     /usr/src/proxmox
+EOF
 
-RUN git clone \
+RUN <<'EOF'
+. /usr/local/bin/devicefs-build-init
+git clone \
     https://bitbucket.org/cathyjf/proxmox-backup \
     /usr/src/proxmox-backup
+EOF
 
 WORKDIR /usr/src/proxmox-backup
 
@@ -307,7 +328,7 @@ WORKDIR /usr/src/proxmox-backup
 # https://bitbucket.org/cathyjf/proxmox-backup/src/main/README.rst
 #
 RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 sed -E \
     -e '/librust-pbs-api-types-1\+default-dev/d' \
     -e 's/(librust-proxmox-(network-api|rate-limiter|rest-server|s3-client)-1\+[^ ,]+) \(>= [^)]*\)/\1/' \
@@ -363,7 +384,7 @@ EOF
 # https://bitbucket.org/cathyjf/proxmox-backup/src/main/README.rst
 #
 RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 sed --in-place \
     '/^#[a-z0-9-]\+ = {.*path = "\.\.\/proxmox\//s/^#//' \
     Cargo.toml
@@ -396,7 +417,7 @@ EOF
 # https://git-scm.com/docs/git-rev-parse
 #
 RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 install -D --mode=0755 \
     target/release/proxmox-backup-client \
     /out/rootfs/usr/local/bin/proxmox-backup-client
@@ -434,7 +455,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # https://manpages.debian.org/trixie/apt/sources.list.5.en.html
 #
 RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 curl --fail --location --show-error \
     --output /tmp/llvm-snapshot.gpg.key \
     https://apt.llvm.org/llvm-snapshot.gpg.key
@@ -472,7 +493,7 @@ EOF
 # https://packages.debian.org/trixie/libparse-yapp-perl
 #
 RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 apt-get update
 nala install -y --no-autoremove --no-install-recommends \
     build-essential \
@@ -508,7 +529,7 @@ EOF
 # https://cmake.org/download/
 #
 RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 case "$(dpkg --print-architecture)" in
     amd64) cmake_arch=x86_64 ;;
     arm64) cmake_arch=aarch64 ;;
@@ -563,7 +584,7 @@ ENV PATH=/opt/cmake/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:
 # https://packages.debian.org/trixie/libparse-yapp-perl
 #
 RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 git clone \
     --branch "${SAMBA_PIDL_TAG}" \
     --depth=1 \
@@ -586,9 +607,12 @@ EOF
 # https://github.com/cathyjf/devicefs
 # https://git-scm.com/docs/git-clone
 #
-RUN git clone \
+RUN <<'EOF'
+. /usr/local/bin/devicefs-build-init
+git clone \
     https://github.com/cathyjf/devicefs \
     /usr/src/devicefs
+EOF
 
 WORKDIR /usr/src/devicefs/src/unix
 
@@ -607,7 +631,7 @@ WORKDIR /usr/src/devicefs/src/unix
 # https://cmake.org/cmake/help/latest/manual/cmake.1.html
 #
 RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 cmake --preset release -DBUILD_TESTING=OFF
 cmake --build --preset release --parallel --target \
     rpcd_devicefs \
@@ -643,7 +667,7 @@ Source: rpcd-devicefs
 EOF
 
 RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 install -D --mode=0755 \
     /usr/src/devicefs/build/unix/samba_rpc/rpcd_devicefs \
     /out/rootfs/usr/local/bin/rpcd_devicefs
@@ -783,7 +807,7 @@ COPY --from=samba-helper-build \
 # https://github.com/cathyjf/devicefs/tree/main/src/modules/supervisor/artifacts
 #
 RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 apt-get update
 apt-get install --yes --no-install-recommends \
     ca-certificates \
@@ -839,7 +863,7 @@ COPY --from=samba-helper-build /out/rootfs/ /
 # https://manpages.debian.org/trixie/manpages/shells.5.en.html
 #
 RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 broker_shell=/usr/local/bin/devicefs-wsl-startup-broker
 printf '%s\n' "${broker_shell}" >> /etc/shells
 groupadd --gid "${DEVICEFS_GID}" pbs-vss
@@ -926,12 +950,13 @@ EOF
 # https://github.com/fish-shell/fish-shell/blob/master/share/functions/__fish_config_interactive.fish
 #
 RUN <<'EOF'
-shopt -s inherit_errexit; set -efux -o pipefail
+. /usr/local/bin/devicefs-build-init
 install -d --mode=0755 \
     /home/pbs-vss/.local/share/fish \
     /home/pbs-vss/.config/fish \
     /home/pbs-vss/.cache/fish/generated_completions \
     /root/.cache/fish/generated_completions
+rm /usr/local/bin/devicefs-build-init
 EOF
 
 #

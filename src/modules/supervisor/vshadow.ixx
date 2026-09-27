@@ -179,32 +179,35 @@ export namespace devicefs::vshadow {
 [[nodiscard]] auto QuerySnapshotProperties(
     const std::span<const GUID> snapshot_identifiers)
     -> std::vector<std::optional<SnapshotProperties>> {
-    auto result = std::vector<std::optional<SnapshotProperties>>(
-        snapshot_identifiers.size());
-    try {
-        auto client = VssClientOwner{VSS_CTX_ALL};
-        for (auto &&[identifier, properties] :
-            std::views::zip(snapshot_identifiers, result)) {
-            try {
-                auto snapshot_set_identifier = GUID{};
-                auto original_volume = std::wstring{};
-                auto device = std::wstring{};
-                client.GetSnapshotProperties(identifier,
-                    snapshot_set_identifier, original_volume, device);
-                properties = SnapshotProperties{
-                    .snapshot_set_identifier = snapshot_set_identifier,
-                    .original_volume = Transcode<std::string>(
-                        original_volume),
-                    .device = Transcode<std::string>(device),
-                };
-            } catch (const HRESULT) {
-                // One unavailable old snapshot does not affect the others.
-            }
+    auto client = [] -> std::optional<VssClientOwner> {
+        try {
+            return std::optional<VssClientOwner>{std::in_place, VSS_CTX_ALL};
+        } catch (HRESULT) {
+            return std::nullopt;
         }
-    } catch (const HRESULT) {
-        // Initialization failure leaves no old snapshot properties.
+    }();
+    if (!client) {
+        return std::vector<std::optional<SnapshotProperties>>(
+            snapshot_identifiers.size());
     }
-    return result;
+    return std::views::zip_transform([&client_ = *client](
+        const GUID &identifier) -> std::optional<SnapshotProperties> {
+        auto snapshot_set_identifier = GUID{};
+        auto original_volume = std::wstring{};
+        auto device = std::wstring{};
+        try {
+            client_.GetSnapshotProperties(identifier,
+                snapshot_set_identifier, original_volume, device);
+        } catch (HRESULT) {
+            return std::nullopt;
+        }
+        return SnapshotProperties{
+            .snapshot_set_identifier = snapshot_set_identifier,
+            .original_volume = Transcode<std::string>(
+                original_volume),
+            .device = Transcode<std::string>(device),
+        };
+    }, snapshot_identifiers) | std::ranges::to<std::vector>();
 }
 
 [[nodiscard]] auto Run(
@@ -212,21 +215,19 @@ export namespace devicefs::vshadow {
     const bool use_writers,
     const std::span<const std::string> volumes,
     SnapshotOperation auto &&operation) -> int {
+    const auto canonical_volumes = volumes |
+        std::views::transform([](const std::string &volume) {
+            try {
+                return GetUniqueVolumeNameForPath(
+                    Transcode<std::wstring>(volume), true);
+            } catch (const HRESULT result) {
+                WinError("could not resolve backup volume '{}'",
+                    volume, ExplicitHresult{result});
+            }
+        }) | std::ranges::to<std::vector<std::wstring>>();
     try {
-        auto canonical_volumes = volumes |
-            std::views::transform([](const std::string &volume) {
-                try {
-                    return GetUniqueVolumeNameForPath(
-                        Transcode<std::wstring>(volume), true);
-                } catch (const HRESULT result) {
-                    WinError("could not resolve backup volume '{}'",
-                        volume, ExplicitHresult{result});
-                }
-            }) |
-            std::ranges::to<std::vector<std::wstring>>();
-
-        auto backup = Backup{cancellation_event, use_writers};
-        return backup.Run(canonical_volumes, operation);
+        return Backup{cancellation_event, use_writers}.Run(
+            canonical_volumes, operation);
     } catch (const HRESULT result) {
         WinError("VSS operation failed", ExplicitHresult{result});
     }

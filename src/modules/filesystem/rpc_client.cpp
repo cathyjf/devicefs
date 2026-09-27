@@ -193,11 +193,12 @@ struct RPCBlockDevice {
                 CompileTimeCast<DWORD>(ExplicitHresult{result});
             devicefs::WriteToStream(devicefs::stderr,
                 "devicefs: RPC read failed for '{:s}' at offset 0x{:x} "
-                "for {} bytes: Windows error {}\n",
+                "for {} bytes: {}\n",
                 symbol_ | std::views::transform(
                     [](const unsigned char byte) noexcept {
                         return std::bit_cast<char>(byte);
-                    }), offset, wanted, win32_error);
+                    }), offset, wanted,
+                TryConstructWinError("", ExplicitHresult{result}));
             return FspNtStatusFromWin32(win32_error);
         }
         transferred = rpc_transferred;

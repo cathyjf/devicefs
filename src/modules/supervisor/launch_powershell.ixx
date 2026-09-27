@@ -184,11 +184,10 @@ function prompt {
         return std::invoke(prepare);
     } catch (const winrt::hresult_error &error) {
         devicefs::WriteToStream(devicefs::stderr,
-            "backup-supervisor: could not query the {} MSIX installation "
-            "(error 0x{:08x}): {}; trying the next console option\n",
-            application,
-            DWORD{ExplicitHresult{error.code()}},
-            Transcode<std::string>(error.message()));
+            "backup-supervisor: could not query the {} MSIX installation: "
+            "{}; trying the next console option\n",
+            application, TryConstructWinError("{}",
+                std::wstring_view{error.message()}, ExplicitHresult{error.code()}));
         return std::nullopt;
     }
 }
@@ -381,11 +380,18 @@ export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) ->
             }
             devicefs::WriteToStream(devicefs::stderr,
                 L"backup-supervisor: Windows Terminal for user '{}' could not "
-                L"be started with this command line:\n{}\n(Windows error "
-                L"0x{:08x}, exit code 0x{:08x})\nTrying Windows Console Host "
-                L"instead.\n",
-                std::wstring_view{username}, std::wstring_view{command},
-                status.error().win_error, status.error().exit_code);
+                L"be started with this command line:\n{}\n",
+                std::wstring_view{username}, std::wstring_view{command});
+            if (status.error().win_error != 0) {
+                devicefs::WriteToStream(devicefs::stderr, "{}\n",
+                    TryConstructWinError("",
+                        ExplicitWin32Error{status.error().win_error}));
+            } else {
+                devicefs::WriteToStream(devicefs::stderr,
+                    "Exit code: 0x{:08x}\n", status.error().exit_code);
+            }
+            devicefs::WriteToStream(devicefs::stderr,
+                "Trying Windows Console Host instead.\n");
         }
         if (try_shell(*powershell)) {
             return 0;

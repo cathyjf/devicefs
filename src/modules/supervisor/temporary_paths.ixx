@@ -77,10 +77,9 @@ public:
         if (const auto result = wil::RemoveDirectoryRecursiveNoThrow(path_.c_str());
             FAILED(result)) {
             devicefs::WriteToStream(devicefs::stderr,
-                L"backup-supervisor: could not remove temporary directory '{}' "
-                L"(Windows error 0x{:08x})\n",
+                L"backup-supervisor: could not remove temporary directory '{}': {}\n",
                 std::wstring_view{path_.native()},
-                DWORD{ExplicitHresult{result}});
+                TryConstructWinError("", ExplicitHresult{result}));
         }
     }
 

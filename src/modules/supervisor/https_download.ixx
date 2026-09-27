@@ -99,9 +99,10 @@ export [[nodiscard]] auto DownloadFile(
             copy.Progress(progress);
         } catch (const winrt::hresult_error &error) {
             devicefs::WriteToStream(devicefs::stderr,
-                "backup-supervisor: could not report download progress for '{}' "
-                "(Windows error 0x{:08x})\n",
-                name, std::uint32_t{ExplicitHresult{error.code()}});
+                "backup-supervisor: could not report download progress "
+                "for '{}': {}\n",
+                name, TryConstructWinError("{}",
+                    std::wstring_view{error.message()}, ExplicitHresult{error.code()}));
         }
         const auto bytes = copy.get();
         devicefs::WriteToStream(devicefs::stdout,

@@ -217,9 +217,9 @@ auto HideAccountFromLogonScreen(const wil::zwstring_view username) noexcept {
         devicefs::WriteToStream(
             devicefs::stderr,
             L"backup-supervisor: could not hide internal Windows account '{}' "
-            L"from the logon screen (Windows error 0x{:08x})\n",
+            L"from the logon screen: {}\n",
             std::wstring_view{username.c_str(), username.size()},
-            DWORD{ExplicitHresult{result}});
+            TryConstructWinError("", ExplicitHresult{result}));
     }
 }
 

@@ -564,9 +564,9 @@ export [[nodiscard]] auto MaterializeOci(
         FAILED(result)) {
         devicefs::WriteToStream(devicefs::stderr,
             L"backup-supervisor: could not suppress the WSL welcome window "
-            L"by setting 'HKCU\\{}\\OOBEComplete' (Windows error 0x{:08x})\n",
+            L"by setting 'HKCU\\{}\\OOBEComplete': {}\n",
             std::wstring_view{kWslRegistration},
-            DWORD{ExplicitHresult{result}});
+            TryConstructWinError("", ExplicitHresult{result}));
     }
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: importing WSL1 distribution '{}' into '{}'\n",

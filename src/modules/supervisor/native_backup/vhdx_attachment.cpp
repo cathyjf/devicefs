@@ -220,8 +220,8 @@ namespace internal {
             if (error != ERROR_NOT_FOUND) {
                 devicefs::WriteToStream(devicefs::stdout,
                     "Could not cancel the pending VHDX attachment "
-                    "(Windows error {}); waiting for it to finish.\n",
-                    error);
+                    "({}); waiting for it to finish.\n",
+                    TryConstructWinError("", ExplicitWin32Error{error}));
             }
         }
         if (WaitForSingleObject(completion_event.get(), INFINITE) ==
@@ -317,15 +317,10 @@ public:
             std::invoke(before_failed_attachment_cleanup);
             const auto detach_status = DetachVhdx(disk->get());
             if (detach_status != ERROR_SUCCESS) {
-                try {
-                    devicefs::WriteToStream(devicefs::stdout,
-                        "  VHDX preparation failed after attachment, and "
-                        "detaching it failed with Windows error {}. Closing "
-                        "its nonpermanent attachment handle.\n",
-                        detach_status);
-                } catch (const std::exception &) {
-                    // Diagnostic output cannot replace attachment cleanup.
-                }
+                devicefs::WriteToStream(devicefs::stdout,
+                    "  VHDX preparation failed after attachment, and detaching "
+                    "it failed: {}. Closing its nonpermanent attachment handle.\n",
+                    TryConstructWinError("", ExplicitWin32Error{detach_status}));
             }
             disk->reset();
         });

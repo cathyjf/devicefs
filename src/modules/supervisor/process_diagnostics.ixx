@@ -18,6 +18,7 @@ export module devicefs.supervisor.process_diagnostics;
 
 import std;
 import <devicefs/windows_imports.h>;
+import <devicefs/common.h>;
 import devicefs.supervisor.logging_console;
 import devicefs.terminal.transcoding;
 
@@ -57,17 +58,20 @@ auto LogJobProcesses(Log &log, const HANDLE job) noexcept {
         auto snapshot = wil::unique_tool_help_snapshot(
             CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
         if (!snapshot) {
+            const auto error = TryConstructWinError("");
             log.TryWrite(
                 "backup-supervisor: could not enumerate processes before "
-                "terminating the backup job: error {}", GetLastError());
+                "terminating the backup job: {}",
+                error ? error->what() : "unknown error");
             return;
         }
 
         auto entry = PROCESSENTRY32W{.dwSize = sizeof(PROCESSENTRY32W)};
         if (!Process32FirstW(snapshot.get(), &entry)) {
+            const auto error = TryConstructWinError("");
             log.TryWrite(
                 "backup-supervisor: could not read the process snapshot: "
-                "error {}", GetLastError());
+                "{}", error ? error->what() : "unknown error");
             return;
         }
         do {

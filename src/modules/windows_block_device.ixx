@@ -643,13 +643,11 @@ auto WindowsBlockDevice::FromFilename(
         ? Ioctl(handle.get(), FSCTL_ALLOW_EXTENDED_DASD_IO, nullptr, 0)
         : DWORD{ERROR_SUCCESS};
     if (dasd_error != ERROR_SUCCESS) {
-        const auto error = std::error_code(
-            std::bit_cast<int>(dasd_error), std::system_category());
         devicefs::WriteToStream(
             devicefs::stderr,
-            L"devicefs: warning: FSCTL_ALLOW_EXTENDED_DASD_IO failed for '{}': ",
-            filename.native());
-        devicefs::WriteToStream(devicefs::stderr, "{}\n", error.message());
+            L"devicefs: warning: FSCTL_ALLOW_EXTENDED_DASD_IO failed for '{}': {}\n",
+            std::wstring_view{filename.native()},
+            TryConstructWinError("", ExplicitWin32Error{dasd_error}));
     }
 
     if (cache || synthetic_free_clusters) {

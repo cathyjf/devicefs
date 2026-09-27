@@ -122,7 +122,8 @@ class WindowsError final : public std::system_error {
 public:
     WindowsError(const DWORD error, const std::string &operation)
         : std::system_error(error, std::system_category()),
-          message_(std::format("{}: {}", operation, FormatWindowsError(error))) {}
+          message_(std::format("{}{}{}", operation,
+              operation.empty() ? "" : ": ", FormatWindowsError(error))) {}
 
     [[nodiscard]] auto what() const noexcept -> const char * override {
         return message_.c_str();

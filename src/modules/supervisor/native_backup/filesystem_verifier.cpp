@@ -396,9 +396,8 @@ auto RequestPendingIoCancellation(
     first_failure = error;
     devicefs::WriteToStream(
         devicefs::stdout,
-        "Could not interrupt pending filesystem-verification I/O "
-        "(Windows error {}).\n",
-        error);
+        "Could not interrupt pending filesystem-verification I/O: {}\n",
+        TryConstructWinError("", ExplicitWin32Error{error}));
 }
 
 class VerificationState {
@@ -802,9 +801,11 @@ auto DetachView(
     const auto status = view.Detach();
     if (status != ERROR_SUCCESS) {
         try {
-            state.RecordCleanupFailure(std::format(
-                "could not detach the {} VHDX view (Windows error {})",
-                name, status));
+            const auto error = TryConstructWinError(
+                "could not detach the {} VHDX view", name,
+                ExplicitWin32Error{status});
+            state.RecordCleanupFailure(error ? error->what() :
+                "could not detach the VHDX view: unknown error");
         } catch (const std::bad_alloc &) {
             // Cleanup reporting must not replace the verification result.
         }
@@ -1015,16 +1016,18 @@ auto DetachView(
             retry_deadline = now + retry_period;
             devicefs::WriteToStream(devicefs::stdout,
                 "  The optional {} layout count for volume {} returned "
-                "Windows error {}; complete attempts will be retried for "
+                "{}; complete attempts will be retried for "
                 "approximately {} seconds.\n",
-                endpoint_name, volume_identifier, estimate.error(),
+                endpoint_name, volume_identifier,
+                TryConstructWinError("", ExplicitWin32Error{estimate.error()}),
                 retry_period.count());
         } else if (now >= *retry_deadline) {
             devicefs::WriteToStream(devicefs::stdout,
                 "  The optional {} layout count for volume {} remained "
-                "unavailable after retries (Windows error {}). This does "
+                "unavailable after retries ({}). This does "
                 "not affect the verification result.\n",
-                endpoint_name, volume_identifier, estimate.error());
+                endpoint_name, volume_identifier,
+                TryConstructWinError("", ExplicitWin32Error{estimate.error()}));
             return std::nullopt;
         }
 
@@ -2296,7 +2299,7 @@ auto PrintOperationOutcome(
     const auto output,
     const std::string_view name,
     const std::optional<OperationFailure> &failure,
-    const DWORD requested) -> void {
+    const DWORD requested) noexcept -> void {
     if (!failure) {
         devicefs::WriteToStream(output,
             "  {} outcome: succeeded.\n", name);
@@ -2308,13 +2311,9 @@ auto PrintOperationOutcome(
             name, failure->transferred, requested);
         return;
     }
-    static_assert(sizeof(DWORD) == sizeof(int));
-    const auto message = std::error_code{
-        std::bit_cast<int>(failure->error),
-        std::system_category()}.message();
     devicefs::WriteToStream(output,
-        "  {} outcome: Windows error {} ({}).\n",
-        name, std::uint32_t{failure->error}, message);
+        "  {} outcome: {}\n",
+        name, TryConstructWinError("", ExplicitWin32Error{failure->error}));
 }
 
 auto PrintOperationComparison(
@@ -2854,15 +2853,16 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                     }
                     if (inventory && !inventory->issues.empty()) {
                         const auto &first = inventory->issues.front();
+                        const auto error = TryConstructWinError("",
+                            ExplicitWin32Error{first.failure.error});
                         throw VerificationFailure{std::format(
                             "ordinary traversal retained {} filesystem-"
-                            "operation failure(s); first: {} for {} "
-                            "(Windows error {})",
+                            "operation failure(s); first: {} for {}: {}",
                             inventory->issues.size(),
                             OperationName(first.key.operation),
                             Transcode<std::string>(DisplayPath(
                                 first.key.path)),
-                            first.failure.error)};
+                            error ? error->what() : "unknown error")};
                     }
                     state.SetPhase(VerificationPhase::Detaching);
                     DetachView(view, "requested device", state);

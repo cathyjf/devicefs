@@ -136,7 +136,8 @@ auto DispatchWinError(
             detail::AdaptWinErrorFormatArgument(
                 std::get<Index>(std::move(argument_tuple)))...);
         if constexpr (std::is_same_v<decltype(error), const ExplicitHresult>) {
-            return text + details;
+            return std::format("{}{}{}",
+                text, text.empty() ? "" : " ", details);
         }
         return text;
     }(std::make_index_sequence<format_argument_count>{});

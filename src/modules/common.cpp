@@ -169,7 +169,7 @@ auto TranscodeString(const std::wstring_view argument) -> std::string {
         }
         return TranscodeString(std::wstring_view{text.get(), SysStringLen(text.get())});
     }();
-    return std::format(" (HRESULT 0x{:08x}){}{}", static_cast<DWORD>(result),
+    return std::format("(HRESULT 0x{:08x}){}{}", static_cast<DWORD>(result),
         description.empty() ? "" : ": ", description);
 }
 

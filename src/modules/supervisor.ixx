@@ -800,7 +800,7 @@ struct SelectiveViewOptions {
                 devicefs::WriteToStream(devicefs::stdout,
                     "Information: Backup viewing will continue with inspection permission for the invoking user.\n"
                     "The optional account lookup for the desktop process could not be completed. Details: {}\n",
-                    view_user.shell_user.error()->what());
+                    view_user.shell_user.error());
             }
             const auto snapshot_override = options.snapshot_override
                 ? std::optional<std::string_view>{

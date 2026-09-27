@@ -58,6 +58,34 @@ export namespace devicefs {
 
 namespace stream_writer_detail {
 
+template <typename Argument>
+concept ErrorObject = requires(Argument &argument) { argument->what(); };
+
+template <typename Character, typename Argument>
+[[nodiscard]] decltype(auto) AdaptFormatArgument(Argument &&argument)
+    noexcept(!ErrorObject<Argument>) {
+    if constexpr (ErrorObject<Argument>) {
+        const auto text = std::basic_string_view{
+            !argument ? "unknown error" : argument->what()};
+        if constexpr (std::same_as<Character, typename decltype(text)::value_type>) {
+            return text;
+        } else {
+            return terminal::Transcode<std::basic_string<Character>>(text);
+        }
+    } else {
+        [[gsl::suppress("26445",
+            justification:
+                "This code forwards arguments generically. Avoiding references "
+                "to views would require special treatment of view types.")]]
+        return std::forward<Argument>(argument);
+    }
+}
+
+template <typename Character, typename Argument>
+using FormatArgument = std::conditional_t<ErrorObject<Argument>,
+    std::remove_reference_t<decltype(AdaptFormatArgument<Character>(
+        std::declval<Argument>()))>, Argument>;
+
 template <typename Character, typename... Arguments>
 class BasicFormatString {
 public:
@@ -73,12 +101,14 @@ public:
     }
 
     [[nodiscard]] constexpr auto get() const noexcept
-        -> const std::basic_format_string<Character, Arguments...> & {
+        -> const std::basic_format_string<Character,
+            FormatArgument<Character, Arguments>...> & {
         return format_;
     }
 
 private:
-    std::basic_format_string<Character, Arguments...> format_;
+    std::basic_format_string<Character,
+        FormatArgument<Character, Arguments>...> format_;
 };
 
 template <typename... Arguments>
@@ -116,7 +146,8 @@ auto WriteToStream(
             return std::format_to(
                 destination,
                 format.get(),
-                std::forward<Arguments>(arguments)...);
+                stream_writer_detail::AdaptFormatArgument<char>(
+                    std::forward<Arguments>(arguments))...);
         });
 }
 
@@ -129,7 +160,8 @@ auto WriteToStream(
         output,
         [&](const auto destination) {
             const auto text = std::format(
-                format.get(), std::forward<Arguments>(arguments)...);
+                format.get(), stream_writer_detail::AdaptFormatArgument<wchar_t>(
+                    std::forward<Arguments>(arguments))...);
             return std::ranges::copy(
                 std::string_view{devicefs::terminal::Transcode<char>(text)},
                 destination

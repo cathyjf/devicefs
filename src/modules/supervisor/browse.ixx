@@ -155,7 +155,7 @@ struct BackupGroup {
     if (!LookupAccountSidA(nullptr, user, nullptr, &name_length,
             nullptr, &domain_length, &use) &&
         (GetLastError() != ERROR_INSUFFICIENT_BUFFER)) {
-        return std::unexpected{ConstructWinError(
+        return std::unexpected{TryConstructWinError(
             "failed to determine the account name buffer sizes for SID '{}'",
             get_sid_text().get())};
     }
@@ -163,7 +163,7 @@ struct BackupGroup {
     auto domain = std::string(domain_length, '\0');
     if (!LookupAccountSidA(nullptr, user, name.data(), &name_length,
             domain.data(), &domain_length, &use)) {
-        return std::unexpected{ConstructWinError(
+        return std::unexpected{TryConstructWinError(
             "failed to look up the account name for SID '{}'",
             get_sid_text().get())};
     }
@@ -248,42 +248,44 @@ export [[nodiscard]] auto SelectBackupViewUser(
         }
         auto process_id = DWORD{};
         if (GetWindowThreadProcessId(shell_window, &process_id) == 0) {
-            return std::unexpected(ConstructWinError(
-                "failed to identify the desktop process"));
+            return std::unexpected{TryConstructWinError(
+                "failed to identify the desktop process")};
         }
-        auto error = std::unique_ptr<std::runtime_error>{};
+        auto privilege_result =
+            std::expected<void, std::unique_ptr<std::runtime_error>>{};
         const auto privileges = ProcessPrivilegeEnabler{
             GetCurrentProcess(), std::array{wil::zwstring_view(SE_DEBUG_NAME)},
-            "SeDebugPrivilege for querying the desktop process"sv, std::ref(error)};
-        if (error) {
-            return std::unexpected(std::move(error));
+            "SeDebugPrivilege for querying the desktop process"sv,
+            std::ref(privilege_result)};
+        if (!privilege_result) {
+            return std::unexpected{std::move(privilege_result.error())};
         }
         const auto process = wil::unique_handle{
             OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id)};
         if (!process) {
-            return std::unexpected(ConstructWinError(
+            return std::unexpected{TryConstructWinError(
                 "failed to open desktop process {}",
-                CompileTimeCast<std::uint32_t>(process_id)));
+                CompileTimeCast<std::uint32_t>(process_id))};
         }
         auto token = wil::unique_handle{};
         if (!OpenProcessToken(process.get(), TOKEN_QUERY, token.addressof())) {
-            return std::unexpected(ConstructWinError(
+            return std::unexpected{TryConstructWinError(
                 "failed to open the token for desktop process {}",
-                CompileTimeCast<std::uint32_t>(process_id)));
+                CompileTimeCast<std::uint32_t>(process_id))};
         }
         auto information = wil::unique_tokeninfo_ptr<TOKEN_USER>{};
         if (const auto result = wil::get_token_information_nothrow(
                 information, token.get()); FAILED(result)) {
-            return std::unexpected(ConstructWinError(
+            return std::unexpected{TryConstructWinError(
                 "failed to identify the user of desktop process {}",
-                CompileTimeCast<std::uint32_t>(process_id), ExplicitHresult{result}));
+                CompileTimeCast<std::uint32_t>(process_id), ExplicitHresult{result})};
         }
         if (EqualSid(sid, information->User.Sid)) {
             return std::nullopt;
         }
         auto shell_account = LookupAccountNameFromSid(information->User.Sid);
         if (!shell_account) {
-            return std::unexpected(std::move(shell_account.error()));
+            return std::unexpected{std::move(shell_account.error())};
         }
         return decltype(BackupViewUser::invoking_user){
             .information = std::move(information),
@@ -298,7 +300,7 @@ export [[nodiscard]] auto SelectBackupViewUser(
     auto account = LookupAccountNameFromSid(
         view_user.invoking_user.information->User.Sid);
     if (!account) {
-        view_user.shell_user = std::unexpected(std::move(account.error()));
+        view_user.shell_user = std::unexpected{std::move(account.error())};
         return view_user;
     }
     const auto &shell_account = (**view_user.shell_user).account_name;

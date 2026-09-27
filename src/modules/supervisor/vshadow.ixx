@@ -74,24 +74,6 @@ public:
     using VssClient::TryDeleteCreatedSnapshotSet;
 };
 
-namespace {
-
-auto TryFormatHresult(const HRESULT result) noexcept -> std::string {
-    try {
-        return ConstructWinError("", ExplicitHresult{result})->what();
-    } catch (...) {
-        try {
-            return "unexpected error";
-        } catch (...) {
-            // This nonthrowing fallback is reached if the `std::string`
-            // constructor throws while copying the above string literal.
-            return {};
-        }
-    }
-}
-
-} // namespace
-
 class Backup {
     enum class Completion {
         None,
@@ -129,7 +111,8 @@ public:
             }
             devicefs::WriteToStream(devicefs::stderr,
                 "backup-supervisor: the backup succeeded but VSS writer "
-                "completion failed: {}\n", TryFormatHresult(result));
+                "completion failed: {}\n",
+                TryConstructWinError("", ExplicitHresult{result}));
         } catch (...) {
             if (completion_ != Completion::Success) {
                 return;
@@ -183,7 +166,7 @@ private:
         }
         devicefs::WriteToStream(devicefs::stderr,
             "backup-supervisor: failed to delete the VSS snapshot set: {}\n",
-            TryFormatHresult(result));
+            TryConstructWinError("", ExplicitHresult{result}));
     }
 
     VssClientOwner client_;

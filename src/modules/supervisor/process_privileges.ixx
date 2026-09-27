@@ -21,6 +21,9 @@ import <cstddef>;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 
+using OutputErrorType = std::optional<std::reference_wrapper<std::expected<
+    void, std::unique_ptr<std::runtime_error>>>>;
+
 export template <std::size_t PrivilegeCount>
 class ProcessPrivilegeEnabler {
     static constexpr auto kStateSize =
@@ -32,15 +35,14 @@ public:
         const HANDLE process,
         const std::span<const wil::zwstring_view, PrivilegeCount> privilege_names,
         const std::string_view description,
-        const std::optional<std::reference_wrapper<
-            std::unique_ptr<std::runtime_error>>> output_error = std::nullopt)
+        const OutputErrorType output_error = std::nullopt)
         : description_{description} {
         const auto handle_error = [output_error]<class... Arguments>(
             const detail::WinErrorFormatString<Arguments...> format,
             Arguments &&...arguments) {
             if (output_error) {
-                output_error->get() = ConstructWinError(
-                    format, std::forward<Arguments>(arguments)...);
+                output_error->get() = std::unexpected{TryConstructWinError(
+                    format, std::forward<Arguments>(arguments)...)};
             } else {
                 WinError(format, std::forward<Arguments>(arguments)...);
             }
@@ -143,5 +145,5 @@ export template <std::size_t PrivilegeCount>
 ProcessPrivilegeEnabler(HANDLE,
     const std::array<wil::zwstring_view, PrivilegeCount> &,
     std::string_view,
-    std::optional<std::reference_wrapper<std::unique_ptr<std::runtime_error>>> = std::nullopt)
+    OutputErrorType = std::nullopt)
     -> ProcessPrivilegeEnabler<PrivilegeCount>;

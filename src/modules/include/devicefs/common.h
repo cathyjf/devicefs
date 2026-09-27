@@ -97,10 +97,34 @@ struct WinErrorFormat<Arguments, std::index_sequence<Index...>> {
 };
 
 template <class... Arguments>
-using WinErrorFormatString = typename WinErrorFormat<
+using WinErrorFormatStringType = typename WinErrorFormat<
     std::tuple<Arguments...>,
     std::make_index_sequence<
         sizeof...(Arguments) - kHasExplicitError<Arguments...>>>::type;
+
+template <class Format>
+class NoThrowFormatString {
+public:
+    template <class String>
+        requires std::convertible_to<const String &, std::string_view>
+    [[gsl::suppress("26447",
+        justification:
+            "The format string is constructed during constant evaluation, "
+            "so no exception can escape at runtime.")]]
+    consteval NoThrowFormatString(const String &format) noexcept
+        : format_{format} {
+    }
+
+    [[nodiscard]] constexpr auto get() const noexcept -> const Format & {
+        return format_;
+    }
+
+private:
+    Format format_;
+};
+
+template <class... Arguments>
+using WinErrorFormatString = NoThrowFormatString<WinErrorFormatStringType<Arguments...>>;
 
 template <auto DispatchError, class... Arguments>
 auto DispatchWinError(
@@ -132,7 +156,7 @@ auto DispatchWinError(
     }();
     const auto operation = [&]<std::size_t... Index>(
         std::index_sequence<Index...>) {
-        const auto text = std::format(format,
+        const auto text = std::format(format.get(),
             detail::AdaptWinErrorFormatArgument(
                 std::get<Index>(std::move(argument_tuple)))...);
         if constexpr (std::is_same_v<decltype(error), const ExplicitHresult>) {
@@ -147,11 +171,15 @@ auto DispatchWinError(
 } // namespace detail
 
 template <class... Arguments>
-[[nodiscard]] auto ConstructWinError(
+[[nodiscard]] auto TryConstructWinError(
     const detail::WinErrorFormatString<Arguments...> format,
-    Arguments &&...arguments) {
-    return detail::DispatchWinError<detail::ConstructWinError>(
-        format, std::forward<Arguments>(arguments)...);
+    Arguments &&...arguments) noexcept {
+    try {
+        return detail::DispatchWinError<detail::ConstructWinError>(
+            format, std::forward<Arguments>(arguments)...);
+    } catch (...) {
+        return std::unique_ptr<std::runtime_error>{};
+    }
 }
 
 template <class... Arguments>

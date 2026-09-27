@@ -345,18 +345,7 @@ struct WindowsBlockDevice {
                 L"devicefs: read failed for '{}' at offset 0x{:x} "
                 L"for {} bytes: {}\n",
                 std::wstring_view{filename.native()}, offset, wanted,
-                [error] noexcept -> std::wstring {
-                    try {
-                        return Transcode<std::wstring>(ConstructWinError("",
-                            ExplicitWin32Error{error})->what());
-                    } catch (...) {
-                        try {
-                            return std::to_wstring(error);
-                        } catch (...) {
-                            return {};
-                        }
-                    }
-                }());
+                TryConstructWinError("", ExplicitWin32Error{error}));
             return FspNtStatusFromWin32(error);
         };
         const auto read = [&](void *const output, const UINT64 position,

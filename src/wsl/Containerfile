@@ -52,31 +52,20 @@ FROM debian:trixie AS bash-base
 ARG TZ
 
 #
-# The `devicefs-build-init` script is sourced by every later RUN block.
+# This `devicefs-sh` wrapper is used as the shell for all later RUN blocks.
+# It invokes bash and prepends each output line with a timestamp.
 #
 RUN bash -e <<'EOF'
-printf 'export TZ=%q\n%s\n' "$TZ" \
-    'PS4='\''+ [\D{%FT%T%z}] '\''
-    shopt -s inherit_errexit
-    set -efux -o pipefail' > \
-        /usr/local/bin/devicefs-build-init
-EOF
-
-#
-# A shell-form RUN instruction invokes /bin/sh. Debian initially points that
-# name at Dash, but Bash is the more capable general-purpose shell preferred by
-# this project for build automation. Both the build and runtime stages inherit
-# this base and therefore use Bash consistently.
-#
-# https://github.com/containers/common/blob/main/docs/Containerfile.5.md
-# https://wiki.debian.org/Shell
-# https://manpages.debian.org/trixie/debconf/dpkg-reconfigure.8.en.html
-#
-RUN bash <<'EOF'
-. /usr/local/bin/devicefs-build-init
-printf '%s\n' 'dash dash/sh boolean false' | debconf-set-selections
-DEBIAN_FRONTEND=noninteractive dpkg-reconfigure dash
-ln --symbolic --force bash /bin/sh
+install --mode=u=rwx,go=rx <(
+    printf '#!/usr/bin/env -S bash -o pipefail\n'
+    printf 'export TZ=%q\n' "$TZ"
+    cat <<'SCRIPT'
+bash -O inherit_errexit -efux -o pipefail "$@" 2>&1 |
+    while IFS= read -r line || [[ -n $line ]]; do
+        printf '[%(%FT%T%z)T] %s\n' -1 "$line"
+    done
+SCRIPT
+) /bin/devicefs-sh
 EOF
 
 #
@@ -139,8 +128,7 @@ COPY <<'EOF' /etc/nala/nala.conf
 simple_summary = true
 EOF
 
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 apt-get update
 apt-get \
     -o Dpkg::Options::=--force-confold \
@@ -158,8 +146,7 @@ EOF
 # https://packages.debian.org/trixie/git
 # https://packages.debian.org/trixie/gnupg
 #
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 apt-get update
 nala install -y --no-autoremove --no-install-recommends \
     ca-certificates \
@@ -180,8 +167,7 @@ EOF
 # https://software.opensuse.org/download.html?project=shells%3Afish%3Arelease%3A4&package=fish
 # https://manpages.debian.org/trixie/apt/apt-secure.8.en.html
 #
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 curl --fail --location --show-error \
     --output /usr/share/keyrings/fish-release-4.asc \
     https://download.opensuse.org/repositories/shells:/fish:/release:/4/Debian_13/Release.key
@@ -225,8 +211,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # https://pbs.proxmox.com/docs/installation.html
 # https://manpages.debian.org/trixie/apt/apt-secure.8.en.html
 #
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 curl --fail --location --show-error \
     --output /usr/share/keyrings/proxmox-archive-keyring.gpg \
     https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg
@@ -261,8 +246,7 @@ EOF
 # https://packages.debian.org/trixie/lld
 # https://bitbucket.org/cathyjf/proxmox-backup/src/main/debian/control
 #
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 apt-get update
 nala install -y --no-autoremove --no-install-recommends \
     binutils \
@@ -286,18 +270,19 @@ EOF
 # https://bitbucket.org/cathyjf/proxmox-backup/src/main/Cargo.toml
 # https://git-scm.com/docs/git-clone
 #
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 git clone \
     git://git.proxmox.com/git/proxmox \
-    /usr/src/proxmox
-EOF
+    /usr/src/proxmox &
+readonly git_job_proxmox=$!
 
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
 git clone \
     https://bitbucket.org/cathyjf/proxmox-backup \
-    /usr/src/proxmox-backup
+    /usr/src/proxmox-backup &
+readonly git_job_proxmox_backup=$!
+
+wait "$git_job_proxmox"
+wait "$git_job_proxmox_backup"
 EOF
 
 WORKDIR /usr/src/proxmox-backup
@@ -329,8 +314,7 @@ WORKDIR /usr/src/proxmox-backup
 # https://bitbucket.org/cathyjf/proxmox-backup/src/main/.cargo/config.toml
 # https://bitbucket.org/cathyjf/proxmox-backup/src/main/README.rst
 #
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 sed -E \
     -e '/librust-pbs-api-types-1\+default-dev/d' \
     -e 's/(librust-proxmox-(network-api|rate-limiter|rest-server|s3-client)-1\+[^ ,]+) \(>= [^)]*\)/\1/' \
@@ -385,8 +369,7 @@ EOF
 # https://bitbucket.org/cathyjf/proxmox-backup/src/main/Cargo.toml
 # https://bitbucket.org/cathyjf/proxmox-backup/src/main/README.rst
 #
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 sed --in-place \
     '/^#[a-z0-9-]\+ = {.*path = "\.\.\/proxmox\//s/^#//' \
     Cargo.toml
@@ -418,8 +401,7 @@ EOF
 # https://manpages.debian.org/trixie/dpkg-dev/dpkg-shlibdeps.1.en.html
 # https://git-scm.com/docs/git-rev-parse
 #
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 install -D --mode=0755 \
     target/release/proxmox-backup-client \
     /out/rootfs/usr/local/bin/proxmox-backup-client
@@ -458,8 +440,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # https://apt.llvm.org/trixie/dists/llvm-toolchain-trixie-23/
 # https://manpages.debian.org/trixie/apt/sources.list.5.en.html
 #
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 curl --fail --location --show-error \
     --output /tmp/llvm-snapshot.gpg.key \
     https://apt.llvm.org/llvm-snapshot.gpg.key
@@ -500,8 +481,7 @@ EOF
 # https://packages.debian.org/trixie/protobuf-compiler-grpc
 # https://packages.debian.org/trixie/libparse-yapp-perl
 #
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 apt-get update
 nala install -y --no-autoremove --no-install-recommends \
     build-essential \
@@ -535,8 +515,7 @@ EOF
 # https://packages.debian.org/trixie/cmake
 # https://cmake.org/download/
 #
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 case "$(dpkg --print-architecture)" in
     amd64)
         cmake_arch=x86_64
@@ -593,8 +572,7 @@ ENV PATH=/opt/cmake/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:
 # https://git-scm.com/docs/git-sparse-checkout
 # https://packages.debian.org/trixie/libparse-yapp-perl
 #
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 git clone \
     --branch "${SAMBA_PIDL_TAG}" \
     --depth=1 \
@@ -617,8 +595,7 @@ EOF
 # https://github.com/cathyjf/devicefs
 # https://git-scm.com/docs/git-clone
 #
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 git clone \
     https://github.com/cathyjf/devicefs \
     /usr/src/devicefs
@@ -640,8 +617,7 @@ WORKDIR /usr/src/devicefs/src/unix
 # https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html
 # https://cmake.org/cmake/help/latest/manual/cmake.1.html
 #
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 cmake --preset release -DBUILD_TESTING=OFF
 cmake --build --preset release --parallel --target \
     rpcd_devicefs \
@@ -676,8 +652,7 @@ COPY <<'EOF' /tmp/rpcd-devicefs/debian/control
 Source: rpcd-devicefs
 EOF
 
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 install -D --mode=0755 \
     /usr/src/devicefs/build/unix/samba_rpc/rpcd_devicefs \
     /out/rootfs/usr/local/bin/rpcd_devicefs
@@ -816,8 +791,7 @@ COPY --from=samba-helper-build \
 # https://packages.debian.org/trixie/amd64/samba-common-bin/filelist
 # https://github.com/cathyjf/devicefs/tree/main/src/modules/supervisor/artifacts
 #
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 apt-get update
 apt-get install --yes --no-install-recommends \
     ca-certificates \
@@ -872,8 +846,7 @@ COPY --from=samba-helper-build /out/rootfs/ /
 # https://manpages.debian.org/trixie/passwd/useradd.8.en.html
 # https://manpages.debian.org/trixie/manpages/shells.5.en.html
 #
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 broker_shell=/usr/local/bin/devicefs-wsl-startup-broker
 printf '%s\n' "${broker_shell}" >> /etc/shells
 groupadd --gid "${DEVICEFS_GID}" pbs-vss
@@ -959,14 +932,13 @@ EOF
 # https://github.com/fish-shell/fish-shell/blob/master/src/path.rs
 # https://github.com/fish-shell/fish-shell/blob/master/share/functions/__fish_config_interactive.fish
 #
-RUN <<'EOF'
-. /usr/local/bin/devicefs-build-init
+RUN /bin/devicefs-sh <<'EOF'
 install -d --mode=0755 \
     /home/pbs-vss/.local/share/fish \
     /home/pbs-vss/.config/fish \
     /home/pbs-vss/.cache/fish/generated_completions \
     /root/.cache/fish/generated_completions
-rm /usr/local/bin/devicefs-build-init
+rm /bin/devicefs-sh
 EOF
 
 #

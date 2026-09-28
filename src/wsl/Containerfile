@@ -132,7 +132,12 @@ RUN /bin/devicefs-sh <<'EOF'
 apt-get update
 apt-get \
     -o Dpkg::Options::=--force-confold \
-    install --yes --no-install-recommends nala
+    install --yes --no-install-recommends nala=0.16.0
+
+# Increase hardcoded Nala download concurrency limit from 3 to 16.
+sed --in-place 's/self.current\[domain\] > 2:/self.current[domain] > 15:/' \
+    /usr/lib/python3/dist-packages/nala/downloader.py
+
 rm -rf /var/lib/apt/lists
 EOF
 

@@ -26,6 +26,8 @@
 # https://packages.debian.org/trixie/cmake
 # https://cmake.org/download/
 ARG CMAKE_VERSION=4.4.3
+ARG CMAKE_SHA256_AMD64=d6c83076c575bc00b823522ac974bda66d0af05d6ddc30e739c12385cf32c6cc
+ARG CMAKE_SHA256_ARM64=2efc974dbd63b4444c0e8494b92f2e80c2d7e635b4b80eac2916985ddd8f72a6
 
 # Debian no longer packages PIDL, and no recent version is available from CPAN.
 # PIDL changes rarely, so using one known Samba tag is simpler and more predictable
@@ -442,6 +444,8 @@ EOF
 FROM build-base AS samba-helper-build
 
 ARG CMAKE_VERSION
+ARG CMAKE_SHA256_AMD64
+ARG CMAKE_SHA256_ARM64
 ARG SAMBA_PIDL_TAG
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -459,6 +463,10 @@ RUN <<'EOF'
 curl --fail --location --show-error \
     --output /tmp/llvm-snapshot.gpg.key \
     https://apt.llvm.org/llvm-snapshot.gpg.key
+printf '%s  %s\n' \
+    '8b2a587ffd672c4687e7581dad4b2f6c1bb2ad6b480cd9771ba2ff48e0b8c75d' \
+    '/tmp/llvm-snapshot.gpg.key' \
+    | sha256sum --check -
 gpg --dearmor \
     --output /usr/share/keyrings/llvm-snapshot.gpg \
     /tmp/llvm-snapshot.gpg.key
@@ -516,9 +524,8 @@ EOF
 
 #
 # CMake's official Linux archive is used because the component requires CMake
-# 4.4 and Debian Trixie's package is older. The checksum file comes from the
-# same CMake release. It detects an incomplete or corrupted archive before the
-# archive is extracted.
+# 4.4 and Debian Trixie's package is older. The archive checksums are pinned
+# alongside `CMAKE_VERSION` near the top of this file.
 #
 # Both amd64 and arm64 names are handled here because CMake publishes separate
 # archives for those architectures. Selecting the archive from Debian's target
@@ -531,8 +538,14 @@ EOF
 RUN <<'EOF'
 . /usr/local/bin/devicefs-build-init
 case "$(dpkg --print-architecture)" in
-    amd64) cmake_arch=x86_64 ;;
-    arm64) cmake_arch=aarch64 ;;
+    amd64)
+        cmake_arch=x86_64
+        cmake_checksum=${CMAKE_SHA256_AMD64}
+        ;;
+    arm64)
+        cmake_arch=aarch64
+        cmake_checksum=${CMAKE_SHA256_ARM64}
+        ;;
     *)
         printf \
             'No CMake binary archive is selected for architecture %s.\n' \
@@ -541,21 +554,18 @@ case "$(dpkg --print-architecture)" in
         ;;
 esac
 archive="cmake-${CMAKE_VERSION}-linux-${cmake_arch}.tar.gz"
-checksums="cmake-${CMAKE_VERSION}-SHA-256.txt"
 release="https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
 cd /tmp
-for file in "${archive}" "${checksums}"; do
-    curl --fail --location --show-error \
-        --output "${file}" \
-        "${release}/${file}"
-done
-grep -F "  ${archive}" "${checksums}" | sha256sum --check -
+curl --fail --location --show-error \
+    --output "${archive}" \
+    "${release}/${archive}"
+printf '%s  %s\n' "${cmake_checksum}" "${archive}" | sha256sum --check -
 install -d --mode=0755 /opt/cmake
 tar --extract --gzip \
     --file="${archive}" \
     --strip-components=1 \
     --directory=/opt/cmake
-rm "${archive}" "${checksums}"
+rm "${archive}"
 EOF
 
 #

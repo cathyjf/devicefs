@@ -39,9 +39,6 @@ ARG CMAKE_SHA256_ARM64=2efc974dbd63b4444c0e8494b92f2e80c2d7e635b4b80eac2916985dd
 # https://gitlab.com/samba-team/samba/-/tree/samba-4.24.6/pidl
 ARG SAMBA_PIDL_TAG=samba-4.24.6
 
-# This timezone is used only for diagnostics while building this image.
-ARG TZ=America/Los_Angeles
-
 # ---------------------------------------------------------------------------
 # Common shell
 # https://sources.debian.org/src/dash/0.5.12-12/debian/
@@ -49,23 +46,13 @@ ARG TZ=America/Los_Angeles
 
 FROM debian:trixie AS bash-base
 
-ARG TZ
-
 #
 # This `devicefs-sh` wrapper is used as the shell for all later RUN blocks.
-# It invokes bash and prepends each output line with a timestamp.
+# It invokes bash with our preferred options.
 #
-RUN bash -e <<'EOF'
-install --mode=u=rwx,go=rx <(
-    printf '#!/usr/bin/env -S bash -o pipefail\n'
-    printf 'export TZ=%q\n' "$TZ"
-    cat <<'SCRIPT'
-bash -O inherit_errexit -efux -o pipefail "$@" 2>&1 |
-    while IFS= read -r line || [[ -n $line ]]; do
-        printf '[%(%FT%T%z)T] %s\n' -1 "$line"
-    done
-SCRIPT
-) /bin/devicefs-sh
+COPY --chmod=0755 <<'EOF' /bin/devicefs-sh
+#!/usr/bin/env bash
+exec "$BASH" -O inherit_errexit -efux -o pipefail
 EOF
 
 #

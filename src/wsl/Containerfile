@@ -119,11 +119,31 @@ RUN /bin/devicefs-sh <<'EOF'
 apt-get update
 apt-get \
     -o Dpkg::Options::=--force-confold \
-    install --yes --no-install-recommends nala=0.16.0
+    install --yes --no-install-recommends nala=0.16.0 patch
 
-# Increase hardcoded Nala download concurrency limit from 3 to 16.
-sed --in-place 's/self.current\[domain\] > 2:/self.current[domain] > 15:/' \
-    /usr/lib/python3/dist-packages/nala/downloader.py
+# Increase Nala's download concurrency limit from 3 to 16.
+# Also distribute Proxmox package downloads across three mirrors.
+patch /usr/lib/python3/dist-packages/nala/downloader.py <<'PATCH'
+--- downloader.py
++++ downloader.py
+@@ -39,0 +40 @@
++from itertools import cycle
+@@ -43,0 +45 @@
++from urllib.parse import urlsplit
+@@ -283,0 +286,9 @@
++		proxmox_mirrors = cycle(
++			("na.cdn.proxmox.com", "fr.cdn.proxmox.com", "sg.cdn.proxmox.com")
++		)
++		for urls in pkgs:
++			for url in urls:
++				uri = urlsplit(url.uri)
++				if uri.netloc == "download.proxmox.com":
++					url.uri = uri._replace(netloc=next(proxmox_mirrors)).geturl()
++
+@@ -352 +363 @@
+-			if self.current[domain] > 2:
++			if self.current[domain] > 15:
+PATCH
 
 rm -rf /var/lib/apt/lists
 EOF

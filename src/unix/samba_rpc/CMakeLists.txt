@@ -193,10 +193,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_compile_definitions(rpcd_devicefs PRIVATE
         DEVICEFS_RPC_WORKER_LIBRARY="${RPC_WORKER_LIBRARY}"
     )
-    # The Samba worker calls tdb_open_ex through ELF symbol lookup. Export
-    # rpcd_devicefs's replacement so lookup selects it before libtdb; the
-    # replacement uses RTLD_NEXT to call libtdb after changing the flags.
     target_link_options(rpcd_devicefs PRIVATE
+        "LINKER:--as-needed"
+        # The Samba worker calls tdb_open_ex through ELF symbol lookup. Export
+        # rpcd_devicefs's replacement so that lookup selects it before libtdb.
+        # The replacement uses RTLD_NEXT to call libtdb after changing the flags.
         "LINKER:--export-dynamic-symbol=tdb_open_ex"
     )
     target_link_libraries(rpcd_devicefs PRIVATE ${CMAKE_DL_LIBS})

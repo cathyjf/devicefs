@@ -284,7 +284,7 @@ EOF
 #
 RUN /bin/devicefs-sh <<'EOF'
 git clone \
-    git://git.proxmox.com/git/proxmox \
+    https://git.proxmox.com/git/proxmox \
     /usr/src/proxmox &
 readonly git_job_proxmox=$!
 
@@ -427,6 +427,8 @@ dpkg-shlibdeps \
 test -s /out/proxmox-backup-client.dependencies
 install -d --mode=0755 /out/rootfs/usr/share/devicefs-build
 git rev-parse HEAD > /out/rootfs/usr/share/devicefs-build/proxmox-backup.commit
+git -C /usr/src/proxmox rev-parse HEAD \
+    > /out/rootfs/usr/share/devicefs-build/proxmox.commit
 EOF
 
 

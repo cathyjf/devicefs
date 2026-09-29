@@ -29,6 +29,7 @@ import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
 import devicefs.supervisor.https_download;
 import devicefs.supervisor.installation;
+import devicefs.supervisor.oci_verification;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.temporary_paths;
 import devicefs.supervisor.winrt_apartment;
@@ -222,6 +223,9 @@ auto ExtractArchiveMember(
     const winrt::Windows::Data::Json::JsonObject &manifest,
     const std::string_view image) -> std::optional<std::string> {
     const auto layers = manifest.GetNamedArray(L"layers");
+    // The publication signature authenticates one layer digest. Requiring
+    // exactly one layer makes that signature cover the complete filesystem
+    // supplied to WSL; accepting further layers would leave them unauthenticated.
     if (layers.Size() != 1) {
         devicefs::WriteToStream(devicefs::stdout,
             "backup-supervisor: OCI image '{}' has {} layers; skipping import\n",
@@ -316,7 +320,8 @@ auto ExtractArchiveMember(
                 ExplicitHresult{error.code()});
         }
     }();
-    const auto layer = [&]() -> std::optional<std::pair<Uri, std::string>> {
+    const auto layer = [&]() -> std::optional<std::tuple<Uri, std::string,
+        winrt::Windows::Data::Json::JsonObject>> {
         try {
             const auto index = ReadRegistryJson(client, Uri{std::format(
                 L"{}/manifests/{}", repository_url, image_tag)});
@@ -335,9 +340,9 @@ auto ExtractArchiveMember(
                 if (!digest) {
                     return std::nullopt;
                 }
-                return std::pair{Uri{std::format(
+                return std::tuple{Uri{std::format(
                     L"{}/blobs/{}", repository_url,
-                    std::wstring_view{Transcode<std::wstring>(*digest)})}, *digest};
+                    std::wstring_view{Transcode<std::wstring>(*digest)})}, *digest, descriptor};
             }
             throw std::runtime_error(std::format(
                 "OCI image '{}' has no suitable linux/{} manifest",
@@ -351,10 +356,24 @@ auto ExtractArchiveMember(
     if (!layer) {
         return std::nullopt;
     }
-    const auto &[layer_url, digest] = *layer;
+    const auto &[layer_url, digest, descriptor] = *layer;
     if (previous_digest && (digest == *previous_digest)) {
         return digest;
     }
+    const auto signature = [&] {
+        try {
+            return Transcode<std::string>(descriptor.GetNamedObject(L"annotations")
+                .GetNamedString(L"com.cathyjf.devicefs.signature"));
+        } catch (const winrt::hresult_error &error) {
+            WinError("could not read the signature for OCI layer '{}' in '{}': {}",
+                digest, image, std::wstring_view{error.message()},
+                ExplicitHresult{error.code()});
+        }
+    }();
+    VerifyOciLayerSignature(digest, signature);
+    devicefs::WriteToStream(devicefs::stdout,
+        "backup-supervisor: verified the signature for OCI layer '{}' in '{}'\n",
+        digest, image);
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: downloading the linux/{} root filesystem from '{}'\n",
         Transcode<std::string>(architecture), image);
@@ -541,6 +560,13 @@ export [[nodiscard]] auto MaterializeOci(
             "backup-supervisor: WSL distribution '{}' already has OCI layer '{}'\n",
             distribution, *digest);
         return true;
+    }
+    VerifyOciLayerFile(rootfs, *digest);
+    if (!oci) {
+        devicefs::WriteToStream(devicefs::stdout,
+            "backup-supervisor: verified that root filesystem '{}' has "
+            "authenticated OCI layer digest '{}'\n",
+            Transcode<std::string>(rootfs.filename().native()), *digest);
     }
 
     const auto executable = WslExecutablePath();

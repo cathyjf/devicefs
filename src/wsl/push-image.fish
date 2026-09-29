@@ -151,11 +151,11 @@ function wait_and_cancel_on_failure -a ptr_exit_codes
     while true
         wait -n $jobs_remaining || {
             set -l wait_status $status
-            kill $jobs_remaining
+            kill -- $jobs_remaining
             wait
             exit $wait_status
         }
-        set jobs_remaining (for job in $pids
+        set jobs_remaining (for job in $jobs_remaining
             jobs -q -- $job && echo -- $job
         end)
         test (count $jobs_remaining) -gt 0 || break

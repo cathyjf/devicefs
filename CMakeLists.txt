@@ -229,6 +229,15 @@ target_link_libraries(devicefs-error-messages-test PRIVATE
     ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-windows-imports
 )
 
+add_executable(devicefs-oci-verification-test tests/oci_verification.cpp)
+target_module_interfaces(devicefs-oci-verification-test PRIVATE
+    src/modules/supervisor/math.ixx
+    src/modules/supervisor/oci_verification.ixx
+)
+target_link_libraries(devicefs-oci-verification-test PRIVATE
+    ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-windows-imports bcrypt crypt32
+)
+
 add_subdirectory(src/terminal)
 target_link_libraries(devicefs-common PRIVATE devicefs-terminal devicefs-windows-imports)
 add_executable(backup-supervisor
@@ -288,6 +297,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/launch_powershell.ixx
     src/modules/supervisor/logging_console.ixx
     src/modules/supervisor/materialize_oci.ixx
+    src/modules/supervisor/math.ixx
     src/modules/supervisor/native_backup.ixx
     src/modules/supervisor/native_backup/backup_viewer.cpp
     src/modules/supervisor/native_backup/devicefs_process.cpp
@@ -300,6 +310,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/native_backup/port_selection.cpp
     src/modules/supervisor/native_backup/s4u_logon.cpp
     src/modules/supervisor/native_backup/vhdx_attachment.cpp
+    src/modules/supervisor/oci_verification.ixx
     src/modules/supervisor/process_attribute_list.ixx
     src/modules/supervisor/process_diagnostics.ixx
     src/modules/supervisor/process_launch.ixx
@@ -328,6 +339,7 @@ set(DEVICEFS_CODE_ANALYSIS_TARGETS
     devicefs-rpc-block-device
     devicefs-read-path-test
     devicefs-error-messages-test
+    devicefs-oci-verification-test
     backup-supervisor
 )
 foreach(target IN LISTS DEVICEFS_CODE_ANALYSIS_TARGETS)
@@ -354,7 +366,7 @@ foreach(target IN LISTS DEVICEFS_CODE_ANALYSIS_TARGETS)
     )
 endforeach()
 
-foreach(target devicefs-read-path-test devicefs-error-messages-test backup-supervisor)
+foreach(target devicefs-read-path-test devicefs-error-messages-test devicefs-oci-verification-test backup-supervisor)
     target_sources(${target} PRIVATE src/resources/devicefs.manifest)
     set_target_properties(${target} PROPERTIES
         VS_GLOBAL_DeviceFsCommonProject "${CMAKE_CURRENT_BINARY_DIR}/devicefs-common.vcxproj"

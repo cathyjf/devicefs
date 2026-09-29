@@ -196,7 +196,7 @@ for builder in $builders
     set -a podman_pids $last_pid
     set -a build_connections $hostname_
     set -a image_id_files $image_id_file
-    set -a podman_exit_codes 1
+    set -a podman_exit_codes 0
     set -l index (count $podman_exit_codes)
     function __handle_podman_exit_{$index} -p $podman_pids[$index] -V index
         set -g podman_exit_codes[$index] $argv[3]
@@ -206,7 +206,22 @@ for builder in $builders
 end
 test (count $podman_pids) -gt 0 || die 'did not launch any builders'
 
-wait $podman_pids
+set -l jobs_remaining $podman_pids
+while true
+    wait -n $jobs_remaining || begin
+        set -l wait_status $status
+        kill $jobs_remaining
+        wait
+        exit $wait_status
+    end
+    set jobs_remaining (for job in $podman_pids
+        jobs -q -- $job && echo -- $job
+    end)
+    test (count $jobs_remaining) -gt 0 || break
+    string match -qr '[^0]' $podman_exit_codes || continue
+    # If we get here, a job has already failed, so kill the remaining jobs.
+    kill -- $jobs_remaining
+end
 
 log 'collected podman exit codes:' $podman_exit_codes
 for index in (seq (count $podman_exit_codes))

@@ -6,7 +6,7 @@ set -l magic_subshell_flag --push-image-internal-subshell
 set -l magic_reader_flag --push-image-internal-reader
 set -l magic_literal_prepend_flag --push-image-internal-literal-prefix-prepend-subshell
 set -l magic_flags $magic_subshell_flag $magic_reader_flag $magic_literal_prepend_flag
-set -g argv0 (status basename)
+set -l argv0 (status basename)
 
 function format_date
     date $argv +%FT%T%z
@@ -26,13 +26,18 @@ function prepend_line_with_timestamp -a line
 end
 
 function escape_argv
+    echo -n -- '+ '
     string escape -- $argv | string join ' '
+end
+
+function log -V argv0
+    printf '%s: %s.\n' $argv0 (string join ' ' $argv)
 end
 
 function die
     set -l exit_status $status
     test "$exit_status" -ne 0 || set -l exit_status 1
-    printf '%s: %s.\n' $argv0 (string join ' ' $argv) >&2
+    log $argv >&2
     exit $exit_status
 end
 
@@ -79,23 +84,40 @@ else if test "$argv[1]" = $magic_reader_flag
     # The return status of the reader subshell is ignored.
     exit 0
 else if test "$argv[1]" = $magic_literal_prepend_flag
-    # The return status of the literal prepending subshell is ignored.
     prepend_literal_prefixes $argv[2..]
+    # The return status of the literal prepending subshell is ignored.
     exit 0
 else
     set -e argv[1]
 end
 
-argparse '/tag=' -- $argv || exit
-set -q _flag_tag || die 'option `--tag TAG` is required'
-
-function qualified_tag -a tag
-    echo ghcr.io/cathyjf/devicefs-wsl:{$tag}
+set -l image_repository ghcr.io/cathyjf/devicefs-wsl
+function qualified_tag -a tag -V image_repository
+    echo $image_repository:{$tag}
 end
 
+argparse -n $argv0 '/tag=' -- $argv || exit
+if ! set -q _flag_tag
+    set -l registry_tags (skopeo list-tags docker://{$image_repository}) || \
+        die 'failed to list tags for' $image_repository 'to select a default tag'
+    set -l existing_tags (printf '%s\n' $registry_tags | jq -r '.Tags[]') || \
+        die 'failed to read the tag list for' $image_repository
+    set -l date_tag (date +%Y%m%d) || \
+        die 'failed to determine the date for the default tag'
+    set _flag_tag $date_tag
+    set -l suffix 0
+    while contains -- $_flag_tag $existing_tags
+        set suffix (math $suffix + 1)
+        set _flag_tag {$date_tag}.{$suffix}
+    end
+end
+set -l version_tag (qualified_tag $_flag_tag)
+log "using tag '$version_tag'"
+
 function unix_timestamp_now
-    # The format string ensures that the timestamp is an integer.
-    printf %d (date +%s)
+    set -l timestamp (date +%s)
+    printf %d $timestamp || \
+        die 'unix timestamp was not an integer:' $timestamp
 end
 
 function podman_
@@ -127,7 +149,6 @@ set -l labels \
     "org.opencontainers.image.source=https://github.com/cathyjf/devicefs" \
     "org.opencontainers.image.description=WSL image for the devicefs backup environment"
 
-set -l version_tag (qualified_tag $_flag_tag)
 set -l label_args
 set -l annotation_args
 for i in $labels

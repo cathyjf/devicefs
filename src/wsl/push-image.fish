@@ -7,6 +7,7 @@ set -l magic_reader_flag --push-image-internal-reader
 set -l magic_literal_prepend_flag --push-image-internal-literal-prefix-prepend-subshell
 set -l magic_flags $magic_subshell_flag $magic_reader_flag $magic_literal_prepend_flag
 set -l argv0 (status basename)
+set -l gpg_signing_fingerprint EDC7363F595C58D2F07930FEB69A7D95683C6E2A
 
 function format_date
     date $argv +%FT%T%z
@@ -42,11 +43,11 @@ function die
 end
 
 function mktemp_autoclean
-    set -l temp_file (mktemp) || die 'failed to create temp file'
+    set -l temp_file (mktemp $argv) || die 'failed to create temporary path'
     set -gq mktemp_autoclean_index || set -g mktemp_autoclean_index 0
     set -g mktemp_autoclean_index (math $mktemp_autoclean_index + 1)
     function __remove_temp_file_{$mktemp_autoclean_index} -e fish_exit -V temp_file
-        rm -f -- $temp_file
+        rm -rf -- $temp_file
     end
     echo -- $temp_file
 end
@@ -96,7 +97,7 @@ function qualified_tag -a tag -V image_repository
     echo $image_repository:{$tag}
 end
 
-argparse -n $argv0 '/tag=' -- $argv || exit
+argparse -n $argv0 '/tag=' '/latest' -- $argv || exit
 if ! set -q _flag_tag
     set -l registry_tags (skopeo list-tags docker://{$image_repository}) || \
         die 'failed to list tags for' $image_repository 'to select a default tag'
@@ -112,7 +113,13 @@ if ! set -q _flag_tag
     end
 end
 set -l version_tag (qualified_tag $_flag_tag)
-log "using tag '$version_tag'"
+set -l publication_tags ({
+    echo -- $version_tag
+    set -q _flag_latest && qualified_tag 'latest'
+})
+for i in $publication_tags
+    log 'using tag' "'$i'"
+end
 
 function unix_timestamp_now
     set -l timestamp (date +%s)
@@ -120,10 +127,27 @@ function unix_timestamp_now
         die 'unix timestamp was not an integer:' $timestamp
 end
 
-function podman_
-    set -l invoke_argv podman $argv
-    escape_argv $invoke_argv
-    $invoke_argv[1] $invoke_argv[2..]
+function print_and_invoke
+    escape_argv $argv
+    $argv[1] $argv[2..]
+end
+
+# Define `podman_` and `skopeo_`.
+for i in podman skopeo
+    function {$i}_ -V i
+        print_and_invoke $i $argv
+    end
+end
+
+function compute_signature -a layer_hash -V gpg_signing_fingerprint
+    log 'Computing signature over message:' "'$layer_hash'" >&2
+    echo -n -- $layer_hash | \
+        gpg --local-user {$gpg_signing_fingerprint}! \
+            --digest-algo SHA512 --no-armor --no-textmode --detach-sign | \
+                base64
+    for exit_status in $pipestatus
+        test "$exit_status" -eq 0 || return $exit_status
+    end
 end
 
 if date --version &>/dev/null
@@ -141,7 +165,7 @@ set -l gh_status (gh auth status 2>&1) || \
     die '`gh auth status` failed:' $gh_status
 if ! string match -q "*'write:packages'*" $gh_status
     die 'GitHub token lacks `write:packages`; run `gh auth refresh -s write:packages`'
-else if ! gh auth token | podman login ghcr.io -u cathyjf --password-stdin
+else if ! gh auth token | skopeo login ghcr.io -u cathyjf --password-stdin
     die 'failed to authenticate to ghcr.io'
 end
 
@@ -208,12 +232,12 @@ test (count $podman_pids) -gt 0 || die 'did not launch any builders'
 
 set -l jobs_remaining $podman_pids
 while true
-    wait -n $jobs_remaining || begin
+    wait -n $jobs_remaining || {
         set -l wait_status $status
         kill $jobs_remaining
         wait
         exit $wait_status
-    end
+    }
     set jobs_remaining (for job in $podman_pids
         jobs -q -- $job && echo -- $job
     end)
@@ -230,34 +254,60 @@ for index in (seq (count $podman_exit_codes))
             $podman_exit_codes[$index]
 end
 
-set -l image_ids
+set -l image_digests
+set -l image_signatures
 for index in (seq (count $image_id_files))
     read --line -l image_id <$image_id_files[$index] || \
         die 'could not read the image ID for the successful build on' \
             $build_connections[$index] 'from' $image_id_files[$index]
-    set -a image_ids $image_id
-    podman image exists $image_id && continue
     set -l image_archive (mktemp_autoclean)
     podman_ --connection $build_connections[$index] save \
         --format oci-archive --output $image_archive $image_id || \
             die 'failed to save image' $image_id 'from' $build_connections[$index] \
                 'to' $image_archive
-    podman_ load --input $image_archive || \
-        die 'failed to load image' $image_id 'from' $image_archive \
-            'into the default connection'
+    set -l layer_hash \
+        (skopeo inspect --format '{{index .Layers 0}}' oci-archive:{$image_archive}) || \
+            die 'failed to read the layer digest from image archive' $image_archive
+    set -a image_signatures ({compute_signature $layer_hash || \
+        die 'failed to compute the signature for layer' $layer_hash} | \
+            string collect --allow-empty)
+    set -l image_digest (skopeo inspect --format '{{.Digest}}' oci-archive:{$image_archive}) || \
+        die 'failed to read the manifest digest from image archive' $image_archive
+    skopeo_ copy --preserve-digests oci-archive:{$image_archive} \
+        docker://{$image_repository}@{$image_digest} || \
+            die 'failed to publish image' $image_id 'to' $image_repository
+    set -a image_digests $image_digest
 end
 
+! podman manifest exists $version_tag || \
+    podman_ manifest rm $version_tag || \
+        die 'failed to delete the existing image index' $version_tag \
+            'to free that tag for a new index containing the new images'
 ! podman image exists $version_tag || \
     podman_ untag $version_tag $version_tag || \
         die 'failed to remove the tag' $version_tag \
             'to free it for a new index containing the new images'
-set -l manifest_id (podman manifest create $version_tag $image_ids) || \
-    die 'failed to create the image index' $version_tag 'for the new images'
+
+set -l manifest_id (podman manifest create $version_tag \
+    docker://{$image_repository}@{$image_digests}) || \
+        die 'failed to create the image index' $version_tag 'for the new images'
 podman_ manifest annotate --index $annotation_args $manifest_id || \
     die 'failed to annotate the image index' $version_tag
 
-for i in $version_tag (qualified_tag latest)
-    podman_ manifest push --all --format oci $manifest_id docker://{$i} || \
+for index in (seq (count $image_digests))
+    podman_ manifest annotate \
+        --annotation "com.cathyjf.devicefs.signature=$image_signatures[$index]" \
+        $manifest_id $image_digests[$index] || \
+            die 'failed to add the signature for image' $image_digests[$index] \
+                'as an annotation to the image index' $version_tag
+end
+
+set -l manifest_directory (mktemp_autoclean -d)
+podman manifest inspect $manifest_id >$manifest_directory/manifest.json || \
+    die 'failed to export the image index' $version_tag
+for i in $publication_tags
+    skopeo_ copy --multi-arch=index-only --preserve-digests \
+        dir:{$manifest_directory} docker://{$i} || \
         die 'failed to publish' $i
 end
 

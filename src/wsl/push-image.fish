@@ -5,8 +5,11 @@
 set -l magic_subshell_flag --push-image-internal-subshell
 set -l magic_reader_flag --push-image-internal-reader
 set -l magic_literal_prepend_flag --push-image-internal-literal-prefix-prepend-subshell
-set -l magic_flags $magic_subshell_flag $magic_reader_flag $magic_literal_prepend_flag
+set -l magic_publish_flag --push-image-internal-publish
+set -l magic_flags $magic_subshell_flag $magic_reader_flag $magic_literal_prepend_flag \
+    $magic_publish_flag
 set -l argv0 (status basename)
+set -l image_repository ghcr.io/cathyjf/devicefs-wsl
 set -l gpg_signing_fingerprint EDC7363F595C58D2F07930FEB69A7D95683C6E2A
 
 function format_date
@@ -76,6 +79,53 @@ function prepend_literal_prefixes -a prefix
     end
 end
 
+function print_and_invoke
+    escape_argv $argv
+    $argv[1] $argv[2..]
+end
+
+# Define `podman_` and `skopeo_`.
+for i in podman skopeo
+    function {$i}_ -V i
+        print_and_invoke $i $argv
+    end
+end
+
+function compute_signature -a layer_hash -V gpg_signing_fingerprint
+    log 'Computing signature over message:' "'$layer_hash'" >&2
+    echo -n -- $layer_hash | \
+        gpg --local-user {$gpg_signing_fingerprint}! \
+            --digest-algo SHA512 --no-armor --no-textmode --detach-sign | \
+                base64 --wrap 0
+    for exit_status in $pipestatus
+        test "$exit_status" -eq 0 || return $exit_status
+    end
+end
+
+function publish_image -a connection image_id_file result_file -V image_repository
+    read --line -l image_id <$image_id_file || \
+        die 'could not read the image ID for the successful build on' \
+            $connection 'from' $image_id_file
+    set -l image_archive (mktemp_autoclean)
+    podman_ --connection $connection save \
+        --format oci-archive --output $image_archive $image_id || \
+            die 'failed to save image' $image_id 'from' $connection \
+                'to' $image_archive
+    set -l layer_hash \
+        (skopeo inspect --format '{{index .Layers 0}}' oci-archive:{$image_archive}) || \
+            die 'failed to read the layer digest from image archive' $image_archive
+    set -l signature (compute_signature $layer_hash || \
+        die 'failed to compute the signature for layer' $layer_hash)
+    set -l image_digest (skopeo inspect --format '{{.Digest}}' oci-archive:{$image_archive}) || \
+        die 'failed to read the manifest digest from image archive' $image_archive
+    skopeo_ copy --preserve-digests oci-archive:{$image_archive} \
+        docker://{$image_repository}@{$image_digest} || \
+            die 'failed to publish image' $image_id 'to' $image_repository
+    printf '%s\n%s\n' $image_digest $signature >$result_file || \
+        die 'failed to record the published image digest and signature for' \
+            $image_id 'in' $result_file
+end
+
 if ! contains -- "$argv[1]" $magic_flags
     prepend_timestamps (status fish-path) -N (status filename) \
         $magic_subshell_flag $argv
@@ -88,11 +138,33 @@ else if test "$argv[1]" = $magic_literal_prepend_flag
     prepend_literal_prefixes $argv[2..]
     # The return status of the literal prepending subshell is ignored.
     exit 0
+else if test "$argv[1]" = $magic_publish_flag
+    publish_image $argv[2..]
+    exit
 else
     set -e argv[1]
 end
 
-set -l image_repository ghcr.io/cathyjf/devicefs-wsl
+function wait_and_cancel_on_failure -a ptr_exit_codes
+    set -l pids $argv[2..]
+    set -l jobs_remaining $pids
+    while true
+        wait -n $jobs_remaining || {
+            set -l wait_status $status
+            kill $jobs_remaining
+            wait
+            exit $wait_status
+        }
+        set jobs_remaining (for job in $pids
+            jobs -q -- $job && echo -- $job
+        end)
+        test (count $jobs_remaining) -gt 0 || break
+        string match -qr '[^0]' $$ptr_exit_codes || continue
+        # If we get here, a job has already failed, so kill the remaining jobs.
+        kill -- $jobs_remaining
+    end
+end
+
 function qualified_tag -a tag -V image_repository
     echo $image_repository:{$tag}
 end
@@ -125,29 +197,6 @@ function unix_timestamp_now
     set -l timestamp (date +%s)
     printf %d $timestamp || \
         die 'unix timestamp was not an integer:' $timestamp
-end
-
-function print_and_invoke
-    escape_argv $argv
-    $argv[1] $argv[2..]
-end
-
-# Define `podman_` and `skopeo_`.
-for i in podman skopeo
-    function {$i}_ -V i
-        print_and_invoke $i $argv
-    end
-end
-
-function compute_signature -a layer_hash -V gpg_signing_fingerprint
-    log 'Computing signature over message:' "'$layer_hash'" >&2
-    echo -n -- $layer_hash | \
-        gpg --local-user {$gpg_signing_fingerprint}! \
-            --digest-algo SHA512 --no-armor --no-textmode --detach-sign | \
-                base64
-    for exit_status in $pipestatus
-        test "$exit_status" -eq 0 || return $exit_status
-    end
 end
 
 if date --version &>/dev/null
@@ -230,22 +279,7 @@ for builder in $builders
 end
 test (count $podman_pids) -gt 0 || die 'did not launch any builders'
 
-set -l jobs_remaining $podman_pids
-while true
-    wait -n $jobs_remaining || {
-        set -l wait_status $status
-        kill $jobs_remaining
-        wait
-        exit $wait_status
-    }
-    set jobs_remaining (for job in $podman_pids
-        jobs -q -- $job && echo -- $job
-    end)
-    test (count $jobs_remaining) -gt 0 || break
-    string match -qr '[^0]' $podman_exit_codes || continue
-    # If we get here, a job has already failed, so kill the remaining jobs.
-    kill -- $jobs_remaining
-end
+wait_and_cancel_on_failure podman_exit_codes $podman_pids
 
 log 'collected podman exit codes:' $podman_exit_codes
 for index in (seq (count $podman_exit_codes))
@@ -254,29 +288,33 @@ for index in (seq (count $podman_exit_codes))
             $podman_exit_codes[$index]
 end
 
+set -l publication_pids
+set -l publication_result_files
+set -g publication_exit_codes
+for index in (seq (count $image_id_files))
+    set -l result_file (mktemp_autoclean)
+    set -a publication_result_files $result_file
+    set -a publication_exit_codes 0
+    $fish -N (status filename) $magic_publish_flag \
+        $build_connections[$index] $image_id_files[$index] $result_file &
+    set -a publication_pids $last_pid
+    function __handle_publication_exit_{$index} -p $publication_pids[$index] -V index
+        set -g publication_exit_codes[$index] $argv[3]
+    end
+end
+wait_and_cancel_on_failure publication_exit_codes $publication_pids
+
 set -l image_digests
 set -l image_signatures
-for index in (seq (count $image_id_files))
-    read --line -l image_id <$image_id_files[$index] || \
-        die 'could not read the image ID for the successful build on' \
-            $build_connections[$index] 'from' $image_id_files[$index]
-    set -l image_archive (mktemp_autoclean)
-    podman_ --connection $build_connections[$index] save \
-        --format oci-archive --output $image_archive $image_id || \
-            die 'failed to save image' $image_id 'from' $build_connections[$index] \
-                'to' $image_archive
-    set -l layer_hash \
-        (skopeo inspect --format '{{index .Layers 0}}' oci-archive:{$image_archive}) || \
-            die 'failed to read the layer digest from image archive' $image_archive
-    set -a image_signatures ({compute_signature $layer_hash || \
-        die 'failed to compute the signature for layer' $layer_hash} | \
-            string collect --allow-empty)
-    set -l image_digest (skopeo inspect --format '{{.Digest}}' oci-archive:{$image_archive}) || \
-        die 'failed to read the manifest digest from image archive' $image_archive
-    skopeo_ copy --preserve-digests oci-archive:{$image_archive} \
-        docker://{$image_repository}@{$image_digest} || \
-            die 'failed to publish image' $image_id 'to' $image_repository
+for index in (seq (count $publication_result_files))
+    test $publication_exit_codes[$index] -eq 0 || \
+        die 'image publication failed for' $build_connections[$index] 'with exit status' \
+            $publication_exit_codes[$index]
+    read --line -l image_digest signature <$publication_result_files[$index] || \
+        die 'failed to read the published image digest and signature for' \
+            $build_connections[$index] 'from' $publication_result_files[$index]
     set -a image_digests $image_digest
+    set -a image_signatures (echo -n -- $signature | string collect --allow-empty)
 end
 
 ! podman manifest exists $version_tag || \

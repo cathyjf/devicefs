@@ -30,14 +30,16 @@ public:
         input_fd_(input_fd), input_filename_(input_filename),
         original_input_fd_(_dup(input_fd_)) {
         if (!original_input_fd_) {
-            ThrowError("failed to save {} before redirecting view output");
+            WinError("failed to save {} before redirecting view output", input_filename_,
+                ExplicitCrtIoError{});
         }
         // Changing `stdout` or `stderr` must also change the handle used by
         // child launches. For console applications, the Universal C Runtime's
         // `_dup2` implementation calls `SetStdHandle` when replacing either
         // descriptor (see `lowio/dup2.cpp` and `lowio/osfinfo.cpp`).
         if (_dup2(output_fd, input_fd_) != 0) {
-            ThrowError("failed to redirect {} to the view output file");
+            WinError("failed to redirect {} to the view output file", input_filename_,
+                ExplicitCrtIoError{});
         }
     }
 
@@ -51,27 +53,15 @@ public:
     }
 
     auto Restore() -> void {
+        ClearCrtIoError();
         if (!TryRestore()) {
             return;
         }
-        ThrowError("failed to restore {} after displaying view output");
+        WinError("failed to restore {} after displaying view output", input_filename_,
+            ExplicitCrtIoError{});
     }
 
 private:
-    // `_doserrno` preserves failures from Windows, but the runtime sets it to
-    // zero for its own failures, such as exhausting its file descriptors.
-    // Those failures are described by `errno` instead.
-    [[noreturn]] auto ThrowError(
-        const std::format_string<const std::string_view &> format) const -> void {
-        const auto crt_error = errno;
-        const auto windows_error = _doserrno;
-        const auto operation = std::format(format, input_filename_);
-        if (windows_error != 0) {
-            WinError("{}", operation, ExplicitWin32Error{windows_error});
-        }
-        throw std::system_error(crt_error, std::generic_category(), operation);
-    }
-
     auto TryRestore() noexcept -> int {
         if (!original_input_fd_) {
             return 0;
@@ -96,21 +86,23 @@ public:
             // `wbT` creates a binary file and marks it as short-lived for
             // caching. `_SH_DENYNO` allows `reader_` to open the same file
             // while the redirected streams are writing to it.
+            ClearCrtIoError();
             auto file = wil::unique_file{_wfsopen(path_.c_str(), L"wbT", _SH_DENYNO)};
             if (!file) {
                 WinError("failed to create view output file '{}'",
-                    std::wstring_view{path_.native()}, ExplicitWin32Error{_doserrno});
+                    std::wstring_view{path_.native()}, ExplicitCrtIoError{});
             }
             return file;
         }()),
-        reader_([this] {
-            auto reader = std::ifstream{path_, std::ios::binary};
-            if (!reader) {
+        reader_file_([this] {
+            auto file = wil::unique_file{_wfsopen(path_.c_str(), L"rb", _SH_DENYNO)};
+            if (!file) {
                 WinError("failed to open view output file '{}' for reading",
-                    std::wstring_view{path_.native()}, ExplicitWin32Error{_doserrno});
+                    std::wstring_view{path_.native()}, ExplicitCrtIoError{});
             }
-            return reader;
+            return file;
         }()),
+        reader_(reader_file_.get()),
         standard_output_(_fileno(stdout), _fileno(file_.get()), "stdout"),
         standard_error_(_fileno(stderr), _fileno(file_.get()), "stderr") {}
 
@@ -118,17 +110,23 @@ public:
         // Reaching the current end of the file does not mean output has
         // finished. Clearing that state allows newly written text to be read.
         reader_.clear();
-        for (auto line = std::string{}; std::getline(reader_, line);) {
+        std::clearerr(reader_file_.get());
+        ClearCrtIoError();
+        for (auto line = std::string{};;) {
+            std::getline(reader_, line);
+            if (std::ferror(reader_file_.get()) || reader_.bad()) {
+                WinError("failed to read view output file '{}'",
+                    std::wstring_view{path_.native()}, ExplicitCrtIoError{});
+            }
+            if (!reader_) {
+                break;
+            }
             view.AppendText(line);
             // `std::getline` removes the newline when it consumes one. At
             // end-of-file, the text remains open for the next read to continue.
             if (!reader_.eof()) {
                 view.AppendText("\n");
             }
-        }
-        if (reader_.bad()) {
-            WinError("failed to read view output file '{}'",
-                std::wstring_view{path_.native()}, ExplicitWin32Error{_doserrno});
         }
     }
 
@@ -143,6 +141,12 @@ private:
     // position shared by `stdout` and `stderr`. Member destruction restores
     // both streams before closing `file_`.
     const wil::unique_file file_;
+    // MSVC's file buffer returns EOF for both EOF and a failed CRT read. Keeping
+    // the underlying `FILE` lets `ReadOutput` distinguish those cases with
+    // `ferror` before appending text can overwrite the error information.
+    // MSVC's `ifstream(FILE *)` borrows the file, so `reader_` is destroyed first.
+    // https://github.com/microsoft/STL/blob/main/stl/inc/__msvc_filebuf.hpp
+    const wil::unique_file reader_file_;
     std::ifstream reader_;
     RedirectedStream standard_output_;
     RedirectedStream standard_error_;

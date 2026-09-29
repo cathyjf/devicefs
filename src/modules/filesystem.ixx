@@ -896,11 +896,19 @@ auto Run(const Options &options) {
     if (rpc_client::IsRpcDevice(options.mappings.front())) {
         return run.operator()<RPCBlockDevice>([&] {
             auto password = wil::secure_string{};
-            if (std::ranges::any_of(options.mappings, rpc_client::IsTcpDevice) &&
-                !std::getline(std::cin, password)) {
-                WinError("could not read the RPC password from standard input",
-                    ExplicitWin32Error{std::cin.bad() ? _doserrno :
-                        (std::cin.eof() ? ERROR_HANDLE_EOF : ERROR_INSUFFICIENT_BUFFER)});
+            if (std::ranges::any_of(options.mappings, rpc_client::IsTcpDevice)) {
+                ClearCrtIoError();
+                std::getline(std::cin, password);
+                if (std::ferror(stdin) || std::cin.bad()) {
+                    WinError("could not read the RPC password from standard input",
+                        ExplicitCrtIoError{});
+                }
+                if (!std::cin) {
+                    WinError("could not read the RPC password from standard input",
+                        ExplicitWin32Error{std::cin.eof()
+                            ? CompileTimeCast<DWORD, ERROR_HANDLE_EOF>()
+                            : CompileTimeCast<DWORD, ERROR_INSUFFICIENT_BUFFER>()});
+                }
             }
             return password;
         }());

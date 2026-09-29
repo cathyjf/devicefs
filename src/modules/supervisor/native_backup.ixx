@@ -55,7 +55,7 @@ export [[nodiscard]] auto RunFishProgram(
     const auto program = ReadEntireFile(path);
     if (!program) {
         WinError("failed to open or read the Fish program: {}",
-            std::wstring_view{path.native()}, ExplicitWin32Error{program.error()});
+            std::wstring_view{path.native()}, program.error());
     }
     const auto fish_arguments = std::array{
         std::span<const std::string_view>{

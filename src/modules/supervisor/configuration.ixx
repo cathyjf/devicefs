@@ -748,7 +748,7 @@ auto ReadFields(
     const auto source = ReadEntireFile<wil::secure_string>(path);
     if (!source) {
         WinError("failed to open or read the backup configuration: {}",
-            std::wstring_view{path.native()}, ExplicitWin32Error{source.error()});
+            std::wstring_view{path.native()}, source.error());
     }
     const auto document = [&] {
         try {

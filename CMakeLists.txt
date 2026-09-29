@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 4.2)
 
 project(devicefs LANGUAGES C CXX RC)
 
+enable_testing()
+
 if((NOT DEFINED CMAKE_VS_VERSION_BUILD_NUMBER)
         OR (CMAKE_VS_VERSION_BUILD_NUMBER VERSION_LESS 18))
     message(FATAL_ERROR "devicefs requires Visual Studio 2026 or newer")
@@ -225,6 +227,9 @@ target_link_libraries(devicefs-read-path-test PRIVATE
 )
 
 add_executable(devicefs-error-messages-test tests/error_messages.cpp)
+target_module_interfaces(devicefs-error-messages-test PRIVATE
+    src/modules/file_reader.ixx
+)
 target_link_libraries(devicefs-error-messages-test PRIVATE
     ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-windows-imports
 )
@@ -237,6 +242,15 @@ target_module_interfaces(devicefs-oci-verification-test PRIVATE
 target_link_libraries(devicefs-oci-verification-test PRIVATE
     ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-windows-imports bcrypt crypt32
 )
+
+add_test(NAME devicefs_read_path COMMAND devicefs-read-path-test)
+add_test(NAME devicefs_error_messages COMMAND devicefs-error-messages-test)
+add_test(NAME devicefs_oci_verification COMMAND devicefs-oci-verification-test)
+
+# These omitted tests require elevation:
+#   tests/Test-SyntheticFreeClusters.ps1
+#   tests/Test-LibvshadowBlockDescriptors.ps1
+#   tests/Measure-PbsKnownDataMap.ps1 (PBS throughput benchmark)
 
 add_subdirectory(src/terminal)
 target_link_libraries(devicefs-common PRIVATE devicefs-terminal devicefs-windows-imports)

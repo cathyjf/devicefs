@@ -53,13 +53,9 @@ auto RequireFailure(const auto &operation) -> void {
 
 } // namespace
 
-// The argument is an existing scratch directory for the file-hashing tests.
-[[gsl::suppress("26429", justification:
-    "C++ [basic.start.main] guarantees that `argv` is not null.")]]
-auto main(const int argc, const char *const *const argv) -> int try {
-    if (argc != 2) {
-        throw std::runtime_error("supply a scratch directory for OCI verification tests");
-    }
+// Run without arguments. The file-hashing tests create and remove their own
+// directory under the invoking user's temporary directory.
+auto main() -> int try {
     VerifyOciLayerSignature(kAmd64Digest, kAmd64Signature);
     VerifyOciLayerSignature(kArm64Digest, kArm64Signature);
     RequireFailure([] { VerifyOciLayerSignature(kAmd64Digest, kArm64Signature); });
@@ -129,11 +125,16 @@ auto main(const int argc, const char *const *const argv) -> int try {
     const auto encoded = Encode(packet);
     RequireFailure([&] { VerifyOciLayerSignature(kAmd64Digest, encoded); });
 
-    const auto file = std::filesystem::path{argv[1]} / "oci-verification-layer-test";
-    const auto cleanup = wil::scope_exit([&file] {
+    const auto directory = std::filesystem::temp_directory_path() /
+        std::format("devicefs-oci-verification-{}", GetCurrentProcessId());
+    if (!std::filesystem::create_directory(directory)) {
+        throw std::runtime_error(std::format("test directory already exists: {}", directory.string()));
+    }
+    const auto cleanup = wil::scope_exit([&directory] {
         auto error = std::error_code{};
-        std::filesystem::remove(file, error);
+        std::filesystem::remove_all(directory, error);
     });
+    const auto file = directory / "oci-verification-layer-test";
     const auto write = [&file](const std::string_view content) {
         auto output = std::ofstream{file, std::ios::binary};
         output << content;

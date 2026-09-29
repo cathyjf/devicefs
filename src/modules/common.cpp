@@ -15,12 +15,26 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import std;
+import <cerrno>;
+import <cstdlib>;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import devicefs.terminal.transcoding;
 
 static_assert(std::same_as<DWORD, unsigned long>);
 static_assert(std::same_as<HRESULT, long>);
+
+ExplicitCrtIoError::ExplicitCrtIoError() noexcept
+    : crt_error(errno), windows_error(_doserrno) {}
+
+auto ClearCrtIoError() noexcept -> void {
+    // Some CRT failures set only `errno`: UCRT's `common_fsopen` in
+    // `stdio/fopen.cpp` sets `EMFILE` when no stream slot is available, leaving
+    // `_doserrno` unchanged. Clearing both values prevents an earlier error
+    // from being reported when the operation does not set that value.
+    errno = 0;
+    _doserrno = 0;
+}
 
 ExplicitHresult::operator unsigned long() const noexcept {
     // An HRESULT's facility identifies the source of its error code.
@@ -133,6 +147,28 @@ private:
     std::string message_;
 };
 
+template <bool Throw>
+auto ReportCrtIoError(const ExplicitCrtIoError error, const std::string &operation) {
+    // A Windows failure supplies the more specific error. A CRT-only failure
+    // supplies `errno`; a stream failure with neither value uses the fallback.
+    if (error.windows_error != 0) {
+        if constexpr (Throw) {
+            detail::ThrowWinError(error.windows_error, operation);
+        } else {
+            return detail::ConstructWinError(error.windows_error, operation);
+        }
+    }
+    const auto code = (error.crt_error != 0)
+        ? std::error_code{error.crt_error, std::generic_category()}
+        : std::make_error_code(std::io_errc::stream);
+    if constexpr (Throw) {
+        throw std::system_error{code, operation};
+    } else {
+        return std::unique_ptr<std::runtime_error>{
+            std::make_unique<std::system_error>(code, operation)};
+    }
+}
+
 } // namespace
 
 namespace detail {
@@ -144,6 +180,15 @@ auto ConstructWinError(const unsigned long error, const std::string &operation)
 
 [[noreturn]] auto ThrowWinError(const unsigned long error, const std::string &operation) -> void {
     throw WindowsError(error, operation);
+}
+
+auto ConstructWinError(const ExplicitCrtIoError error, const std::string &operation)
+    -> std::unique_ptr<std::runtime_error> {
+    return ReportCrtIoError<false>(error, operation);
+}
+
+[[noreturn]] auto ThrowWinError(const ExplicitCrtIoError error, const std::string &operation) -> void {
+    ReportCrtIoError<true>(error, operation);
 }
 
 auto LastWin32Error() noexcept -> ExplicitWin32Error {

@@ -19,17 +19,19 @@ export module devicefs.file_reader;
 import std;
 import <share.h>;
 import <devicefs/windows_imports.h>;
+import <devicefs/common.h>;
 
-// Read an entire file as bytes, or return the Windows error from opening or
+// Read an entire file as bytes, or return the captured CRT I/O error from opening or
 // reading it. Other readers are permitted, but writers are excluded while the
 // file is open. `String` can select a secure allocator for sensitive contents.
 export template <class String = std::string>
 [[nodiscard]] auto ReadEntireFile(const std::filesystem::path &path)
-    -> std::expected<String, DWORD> {
+    -> std::expected<String, ExplicitCrtIoError> {
+    ClearCrtIoError();
     const auto file = wil::unique_file{
         _wfsopen(path.c_str(), L"rb", _SH_DENYWR)};
     if (!file) {
-        return std::unexpected{_doserrno};
+        return std::unexpected{ExplicitCrtIoError{}};
     }
     // Iterator reads bypass the stream's error state, and MSVC's file buffer
     // reports both EOF and read failures as the end of the sequence. Keeping
@@ -40,7 +42,7 @@ export template <class String = std::string>
     auto contents = String{
         std::istreambuf_iterator<char>{std::ifstream{file.get()}.rdbuf()}, {}};
     if (std::ferror(file.get())) {
-        return std::unexpected{_doserrno};
+        return std::unexpected{ExplicitCrtIoError{}};
     }
     return contents;
 }

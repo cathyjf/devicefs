@@ -33,6 +33,17 @@ struct ExplicitHresult final {
     [[nodiscard]] operator unsigned long() const noexcept;
 };
 
+// Capture both CRT I/O error values for immediate reporting or later use.
+struct ExplicitCrtIoError final {
+    ExplicitCrtIoError() noexcept;
+
+    int crt_error;
+    unsigned long windows_error;
+};
+
+// Clear stale error values before a checked sequence of CRT I/O operations.
+auto ClearCrtIoError() noexcept -> void;
+
 namespace detail {
 
 [[nodiscard]] auto LastWin32Error() noexcept -> ExplicitWin32Error;
@@ -42,6 +53,9 @@ namespace detail {
 [[nodiscard]] auto ConstructWinError(unsigned long, const std::string &)
     -> std::unique_ptr<std::runtime_error>;
 [[noreturn]] auto ThrowWinError(unsigned long, const std::string &) -> void;
+[[nodiscard]] auto ConstructWinError(ExplicitCrtIoError, const std::string &)
+    -> std::unique_ptr<std::runtime_error>;
+[[noreturn]] auto ThrowWinError(ExplicitCrtIoError, const std::string &) -> void;
 
 template <class Argument>
 constexpr auto kIsWideStringView = std::is_same_v<
@@ -83,7 +97,8 @@ constexpr auto kHasExplicitError = [] {
         using LastArgument = std::remove_cvref_t<std::tuple_element_t<
             sizeof...(Arguments) - 1, std::tuple<Arguments...>>>;
         return std::is_same_v<LastArgument, ExplicitWin32Error> ||
-            std::is_same_v<LastArgument, ExplicitHresult>;
+            std::is_same_v<LastArgument, ExplicitHresult> ||
+            std::is_same_v<LastArgument, ExplicitCrtIoError>;
     }
 }();
 
@@ -175,8 +190,9 @@ template <class... Arguments>
     const detail::WinErrorFormatString<Arguments...> format,
     Arguments &&...arguments) noexcept {
     try {
-        return detail::DispatchWinError<detail::ConstructWinError>(
-            format, std::forward<Arguments>(arguments)...);
+        return detail::DispatchWinError<[](const auto error, const std::string &operation) {
+            return detail::ConstructWinError(error, operation);
+        }>(format, std::forward<Arguments>(arguments)...);
     } catch (...) {
         return std::unique_ptr<std::runtime_error>{};
     }
@@ -186,8 +202,9 @@ template <class... Arguments>
 [[noreturn]] auto WinError(
     const detail::WinErrorFormatString<Arguments...> format,
     Arguments &&...arguments) {
-    detail::DispatchWinError<detail::ThrowWinError>(
-        format, std::forward<Arguments>(arguments)...);
+    detail::DispatchWinError<[](const auto error, const std::string &operation) {
+        detail::ThrowWinError(error, operation);
+    }>(format, std::forward<Arguments>(arguments)...);
 }
 
 auto HardenProcess() -> void;

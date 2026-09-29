@@ -247,7 +247,7 @@ auto ExtractArchiveMember(
         const auto source = ReadEntireFile(path);
         if (!source) {
             WinError("failed to open or read the OCI metadata: {}",
-                std::wstring_view{path.native()}, ExplicitWin32Error{source.error()});
+                std::wstring_view{path.native()}, source.error());
         }
         return winrt::Windows::Data::Json::JsonObject::Parse(Transcode<std::wstring>(*source));
     };
@@ -606,13 +606,24 @@ export [[nodiscard]] auto MaterializeOci(
     // record this metadata does not invalidate the imported distribution.
     {
         const auto digest_path = installation / kOciLayerDigestFile;
+        ClearCrtIoError();
         auto digest_file = std::ofstream{digest_path, std::ios::binary};
-        std::println(digest_file, "{}", *digest);
-        digest_file.flush();
-        if (!digest_file) {
+        const auto test_io_success =
+            [&digest_file = std::as_const(digest_file), &digest_path] {
+            if (digest_file) {
+                return true;
+            }
             devicefs::WriteToStream(devicefs::stderr,
-                "backup-supervisor: could not record OCI layer digest in '{}'\n",
-                Transcode<std::string>(digest_path.native()));
+                L"backup-supervisor: could not record OCI layer digest in '{}': {}\n",
+                digest_path.native(), TryConstructWinError("", ExplicitCrtIoError{}));
+            return false;
+        };
+        if (test_io_success()) {
+            std::println(digest_file, "{}", *digest);
+            if (test_io_success()) {
+                digest_file.flush();
+                test_io_success();
+            }
         }
     }
     if (previous) {

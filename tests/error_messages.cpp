@@ -4,13 +4,16 @@
 // Exercise `WinError` with system errors, component message tables, and COM
 // descriptions. The COM cases install an error object on the current thread,
 // just as a failing COM call would, and inspect the resulting exception.
-// Run `devicefs-error-messages-test` without arguments.
+// Run `devicefs-error-messages-test` without arguments. The read-failure test
+// creates and removes its own directory under the system temporary directory.
 
 #include <devicefs/strsafe_compat.h>
 
 import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import <share.h>;
+import devicefs.file_reader;
 
 namespace {
 
@@ -55,6 +58,80 @@ auto SetComDescription(std::wstring description) -> void {
     if (const auto result = SetErrorInfo(0, information.query<IErrorInfo>().get()); FAILED(result)) {
         WinError("could not install the test COM error object", ExplicitHresult{result});
     }
+}
+
+auto TestReadFailure() -> void {
+    const auto directory = std::filesystem::temp_directory_path() /
+        std::format("devicefs-crt-io-{}", GetCurrentProcessId());
+    if (!std::filesystem::create_directory(directory)) {
+        throw std::runtime_error(std::format("test directory already exists: {}", directory.string()));
+    }
+    const auto cleanup = wil::scope_exit([&directory] {
+        auto error = std::error_code{};
+        std::filesystem::remove_all(directory, error);
+    });
+    const auto path = directory / "locked.txt";
+    constexpr auto contents = std::string_view{"readable before and after the lock\n"};
+    {
+        auto output = std::ofstream{path, std::ios::binary};
+        output << contents;
+        output.close();
+        if (!output) {
+            WinError("could not write the read-failure test file '{}'",
+                std::wstring_view{path.native()}, ExplicitCrtIoError{});
+        }
+    }
+    // A separate handle's exclusive byte-range lock permits opening the file
+    // but prevents reading its first byte. This causes a real read failure
+    // without replacing the production reader or its error handling.
+    auto lock = wil::unique_hfile{CreateFileW(path.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr)};
+    if (!lock) {
+        WinError("could not open the read-failure test file for locking");
+    }
+    auto operation = OVERLAPPED{};
+    if (!LockFileEx(lock.get(), LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0, 1, 0, &operation)) {
+        WinError("could not lock the read-failure test file");
+    }
+    {
+        const auto file = wil::unique_file{_wfsopen(path.c_str(), L"rb", _SH_DENYWR)};
+        if (!file) {
+            WinError("could not open the locked test file", ExplicitCrtIoError{});
+        }
+        auto input = std::ifstream{file.get()};
+        auto line = std::string{};
+        std::getline(input, line);
+        if (!std::ferror(file.get()) || !input.eof() || input.bad()) {
+            throw std::runtime_error("the locked read did not demonstrate a CRT error presented as C++ EOF");
+        }
+    }
+    const auto unreadable = ReadEntireFile(path);
+    if (unreadable) {
+        throw std::runtime_error("the whole-file reader accepted a failed read as EOF");
+    }
+    try {
+        WinError("could not read '{}'", std::wstring_view{path.native()}, unreadable.error());
+    } catch (const std::system_error &failure) {
+        const auto message = std::string_view{failure.what()};
+        if ((failure.code() != std::error_code{ERROR_LOCK_VIOLATION, std::system_category()}) ||
+            !message.contains("locked.txt") || !message.contains("Windows error 0x00000021")) {
+            throw std::runtime_error(std::format("the reader lost its underlying read error: {}", message));
+        }
+    }
+    // The next assertion requires the byte-range lock to be released. Explicit
+    // unlocking avoids relying on close-time release, whose timing is qualified
+    // in https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex#remarks.
+    if (!UnlockFileEx(lock.get(), 0, 1, 0, &operation)) {
+        WinError("could not unlock the read-failure test file");
+    }
+    lock.reset();
+    const auto readable = ReadEntireFile(path);
+    if (!readable || (*readable != contents)) {
+        throw std::runtime_error("the whole-file reader did not recover after releasing the lock");
+    }
+    std::filesystem::remove_all(directory);
+    PrintPass("a real read failure reported as C++ EOF retains its Windows error and file context.");
 }
 
 } // namespace
@@ -152,6 +229,85 @@ auto main() -> int try {
         throw std::runtime_error(std::format("missing numeric fallback: {}", unknown.message));
     }
     PrintPass("a code without a message resource produces a numeric diagnostic.");
+
+    struct CrtCase {
+        int crt_error;
+        unsigned long windows_error;
+        std::error_code expected;
+    };
+    for (const auto &test : std::array{
+            CrtCase{EINVAL, ERROR_ACCESS_DENIED,
+                {ERROR_ACCESS_DENIED, std::system_category()}},
+            CrtCase{EMFILE, 0, {EMFILE, std::generic_category()}},
+            CrtCase{0, 0, std::make_error_code(std::io_errc::stream)}}) {
+        errno = test.crt_error;
+        _doserrno = test.windows_error;
+        const auto constructed = TryConstructWinError("", ExplicitCrtIoError{});
+        if (!constructed) {
+            throw std::runtime_error("could not construct the test CRT I/O error");
+        }
+        errno = test.crt_error;
+        _doserrno = test.windows_error;
+        try {
+            WinError("could not redirect '{}'", "stdout", ExplicitCrtIoError{});
+        } catch (const std::system_error &failure) {
+            const auto message = std::string_view{failure.what()};
+            if ((failure.code() != test.expected) ||
+                !message.contains("could not redirect 'stdout'") ||
+                !message.contains(constructed->what())) {
+                throw std::runtime_error(std::format(
+                    "inconsistent constructed and thrown CRT I/O errors: {} / {}",
+                    constructed->what(), message));
+            }
+        }
+    }
+    PrintPass("constructed and thrown CRT I/O errors agree on Windows errors, "
+        "CRT-only errors, and stream failures without a recorded error code.");
+
+    errno = EACCES;
+    _doserrno = ERROR_ACCESS_DENIED;
+    const auto saved = ExplicitCrtIoError{};
+    errno = ENOENT;
+    _doserrno = ERROR_FILE_NOT_FOUND;
+    const auto saved_diagnostic = TryConstructWinError("", saved);
+    if (!saved_diagnostic) {
+        throw std::runtime_error("could not construct the saved CRT I/O error");
+    }
+    try {
+        WinError("could not read '{}'", std::wstring_view{L"caf\u00e9"}, saved);
+    } catch (const std::system_error &failure) {
+        if ((failure.code() != std::error_code{ERROR_ACCESS_DENIED, std::system_category()}) ||
+            !std::string_view{failure.what()}.contains("caf\u00e9") ||
+            !std::string_view{failure.what()}.contains(saved_diagnostic->what())) {
+            throw std::runtime_error("a saved CRT I/O error lost its code or wide context");
+        }
+    }
+    PrintPass("a saved CRT I/O error survives later errors and formats a wide path.");
+
+    // Exhaust CRT stream slots without consuming disk space, then exercise the
+    // real reader. Releasing the streams before reporting also checks that the
+    // result carries the error independently of subsequent CRT operations.
+    auto streams = std::vector<wil::unique_file>{};
+    while (auto stream = wil::unique_file{_wfsopen(L"NUL", L"rb", _SH_DENYNO)}) {
+        streams.push_back(std::move(stream));
+    }
+    // The failing CRT open sets `EMFILE` without changing `_doserrno`. An
+    // unrelated Windows error must not take precedence over that real failure.
+    _doserrno = ERROR_ACCESS_DENIED;
+    const auto unreadable = ReadEntireFile(std::filesystem::path{"NUL"});
+    streams.clear();
+    if (unreadable) {
+        throw std::runtime_error("the reader unexpectedly opened a file with no CRT stream slots available");
+    }
+    try {
+        WinError("could not read 'NUL'", unreadable.error());
+    } catch (const std::system_error &failure) {
+        if (failure.code() != std::error_code{EMFILE, std::generic_category()}) {
+            throw std::runtime_error(std::format("the reader lost its CRT-only error: {}", failure.what()));
+        }
+    }
+    PrintPass("the whole-file reader preserves a real CRT-only open failure.");
+    TestReadFailure();
     return 0;
 } catch (const std::exception &error) {
     std::println("{}FAIL: {}{}", kRedForeground, error.what(), kDefaultForeground);

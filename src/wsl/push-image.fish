@@ -157,7 +157,7 @@ for i in $labels
 end
 
 set -l wall_clock_initial (unix_timestamp_now)
-printf '%s: wall clock started at %s.\n' $argv0 \
+log 'wall clock started at' \
     (format_date (date_timestamp_args $wall_clock_initial))
 
 set -l builders \
@@ -206,11 +206,9 @@ for builder in $builders
 end
 test (count $podman_pids) -gt 0 || die 'did not launch any builders'
 
-wait
+wait $podman_pids
 
-printf '%s: collected exit codes: %s\n' \
-    $argv0 (string join ' ' $podman_exit_codes)
-
+log 'collected podman exit codes:' $podman_exit_codes
 for index in (seq (count $podman_exit_codes))
     test $podman_exit_codes[$index] -eq 0 || \
         die 'build failed on' $build_connections[$index] 'with exit status' \
@@ -249,11 +247,17 @@ for i in $version_tag (qualified_tag latest)
 end
 
 set -l wall_clock_final (unix_timestamp_now)
-printf '%s: wall clock stopped at %s.\n' $argv0 \
+log 'wall clock stopped at' \
     (format_date (date_timestamp_args $wall_clock_final))
 
-set -l date_args \
-    (date_timestamp_args (math $wall_clock_final - $wall_clock_initial))
 # This formatting method assumes that the time elapsed was less than 24 hours.
 # That is a reasonable assumption here.
-printf '%s: completed successfully in %s.\n' $argv0 (date -u $date_args +%T)
+set -l date_args \
+    (date_timestamp_args (math $wall_clock_final - $wall_clock_initial))
+log 'completed successfully in' (date -u $date_args +%T)
+
+if jobs -q
+    log 'waiting for log reader processes to exit'
+    wait
+    log 'all log reader processes have exited'
+end

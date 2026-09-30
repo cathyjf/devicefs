@@ -42,8 +42,8 @@ namespace {
 // a specific release and record its SHA-256 digest so `VerifyWinFspMsi` can
 // reject a changed download before Windows Installer executes it. Accepting
 // another WinFsp installer therefore requires changing these source constants.
-// WSL uses Microsoft's current release because Windows already relies on
-// Microsoft to supply trusted operating system code.
+// WSL uses Microsoft's current release, with its MSI signature and Microsoft
+// certificate chain checked by `VerifyWslMsi` before installation.
 //
 // The WinFsp release page publishes the version and SHA-256 recorded here:
 // https://github.com/winfsp/winfsp/releases/tag/v2.2B4
@@ -52,6 +52,66 @@ constexpr auto kWinFspRelease =
     "https://github.com/winfsp/winfsp/releases/download/v2.2B4"sv;
 constexpr auto kWinFspSha256 =
     "2ECB5C89405488A95BBD8A01875E02C48534FD37BBDFD84488F7590464D65944"sv;
+
+auto VerifyWslMsi(const std::filesystem::path &path) {
+    // WSL acquisition is an automatic prerequisite of DeviceFs installation.
+    // The installer therefore requires a signed MSI whose entire publisher
+    // chain, including the root, identifies Microsoft Corporation. Accepting
+    // Microsoft's corporate identity allows signing-root changes without
+    // requiring a DeviceFs update before WSL can be installed.
+    auto file = WINTRUST_FILE_INFO{
+        .cbStruct = sizeof(WINTRUST_FILE_INFO),
+        .pcwszFilePath = path.c_str(),
+    };
+    auto trust = wil::unique_wintrust_data{WINTRUST_DATA{
+        .cbStruct = sizeof(WINTRUST_DATA),
+        .dwUIChoice = WTD_UI_NONE,
+        .dwUnionChoice = WTD_CHOICE_FILE,
+        .pFile = &file,
+        .dwStateAction = WTD_STATEACTION_VERIFY,
+    }};
+    auto action = GUID WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    if (const auto status = WinVerifyTrust(
+            static_cast<HWND>(INVALID_HANDLE_VALUE),
+            &action, &trust); status != ERROR_SUCCESS) {
+        WinError("could not verify the signature of WSL MSI '{}'",
+            std::wstring_view{path.native()}, ExplicitHresult{status});
+    }
+
+    // The retained Authenticode state contains the verified publisher chain.
+    // Using that chain ties the identity checks to the MSI signature Windows
+    // accepted. WIL closes the state after the certificate checks finish.
+    // https://learn.microsoft.com/en-us/windows/win32/api/wintrust/nf-wintrust-wthelpergetprovsignerfromchain
+    const auto provider = WTHelperProvDataFromStateData(trust.hWVTStateData);
+    const auto signer = provider
+        ? WTHelperGetProvSignerFromChain(provider, 0, FALSE, 0) : nullptr;
+    if (!signer || (signer->csCertChain == 0)) {
+        throw std::runtime_error(std::format(
+            "WSL MSI '{}' has no verified publisher certificate chain",
+            Transcode<std::string>(path.native())));
+    }
+    const auto chain = std::span{signer->pasCertChain, signer->csCertChain};
+    auto organization_oid = std::to_array(szOID_ORGANIZATION_NAME);
+    for (const auto &certificate : chain) {
+        const auto length = CertGetNameStringA(certificate.pCert,
+            CERT_NAME_ATTR_TYPE, 0, organization_oid.data(), nullptr, 0);
+        auto organization = std::string(length, '\0');
+        if (CertGetNameStringA(certificate.pCert, CERT_NAME_ATTR_TYPE, 0,
+                organization_oid.data(), organization.data(), length) <= 1) {
+            throw std::runtime_error(std::format(
+                "WSL MSI '{}' has a signing-chain certificate without an "
+                "organization",
+                Transcode<std::string>(path.native())));
+        }
+        organization.pop_back();
+        if (organization != "Microsoft Corporation") {
+            throw std::runtime_error(std::format(
+                "WSL MSI '{}' has a signing-chain certificate for organization "
+                "'{}'; expected Microsoft Corporation",
+                Transcode<std::string>(path.native()), organization));
+        }
+    }
+}
 
 [[nodiscard]] auto InstallMsi(
     const std::filesystem::path &path,
@@ -252,6 +312,11 @@ auto InstallWslPackage() -> bool {
             L"backup-supervisor: downloaded '{}' ({:.2f} MiB)\n",
             std::wstring_view{name}, bytes / (1024.0 * 1024.0));
 
+        VerifyWslMsi(destination);
+        devicefs::WriteToStream(devicefs::stdout,
+            L"backup-supervisor: verified WSL MSI '{}' signature and Microsoft "
+            L"certificate chain\n",
+            std::wstring_view{name});
         return InstallMsi(destination,
             std::format("WSL MSI '{}'", Transcode<std::string>(name)));
     } catch (const winrt::hresult_error &error) {

@@ -264,7 +264,7 @@ devicefs_version_info(backup-supervisor "DeviceFs Backup Supervisor" 0.1)
 target_link_libraries(backup-supervisor PRIVATE
     ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-rpc-block-device
     devicefs-terminal devicefs-windows-imports vshadow
-    Version
+    Version wintrust
 )
 
 foreach(target IN ITEMS backup-supervisor devicefs-read-path-test)

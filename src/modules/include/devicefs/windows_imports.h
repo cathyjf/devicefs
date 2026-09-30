@@ -46,6 +46,8 @@ using PNTSTATUS = NTSTATUS *;
 #include <userenv.h>
 #include <vsserror.h>
 #include <wincrypt.h>
+#include <wintrust.h>
+#include <softpub.h>
 #include <wininet.h>
 #include <winioctl.h>
 #include <winfsp/winfsp.h>

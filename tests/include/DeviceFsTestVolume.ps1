@@ -5,6 +5,7 @@
 # without assigning a drive letter. Return the partition for the caller to
 # mount or populate. The filename selects VHD or VHDX; `Fixed` selects fully
 # allocated storage rather than a dynamic image.
+# `DevDrive` formats the partition as a Dev Drive.
 # The caller is responsible for detaching and deleting `Path`, including when
 # creation fails after the image has been attached.
 function New-DeviceFsTestVolume {
@@ -22,6 +23,8 @@ function New-DeviceFsTestVolume {
         [string] $Label,
 
         [switch] $Fixed,
+
+        [switch] $DevDrive,
 
         [ValidateSet('NTFS', 'ReFS')]
         [string] $FileSystem = 'NTFS'
@@ -64,7 +67,8 @@ function New-DeviceFsTestVolume {
         ([char]$partition.DriveLetter -ne [char]0)) {
         throw "The test partition in '$Path' did not become visible without a drive letter."
     }
+    $format_options = if ($DevDrive) { @{ DevDrive = $true } } else { @{} }
     Format-Volume -Partition $partition -FileSystem $FileSystem -AllocationUnitSize $ClusterSize `
-        -NewFileSystemLabel $Label -Force -Confirm:$false | Out-Null
+        -NewFileSystemLabel $Label @format_options -Force -Confirm:$false | Out-Null
     return $partition
 }

@@ -10,13 +10,21 @@
 Exercises devicefs --synthetic-free-clusters against a disposable read-only VHD.
 
 .DESCRIPTION
-Runs NTFS with 4 KiB clusters and ReFS with 4 KiB and 64 KiB clusters by default.
+Runs NTFS with 4 KiB clusters, ReFS with 4 KiB and 64 KiB clusters, and
+Dev Drive with 4 KiB clusters by default. The selected cases run in parallel,
+and their results are collected after all cases have finished.
 Cases whose filesystem Windows cannot format are reported as unavailable.
-Each case creates a fixed VHD containing one volume without assigning a drive
+Each case creates a VHD containing one volume without assigning a drive
 letter. The test selects a free cluster while the VHD is attached read-only,
-detaches the VHD, writes a nonzero pattern into that cluster, and attaches the
-VHD read-only again. It then compares direct volume reads with normal and
+detaches the VHD, writes a nonzero pattern into that cluster as described below,
+and reattaches the VHD read-only. It then compares direct volume reads with normal and
 synthetic devicefs views using an independently queried allocation bitmap.
+The Dev Drive case uses a dynamically expanding 51 GiB VHD, leaving room for a
+volume of at least 50 GiB. The other cases use fixed VHDs. All cases write the
+witness into the detached VHD file; dynamic VHD writes use its block allocation table.
+The Dev Drive sequential comparison covers the first 2 GiB; the
+other cases compare the complete volume. Targeted reads also check the
+free-cluster witness, cluster boundaries, and the end of the volume.
 It also checks the exposed known-data bitmap. Use -KnownDataMapClusterSize to
 test different byte counts per bit, including sizes that cross filesystem clusters.
 
@@ -26,8 +34,7 @@ detached VHD and logs after a failure.
 .PARAMETER Cases
 Selects filesystem and cluster-size cases using one comma-separated string,
 for example `-Cases 'ReFS-4K,ReFS-64K'`. All cases run by default.
-Every case runs the same read comparisons, free-cluster witness checks and
-known-data bitmap assertions.
+Every case checks read boundaries, free-cluster witnesses, and the known-data bitmap.
 
 .PARAMETER VhdSizeMiB
 Size of the NTFS fixture. ReFS fixtures use at least 2048 MiB.
@@ -48,9 +55,12 @@ param(
     [ValidateRange(1, [long]::MaxValue)]
     [long] $KnownDataMapClusterSize = 4MB,
 
-    [string] $Cases = 'NTFS-4K,ReFS-4K,ReFS-64K',
+    [string] $Cases = 'NTFS-4K,ReFS-4K,ReFS-64K,DevDrive-4K',
 
-    [switch] $KeepArtifactsOnFailure
+    [switch] $KeepArtifactsOnFailure,
+
+    [Parameter(DontShow)]
+    [switch] $ParallelWorker
 )
 
 Set-StrictMode -Version Latest
@@ -59,6 +69,7 @@ $case_settings = @{
     'NTFS-4K' = @{ FileSystem = 'NTFS'; ClusterSize = 4KB }
     'ReFS-4K' = @{ FileSystem = 'ReFS'; ClusterSize = 4KB }
     'ReFS-64K' = @{ FileSystem = 'ReFS'; ClusterSize = 64KB }
+    'DevDrive-4K' = @{ FileSystem = 'ReFS'; ClusterSize = 4KB; DevDrive = $true }
 }
 $selected_cases = $Cases -split ','
 foreach ($case in $selected_cases) {
@@ -70,6 +81,19 @@ $file_backed_virtual_bus_type = [UInt16]15
 . ([IO.Path]::Combine(
         $PSScriptRoot, 'include', 'DeviceFsTestProcess.ps1'))
 . (Join-Path $PSScriptRoot 'include/DeviceFsTestVolume.ps1')
+
+function Write-TestLog {
+    param(
+        [string] $Message,
+        [string] $CaseName = $case,
+        [switch] $Warning
+    )
+
+    $write = if ($Warning) { 'Write-Warning' } else { 'Write-Host' }
+    foreach ($line in $Message.Split("`n")) {
+        & $write "[$CaseName] $($line.TrimEnd("`r"))"
+    }
+}
 
 function Assert-Condition {
     param(
@@ -143,26 +167,8 @@ function Write-VhdCluster {
         $relative_offset -le ($PartitionLength - $ClusterSize)) `
         'The VHD witness cluster is outside the partition.'
 
-    $footer_size = 512
-    $stream = [IO.File]::Open(
-        $Path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite,
-        [IO.FileShare]::None)
-    try {
-        Assert-Condition ($stream.Length -eq ($DiskLength + $footer_size)) `
-            'The fixed VHD file has an unexpected length.'
-        $footer_cookie = [byte[]]::new(8)
-        $stream.Position = $DiskLength
-        $stream.ReadExactly($footer_cookie, 0, $footer_cookie.Length)
-        Assert-Condition (
-            [Text.Encoding]::ASCII.GetString($footer_cookie) -ceq 'conectix') `
-            'The fixed VHD footer is invalid.'
-
-        $stream.Position = $PartitionOffset + $relative_offset
-        $stream.Write($Pattern, 0, $Pattern.Length)
-        $stream.Flush($true)
-    } finally {
-        $stream.Dispose()
-    }
+    [DeviceFsTestNative]::WriteVhdWitness(
+        $Path, $DiskLength, ($PartitionOffset + $relative_offset), $Pattern)
 }
 
 function Mount-ValidatedReadOnlyVhd {
@@ -215,7 +221,7 @@ function Mount-ValidatedReadOnlyVhd {
         'The read-only volume does not map to the expected VHD partition.'
 
     $bitmap = [DeviceFsTestNative]::GetAllocationBitmap(
-        $Fixture.VolumeName, $true)
+        $Fixture.VolumeName, $true, { param($message) Write-TestLog $message })
     Assert-Condition (
         ($bitmap.Length -eq $Fixture.VolumeLength) -and
             ($bitmap.ClusterSize -eq $Fixture.ClusterSize)) `
@@ -239,15 +245,18 @@ Assert-Condition ([IO.File]::Exists($SupervisorPath)) `
 
 $native_source_path = [IO.Path]::Combine(
     $PSScriptRoot, 'types', 'DeviceFsTestNative.cs')
-if ($null -ne ([Management.Automation.PSTypeName]'DeviceFsTestNative').Type) {
-    throw 'DeviceFsTestNative is already loaded. Run the test in a fresh pwsh process.'
+if (-not $ParallelWorker) {
+    if ($null -ne ([Management.Automation.PSTypeName]'DeviceFsTestNative').Type) {
+        throw 'DeviceFsTestNative is already loaded. Run the test in a fresh pwsh process.'
+    }
+    Add-Type -Path $native_source_path
 }
-Add-Type -Path $native_source_path
 
 function Invoke-SyntheticFreeClustersCase {
     param(
         [string] $FileSystem,
-        [int] $ClusterSize
+        [int] $ClusterSize,
+        [switch] $DevDrive
     )
 
     $run_id = [Guid]::NewGuid().ToString('N')
@@ -279,14 +288,19 @@ function Invoke-SyntheticFreeClustersCase {
         $normal_mount = [IO.Path]::Combine($test_root, 'normal')
         $synthetic_mount = [IO.Path]::Combine($test_root, 'synthetic')
 
-        $size_mib = if ($FileSystem -eq 'ReFS') {
+        # Dev Drive requires a 50 GB volume; the extra GiB accommodates partitioning.
+        # https://learn.microsoft.com/en-us/windows/dev-drive/#prerequisites
+        $size_mib = if ($DevDrive) {
+            51 * 1024
+        } elseif ($FileSystem -eq 'ReFS') {
             [Math]::Max(2048, $VhdSizeMiB)
         } else {
             $VhdSizeMiB
         }
         $requested_disk_length = [UInt64]$size_mib * 1MB
         $source_partition = New-DeviceFsTestVolume -Path $vhd_path -SizeBytes $requested_disk_length `
-            -ClusterSize $ClusterSize -FileSystem $FileSystem -Label $source_label -Fixed
+            -ClusterSize $ClusterSize -FileSystem $FileSystem -Label $source_label -Fixed:(-not $DevDrive) `
+            -DevDrive:$DevDrive
         $disk = Get-Disk -Number $source_partition.DiskNumber
         Add-PartitionAccessPath -InputObject $source_partition `
             -AccessPath $source_mount
@@ -370,8 +384,7 @@ function Invoke-SyntheticFreeClustersCase {
 
         Dismount-DiskImage -ImagePath $vhd_path | Out-Null
         Assert-Condition (-not (Get-DiskImage -ImagePath $vhd_path).Attached) `
-            'The read-only VHD remained attached before offline modification.'
-        # A fixed legacy VHD stores its raw disk payload at file offset zero.
+            'The read-only VHD remained attached before witness modification.'
         Write-VhdCluster -Path $vhd_path -DiskLength $fixture.DiskLength `
             -PartitionOffset $fixture.PartitionOffset `
             -PartitionLength $fixture.PartitionLength `
@@ -423,20 +436,20 @@ function Invoke-SyntheticFreeClustersCase {
         $map_path = "$synthetic_image.known-data.bitmap"
         Assert-Condition (-not [IO.File]::Exists("$normal_image.known-data.bitmap")) `
             'The filesystem exposed a bitmap without the option.'
-        Write-Host 'PASS: no bitmap file is exposed when --expose-known-data-map is omitted.'
+        Write-TestLog 'PASS: no bitmap file is exposed when --expose-known-data-map is omitted.'
 
         $entries = @(Get-ChildItem -LiteralPath $synthetic_mount -Name)
         Assert-Condition (($entries.Count -eq 2) -and
             ($entries -contains 'volume.img') -and
             ($entries -contains 'volume.img.known-data.bitmap')) `
             'The directory listing did not contain the image and its bitmap.'
-        Write-Host 'PASS: the directory lists the image and its bitmap file.'
+        Write-TestLog 'PASS: the directory lists the image and its bitmap file.'
 
         $map = [IO.File]::ReadAllBytes($map_path)
         $chunk_count = [long][Math]::Ceiling($bitmap.Length / $KnownDataMapClusterSize)
         Assert-Condition ($map.Length -eq [long][Math]::Ceiling($chunk_count / 8)) `
             'The exposed bitmap has the wrong length.'
-        Write-Host "PASS: the bitmap has the expected length of $($map.Length) bytes."
+        Write-TestLog "PASS: the bitmap has the expected length of $($map.Length) bytes."
 
         for ($chunk = 0L; $chunk -lt $chunk_count; ++$chunk) {
             $first = [long][Math]::Floor($chunk * $KnownDataMapClusterSize / $bitmap.ClusterSize)
@@ -453,16 +466,16 @@ function Invoke-SyntheticFreeClustersCase {
             $actual = ($map[$index] -band (1 -shl ($chunk % 8))) -ne 0
             Assert-Condition ($actual -eq $allocated) "Known-data bitmap differs at chunk $chunk."
         }
-        Write-Host ("PASS: all $chunk_count bits match the allocation bitmap " +
+        Write-TestLog ("PASS: all $chunk_count bits match the allocation bitmap " +
             "at $KnownDataMapClusterSize bytes per bit.")
 
         $map_stream = [IO.File]::OpenRead($map_path)
         try {
             $null = $map_stream.Seek(-1, [IO.SeekOrigin]::End)
             Assert-Condition ($map_stream.ReadByte() -eq $map[-1]) 'Reading the last bitmap byte failed.'
-            Write-Host 'PASS: seeking to the final bitmap byte returns the correct value.'
+            Write-TestLog 'PASS: seeking to the final bitmap byte returns the correct value.'
             Assert-Condition ($map_stream.ReadByte() -eq -1) 'Reading past the bitmap did not return EOF.'
-            Write-Host 'PASS: reading past the bitmap returns EOF.'
+            Write-TestLog 'PASS: reading past the bitmap returns EOF.'
         } finally {
             $map_stream.Dispose()
         }
@@ -504,13 +517,14 @@ function Invoke-SyntheticFreeClustersCase {
                 $test_case.Offset, $test_case.Length)
         }
 
+        $comparison_length = if ($DevDrive) { [Math]::Min(2GB, $bitmap.Length) } else { $bitmap.Length }
         $comparison = [DeviceFsTestNative]::CompareViews(
             $source_device, $normal_image, $synthetic_image, $bitmap,
-            $comparison_chunk_size)
-        Assert-Condition ($comparison.BytesCompared -eq $bitmap.Length) `
-            'The full comparison did not cover the complete volume.'
-        Write-Host ("PASS: compared $($comparison.BytesCompared) bytes; " +
-            "$($comparison.FreeBytes) bytes belonged to free clusters, including " +
+            $comparison_chunk_size, $comparison_length)
+        Assert-Condition ($comparison.BytesCompared -eq $comparison_length) `
+            'The sequential comparison did not cover the requested byte count.'
+        Write-TestLog ("PASS: compared $($comparison.BytesCompared) bytes; " +
+            "$($comparison.FreeBytes) bytes belonged to free clusters; targeted reads verified " +
             "$($bitmap.ClusterSize) controlled nonzero witness bytes that " +
             'the synthetic view replaced with zeros.')
     } catch {
@@ -551,7 +565,7 @@ function Invoke-SyntheticFreeClustersCase {
                     $invocation.Process.Dispose()
                 } else {
                     $devicefs_processes_gone = $false
-                    Write-Warning (
+                    Write-TestLog -Warning (
                         "devicefs process $($invocation.Process.Id) remains " +
                         'alive; the VHD and test directory will be preserved.')
                 }
@@ -594,17 +608,17 @@ function Invoke-SyntheticFreeClustersCase {
                 Remove-Item -LiteralPath $test_root -Recurse -Force
             } catch {
                 $cleanup_errors.Add($_.Exception)
-                Write-Warning "Test artifacts were preserved at '$test_root'."
+                Write-TestLog -Warning "Test artifacts were preserved at '$test_root'."
             }
         } elseif (($null -ne $test_root) -and
             (Test-Path -LiteralPath $test_root)) {
-            Write-Warning "Test artifacts were preserved at '$test_root'."
+            Write-TestLog -Warning "Test artifacts were preserved at '$test_root'."
         }
     }
 
     if ($null -ne $primary_error) {
         foreach ($cleanup_error in $cleanup_errors) {
-            Write-Warning "Cleanup also failed: $($cleanup_error.Message)"
+            Write-TestLog -Warning "Cleanup also failed: $($cleanup_error.Message)"
         }
         throw $primary_error
     }
@@ -615,19 +629,43 @@ function Invoke-SyntheticFreeClustersCase {
     return -not $filesystem_unsupported
 }
 
-$failures = [Collections.Generic.List[Exception]]::new()
-foreach ($case in $selected_cases) {
-    Write-Host "Testing $case"
+if ($ParallelWorker) {
+    $case = $selected_cases[0]
+    $settings = $case_settings[$case]
+    Write-TestLog 'Testing'
     try {
-        $settings = $case_settings[$case]
-        if (Invoke-SyntheticFreeClustersCase @settings) {
-            Write-Host "PASS: $case"
-        } else {
-            Write-Host "Information: ${case} was not run because Windows does not support formatting $($settings.FileSystem) on this system."
+        return [pscustomobject]@{
+            Case = $case
+            Available = Invoke-SyntheticFreeClustersCase @settings
+            Error = $null
         }
     } catch {
-        Write-Host "FAIL: ${case}: $($_.Exception.Message)"
-        $failures.Add($_.Exception)
+        return [pscustomobject]@{ Case = $case; Available = $false; Error = $_.Exception }
+    }
+}
+
+$script_path = $PSCommandPath
+$parameters = @{
+    SupervisorPath = $SupervisorPath
+    VhdSizeMiB = $VhdSizeMiB
+    KnownDataMapClusterSize = $KnownDataMapClusterSize
+    KeepArtifactsOnFailure = $KeepArtifactsOnFailure.IsPresent
+    ParallelWorker = $true
+}
+$results = @($selected_cases | ForEach-Object -Parallel {
+    $ErrorActionPreference = 'Stop'
+    & $using:script_path @using:parameters -Cases $_
+})
+
+$failures = [Collections.Generic.List[Exception]]::new()
+foreach ($result in $results) {
+    if ($null -ne $result.Error) {
+        Write-TestLog -CaseName $result.Case "FAIL: $($result.Error.Message)"
+        $failures.Add($result.Error)
+    } elseif ($result.Available) {
+        Write-TestLog -CaseName $result.Case 'PASS'
+    } else {
+        Write-TestLog -CaseName $result.Case "Information: Windows does not support formatting $($case_settings[$result.Case].FileSystem) on this system."
     }
 }
 if ($failures.Count -ne 0) {

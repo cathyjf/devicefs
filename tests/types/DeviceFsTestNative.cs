@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
@@ -612,7 +613,7 @@ public static class DeviceFsTestNative {
     }
 
     private static VolumeAllocationBitmap QueryBitmap(SafeFileHandle device,
-        bool requireReadOnly) {
+        bool requireReadOnly, Action<string> log) {
         QueryVolumeInformation(device, out _, out var fileSystemName,
             out var fileSystemFlags);
         if (requireReadOnly && ((fileSystemFlags & FileReadOnlyVolume) == 0)) {
@@ -653,7 +654,7 @@ public static class DeviceFsTestNative {
         var bits = new byte[checked((int)bitmapBytes)];
         Buffer.BlockCopy(
             result.Buffer, VolumeBitmapHeaderSize, bits, 0, bits.Length);
-        Console.WriteLine($"{fileSystemName}: {geometry.ClusterCount} clusters of " +
+        log($"{fileSystemName}: {geometry.ClusterCount} clusters of " +
             $"{geometry.ClusterSize} bytes; bitmap reports " +
             $"{BitConverter.ToInt64(result.Buffer, 8)} clusters, " +
             $"returned {result.BytesReturned} bytes.");
@@ -744,9 +745,9 @@ public static class DeviceFsTestNative {
     }
 
     public static VolumeAllocationBitmap GetAllocationBitmap(string devicePath,
-        bool requireReadOnly) {
+        bool requireReadOnly, Action<string> log = null) {
         using var device = OpenDevice(devicePath);
-        return QueryBitmap(device, requireReadOnly);
+        return QueryBitmap(device, requireReadOnly, log ?? Console.WriteLine);
     }
 
     public static byte[] ReadDeviceAt(string devicePath,
@@ -1207,11 +1208,172 @@ public static class DeviceFsTestNative {
         summary.BytesCompared += count;
     }
 
+    // Write sector-aligned witness bytes into a detached fixed or dynamic VHD.
+    // Citations below refer to Microsoft's Virtual Hard Disk Image Format
+    // Specification, October 11, 2006, v1.0, abbreviated as VHD Specification.
+    // https://www.microsoft.com/en-us/download/details.aspx?id=23850
+    // Multibyte fields use big-endian byte order. See VHD Specification v1.0,
+    // "Introduction", p. 3.
+    public static void WriteVhdWitness(string path, long diskLength, long diskOffset,
+        byte[] pattern) {
+        // Sector length is always 512 bytes. See VHD Specification v1.0,
+        // "Introduction", p. 3.
+        const int sectorSize = 512;
+        if ((diskOffset < 0) || (diskOffset % sectorSize != 0) ||
+            (pattern.Length == 0) || (pattern.Length % sectorSize != 0) ||
+            (diskOffset > diskLength - pattern.Length)) {
+            throw new ArgumentOutOfRangeException(nameof(diskOffset),
+                "the witness must cover whole sectors within the virtual disk");
+        }
+        using var file = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        byte[] ReadAt(long offset, int count) {
+            if ((offset < 0) || (offset > file.Length - count)) {
+                throw new InvalidDataException($"VHD record at offset {offset} is outside '{path}'");
+            }
+            var bytes = new byte[count];
+            file.Position = offset;
+            file.ReadExactly(bytes);
+            return bytes;
+        }
+
+        // The footer table places the eight-byte ASCII cookie at offset 0 and
+        // the eight-byte `Current Size` at offset 48. `Current Size` counts the
+        // virtual disk's bytes. This test writes new Windows VHDs with 512-byte
+        // footers; the document also describes an older 511-byte footer.
+        // See VHD Specification v1.0, "Hard Disk Footer Format" and
+        // "Hard Disk Footer Field Descriptions", pp. 5–6.
+        var footer = ReadAt(file.Length - sectorSize, sectorSize);
+        if ((Encoding.ASCII.GetString(footer, 0, 8) != "conectix") ||
+            (BinaryPrimitives.ReadUInt64BigEndian(footer.AsSpan(48)) != (ulong)diskLength)) {
+            throw new InvalidDataException($"VHD footer in '{path}' does not match the test disk");
+        }
+        // The four-byte `Disk Type` field begins at offset 60. Values 2 and 3
+        // identify fixed and dynamic disks. See VHD Specification v1.0,
+        // "Hard Disk Footer Format", p. 5, and "Disk Type", p. 7.
+        var diskType = BinaryPrimitives.ReadUInt32BigEndian(footer.AsSpan(60));
+        // Fixed VHDs store disk bytes from file offset zero, followed by the
+        // footer. See VHD Specification v1.0, "Fixed Hard Disk Image", p. 3.
+        if (diskType == 2) {
+            if (file.Length != checked(diskLength + sectorSize)) {
+                throw new InvalidDataException($"fixed VHD '{path}' has an unexpected length");
+            }
+            file.Position = diskOffset;
+            file.Write(pattern);
+            file.Flush(true);
+            return;
+        }
+        if (diskType != 3) {
+            throw new InvalidDataException($"VHD '{path}' is neither fixed nor dynamic");
+        }
+        // The footer's eight-byte `Data Offset`, at offset 16, points to the
+        // 1024-byte dynamic header. Its eight-byte cookie is `cxsparse`.
+        // See VHD Specification v1.0, "Hard Disk Footer Format", pp. 5–6;
+        // "Dynamic Hard Disk Image", p. 4; and "Dynamic Disk Header Format", p. 8.
+        var header = ReadAt(checked((long)BinaryPrimitives.ReadUInt64BigEndian(
+            footer.AsSpan(16))), 1024);
+        if (Encoding.ASCII.GetString(header, 0, 8) != "cxsparse") {
+            throw new InvalidDataException($"dynamic VHD header in '{path}' has an invalid cookie");
+        }
+        // The header table places `Table Offset` at 16 (eight bytes),
+        // `Max Table Entries` at 28 (four), and `Block Size` at 32 (four).
+        // The table offset counts file bytes; block size excludes the bitmap.
+        // See VHD Specification v1.0, "Dynamic Disk Header Format" and its
+        // field descriptions, pp. 8–9.
+        var tableOffset = checked((long)BinaryPrimitives.ReadUInt64BigEndian(header.AsSpan(16)));
+        var entryCount = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(28));
+        var blockSize = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(32));
+        // Blocks contain a power-of-two number of sectors. Because sectors are
+        // 512 bytes, block size must be a power of two and at least 512 bytes.
+        // See VHD Specification v1.0, "Block Size", p. 9, and
+        // "Block Allocation Table and Data Blocks", p. 11.
+        if ((blockSize < sectorSize) || ((blockSize & (blockSize - 1)) != 0)) {
+            throw new InvalidDataException($"dynamic VHD '{path}' has an invalid block size");
+        }
+        // Each payload sector has one bitmap bit. The bitmap precedes the data
+        // and is padded to a sector boundary, so its bit count is rounded first
+        // to bytes, then to sectors. See VHD Specification v1.0,
+        // "Block Allocation Table and Data Blocks", p. 11.
+        var sectorsPerBlock = blockSize / sectorSize;
+        var bitmapSize = checked((int)(((sectorsPerBlock + 7L) / 8 + sectorSize - 1)
+            / sectorSize * sectorSize));
+        for (var written = 0; written < pattern.Length;) {
+            var offset = checked(diskOffset + written);
+            // Division selects the BAT entry; the remainder below selects bytes
+            // within its payload. These are the byte forms of the sector
+            // formulas in VHD Specification v1.0, "Mapping a Disk Sector to
+            // a Sector in the Block", p. 12.
+            var blockIndex = offset / blockSize;
+            if (blockIndex >= entryCount) {
+                throw new InvalidDataException($"witness block is outside the BAT in '{path}'");
+            }
+            // BAT entries are four-byte absolute sector offsets. `0xFFFFFFFF`
+            // denotes an unallocated block. See VHD Specification v1.0,
+            // "Block Allocation Table and Data Blocks", p. 10.
+            var entryOffset = checked(tableOffset + blockIndex * sizeof(uint));
+            var entry = ReadAt(entryOffset, sizeof(uint));
+            var sector = BinaryPrimitives.ReadUInt32BigEndian(entry);
+            long blockOffset;
+            byte[] bitmap;
+            if (sector == uint.MaxValue) {
+                // An absent BAT entry represents zeros. A new zero-filled
+                // block replaces the old trailing footer, and the unchanged
+                // footer is written at the new end. Its checksum stays valid
+                // because no footer bytes change. See VHD Specification v1.0,
+                // "Mapping a Disk Sector to a Sector in the Block", p. 12;
+                // the zero-sector requirement in "Block Allocation Table and
+                // Data Blocks", p. 11; and "Checksum", p. 7.
+                blockOffset = file.Length - sectorSize;
+                if (blockOffset % sectorSize != 0) {
+                    throw new InvalidDataException($"dynamic VHD '{path}' is not sector aligned");
+                }
+                var zeroBlock = new byte[checked(bitmapSize + (int)blockSize)];
+                file.Position = blockOffset;
+                file.Write(zeroBlock);
+                file.Write(footer);
+                BinaryPrimitives.WriteUInt32BigEndian(entry,
+                    checked((uint)(blockOffset / sectorSize)));
+                file.Position = entryOffset;
+                file.Write(entry);
+                bitmap = new byte[bitmapSize];
+            } else {
+                // The BAT locates the start of the bitmap. Its padded length
+                // separates that offset from the payload. See VHD Specification
+                // v1.0, "Mapping a Disk Sector to a Sector in the Block", p. 12.
+                blockOffset = (long)sector * sectorSize;
+                if (blockOffset + bitmapSize + blockSize > file.Length - sectorSize) {
+                    throw new InvalidDataException($"BAT entry in '{path}' extends beyond its data");
+                }
+                bitmap = ReadAt(blockOffset, bitmapSize);
+            }
+            var withinBlock = offset % blockSize;
+            var count = (int)Math.Min(pattern.Length - written, blockSize - withinBlock);
+            file.Position = blockOffset + bitmapSize + withinBlock;
+            file.Write(pattern, written, count);
+            // A zero bitmap bit requires the sector's stored bytes to be zero.
+            // Marking all payload sectors valid therefore preserves the meaning
+            // of unwritten sectors, and also makes the witness valid. Updating
+            // complete bitmap bytes avoids depending on an intra-byte bit order
+            // that the specification does not explicitly define. Padding bytes
+            // after the payload's bitmap are left unchanged.
+            // See VHD Specification v1.0, "Block Allocation Table and Data
+            // Blocks", p. 11.
+            Array.Fill(bitmap, byte.MaxValue, 0,
+                checked((int)((sectorsPerBlock + 7L) / 8)));
+            file.Position = blockOffset;
+            file.Write(bitmap);
+            written += count;
+        }
+        file.Flush(true);
+    }
+
     public static ComparisonSummary CompareViews(string sourceDevicePath,
         string normalImagePath, string syntheticImagePath, VolumeAllocationBitmap bitmap,
-        int chunkSize) {
+        int chunkSize, long maximumBytes) {
         if (chunkSize <= 0) {
             throw new ArgumentOutOfRangeException(nameof(chunkSize));
+        }
+        if (maximumBytes <= 0) {
+            throw new ArgumentOutOfRangeException(nameof(maximumBytes));
         }
 
         using var source = OpenRawReadDevice(sourceDevicePath);
@@ -1233,8 +1395,9 @@ public static class DeviceFsTestNative {
         var normalBytes = new byte[chunkSize];
         var syntheticBytes = new byte[chunkSize];
         var summary = new ComparisonSummary();
-        for (var offset = 0L; offset < length;) {
-            var current = (int)Math.Min((long)chunkSize, length - offset);
+        var comparisonLength = Math.Min(length, maximumBytes);
+        for (var offset = 0L; offset < comparisonLength;) {
+            var current = (int)Math.Min((long)chunkSize, comparisonLength - offset);
             if ((ReadManaged(normal, normalBytes, current) != current) ||
                 (ReadManaged(synthetic, syntheticBytes, current) != current)) {
                 throw new EndOfStreamException(

@@ -253,13 +253,13 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
             "    Volume size: {} bytes\n"
             "    Potentially dirty: {} of {} 16-KiB blocks ({:.2f}%)\n"
             "    Descriptor evidence: {} unique block(s) from {} "
-            "descriptor(s) in {} list block(s)\n"
+            "descriptor(s) in {} list block(s) across {} store(s)\n"
             "    Allocation changes: {} unique block(s)\n"
             "    System Volume Information extents: {} unique block(s)\n",
             map.volume_size,
             candidate_blocks, volume_blocks, percentage,
             map.descriptor_block_count, map.descriptor_count,
-            map.descriptor_list_block_count,
+            map.descriptor_list_block_count, map.descriptor_store_count,
             map.allocation_block_count,
             map.svi_block_count);
     }
@@ -282,6 +282,7 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
         try {
             return BuildDirtyBlockMap(
                 interval.baseline_snapshot_identifier,
+                interval.payload_snapshot_identifier,
                 interval.baseline_device,
                 interval.payload_device);
         } catch (const std::runtime_error &error) {
@@ -403,8 +404,8 @@ enum class BackupViewPreparation {
         report.payload_device,
         filename);
     devicefs::WriteToStream(output,
-        "    Dirty map: {} 16-KiB block(s)\n",
-        report.map->block_offsets.size());
+        "    Dirty map: {} 16-KiB block(s); {} contributing descriptor store(s)\n",
+        report.map->block_offsets.size(), report.map->descriptor_store_count);
 
     synthetic_sources.push_back({
         .name = filename,
@@ -1627,6 +1628,44 @@ auto PrintVerificationResult(
     const std::span<const AvailableBaseline> baselines,
     const IncrementalDiagnosticOptions &options) {
     auto result = SnapshotDiagnosticResult{};
+    if (options.payload_snapshot_identifier) {
+        const auto identifier = *options.payload_snapshot_identifier;
+        const auto properties = devicefs::vshadow::QuerySnapshotProperties(
+            std::array{identifier}).front();
+        if (!properties) {
+            throw std::runtime_error(std::format(
+                "could not query the requested payload snapshot '{}'", FormatGuid(identifier)));
+        }
+        if (std::ranges::none_of(volumes, [&properties](const auto &volume) {
+                return SameVolume(properties->original_volume,
+                    Transcode<std::string>(devicefs::vshadow::ResolveVolumeName(volume)));
+            })) {
+            throw std::runtime_error(std::format(
+                "requested payload snapshot '{}' belongs to volume '{}', "
+                "which is not among the selected volumes",
+                FormatGuid(identifier), properties->original_volume));
+        }
+        // The test suite creates snapshots around controlled file changes and
+        // supplies their IDs to each diagnostic. Using the requested payload
+        // snapshot makes the filesystem comparison test those same changes.
+        // The caller remains responsible for deleting this snapshot.
+        // `BuildDirtyBlockReports` creates and deletes a later snapshot to
+        // freeze the descriptor stores while constructing the dirty map.
+        [[gsl::suppress("6001", justification:
+            "This expression initializes `payload`; it does not read it.")]]
+        const auto payload = devicefs::vshadow::SnapshotSet{
+            .identifier = properties->snapshot_set_identifier,
+            .snapshots = {{.identifier = identifier,
+                .original_volume = properties->original_volume,
+                .device = properties->device}},
+        };
+        result.exit_code = internal::RunVssOperation(cancellation_event, [&] {
+            result.diagnostics = RunPayloadDiagnostics(
+                cancellation_event, baselines, payload, options);
+            return kTemporarySnapshotsComplete;
+        });
+        return result;
+    }
     result.exit_code = internal::RunVssOperation(
         cancellation_event,
         [&] {

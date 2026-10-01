@@ -30,6 +30,7 @@ import devicefs.vss_block_descriptors;
 export struct DirtyBlockMap {
     std::uint64_t volume_size;
     std::vector<std::uint64_t> block_offsets;
+    std::size_t descriptor_store_count;
     std::size_t descriptor_count;
     std::uint64_t descriptor_list_block_count;
     std::size_t descriptor_block_count;
@@ -72,19 +73,28 @@ auto SortAndDeduplicate(
 
 export [[nodiscard]] auto BuildDirtyBlockMap(
     const GUID &baseline_snapshot_identifier,
+    const GUID &payload_snapshot_identifier,
     const std::string_view baseline_device,
     const std::string_view payload_device) {
-    const auto descriptors = devicefs::vss::ReadBlockDescriptors(
-        payload_device, baseline_snapshot_identifier);
-    auto descriptor_blocks = ProjectDescriptorBlocks(descriptors);
+    const auto interval = devicefs::vss::ReadBlockDescriptorInterval(
+        payload_device, baseline_snapshot_identifier, payload_snapshot_identifier);
+    auto descriptor_blocks = std::vector<std::uint64_t>{};
+    auto descriptor_count = std::size_t{};
+    auto list_block_count = std::uint64_t{};
+    for (const auto &store : interval.stores) {
+        descriptor_blocks.append_range(ProjectDescriptorBlocks(store.blocks));
+        descriptor_count += store.blocks.descriptors.size();
+        list_block_count += store.blocks.list_block_count;
+    }
+    SortAndDeduplicate(descriptor_blocks);
     auto allocation_blocks = devicefs::ReadAllocationChangeBlocks(
         baseline_device, payload_device, devicefs::vss::kBlockSize);
-    if (descriptors.volume_size != allocation_blocks.volume_size) {
+    if (interval.payload.volume_size != allocation_blocks.volume_size) {
         throw std::runtime_error(std::format(
             "the VSS descriptors for '{}' report a {}-byte volume, but the "
             "allocation bitmaps report {} bytes",
             payload_device,
-            descriptors.volume_size, allocation_blocks.volume_size));
+            interval.payload.volume_size, allocation_blocks.volume_size));
     }
 
     constexpr auto privilege_description =
@@ -106,10 +116,11 @@ export [[nodiscard]] auto BuildDirtyBlockMap(
     descriptor_blocks.append_range(svi_blocks);
     SortAndDeduplicate(descriptor_blocks);
     return DirtyBlockMap{
-        .volume_size = descriptors.volume_size,
+        .volume_size = interval.payload.volume_size,
         .block_offsets = std::move(descriptor_blocks),
-        .descriptor_count = descriptors.descriptors.size(),
-        .descriptor_list_block_count = descriptors.list_block_count,
+        .descriptor_store_count = interval.stores.size(),
+        .descriptor_count = descriptor_count,
+        .descriptor_list_block_count = list_block_count,
         .descriptor_block_count = descriptor_block_count,
         .allocation_block_count = allocation_block_count,
         .svi_block_count = svi_block_count,

@@ -27,6 +27,7 @@ export struct IncrementalDiagnosticOptions {
     std::optional<std::filesystem::path> backup_view_mount_root;
     double filesystem_verification_percentage = 100.0;
     std::optional<GUID> baseline_snapshot_identifier;
+    std::optional<GUID> payload_snapshot_identifier;
     std::optional<std::u8string> namespace_override;
     std::vector<std::string> volume_override;
 };

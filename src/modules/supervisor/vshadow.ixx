@@ -210,21 +210,27 @@ export namespace devicefs::vshadow {
     }, snapshot_identifiers) | std::ranges::to<std::vector>();
 }
 
+// Resolve a drive, mount path, or volume name using the same VShadow rules
+// used when creating snapshots. The result can also be compared with the
+// original volume reported by `QuerySnapshotProperties`.
+[[nodiscard]] auto ResolveVolumeName(const std::string &volume) {
+    try {
+        return GetUniqueVolumeNameForPath(
+            Transcode<std::wstring>(volume), true);
+    } catch (const HRESULT result) {
+        WinError("could not resolve backup volume '{}'",
+            volume, ExplicitHresult{result});
+    }
+}
+
 [[nodiscard]] auto Run(
     const HANDLE cancellation_event,
     const bool use_writers,
     const std::span<const std::string> volumes,
     SnapshotOperation auto &&operation) -> int {
     const auto canonical_volumes = volumes |
-        std::views::transform([](const std::string &volume) {
-            try {
-                return GetUniqueVolumeNameForPath(
-                    Transcode<std::wstring>(volume), true);
-            } catch (const HRESULT result) {
-                WinError("could not resolve backup volume '{}'",
-                    volume, ExplicitHresult{result});
-            }
-        }) | std::ranges::to<std::vector<std::wstring>>();
+        std::views::transform(ResolveVolumeName) |
+        std::ranges::to<std::vector<std::wstring>>();
     try {
         return Backup{cancellation_event, use_writers}.Run(
             canonical_volumes, operation);

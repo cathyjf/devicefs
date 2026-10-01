@@ -564,6 +564,30 @@ struct SelectiveViewOptions {
     return result;
 }
 
+[[nodiscard]] auto ParseVerificationPercentage(const std::string_view value) {
+    const auto text = std::string{value};
+    const auto invalid = [&text] {
+        return std::invalid_argument(std::format(
+            "--verify-percentage requires a number greater than "
+            "zero and no greater than 100; received '{}'", text));
+    };
+    auto consumed = std::size_t{};
+    const auto percentage = [&] {
+        try {
+            return std::stod(text, &consumed);
+        } catch (const std::invalid_argument &) {
+            throw invalid();
+        } catch (const std::out_of_range &) {
+            throw invalid();
+        }
+    }();
+    if ((consumed != text.size()) || !std::isfinite(percentage) ||
+        (percentage <= 0.0) || (percentage > 100.0)) {
+        throw invalid();
+    }
+    return percentage;
+}
+
 [[nodiscard]] auto ParseIncrementalDiagnosticOptions(
     const std::span<const std::string_view> arguments) {
     auto result = IncrementalDiagnosticOptions{};
@@ -595,29 +619,8 @@ struct SelectiveViewOptions {
                 throw std::invalid_argument(
                     "--verify-percentage requires a value");
             }
-            const auto text = std::string{arguments[index]};
-            auto consumed = std::size_t{};
-            try {
-                result.filesystem_verification_percentage =
-                    std::stod(text, &consumed);
-            } catch (const std::invalid_argument &) {
-                throw std::invalid_argument(std::format(
-                    "--verify-percentage requires a number greater than "
-                    "zero and no greater than 100; received '{}'", text));
-            } catch (const std::out_of_range &) {
-                throw std::invalid_argument(std::format(
-                    "--verify-percentage requires a number greater than "
-                    "zero and no greater than 100; received '{}'", text));
-            }
-            if ((consumed != text.size()) ||
-                !std::isfinite(
-                    result.filesystem_verification_percentage) ||
-                (result.filesystem_verification_percentage <= 0.0) ||
-                (result.filesystem_verification_percentage > 100.0)) {
-                throw std::invalid_argument(std::format(
-                    "--verify-percentage requires a number greater than "
-                    "zero and no greater than 100; received '{}'", text));
-            }
+            result.filesystem_verification_percentage =
+                ParseVerificationPercentage(arguments[index]);
             verification_percentage_supplied = true;
         } else if (argument == "--namespace") {
             if (++index == arguments.size()) {
@@ -632,16 +635,18 @@ struct SelectiveViewOptions {
                     "--volume/--volumes requires a value");
             }
             raw_volume_override = arguments[index];
-        } else if (argument == "--baseline") {
+        } else if ((argument == "--baseline") || (argument == "--payload")) {
             if (++index == arguments.size()) {
                 throw std::invalid_argument(
-                    "--baseline requires a value");
+                    std::format("{} requires a value", argument));
             }
-            result.baseline_snapshot_identifier = [argument = arguments[index]] {
-                const auto identifier = ParseGuid(argument);
+            auto &destination = argument == "--baseline"
+                ? result.baseline_snapshot_identifier : result.payload_snapshot_identifier;
+            destination = [option = argument, value = arguments[index]] {
+                const auto identifier = ParseGuid(value);
                 if (!identifier) {
                     throw std::invalid_argument(std::format(
-                        "--baseline requires a snapshot GUID; received '{}'", argument));
+                        "{} requires a snapshot GUID; received '{}'", option, value));
                 }
                 return *identifier;
             }();
@@ -932,6 +937,27 @@ struct SelectiveViewOptions {
         });
 }
 
+[[nodiscard]] auto RunVerifyFilesystems(
+    const std::span<const std::string_view> arguments) {
+    if ((arguments.size() != 3) &&
+        ((arguments.size() != 5) || (arguments[3] != "--verify-percentage"))) {
+        throw std::invalid_argument(
+            "--verify-filesystems requires SYNTHETIC-ROOT REAL-ROOT "
+            "and an optional --verify-percentage PERCENT");
+    }
+    const auto percentage = arguments.size() == 5
+        ? ParseVerificationPercentage(arguments[4]) : 100.0;
+    const auto [input, console_mode] = GetForegroundConsoleInput(
+        "--verify-filesystems requires an attached console");
+    return RunForegroundOperation(input, console_mode,
+        [synthetic = std::filesystem::path{arguments[1]},
+            real = std::filesystem::path{arguments[2]}, percentage](
+            const HANDLE cancellation_event) {
+            return VerifyMountedFilesystems(
+                cancellation_event, synthetic, real, percentage);
+        });
+}
+
 auto WINAPI ServiceMain(
     const DWORD argc, char **) noexcept -> void {
     static auto context = ServiceContext{};
@@ -988,13 +1014,18 @@ auto PrintHelp() noexcept {
         "[--namespace NAMESPACE]\n"
         "      ADDRESS defaults to 127.0.0.1.\n"
         "  backup-supervisor.exe --inventory-vhdx DEVICE\n"
+        "  backup-supervisor.exe --verify-filesystems SYNTHETIC-ROOT REAL-ROOT\n"
+        "      [--verify-percentage PERCENT]\n"
+        "      Compare two already mounted volume roots.\n"
+        "      Keep both volumes mounted until verification finishes.\n"
         "  backup-supervisor.exe [--incremental-verify] "
         "[--incremental-stats]\n"
         "      [--expose-synthetic-backup [MOUNT-POINT] |\n"
         "       --verify-synthetic-backup [MOUNT-POINT] "
         "[--verify-percentage PERCENT]]\n"
         "      Omit MOUNT-POINT to use a temporary SystemTemp directory.\n"
-        "      [--namespace NAMESPACE] [--baseline SNAPSHOT-ID]\n"
+        "      [--namespace NAMESPACE] [--baseline SNAPSHOT-ID] [--payload SNAPSHOT-ID]\n"
+        "      --payload uses an existing payload snapshot instead of creating one.\n"
         "      [--volumes VOLUME[,VOLUME...]]\n"
         "  backup-supervisor.exe --install\n"
         "  backup-supervisor.exe --run-service\n");
@@ -1066,6 +1097,9 @@ export auto BackupSupervisorMain(
                     "--inventory-vhdx requires exactly one DEVICE");
             }
             return RunInventoryVhdx(std::string{arguments[1]});
+        }
+        if (option == "--verify-filesystems") {
+            return RunVerifyFilesystems(arguments);
         }
         if ((option == "--incremental-stats") ||
             (option == "--incremental-verify") ||

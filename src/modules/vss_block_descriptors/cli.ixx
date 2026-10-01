@@ -27,7 +27,9 @@ namespace {
 struct Options {
     std::string_view source;
     std::string_view snapshot_identifier;
+    std::string_view baseline_identifier;
     bool svi_extents = false;
+    bool catalog = false;
     bool help = false;
 };
 
@@ -35,13 +37,17 @@ auto Usage(const auto output) noexcept {
     devicefs::WriteToStream(
         output,
         "Usage: vss-descriptor-dump --source SOURCE --snapshot-id GUID\n"
-        "       vss-descriptor-dump --source SNAPSHOT --svi-extents\n\n"
-        "Read one VSS store's raw block descriptors or the allocated "
-        "System Volume Information extents of a snapshot.\n\n"
+        "       vss-descriptor-dump --source SOURCE --baseline-id A --snapshot-id B\n"
+        "       vss-descriptor-dump --source SNAPSHOT --svi-extents\n"
+        "       vss-descriptor-dump --source SOURCE --catalog\n\n"
+        "Read raw VSS descriptors for one store or an A-inclusive, B-exclusive\n"
+        "interval, inspect the catalog, or enumerate allocated SVI extents.\n\n"
         "Options:\n"
         "  --source SOURCE       Volume, snapshot device, or flat volume image\n"
         "  --snapshot-id GUID    Shadow-copy identifier to select\n"
+        "  --baseline-id GUID    Read all stores from this copy up to --snapshot-id\n"
         "  --svi-extents         Print allocated SVI block offsets\n"
+        "  --catalog             Print store IDs, creation FILETIMEs and offsets\n"
         "  -h, --help            Show this help\n");
 }
 
@@ -64,8 +70,12 @@ auto Usage(const auto output) noexcept {
             result.source = next(index);
         } else if (argument == "--snapshot-id") {
             result.snapshot_identifier = next(index);
+        } else if (argument == "--baseline-id") {
+            result.baseline_identifier = next(index);
         } else if (argument == "--svi-extents") {
             result.svi_extents = true;
+        } else if (argument == "--catalog") {
+            result.catalog = true;
         } else {
             throw std::invalid_argument(std::format(
                 "unknown option '{}' at argument {}", argument, index + 1));
@@ -77,13 +87,14 @@ auto Usage(const auto output) noexcept {
     if (result.source.empty()) {
         throw std::invalid_argument("--source is required");
     }
-    if (result.snapshot_identifier.empty() && !result.svi_extents) {
+    const auto modes = std::array{!result.snapshot_identifier.empty(),
+        result.svi_extents, result.catalog};
+    if (std::ranges::count(modes, true) != 1) {
         throw std::invalid_argument(
-            "--snapshot-id or --svi-extents is required");
+            "exactly one of --snapshot-id, --svi-extents, or --catalog is required");
     }
-    if (!result.snapshot_identifier.empty() && result.svi_extents) {
-        throw std::invalid_argument(
-            "--snapshot-id and --svi-extents cannot be combined");
+    if (!result.baseline_identifier.empty() && result.snapshot_identifier.empty()) {
+        throw std::invalid_argument("--baseline-id requires --snapshot-id");
     }
     return result;
 }
@@ -142,6 +153,28 @@ auto WriteOutput(const std::string_view output) {
     }
 }
 
+[[nodiscard]] auto FormatCatalog(
+    const std::vector<devicefs::vss::CatalogStore> &stores) {
+    auto output = std::format("schema-version\t1\nstore-count\t{}\n",
+        stores.size());
+    // `index` records catalog traversal order; `creation-filetime` lets a
+    // diagnostic compare that order with the stores' creation times.
+    output += "columns\tindex\tstore-id\tsnapshot-id\tcreation-filetime\t"
+        "volume-size\tin-volume\tlist-offset\theader-offset\n";
+    for (auto index = 0uz; index < stores.size(); ++index) {
+        const auto &store = stores[index];
+        std::format_to(std::back_inserter(output),
+            "store\t{}\t{}\t{}\t{}\t{}\t{}\t{:016x}\t{:016x}\n",
+            index, FormatGuid<false>(store.store_identifier),
+            store.snapshot_identifier
+                ? FormatGuid<false>(*store.snapshot_identifier) : "-",
+            store.creation_time, store.volume_size,
+            store.has_in_volume_data ? 1 : 0,
+            store.list_offset, store.header_offset);
+    }
+    return output;
+}
+
 auto Run(const std::span<const std::string_view> arguments) {
     const auto options = ParseOptions(arguments);
     if (options.help) {
@@ -154,10 +187,38 @@ auto Run(const std::span<const std::string_view> arguments) {
         WriteOutput(FormatSviExtents(offsets));
         return 0;
     }
+    if (options.catalog) {
+        WriteOutput(FormatCatalog(
+            devicefs::vss::ReadStoreCatalog(options.source)));
+        return 0;
+    }
     const auto snapshot_identifier = ParseGuid(options.snapshot_identifier);
     if (!snapshot_identifier) {
         throw std::invalid_argument(std::format(
             "--snapshot-id is not a GUID: {}", options.snapshot_identifier));
+    }
+    if (!options.baseline_identifier.empty()) {
+        const auto baseline = ParseGuid(options.baseline_identifier);
+        if (!baseline) {
+            throw std::invalid_argument(std::format(
+                "--baseline-id is not a GUID: {}", options.baseline_identifier));
+        }
+        const auto interval = devicefs::vss::ReadBlockDescriptorInterval(
+            options.source, *baseline, *snapshot_identifier);
+        auto output = std::format(
+            "schema-version\t1\ninterval-baseline-id\t{}\n"
+            "interval-payload-id\t{}\nstore-count\t{}\n",
+            FormatGuid<false>(*baseline), FormatGuid<false>(*snapshot_identifier),
+            interval.stores.size());
+        // The text between `begin-store` and `end-store` uses the single-store
+        // schema, so both modes can use the same descriptor-output decoder.
+        for (const auto &store : interval.stores) {
+            std::format_to(std::back_inserter(output),
+                "begin-store\t{}\n{}end-store\n", store.catalog.creation_time,
+                FormatResult(store.blocks));
+        }
+        WriteOutput(output);
+        return 0;
     }
     const auto result = devicefs::vss::ReadBlockDescriptors(
         options.source, *snapshot_identifier);

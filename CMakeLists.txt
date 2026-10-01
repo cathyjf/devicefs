@@ -246,10 +246,16 @@ target_link_libraries(devicefs-oci-verification-test PRIVATE
 add_test(NAME devicefs_read_path COMMAND devicefs-read-path-test)
 add_test(NAME devicefs_error_messages COMMAND devicefs-error-messages-test)
 add_test(NAME devicefs_oci_verification COMMAND devicefs-oci-verification-test)
+add_test(NAME devicefs_vss_catalog
+    COMMAND "${POWERSHELL_EXECUTABLE}" -NoProfile -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/Test-VssCatalog.ps1"
+        -SupervisorPath $<TARGET_FILE:backup-supervisor>
+)
 
 # These omitted tests require elevation:
 #   tests/Test-SyntheticFreeClusters.ps1
 #   tests/Test-LibvshadowBlockDescriptors.ps1
+#   tests/Test-VssSnapshotIntervals.ps1
 #   tests/Measure-PbsKnownDataMap.ps1 (PBS throughput benchmark)
 
 add_subdirectory(src/terminal)

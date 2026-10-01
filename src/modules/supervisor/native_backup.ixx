@@ -76,6 +76,18 @@ export [[nodiscard]] auto InventoryVhdx(
     const HANDLE cancellation_event,
     const std::string_view device) -> int;
 
+// Compare the namespace and selected stream contents of two mounted volume
+// roots. The caller keeps both filesystems mounted and unchanged until the
+// operation returns. Results, progress, and exit codes use the same rules as
+// synthetic-backup verification. `percentage` is greater than zero and at most
+// 100, and selects content chunks; namespace traversal always covers the
+// complete volume.
+export [[nodiscard]] auto VerifyMountedFilesystems(
+    const HANDLE cancellation_event,
+    const std::filesystem::path &synthetic_root,
+    const std::filesystem::path &real_root,
+    const double percentage) -> int;
+
 // Retrieve the PBS snapshot catalog as UTF-8 JSON for all groups in the
 // configured namespace, or the supplied override, and its descendants. The
 // object contains the starting namespace and a snapshots array; each snapshot

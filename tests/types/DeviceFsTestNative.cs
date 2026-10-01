@@ -92,6 +92,7 @@ public sealed class AllocationChangeBlocks {
 
 public static class DeviceFsTestNative {
     private const uint GenericRead = 0x80000000;
+    private const uint GenericWrite = 0x40000000;
     private const uint TokenQuery = 0x00000008;
     private const uint TokenAdjustPrivileges = 0x00000020;
     private const uint SePrivilegeEnabled = 0x00000002;
@@ -133,6 +134,27 @@ public static class DeviceFsTestNative {
     private const int ErrorMoreData = 234;
     private const int ErrorNotAllAssigned = 1300;
     private const string BackupPrivilegeName = "SeBackupPrivilege";
+    private const ushort KeyEvent = 0x0001;
+    private const uint LeftCtrlPressed = 0x0008;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KeyEventRecord {
+        public int KeyDown;
+        public ushort RepeatCount;
+        public ushort VirtualKeyCode;
+        public ushort VirtualScanCode;
+        public ushort UnicodeChar;
+        public uint ControlKeyState;
+    }
+
+    // Only the key-event member of INPUT_RECORD's union is needed here.
+    // Sequential layout supplies the padding before the DWORD-aligned member.
+    // https://learn.microsoft.com/en-us/windows/console/input-record-str
+    [StructLayout(LayoutKind.Sequential)]
+    private struct InputRecord {
+        public ushort EventType;
+        public KeyEventRecord Key;
+    }
 
     // These control codes are normally produced by Windows SDK CTL_CODE macros.
     private const uint FsctlGetNtfsVolumeData = 0x00090064;
@@ -316,6 +338,11 @@ public static class DeviceFsTestNative {
         uint creationDisposition, uint flagsAndAttributes,
         IntPtr templateFile);
 
+    [DllImport("kernel32.dll", SetLastError = true,
+        EntryPoint = "WriteConsoleInputW")]
+    private static extern bool WriteConsoleInput(SafeFileHandle input,
+        [In] InputRecord[] records, uint count, out uint written);
+
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetCurrentProcess();
 
@@ -391,6 +418,40 @@ public static class DeviceFsTestNative {
 
     private static Win32Exception LastError(string operation) {
         return Win32Error(operation, Marshal.GetLastWin32Error());
+    }
+
+    // The exposure supervisor shares the harness's console and reads Ctrl+C
+    // as a key record with processed input disabled. Writing that record asks
+    // the supervisor to use its existing cancellation and cleanup path.
+    // The harness calls this while exposure is the console input reader.
+    // https://learn.microsoft.com/en-us/windows/console/writeconsoleinput
+    public static void SendCtrlC() {
+        using (var input = CreateFile("CONIN$", GenericWrite,
+                FileShareRead | FileShareWrite, IntPtr.Zero, OpenExisting,
+                0, IntPtr.Zero)) {
+            if (input.IsInvalid) {
+                throw LastError("could not open console input to send Ctrl+C");
+            }
+            var records = new[] {
+                new InputRecord {
+                    EventType = KeyEvent,
+                    Key = new KeyEventRecord {
+                        KeyDown = 1,
+                        RepeatCount = 1,
+                        VirtualKeyCode = 'C',
+                        UnicodeChar = '\u0003',
+                        ControlKeyState = LeftCtrlPressed,
+                    },
+                },
+            };
+            if (!WriteConsoleInput(input, records, (uint)records.Length,
+                    out var written)) {
+                throw LastError("could not send Ctrl+C to console input");
+            }
+            if (written != records.Length) {
+                throw new IOException("Ctrl+C was not written to console input.");
+            }
+        }
     }
 
     private static string DevicePath(string volumeName) {

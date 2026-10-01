@@ -1,6 +1,66 @@
 # SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+function ConvertFrom-VssCatalogOutput {
+    param([AllowEmptyString()][string] $Output)
+
+    $lines = @($Output.TrimEnd("`r", "`n") -split '\r?\n')
+    $columns = "columns`tindex`tstore-id`tsnapshot-id`tcreation-filetime`t" +
+        "volume-size`tin-volume`tlist-offset`theader-offset"
+    Assert-Condition (($lines.Count -ge 3) -and
+        ($lines[0] -ceq "schema-version`t1") -and
+        ($lines[1] -match '^store-count\t([0-9]+)$') -and
+        ($lines[2] -ceq $columns)) 'Invalid VSS catalog output header.'
+    $count = [int]$Matches[1]
+    Assert-Condition ($lines.Count -eq $count + 3) 'VSS catalog row count differed from its header.'
+    $stores = [Collections.Generic.List[object]]::new()
+    for ($i = 0; $i -lt $count; ++$i) {
+        $fields = $lines[$i + 3].Split("`t")
+        Assert-Condition (($fields.Count -eq 9) -and ($fields[0] -ceq 'store') -and
+            ([int]$fields[1] -eq $i) -and ($fields[6] -cmatch '^[01]$')) `
+            "Invalid VSS catalog row: $($lines[$i + 3])"
+        $stores.Add([pscustomobject]@{
+            Index = $i
+            StoreId = [Guid]$fields[2]
+            CopyId = if ($fields[3] -ceq '-') { $null } else { [Guid]$fields[3] }
+            CreationFileTime = [uint64]$fields[4]
+            VolumeSize = [uint64]$fields[5]
+            InVolume = $fields[6] -ceq '1'
+            ListOffset = [Convert]::ToUInt64($fields[7], 16)
+            HeaderOffset = [Convert]::ToUInt64($fields[8], 16)
+        })
+    }
+    return ,$stores
+}
+
+function ConvertFrom-VssIntervalOutput {
+    param([string] $Output, [Guid] $BaselineId, [Guid] $PayloadId,
+        [long] $SourceLength, [int] $BlockSize)
+
+    $pattern = '\Aschema-version\t1\r?\ninterval-baseline-id\t([^\r\n]+)\r?\n' +
+        'interval-payload-id\t([^\r\n]+)\r?\nstore-count\t([0-9]+)\r?\n'
+    Assert-Condition ($Output -match $pattern) 'Invalid interval output header.'
+    Assert-Condition (([Guid]$Matches[1] -eq $BaselineId) -and
+        ([Guid]$Matches[2] -eq $PayloadId)) 'Interval endpoints differed from the request.'
+    $count = [int]$Matches[3]
+    $position = $Matches[0].Length
+    $stores = [Collections.Generic.List[object]]::new()
+    while ($position -lt $Output.Length) {
+        Assert-Condition ($Output.Substring($position) -match
+            '\Abegin-store\t([0-9]+)\r?\n([\s\S]*?)end-store\r?\n') 'Invalid interval store framing.'
+        $position += $Matches[0].Length
+        $time = [uint64]$Matches[1]
+        $store_text = $Matches[2]
+        Assert-Condition ($store_text -match '(?m)^snapshot-id\t([^\r\n]+)') 'Interval store omitted its copy ID.'
+        $store = ConvertFrom-VssDescriptorDumpOutput $store_text ([Guid]$Matches[1]) `
+            $stores.Count 1 2 $SourceLength $BlockSize
+        $store | Add-Member CreationFileTime $time
+        $stores.Add($store)
+    }
+    Assert-Condition ($stores.Count -eq $count) 'Interval store count differed from its header.'
+    return ,$stores
+}
+
 function Format-VssDescriptorTuple {
     param(
         [uint64] $Original,
@@ -296,4 +356,45 @@ function Compare-VssDescriptorStores {
         }
     }
     return $differences
+}
+
+function ConvertFrom-SviExtentDumpOutput {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string] $Output,
+
+        [Parameter(Mandatory)]
+        [int] $ExpectedBlockSize
+    )
+
+    $header_pattern = (
+        '\Aschema-version\t1\r?\n' +
+        'block-size\t(?<size>[0-9]+)\r?\n' +
+        'block-count\t(?<count>[0-9]+)\r?\n')
+    Assert-Condition ($Output -match $header_pattern) `
+        'the SVI extent reader printed an invalid header.'
+    $header = $Matches
+    Assert-Condition (
+        [Convert]::ToUInt64($header['size']) -eq $ExpectedBlockSize) `
+        'the SVI extent reader reported an unexpected block size.'
+
+    $blocks = [Collections.Generic.HashSet[long]]::new()
+    $block_output = $Output.Substring($header[0].Length)
+    foreach ($line in $block_output -split '\r?\n') {
+        if ($line.Length -eq 0) {
+            continue
+        }
+        Assert-Condition ($line -match '^block\t([0-9a-f]{16})$') `
+            "the SVI extent reader printed an unexpected line: $line"
+        $offset = [Convert]::ToUInt64($Matches[1], 16)
+        Assert-Condition ($offset -le [long]::MaxValue) `
+            'the SVI extent reader printed an out-of-range block offset.'
+        Assert-Condition ($blocks.Add([long]$offset)) `
+            'the SVI extent reader printed a duplicate block offset.'
+    }
+    Assert-Condition (
+        [uint64]$blocks.Count -eq [Convert]::ToUInt64($header['count'])) `
+        'the SVI extent reader block count did not match its output.'
+    return ,$blocks
 }

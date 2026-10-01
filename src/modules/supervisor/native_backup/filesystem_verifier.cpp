@@ -1636,7 +1636,7 @@ auto AppendStreamTasks(
     auto seed = std::seed_seq{seed_parts.begin(), seed_parts.end()};
     auto random = std::mt19937_64{seed};
     // The percentage independently selects ordinary stream-content chunks,
-    // with B's snapshot ID making the sample repeatable for this run.
+    // with the supplied identifier making the sample repeatable for this run.
     auto choose = std::bernoulli_distribution{percentage / 100.0};
     auto result = ComparisonPlan{};
     auto fallback = std::optional<ReadTask>{};
@@ -2044,10 +2044,11 @@ auto RunComparisonWorkers(
             plan.tasks.size());
 }
 
-auto CompareAttachedFilesystems(
-    const FilesystemVerificationVolume &volume,
-    const AttachedVhdx &synthetic_attachment,
-    const AttachedVhdx &real_attachment,
+auto CompareFilesystems(
+    const GUID &volume_id,
+    const GUID &seed_identifier,
+    const std::wstring_view synthetic_root,
+    const std::wstring_view real_root,
     const HANDLE cancellation_event,
     const double percentage,
     SynchronousIoCancellation &io_cancellation,
@@ -2055,7 +2056,7 @@ auto CompareAttachedFilesystems(
     if (internal::CancellationRequested(cancellation_event)) {
         return;
     }
-    const auto volume_identifier = FormatGuid(volume.volume_identifier);
+    const auto volume_identifier = FormatGuid(volume_id);
     state.BeginTraversal();
     devicefs::WriteToStream(
         devicefs::stdout,
@@ -2064,15 +2065,15 @@ auto CompareAttachedFilesystems(
         "  Real-B volume: {}\n"
         "  Traversal workers per view: {}\n",
         volume_identifier,
-        Transcode<std::string>(synthetic_attachment.Root()),
-        Transcode<std::string>(real_attachment.Root()),
+        Transcode<std::string>(synthetic_root),
+        Transcode<std::string>(real_root),
         kVerificationWorkerCount);
 
     auto synthetic_operation = std::async(
         std::launch::async,
         [&] {
             return InventoryFilesystem(
-                synthetic_attachment.Root(),
+                synthetic_root,
                 VerificationEndpoint::Synthetic,
                 cancellation_event, io_cancellation, state);
         });
@@ -2080,7 +2081,7 @@ auto CompareAttachedFilesystems(
         std::launch::async,
         [&] {
             return InventoryFilesystem(
-                real_attachment.Root(), VerificationEndpoint::Real,
+                real_root, VerificationEndpoint::Real,
                 cancellation_event, io_cancellation, state);
         });
 
@@ -2092,7 +2093,7 @@ auto CompareAttachedFilesystems(
         try {
             return std::async(std::launch::async, [&] {
                 PublishTraversalLayoutEstimate(
-                    real_attachment.Root(), synthetic_attachment.Root(),
+                    real_root, synthetic_root,
                     volume_identifier,
                     cancellation_event, io_cancellation, state);
             });
@@ -2148,7 +2149,7 @@ auto CompareAttachedFilesystems(
             "preparing content comparisons.\n",
             volume_identifier);
         auto plan = BuildComparisonPlan(
-            *synthetic, *real, volume.payload_snapshot_identifier,
+            *synthetic, *real, seed_identifier,
             percentage, cancellation_event, state);
         if (plan) {
             state.SetPlan(*plan);
@@ -2203,8 +2204,9 @@ auto VerifyVolume(
             real_vhdx, "real B", cancellation_event,
             virtual_disk_lock, io_cancellation);
         try {
-            CompareAttachedFilesystems(volume,
-                synthetic_attachment, real_attachment,
+            CompareFilesystems(volume.volume_identifier,
+                volume.payload_snapshot_identifier,
+                synthetic_attachment.Root(), real_attachment.Root(),
                 cancellation_event, percentage,
                 io_cancellation, state);
         } catch (...) {
@@ -2234,6 +2236,46 @@ struct VolumeJob {
     std::size_t printed_mismatches = 0;
     std::size_t printed_operation_comparisons = 0;
 };
+
+template <typename Operation>
+[[nodiscard]] auto StartVerification(
+    const GUID &volume_identifier,
+    const double percentage,
+    const HANDLE cancellation_event,
+    Operation operation) -> VolumeJob {
+    auto state = std::make_unique<VerificationState>();
+    auto &borrowed_state = *state;
+    auto future = [&]() -> std::future<void> {
+        try {
+            return std::async(std::launch::async,
+                [operation = std::move(operation), cancellation_event,
+                    &borrowed_state] {
+                    try {
+                        operation(borrowed_state);
+                    } catch (const VerificationFailure &error) {
+                        borrowed_state.Fail(error.what());
+                        borrowed_state.SetPhase(VerificationPhase::Complete);
+                    } catch (const std::system_error &error) {
+                        if (!(IsCancellationError(error) &&
+                            internal::CancellationRequested(cancellation_event))) {
+                            borrowed_state.Fail(error.what());
+                        }
+                        borrowed_state.SetPhase(VerificationPhase::Complete);
+                    }
+                });
+        } catch (const std::system_error &error) {
+            state->Fail(error.what());
+            state->SetPhase(VerificationPhase::Complete);
+            return {};
+        }
+    }();
+    return {
+        .volume_identifier = volume_identifier,
+        .percentage = percentage,
+        .state = std::move(state),
+        .operation = std::move(future),
+    };
+}
 
 [[nodiscard]] auto PhaseName(
     const VerificationPhase phase) noexcept -> std::string_view {
@@ -2762,7 +2804,92 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     return 0;
 }
 
+[[nodiscard]] auto FinishVerification(
+    const std::span<VolumeJob> jobs,
+    const HANDLE cancellation_event,
+    SynchronousIoCancellation &io_cancellation,
+    const std::size_t optimization_unavailable,
+    const std::size_t preparation_failures) -> int {
+    auto next_progress =
+        std::chrono::steady_clock::now() + kProgressReportInterval;
+    auto cancellation_failure = DWORD{ERROR_SUCCESS};
+    while (!JobsReady(jobs)) {
+        if (internal::CancellationRequested(cancellation_event)) {
+            RequestPendingIoCancellation(io_cancellation, cancellation_failure);
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= next_progress) {
+            PrintNewMismatches(jobs, devicefs::stdout);
+            PrintProgress(jobs);
+            next_progress = now + kProgressReportInterval;
+        }
+        std::this_thread::sleep_for(kReporterPollInterval);
+    }
+    for (auto &job : jobs) {
+        if (job.operation.valid()) {
+            job.operation.get();
+        }
+    }
+    return PrintFinalResults(jobs, optimization_unavailable, preparation_failures);
+}
+
+[[nodiscard]] auto MountedVolumeRoot(const std::filesystem::path &mount) {
+    auto path = std::filesystem::absolute(mount).make_preferred().native();
+    if (!path.ends_with(L'\\')) {
+        path.push_back(L'\\');
+    }
+    // `GetVolumeNameForVolumeMountPointW` resolves drive letters and mounted
+    // folders to volume-GUID roots. The optional layout count needs that volume
+    // name rather than the mount directory.
+    auto name = std::array<wchar_t, MAX_PATH>{};
+    if (!GetVolumeNameForVolumeMountPointW(
+            path.c_str(), name.data(), CompileTimeCast<DWORD, name.size()>())) {
+        WinError("could not obtain the mounted volume for '{}'",
+            std::wstring_view{path});
+    }
+    return std::wstring{name.data()};
+}
+
 } // namespace
+
+[[nodiscard]] auto VerifyMountedFilesystems(
+    const HANDLE cancellation_event,
+    const std::filesystem::path &synthetic_mount,
+    const std::filesystem::path &real_mount,
+    const double percentage) -> int {
+    if (internal::CancellationRequested(cancellation_event)) {
+        return internal::kCancelledExitCode;
+    }
+    const auto synthetic_root = MountedVolumeRoot(synthetic_mount);
+    const auto real_root = MountedVolumeRoot(real_mount);
+    // Windows returns `\\?\Volume{GUID}\`; the braced GUID follows the
+    // ten-character prefix and occupies 38 characters.
+    const auto volume_identifier = ParseGuid(
+        Transcode<std::string>(real_root).substr(10, 38));
+    if (!volume_identifier) {
+        WinError("could not read the volume GUID from '{}'",
+            std::wstring_view{real_root}, ExplicitHresult{volume_identifier.error()});
+    }
+    auto privileges = ProcessPrivilegeEnabler{
+        GetCurrentProcess(), std::array{wil::zwstring_view{SE_BACKUP_NAME}},
+        "the backup privilege"sv};
+    auto io_cancellation = SynchronousIoCancellation{};
+    // The mounted reference volume's GUID makes content sampling repeatable
+    // while the caller keeps this pair mounted.
+    auto jobs = std::array{StartVerification(*volume_identifier, percentage,
+        cancellation_event, [&](VerificationState &state) {
+            CompareFilesystems(*volume_identifier, *volume_identifier,
+                synthetic_root, real_root, cancellation_event, percentage,
+                io_cancellation, state);
+            state.SetPhase(VerificationPhase::Complete);
+        })};
+    const auto result = FinishVerification(
+        jobs, cancellation_event, io_cancellation, 0, 0);
+    if (result == 0) {
+        privileges.Restore();
+    }
+    return result;
+}
 
 [[nodiscard]] auto InventoryVhdx(
     const HANDLE cancellation_event,
@@ -2987,76 +3114,21 @@ export [[nodiscard]] auto VerifyFilesystemViews(
     auto jobs = std::vector<VolumeJob>{};
     jobs.reserve(volumes.size());
     for (const auto &volume : volumes) {
-        auto state = std::make_unique<VerificationState>();
-        auto *const borrowed_state = state.get();
         auto synthetic_vhdx = synthetic_mount / volume.filename;
         auto real_vhdx = real_mount / volume.filename;
-        auto operation = [&]() -> std::future<void> {
-            try {
-                return std::async(std::launch::async,
-                    [volume, synthetic_vhdx = std::move(synthetic_vhdx),
-                        real_vhdx = std::move(real_vhdx),
-                        cancellation_event, percentage, borrowed_state,
-                        &virtual_disk_lock, &io_cancellation] {
-                        try {
-                            VerifyVolume(volume,
-                                synthetic_vhdx, real_vhdx,
-                                cancellation_event, percentage,
-                                virtual_disk_lock,
-                                io_cancellation,
-                                *borrowed_state);
-                        } catch (const VerificationFailure &error) {
-                            borrowed_state->Fail(error.what());
-                            borrowed_state->SetPhase(
-                                VerificationPhase::Complete);
-                        } catch (const std::system_error &error) {
-                            if (!(IsCancellationError(error) &&
-                                internal::CancellationRequested(
-                                    cancellation_event))) {
-                                borrowed_state->Fail(error.what());
-                            }
-                            borrowed_state->SetPhase(
-                                VerificationPhase::Complete);
-                        }
-                    });
-            } catch (const std::system_error &error) {
-                state->Fail(error.what());
-                state->SetPhase(VerificationPhase::Complete);
-                return {};
-            }
-        }();
-        jobs.push_back({
-            .volume_identifier = volume.volume_identifier,
-            .percentage = percentage,
-            .state = std::move(state),
-            .operation = std::move(operation),
-        });
+        jobs.push_back(StartVerification(volume.volume_identifier, percentage,
+            cancellation_event,
+            [volume, synthetic_vhdx = std::move(synthetic_vhdx),
+                real_vhdx = std::move(real_vhdx), cancellation_event, percentage,
+                &virtual_disk_lock, &io_cancellation](VerificationState &state) {
+                VerifyVolume(volume, synthetic_vhdx, real_vhdx,
+                    cancellation_event, percentage, virtual_disk_lock,
+                    io_cancellation, state);
+            }));
     }
 
-    auto next_progress =
-        std::chrono::steady_clock::now() +
-        kProgressReportInterval;
-    auto cancellation_failure = DWORD{ERROR_SUCCESS};
-    while (!JobsReady(jobs)) {
-        if (internal::CancellationRequested(cancellation_event)) {
-            RequestPendingIoCancellation(
-                io_cancellation, cancellation_failure);
-        }
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= next_progress) {
-            PrintNewMismatches(jobs, devicefs::stdout);
-            PrintProgress(jobs);
-            next_progress = now + kProgressReportInterval;
-        }
-        std::this_thread::sleep_for(kReporterPollInterval);
-    }
-    for (auto &job : jobs) {
-        if (job.operation.valid()) {
-            job.operation.get();
-        }
-    }
-    const auto result = PrintFinalResults(
-        jobs, optimization_unavailable, preparation_failures);
+    const auto result = FinishVerification(jobs, cancellation_event,
+        io_cancellation, optimization_unavailable, preparation_failures);
     if (result != 0) {
         return result;
     }

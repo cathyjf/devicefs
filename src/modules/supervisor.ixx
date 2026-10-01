@@ -415,11 +415,16 @@ template <typename Operation>
                 WinError("could not read foreground console input");
             }
             for (const auto &record : std::span{records}.first(read)) {
+                // With VT input enabled, Ctrl+C can arrive as the ETX character
+                // (`0x03`) without a virtual key code or Ctrl modifier. This was
+                // observed when running through CTest. Both representations
+                // request cancellation, allowing callers to retain VT input.
                 if ((record.EventType != KEY_EVENT) ||
                     !record.Event.KeyEvent.bKeyDown ||
-                    (record.Event.KeyEvent.wVirtualKeyCode != L'C') ||
-                    ((record.Event.KeyEvent.dwControlKeyState &
-                        (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) == 0)) {
+                    ((record.Event.KeyEvent.uChar.UnicodeChar != L'\x03') &&
+                        ((record.Event.KeyEvent.wVirtualKeyCode != L'C') ||
+                            ((record.Event.KeyEvent.dwControlKeyState &
+                                (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) == 0)))) {
                     continue;
                 }
                 if (cancellation_event.is_signaled()) {

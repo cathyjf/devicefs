@@ -11,6 +11,7 @@ Exercises devicefs --synthetic-free-clusters against a disposable read-only VHD.
 
 .DESCRIPTION
 Runs NTFS with 4 KiB clusters and ReFS with 4 KiB and 64 KiB clusters by default.
+Cases whose filesystem Windows cannot format are reported as unavailable.
 Each case creates a fixed VHD containing one volume without assigning a drive
 letter. The test selects a free cluster while the VHD is attached read-only,
 detaches the VHD, writes a nonzero pattern into that cluster, and attaches the
@@ -259,6 +260,7 @@ function Invoke-SyntheticFreeClustersCase {
     $synthetic_invocation = $null
     $comparison = $null
     $primary_error = $null
+    $filesystem_unsupported = $false
     $cleanup_errors = [Collections.Generic.List[Exception]]::new()
     $devicefs_processes_gone = $true
     $image_detached = $false
@@ -512,7 +514,14 @@ function Invoke-SyntheticFreeClustersCase {
             "$($bitmap.ClusterSize) controlled nonzero witness bytes that " +
             'the synthetic view replaced with zeros.')
     } catch {
-        $primary_error = $_
+        # `MSFT_Volume.Format` reports 43001 when the filesystem is unsupported.
+        # Matching the error ID also works when Windows localizes the message.
+        # https://learn.microsoft.com/en-us/windows-hardware/drivers/storage/format-msft-volume
+        if ($_.FullyQualifiedErrorId -eq 'StorageWMI 43001,Format-Volume') {
+            $filesystem_unsupported = $true
+        } else {
+            $primary_error = $_
+        }
     } finally {
         foreach ($invocation in @($synthetic_invocation, $normal_invocation)) {
             if ($null -eq $invocation) {
@@ -600,9 +609,10 @@ function Invoke-SyntheticFreeClustersCase {
         throw $primary_error
     }
     if ($cleanup_errors.Count -ne 0) {
-        throw [AggregateException]::new('The test passed, but cleanup failed.',
+        throw [AggregateException]::new('Test cleanup failed.',
             $cleanup_errors)
     }
+    return -not $filesystem_unsupported
 }
 
 $failures = [Collections.Generic.List[Exception]]::new()
@@ -610,8 +620,11 @@ foreach ($case in $selected_cases) {
     Write-Host "Testing $case"
     try {
         $settings = $case_settings[$case]
-        Invoke-SyntheticFreeClustersCase @settings
-        Write-Host "PASS: $case"
+        if (Invoke-SyntheticFreeClustersCase @settings) {
+            Write-Host "PASS: $case"
+        } else {
+            Write-Host "Information: ${case} was not run because Windows does not support formatting $($settings.FileSystem) on this system."
+        }
     } catch {
         Write-Host "FAIL: ${case}: $($_.Exception.Message)"
         $failures.Add($_.Exception)

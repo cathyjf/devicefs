@@ -61,6 +61,20 @@
   "testPresets": [
     {
       "name": "windows-x64",
+      "inherits": "windows-x64-privileged",
+      "filter": {
+        "exclude": {
+          "label": "^privileged$"
+        }
+      }
+    },
+    {
+      "name": "windows-arm64",
+      "configurePreset": "windows-arm64",
+      "inherits": "windows-x64"
+    },
+    {
+      "name": "windows-x64-privileged",
       "configurePreset": "windows-x64",
       "configuration": "Release",
       "execution": {
@@ -71,9 +85,9 @@
       }
     },
     {
-      "name": "windows-arm64",
+      "name": "windows-arm64-privileged",
       "configurePreset": "windows-arm64",
-      "inherits": "windows-x64"
+      "inherits": "windows-x64-privileged"
     }
   ]
 }

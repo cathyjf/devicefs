@@ -246,17 +246,32 @@ target_link_libraries(devicefs-oci-verification-test PRIVATE
 add_test(NAME devicefs_read_path COMMAND devicefs-read-path-test)
 add_test(NAME devicefs_error_messages COMMAND devicefs-error-messages-test)
 add_test(NAME devicefs_oci_verification COMMAND devicefs-oci-verification-test)
-add_test(NAME devicefs_vss_catalog
-    COMMAND "${POWERSHELL_EXECUTABLE}" -NoProfile -File
-        "${CMAKE_CURRENT_SOURCE_DIR}/tests/Test-VssCatalog.ps1"
-        -SupervisorPath $<TARGET_FILE:backup-supervisor>
-)
+function(devicefs_powershell_test name filename)
+    add_test(NAME "${name}"
+        COMMAND "${POWERSHELL_EXECUTABLE}" -NoProfile -NonInteractive -File
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/${filename}"
+            -SupervisorPath $<TARGET_FILE:backup-supervisor> ${ARGN}
+    )
+endfunction()
 
-# These omitted tests require elevation:
-#   tests/Test-SyntheticFreeClusters.ps1
-#   tests/Test-LibvshadowBlockDescriptors.ps1
-#   tests/Test-VssSnapshotIntervals.ps1
-#   tests/Measure-PbsKnownDataMap.ps1 (PBS throughput benchmark)
+devicefs_powershell_test(devicefs_vss_catalog Test-VssCatalog.ps1)
+devicefs_powershell_test(devicefs_synthetic_free_clusters Test-SyntheticFreeClusters.ps1)
+devicefs_powershell_test(devicefs_libvshadow_block_descriptors Test-LibvshadowBlockDescriptors.ps1)
+devicefs_powershell_test(devicefs_vss_snapshot_intervals Test-VssSnapshotIntervals.ps1
+    -RemoveTemporaryFiles)
+set_tests_properties(
+    devicefs_synthetic_free_clusters
+    devicefs_libvshadow_block_descriptors
+    devicefs_vss_snapshot_intervals
+    PROPERTIES LABELS privileged
+)
+set_tests_properties(
+    devicefs_libvshadow_block_descriptors
+    devicefs_vss_snapshot_intervals
+    # Windows permits only one VSS snapshot creation operation at a time.
+    # https://learn.microsoft.com/en-us/windows/win32/api/vsbackup/nf-vsbackup-ivssbackupcomponents-startsnapshotset
+    PROPERTIES RESOURCE_LOCK devicefs_vss
+)
 
 add_subdirectory(src/terminal)
 target_link_libraries(devicefs-common PRIVATE devicefs-terminal devicefs-windows-imports)

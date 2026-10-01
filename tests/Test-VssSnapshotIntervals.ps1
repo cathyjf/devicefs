@@ -40,7 +40,8 @@ Failures are collected per check. Independent checks and subsequent cases
 continue; unavailable prerequisites produce explicit skips. Cleanup happens
 after each case's available checks have finished. JSON summaries, CSV witness
 coverage, a console transcript, and each tool's output remain in a new report
-directory whose path is printed at startup. Only snapshots created by this
+directory whose path is printed at startup, unless -RemoveTemporaryFiles is supplied.
+Only snapshots created by this
 invocation are deleted. Detached images are removed unless -KeepImages is supplied.
 
 Each case exposes the production reconstruction of B and the corresponding
@@ -81,6 +82,10 @@ Windows `SystemTemp` directory.
 .PARAMETER KeepImages
 Retains the case's VHD, copied VHDX files, and any captured raw image after detaching.
 
+.PARAMETER RemoveTemporaryFiles
+Removes the report directory after the cases finish and their images are detached.
+CTest supplies this option to avoid leaving temporary reports behind.
+
 .EXAMPLE
 pwsh -NoProfile -File .\tests\Test-VssSnapshotIntervals.ps1
 
@@ -96,12 +101,16 @@ param(
     [ValidateRange(1, 100)][int] $VerificationPercentage = 100,
     [string] $OutputDirectory = (Join-Path $env:WINDIR 'SystemTemp'),
     [switch] $CompareRawImages,
-    [switch] $KeepImages
+    [switch] $KeepImages,
+    [switch] $RemoveTemporaryFiles
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+if ($KeepImages -and $RemoveTemporaryFiles) {
+    throw '-KeepImages and -RemoveTemporaryFiles cannot be used together.'
+}
 . (Join-Path $PSScriptRoot 'include/DeviceFsTestProcess.ps1')
 . (Join-Path $PSScriptRoot 'include/DeviceFsTestVolume.ps1')
 . (Join-Path $PSScriptRoot 'include/VssTestWorkload.ps1')
@@ -666,6 +675,10 @@ for ($repetition = 1; $repetition -le $Repetitions; ++$repetition) {
     }
 }
 $results | Format-Table Case, IntermediateCount, Repetition, Verdict
-Write-Host "Reports retained at $root"
 Stop-Transcript | Out-Null
+if ($RemoveTemporaryFiles) {
+    Remove-Item -LiteralPath $root -Recurse -Force
+} else {
+    Write-Host "Reports retained at $root"
+}
 if (@($results | Where-Object { ($_.Verdict -ne 'Passed') -or ($_.CleanupErrors.Count -ne 0) }).Count) { exit 1 }

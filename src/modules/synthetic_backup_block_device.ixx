@@ -31,7 +31,7 @@ public:
     [[nodiscard]] static auto FromBlockDevices(
         DeviceType baseline, DeviceType payload,
         const std::uint64_t block_size,
-        std::vector<std::uint64_t> payload_block_offsets) {
+        std::set<std::uint64_t> payload_block_offsets) {
         if (baseline.length != payload.length) {
             throw std::runtime_error(std::format(
                 "the synthetic backup baseline is {} bytes, but the payload is {} bytes",
@@ -64,8 +64,7 @@ public:
         while (transferred != wanted) {
             const auto block_offset =
                 position - (position % block_size_);
-            auto next_payload = std::ranges::lower_bound(
-                payload_block_offsets_, block_offset);
+            auto next_payload = payload_block_offsets_.lower_bound(block_offset);
             const auto use_payload =
                 (next_payload != payload_block_offsets_.end()) &&
                 (*next_payload == block_offset);
@@ -112,7 +111,7 @@ private:
     SyntheticBackupBlockDevice(
         DeviceType baseline, DeviceType payload,
         const std::uint64_t block_size,
-        std::vector<std::uint64_t> payload_block_offsets) noexcept
+        std::set<std::uint64_t> payload_block_offsets)
         : length{payload.length},
           baseline_{std::move(baseline)},
           payload_{std::move(payload)},
@@ -122,7 +121,7 @@ private:
     DeviceType baseline_;
     DeviceType payload_;
     std::uint64_t block_size_;
-    std::vector<std::uint64_t> payload_block_offsets_;
+    std::set<std::uint64_t> payload_block_offsets_;
 };
 
 } // namespace devicefs

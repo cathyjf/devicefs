@@ -90,12 +90,7 @@ struct SnapshotInterval {
 };
 
 struct VolumeReport {
-    GUID volume_identifier;
-    GUID baseline_snapshot_identifier;
-    GUID payload_snapshot_identifier;
-    std::string volume;
-    std::string baseline_device;
-    std::string payload_device;
+    SnapshotInterval interval;
     std::expected<DirtyBlockMap, std::string> map;
 };
 
@@ -233,7 +228,7 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
     auto volume_block_total = std::uint64_t{};
     for (const auto &report : reports) {
         devicefs::WriteToStream(devicefs::stdout, "\n  Volume ID: {}\n",
-            FormatGuid(report.volume_identifier));
+            FormatGuid(report.interval.volume_identifier));
         if (!report.map) {
             devicefs::WriteToStream(devicefs::stdout,
                 "    Dirty map unavailable: {}\n", report.map.error());
@@ -275,33 +270,6 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
         mapped, unavailable, candidate_total, volume_block_total, percentage);
 }
 
-[[nodiscard]] auto BuildVolumeReport(
-    const SnapshotInterval &interval) {
-    auto map = [&]
-        -> std::expected<DirtyBlockMap, std::string> {
-        try {
-            return BuildDirtyBlockMap(
-                interval.baseline_snapshot_identifier,
-                interval.payload_snapshot_identifier,
-                interval.baseline_device,
-                interval.payload_device);
-        } catch (const std::runtime_error &error) {
-            return std::unexpected{std::string{error.what()}};
-        }
-    }();
-    return VolumeReport{
-        .volume_identifier = interval.volume_identifier,
-        .baseline_snapshot_identifier =
-            interval.baseline_snapshot_identifier,
-        .payload_snapshot_identifier =
-            interval.payload_snapshot_identifier,
-        .volume = interval.volume,
-        .baseline_device = interval.baseline_device,
-        .payload_device = interval.payload_device,
-        .map = std::move(map),
-    };
-}
-
 [[nodiscard]] auto BuildDirtyBlockReports(
     const HANDLE cancellation_event,
     const std::span<const SnapshotInterval> intervals) {
@@ -318,7 +286,20 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
                 if (internal::CancellationRequested(cancellation_event)) {
                     return internal::kCancelledExitCode;
                 }
-                reports.push_back(BuildVolumeReport(interval));
+                reports.push_back(VolumeReport{
+                    .interval = interval,
+                    .map = [&interval] -> std::expected<DirtyBlockMap, std::string> {
+                        try {
+                            return BuildDirtyBlockMap(
+                                interval.baseline_snapshot_identifier,
+                                interval.payload_snapshot_identifier,
+                                interval.baseline_device,
+                                interval.payload_device);
+                        } catch (const std::runtime_error &error) {
+                            return std::unexpected{std::string{error.what()}};
+                        }
+                    }(),
+                });
             }
             return kTemporarySnapshotsComplete;
         });
@@ -347,7 +328,7 @@ enum class BackupViewPreparation {
     std::vector<internal::DeviceFsSource> &real_sources,
     std::vector<FilesystemVerificationVolume> &verification_volumes,
     const auto output) {
-    const auto volume_identifier = FormatGuid(report.volume_identifier);
+    const auto volume_identifier = FormatGuid(report.interval.volume_identifier);
     if (!report.map) {
         devicefs::WriteToStream(output,
             "\n  Volume ID: {}\n",
@@ -361,10 +342,10 @@ enum class BackupViewPreparation {
     auto synthetic = [&] -> std::optional<SyntheticBackupDevice> {
         try {
             auto baseline = devicefs::WindowsBlockDevice::FromFilename(
-                std::filesystem::path{report.baseline_device},
+                std::filesystem::path{report.interval.baseline_device},
                 true, true, true, kBaselineDescription);
             auto payload = devicefs::WindowsBlockDevice::FromFilename(
-                std::filesystem::path{report.payload_device},
+                std::filesystem::path{report.interval.payload_device},
                 true, true, true, kPayloadDescription);
             const auto alignment = std::max(baseline.buffer_alignment, payload.buffer_alignment);
             devicefs::WindowsBlockDevice::read_buffer_alignment = devices.empty()
@@ -387,7 +368,7 @@ enum class BackupViewPreparation {
     }
 
     auto filename = internal::VolumeImageName(
-        report.volume, ".vhdx");
+        report.interval.volume, ".vhdx");
     devicefs::WriteToStream(output,
         "\n  File: {}\n"
         "    Volume ID: {}\n"
@@ -398,10 +379,10 @@ enum class BackupViewPreparation {
         "    RPC symbol: {}\n",
         filename,
         volume_identifier,
-        FormatGuid(report.baseline_snapshot_identifier),
-        report.baseline_device,
-        FormatGuid(report.payload_snapshot_identifier),
-        report.payload_device,
+        FormatGuid(report.interval.baseline_snapshot_identifier),
+        report.interval.baseline_device,
+        FormatGuid(report.interval.payload_snapshot_identifier),
+        report.interval.payload_device,
         filename);
     devicefs::WriteToStream(output,
         "    Dirty map: {} 16-KiB block(s); {} contributing descriptor store(s)\n",
@@ -413,12 +394,12 @@ enum class BackupViewPreparation {
     });
     real_sources.push_back({
         .name = filename,
-        .source = report.payload_device,
+        .source = report.interval.payload_device,
     });
     verification_volumes.push_back({
-        .volume_identifier = report.volume_identifier,
+        .volume_identifier = report.interval.volume_identifier,
         .payload_snapshot_identifier =
-            report.payload_snapshot_identifier,
+            report.interval.payload_snapshot_identifier,
         .filename = filename,
     });
     devices.emplace_back(
@@ -724,15 +705,15 @@ struct VerificationJob {
 [[nodiscard]] auto LoadVerificationAllocation(
     const VolumeReport &volume) {
     auto baseline = devicefs::LoadSnapshotAllocationBitmap(
-        volume.baseline_device, kBaselineDescription);
+        volume.interval.baseline_device, kBaselineDescription);
     auto payload = devicefs::LoadSnapshotAllocationBitmap(
-        volume.payload_device, kPayloadDescription);
+        volume.interval.payload_device, kPayloadDescription);
     if (baseline.VolumeSize() != payload.VolumeSize()) {
         throw std::runtime_error(std::format(
             "the retained snapshot '{}' is {} bytes, but the new snapshot '{}' "
             "is {} bytes",
-            volume.baseline_device, baseline.VolumeSize(),
-            volume.payload_device, payload.VolumeSize()));
+            volume.interval.baseline_device, baseline.VolumeSize(),
+            volume.interval.payload_device, payload.VolumeSize()));
     }
     return VerificationAllocation{
         .baseline = std::move(baseline),
@@ -791,7 +772,7 @@ auto ReadVerificationChunk(
 }
 
 using DirtyBlockIterator =
-    std::span<const std::uint64_t>::iterator;
+    std::set<std::uint64_t>::const_iterator;
 
 auto AppendDifferingClusters(
     const std::span<const unsigned char> baseline,
@@ -899,25 +880,27 @@ auto VerifySnapshotRange(
             return;
         }
         auto baseline = OpenVerificationSnapshot(
-            volume.baseline_device, kBaselineDescription);
+            volume.interval.baseline_device, kBaselineDescription);
         auto payload = OpenVerificationSnapshot(
-            volume.payload_device, kPayloadDescription);
-        auto baseline_storage = AllocateComparisonBuffer(baseline.get(), volume.baseline_device);
-        auto payload_storage = AllocateComparisonBuffer(payload.get(), volume.payload_device);
+            volume.interval.payload_device, kPayloadDescription);
+        auto baseline_storage = AllocateComparisonBuffer(baseline.get(), volume.interval.baseline_device);
+        auto payload_storage = AllocateComparisonBuffer(payload.get(), volume.interval.payload_device);
         SeekVerificationSnapshot(
             baseline.get(), range_start, kBaselineDescription,
-            volume.baseline_device);
+            volume.interval.baseline_device);
         SeekVerificationSnapshot(
             payload.get(), range_start, kPayloadDescription,
-            volume.payload_device);
+            volume.interval.payload_device);
 
-        const auto dirty_blocks = volume.map
-            ? std::span<const std::uint64_t>{
-                volume.map->block_offsets}
-            : std::span<const std::uint64_t>{};
         const auto cluster_size = allocation.baseline.ClusterSize();
-        auto next_dirty = std::ranges::lower_bound(
-            dirty_blocks, range_start);
+        // `CompareVerificationChunk` uses the coverage iterators only when
+        // `volume.map` is present.
+        auto next_dirty = volume.map
+            ? volume.map->block_offsets.lower_bound(range_start)
+            : DirtyBlockIterator{};
+        const auto dirty_end = volume.map
+            ? volume.map->block_offsets.end()
+            : DirtyBlockIterator{};
         for (auto offset = range_start; offset < range_end;
             offset += kComparisonChunkSize) {
             if (state.Failed() ||
@@ -935,10 +918,10 @@ auto VerifySnapshotRange(
                     .first(size);
             ReadVerificationChunk(
                 baseline.get(), baseline_chunk,
-                offset, kBaselineDescription, volume.baseline_device);
+                offset, kBaselineDescription, volume.interval.baseline_device);
             ReadVerificationChunk(
                 payload.get(), payload_chunk,
-                offset, kPayloadDescription, volume.payload_device);
+                offset, kPayloadDescription, volume.interval.payload_device);
             // Raw free-cluster contents are not stable across snapshot
             // devices. Compare the synthetic views that DeviceFs backs up.
             allocation.baseline.SynthesizeFreeClusters(
@@ -949,7 +932,7 @@ auto VerifySnapshotRange(
                 baseline_chunk, payload_chunk, offset,
                 cluster_size,
                 volume.map.has_value(),
-                next_dirty, dirty_blocks.end()));
+                next_dirty, dirty_end));
         }
     } catch (const std::runtime_error &error) {
         state.Fail(error.what());
@@ -1172,10 +1155,10 @@ auto UpdateClusterOwnership(
     }
     ResolveSnapshotOwnership(
         job.ownership, SnapshotEndpoint::Baseline,
-        job.volume.get().baseline_device, new_clusters);
+        job.volume.get().interval.baseline_device, new_clusters);
     ResolveSnapshotOwnership(
         job.ownership, SnapshotEndpoint::Payload,
-        job.volume.get().payload_device, new_clusters);
+        job.volume.get().interval.payload_device, new_clusters);
 }
 
 [[nodiscard]] constexpr auto VerificationPercentage(
@@ -1303,7 +1286,7 @@ auto PrintVerificationProgress(
         uncovered_total += observation.uncovered_blocks;
         devicefs::WriteToStream(devicefs::stdout,
             "  Volume ID: {}\n",
-            FormatGuid(job.volume.get().volume_identifier));
+            FormatGuid(job.volume.get().interval.volume_identifier));
         devicefs::WriteToStream(devicefs::stdout,
             "    Compared: {} of {} bytes ({:.2f}%)\n"
             "    Differences observed: {} byte(s) in {} 16-KiB block(s)\n",
@@ -1343,7 +1326,7 @@ auto PrintVerificationProgress(
         }
         UpdateClusterOwnership(job, observation.uncovered_clusters);
         PrintOwnershipUpdate(
-            devicefs::stdout, job.volume.get().volume_identifier,
+            devicefs::stdout, job.volume.get().interval.volume_identifier,
             job.ownership);
     }
 }
@@ -1395,7 +1378,7 @@ auto PrintVerificationResult(
     const bool cancelled) {
     devicefs::WriteToStream(output,
         "\n  Volume ID: {}\n",
-        FormatGuid(job.volume.get().volume_identifier));
+        FormatGuid(job.volume.get().interval.volume_identifier));
     if (!observation.failure.empty()) {
         devicefs::WriteToStream(output,
             "    Status: failed after comparing {} byte(s): {}\n",

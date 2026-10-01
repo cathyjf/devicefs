@@ -114,42 +114,50 @@ struct CatalogStore {
     // The snapshot ID comes from the store header located by the type-3
     // catalog record. It is absent when the store has no in-volume data.
     std::optional<GUID> snapshot_identifier;
+
+    [[nodiscard]] auto operator==(const CatalogStore &) const -> bool = default;
 };
 
 // Read the catalog and store headers in catalog traversal order. The result
 // includes snapshot IDs and creation times so diagnostics can compare catalog
 // order with snapshot creation order. Descriptor lists are read separately by
-// `ReadBlockDescriptors` or `ReadBlockDescriptorInterval`.
+// `ReadBlockDescriptors`.
 [[nodiscard]] auto ReadStoreCatalog(std::string_view source)
     -> std::vector<CatalogStore>;
 
-// source exposes NTFS volume byte zero at offset zero. It may be a live volume
-// handle path or a flat byte-for-byte image of that volume. The result preserves
-// every nonempty raw descriptor's traversal order and multiplicity.
-[[nodiscard]] auto ReadBlockDescriptors(
-    std::string_view source, const GUID &snapshot_identifier)
-    -> StoreBlockDescriptors;
+// Select the store for an exact snapshot ID. A missing or ambiguous match throws.
+[[nodiscard]] auto SelectCatalogStore(std::span<const CatalogStore> stores,
+    const GUID &snapshot_identifier, std::string_view source)
+    -> CatalogStore;
 
-struct IntervalStore {
+struct CatalogStoreDescriptors {
     CatalogStore catalog;
     StoreBlockDescriptors blocks;
 };
 
-struct BlockDescriptorInterval {
+struct CatalogInterval {
     CatalogStore payload;
-    std::vector<IntervalStore> stores;
+    std::vector<CatalogStore> stores;
+
+    [[nodiscard]] auto operator==(const CatalogInterval &) const -> bool = default;
 };
 
-// Read the baseline store and every store created after it but before the
-// payload snapshot, in creation-time order. The two IDs identify the baseline
-// and payload snapshots in the catalog. `source` has the volume layout described
-// by `ReadBlockDescriptors`; the caller reads through the payload snapshot and
-// keeps a later snapshot alive to freeze the earlier descriptor stores.
-// Missing snapshots, equal creation times, or failure to read any contributing
-// store cause an exception rather than a result with some stores missing.
-[[nodiscard]] auto ReadBlockDescriptorInterval(std::string_view source,
+// Select contributing stores from the exact baseline inclusive to the exact
+// payload exclusive, in creation-time order. The payload entry is returned
+// separately. This reads store headers but not descriptor lists, so a caller
+// can open all snapshot devices before reading descriptors. A failed read or
+// selection throws; no partial interval is returned.
+[[nodiscard]] auto ReadBlockDescriptorIntervalCatalog(std::string_view source,
     const GUID &baseline_identifier, const GUID &payload_identifier)
-    -> BlockDescriptorInterval;
+    -> CatalogInterval;
+
+// Read every supplied store's descriptor list, in supplied order. `source`
+// exposes NTFS volume byte zero at offset zero and may be a volume device or a
+// flat image. The result preserves descriptor traversal order and multiplicity.
+// The caller keeps the selected snapshots available until this read completes.
+// Read failures throw; no partial result is returned.
+[[nodiscard]] auto ReadBlockDescriptors(std::string_view source,
+    std::span<const CatalogStore> stores) -> std::vector<CatalogStoreDescriptors>;
 
 } // namespace devicefs::vss
 
@@ -340,7 +348,7 @@ public:
     }
 
     [[nodiscard]] auto Read(
-        const std::uint64_t offset, const std::size_t size) {
+        const std::uint64_t offset, const std::size_t size) const {
         auto result = std::vector<std::byte>(size);
         ReadExact(offset, result);
         return result;
@@ -348,7 +356,7 @@ public:
 
 private:
     void ReadExact(
-        const std::uint64_t offset, std::span<std::byte> destination) {
+        const std::uint64_t offset, std::span<std::byte> destination) const {
         const auto requested =
             wil::safe_cast_failfast<std::uint64_t>(destination.size());
         if ((offset > size_) || (requested > (size_ - offset))) {
@@ -364,7 +372,7 @@ private:
         ReadCurrentExact(offset, destination);
     }
 
-    void Seek(const std::uint64_t offset) {
+    void Seek(const std::uint64_t offset) const {
         const auto position = LARGE_INTEGER{
             .QuadPart = wil::safe_cast_failfast<LONGLONG>(offset),
         };
@@ -374,7 +382,7 @@ private:
     }
 
     void ReadCurrentExact(
-        const std::uint64_t offset, std::span<std::byte> destination) {
+        const std::uint64_t offset, std::span<std::byte> destination) const {
         const auto requested =
             wil::safe_cast_failfast<DWORD>(destination.size());
         auto completed = DWORD{};
@@ -389,7 +397,7 @@ private:
     }
 
     void ReadRawExact(
-        const std::uint64_t offset, const std::span<std::byte> destination) {
+        const std::uint64_t offset, const std::span<std::byte> destination) const {
         if (destination.empty()) {
             return;
         }
@@ -521,7 +529,7 @@ struct NtfsHeader {
     };
 }
 
-auto ValidateNtfsVolume(RawSource &source) {
+auto ValidateNtfsVolume(const RawSource &source) {
     // libvshadow_volume_open_read_ntfs_volume_headers requires the primary and
     // backup NTFS headers to describe the same volume size before opening the
     // VSS catalog. The equality protects the physical-offset coordinate system
@@ -612,7 +620,7 @@ auto VisitMetadataBlock(
     }
 }
 
-[[nodiscard]] auto ReadCatalog(RawSource &source, std::uint64_t offset) {
+[[nodiscard]] auto ReadCatalog(const RawSource &source, std::uint64_t offset) {
     auto stores = std::vector<CatalogStore>{};
     auto visited = std::unordered_set<std::uint64_t>{};
 
@@ -742,7 +750,7 @@ struct StoreBlockHeader {
     };
 }
 
-auto ReadStoreHeaders(RawSource &source, std::vector<CatalogStore> &stores) {
+auto ReadStoreHeaders(const RawSource &source, std::vector<CatalogStore> &stores) {
     // libvshadow_volume_open_read invokes
     // libvshadow_store_descriptor_read_store_header for every in-volume store
     // before vshadowinfo can enumerate any of them. Preserve the eager common
@@ -901,7 +909,7 @@ private:
 };
 
 [[nodiscard]] auto ReadDescriptorList(
-    RawSource &source, const CatalogStore &store) {
+    const RawSource &source, const CatalogStore &store) {
     auto result = devicefs::vss::StoreBlockDescriptors{
         .store_identifier = store.store_identifier,
         .snapshot_identifier = *store.snapshot_identifier,
@@ -980,7 +988,7 @@ private:
     return result;
 }
 
-[[nodiscard]] auto ReadStores(RawSource &source,
+[[nodiscard]] auto ReadStores(const RawSource &source,
     const std::string_view source_path) {
     const auto signature = source.Read(
         kVssVolumeHeaderOffset, kVssIdentifier.size());
@@ -991,8 +999,7 @@ private:
     // that this is the known VSS format before any embedded physical pointer is
     // trusted. ReadCatalogOffset separately mirrors the eight-byte header check
     // in libvshadow_io_handle_read_volume_header_data; that weaker local check
-    // is not a substitute for ReadBlockDescriptors recognizing the complete
-    // format identifier before calling it.
+    // is not a substitute for the complete format preflight performed here.
     // https://github.com/libyal/libvshadow/blob/f5a7362/vshadowtools/info_handle.c#L485-L506
     // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_support.c#L324-L418
     if (!HasIdentifier(signature, kVssIdentifier.size())) {
@@ -1014,60 +1021,50 @@ private:
     return stores;
 }
 
-[[nodiscard]] auto SelectStore(const std::span<const CatalogStore> stores,
+} // namespace
+
+namespace devicefs::vss {
+
+auto SelectCatalogStore(const std::span<const CatalogStore> stores,
     const GUID &snapshot_identifier, const std::string_view source_path)
-    -> const CatalogStore & {
-    const CatalogStore *selected = nullptr;
+    -> CatalogStore {
+    auto selected = std::optional<std::reference_wrapper<const CatalogStore>>{};
     for (const auto &store : stores) {
         if (!store.has_in_volume_data ||
             (InlineIsEqualGUID(*store.snapshot_identifier,
                 snapshot_identifier) == FALSE)) {
             continue;
         }
-        if (selected != nullptr) {
-            // This is the caller's fail-closed selection policy, not a VSS
-            // format uniqueness assertion made by libvshadow.
+        if (selected) {
+            // A crafted flat image can give two stores the same snapshot ID.
+            // Choosing either would let catalog order determine the endpoint.
             throw std::runtime_error(std::format(
                 "VSS snapshot ID '{}' matched multiple stores in '{}'",
                 FormatGuid(snapshot_identifier),
                 source_path));
         }
-        selected = &store;
+        selected = std::cref(store);
     }
-    if (selected == nullptr) {
+    if (!selected) {
         throw std::runtime_error(std::format(
             "VSS snapshot ID '{}' was not found in the catalog for '{}'",
             FormatGuid(snapshot_identifier),
             source_path));
     }
-    return *selected;
+    return selected->get();
 }
-
-} // namespace
-
-namespace devicefs::vss {
 
 auto ReadStoreCatalog(const std::string_view source_path)
     -> std::vector<CatalogStore> {
-    auto source = RawSource{source_path};
-    return ReadStores(source, source_path);
+    return ReadStores(RawSource{source_path}, source_path);
 }
 
-auto ReadBlockDescriptors(const std::string_view source_path,
-    const GUID &snapshot_identifier) -> StoreBlockDescriptors {
-    auto source = RawSource{source_path};
-    const auto stores = ReadStores(source, source_path);
-    return ReadDescriptorList(source,
-        SelectStore(stores, snapshot_identifier, source_path));
-}
-
-auto ReadBlockDescriptorInterval(const std::string_view source_path,
+auto ReadBlockDescriptorIntervalCatalog(const std::string_view source_path,
     const GUID &baseline_identifier, const GUID &payload_identifier)
-    -> BlockDescriptorInterval {
-    auto source = RawSource{source_path};
-    const auto stores = ReadStores(source, source_path);
-    const auto &baseline = SelectStore(stores, baseline_identifier, source_path);
-    const auto &payload = SelectStore(stores, payload_identifier, source_path);
+    -> CatalogInterval {
+    const auto stores = ReadStoreCatalog(source_path);
+    const auto baseline = SelectCatalogStore(stores, baseline_identifier, source_path);
+    const auto payload = SelectCatalogStore(stores, payload_identifier, source_path);
     if (baseline.creation_time >= payload.creation_time) {
         throw std::runtime_error(std::format(
             "VSS baseline '{}' (FILETIME {}) does not precede payload '{}' "
@@ -1080,8 +1077,8 @@ auto ReadBlockDescriptorInterval(const std::string_view source_path,
     // predecessor and successor. Reconstructing an older snapshot can read
     // descriptors from successive stores. Changes between the baseline and
     // payload can therefore appear in intermediate stores as well as the
-    // baseline store. The payload's own descriptors describe later changes,
-    // so the returned interval ends before the payload store.
+    // baseline store. The payload's catalog entry marks the endpoint, but its
+    // descriptors describe later changes and are excluded from descriptor reads.
     // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_io_handle.c#L788-L795
     // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_volume.c#L1152-L1158
     // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_store_descriptor.c#L2911-L3007
@@ -1122,14 +1119,22 @@ auto ReadBlockDescriptorInterval(const std::string_view source_path,
                 payload.volume_size, source_path));
         }
     }
-    auto result = BlockDescriptorInterval{.payload = payload, .stores = {}};
-    for (const CatalogStore &store : ordered) {
-        if (store.creation_time < payload.creation_time) {
-            result.stores.push_back(IntervalStore{
-                .catalog = store, .blocks = ReadDescriptorList(source, store)});
-        }
-    }
-    return result;
+    return CatalogInterval{
+        .payload = payload,
+        .stores = ordered | std::views::take(ordered.size() - 1) |
+            std::views::transform([](const CatalogStore &store) {
+            return store;
+        }) | std::ranges::to<std::vector>(),
+    };
+}
+
+auto ReadBlockDescriptors(const std::string_view source_path,
+    const std::span<const CatalogStore> stores) -> std::vector<CatalogStoreDescriptors> {
+    const auto source = RawSource{source_path};
+    return stores | std::views::transform([&source](const auto &store) {
+        return CatalogStoreDescriptors{
+            .catalog = store, .blocks = ReadDescriptorList(source, store)};
+    }) | std::ranges::to<std::vector>();
 }
 
 } // namespace devicefs::vss

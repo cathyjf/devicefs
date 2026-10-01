@@ -188,8 +188,8 @@ auto Run(const std::span<const std::string_view> arguments) {
         return 0;
     }
     if (options.catalog) {
-        WriteOutput(FormatCatalog(
-            devicefs::vss::ReadStoreCatalog(options.source)));
+        const auto catalog = devicefs::vss::ReadStoreCatalog(options.source);
+        WriteOutput(FormatCatalog(catalog));
         return 0;
     }
     const auto snapshot_identifier = ParseGuid(options.snapshot_identifier);
@@ -203,16 +203,18 @@ auto Run(const std::span<const std::string_view> arguments) {
             throw std::invalid_argument(std::format(
                 "--baseline-id is not a GUID: {}", options.baseline_identifier));
         }
-        const auto interval = devicefs::vss::ReadBlockDescriptorInterval(
+        const auto interval = devicefs::vss::ReadBlockDescriptorIntervalCatalog(
             options.source, *baseline, *snapshot_identifier);
+        const auto stores = devicefs::vss::ReadBlockDescriptors(
+            options.source, interval.stores);
         auto output = std::format(
             "schema-version\t1\ninterval-baseline-id\t{}\n"
             "interval-payload-id\t{}\nstore-count\t{}\n",
             FormatGuid<false>(*baseline), FormatGuid<false>(*snapshot_identifier),
-            interval.stores.size());
+            stores.size());
         // The text between `begin-store` and `end-store` uses the single-store
         // schema, so both modes can use the same descriptor-output decoder.
-        for (const auto &store : interval.stores) {
+        for (const auto &store : stores) {
             std::format_to(std::back_inserter(output),
                 "begin-store\t{}\n{}end-store\n", store.catalog.creation_time,
                 FormatResult(store.blocks));
@@ -220,9 +222,12 @@ auto Run(const std::span<const std::string_view> arguments) {
         WriteOutput(output);
         return 0;
     }
-    const auto result = devicefs::vss::ReadBlockDescriptors(
-        options.source, *snapshot_identifier);
-    WriteOutput(FormatResult(result));
+    const auto catalog = devicefs::vss::ReadStoreCatalog(options.source);
+    const auto selected = devicefs::vss::SelectCatalogStore(
+        catalog, *snapshot_identifier, options.source);
+    const auto stores = devicefs::vss::ReadBlockDescriptors(
+        options.source, std::array{selected});
+    WriteOutput(FormatResult(stores.front().blocks));
     return 0;
 }
 

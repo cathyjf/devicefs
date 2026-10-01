@@ -572,7 +572,7 @@ struct SelectiveViewOptions {
             "zero and no greater than 100; received '{}'", text));
     };
     auto consumed = std::size_t{};
-    const auto percentage = [&] {
+    const auto percentage = [&text, &consumed, &invalid] {
         try {
             return std::stod(text, &consumed);
         } catch (const std::invalid_argument &) {

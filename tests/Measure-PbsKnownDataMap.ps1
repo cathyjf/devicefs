@@ -3,7 +3,6 @@
 
 #requires -Version 7.4
 #requires -RunAsAdministrator
-#requires -Modules Hyper-V
 
 <#
 .SYNOPSIS
@@ -123,6 +122,10 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 . (Join-Path $PSScriptRoot 'include/DeviceFsTestProcess.ps1')
 . (Join-Path $PSScriptRoot 'include/DeviceFsTestVolume.ps1')
+if ($null -ne ([Management.Automation.PSTypeName]'DeviceFsTestNative').Type) {
+    throw 'DeviceFsTestNative is already loaded. Run the test in a fresh pwsh process.'
+}
+Add-Type -Path (Join-Path $PSScriptRoot 'types/DeviceFsTestNative.cs')
 
 if (-not $SupervisorPath) {
     $SupervisorPath = Get-DefaultTestExecutablePath 'backup-supervisor.exe'
@@ -141,6 +144,7 @@ $backup_lock = [IO.File]::Open(
     [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
 $invocation = $null
 $vhd_paths = [Collections.Generic.List[string]]::new()
+$attachments = [Collections.Generic.List[DeviceFsTestDisk]]::new()
 $run_id = [Guid]::NewGuid().ToString('N')
 $backup_id = "devicefs-map-test-$run_id"
 $results_path = Join-Path $OutputDirectory 'results.csv'
@@ -170,12 +174,11 @@ try {
         $vhd_paths.Add($vhd_path)
         $partition = New-DeviceFsTestVolume -Path $vhd_path -SizeBytes $definition.Value `
             -ClusterSize $ntfs_cluster_size -Label "PBS test $($definition.Key)"
-        $partition_number = $partition.PartitionNumber
-        Dismount-DiskImage -ImagePath $vhd_path
-        $disk = Mount-DiskImage -ImagePath $vhd_path -Access ReadOnly `
-            -NoDriveLetter -PassThru | Get-Disk
-        $partition = Get-Partition -DiskNumber $disk.Number -PartitionNumber $partition_number
-        $mappings["$($definition.Key).img"] = ($partition | Get-Volume).Path.TrimEnd([char]'\')
+        $attachments.Add($partition)
+        $partition.Detach()
+        $partition = [DeviceFsTestDisk]::Open($vhd_path)
+        $attachments.Add($partition)
+        $mappings["$($definition.Key).img"] = $partition.VolumeName.TrimEnd([char]'\')
         $image_bytes += [long]$partition.Size
     }
 
@@ -353,11 +356,9 @@ try {
             }
             $invocation.Process.Dispose()
         }
+        foreach ($attachment in $attachments) { $attachment.Detach() }
         foreach ($vhd_path in $vhd_paths) {
             if (Test-Path -LiteralPath $vhd_path) {
-                if ((Get-DiskImage -ImagePath $vhd_path).Attached) {
-                    Dismount-DiskImage -ImagePath $vhd_path
-                }
                 Remove-Item -LiteralPath $vhd_path
             }
         }

@@ -3,7 +3,6 @@
 
 #requires -Version 7.4
 #requires -RunAsAdministrator
-#requires -Modules Hyper-V
 
 <#
 .SYNOPSIS
@@ -160,6 +159,7 @@ function Invoke-IntervalCase {
         'devicefs-vss-copies-' + [Guid]::NewGuid().ToString('N'))
     $owned_copy_directories = [Collections.Generic.List[string]]::new()
     $copied_images = [Collections.Generic.List[string]]::new()
+    $attachments = @{}
     $exposure = [ordered]@{
         Process = $null
         Children = @()
@@ -264,7 +264,7 @@ function Invoke-IntervalCase {
         New-Item -ItemType Directory -Path $mount | Out-Null
         $partition = New-DeviceFsTestVolume -Path $vhd -SizeBytes 1GB -ClusterSize 4096 `
             -Label ('DFSVSS-' + [Guid]::NewGuid().ToString('N').Substring(0, 17)) -Fixed
-        Add-PartitionAccessPath -InputObject $partition -AccessPath $mount
+        $partition.Mount($mount)
         $mounted = $true
         $volume_name = [DeviceFsTestNative]::GetVolumeName($mount)
         $identity = [DeviceFsTestNative]::InspectVolume($volume_name)
@@ -553,10 +553,8 @@ function Invoke-IntervalCase {
                 $mounted_roots[$view] = Invoke-Check "attach the copied $view VHDX read-only" {
                     $image = Join-Path $copied_directory "$view.vhdx"
                     Write-Host "Attaching $image read-only"
-                    Mount-DiskImage -ImagePath $image -Access ReadOnly -NoDriveLetter | Out-Null
-                    $disk = Get-DiskImage -ImagePath $image | Get-Disk
-                    $volume = Get-Partition -DiskNumber $disk.Number -PartitionNumber 1 | Get-Volume
-                    return $volume.Path
+                    $attachments[$image] = [DeviceFsTestDisk]::Open($image)
+                    return $attachments[$image].VolumeName
                 } -SkipReason $(if ((-not $copies_ready) -or (-not $exposure_stopped)) {
                     'Both images must be copied and exposure must stop before attachment.'
                 })
@@ -572,8 +570,8 @@ function Invoke-IntervalCase {
         } finally {
             foreach ($image in $copied_images) {
                 $null = Invoke-Check "detach $image" {
-                    if ((Get-DiskImage -ImagePath $image).Attached) {
-                        Dismount-DiskImage -ImagePath $image | Out-Null
+                    if ($attachments.ContainsKey($image)) {
+                        $attachments[$image].Detach()
                     }
                 }
             }
@@ -610,9 +608,6 @@ function Invoke-IntervalCase {
                 continue
             }
             try {
-                foreach ($image in $copied_images) {
-                    Assert-Condition (-not (Get-DiskImage -ImagePath $image).Attached) "Copied image '$image' is still attached."
-                }
                 # Only the uniquely named directory created by this case is removed.
                 $absolute = [IO.Path]::GetFullPath($copies)
                 Assert-Condition ([IO.Path]::GetDirectoryName($absolute) -eq
@@ -631,14 +626,13 @@ function Invoke-IntervalCase {
             } catch { $cleanup_errors.Add($_.Exception.Message) }
         }
         if ($mounted) {
-            try { Remove-PartitionAccessPath -InputObject $partition -AccessPath $mount -Confirm:$false }
+            try { $partition.Unmount($mount) }
             catch { $cleanup_errors.Add($_.Exception.Message) }
         }
         if ([IO.File]::Exists($vhd)) {
             try {
-                if ((Get-DiskImage -ImagePath $vhd).Attached) { Dismount-DiskImage -ImagePath $vhd | Out-Null }
+                if ($null -ne $partition) { $partition.Detach() }
                 if (-not $KeepImages) {
-                    Assert-Condition (-not (Get-DiskImage -ImagePath $vhd).Attached) "Fixture '$vhd' is still attached."
                     Remove-Item -LiteralPath $vhd
                 }
             } catch { $cleanup_errors.Add($_.Exception.Message) }

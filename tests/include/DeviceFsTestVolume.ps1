@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # Create and attach a new VHD or VHDX containing one writable partition,
-# without assigning a drive letter. Return the partition for the caller to
+# without assigning a drive letter. Return the attachment for the caller to
 # mount or populate. The filename selects VHD or VHDX; `Fixed` selects fully
 # allocated storage rather than a dynamic image.
 # `DevDrive` formats the partition as a Dev Drive.
-# The caller is responsible for detaching and deleting `Path`, including when
-# creation fails after the image has been attached.
+# The caller detaches the returned `DeviceFsTestDisk` before deleting `Path`.
+# A failure during creation or formatting closes the attachment automatically.
 function New-DeviceFsTestVolume {
     param(
         [Parameter(Mandatory)]
@@ -30,45 +30,49 @@ function New-DeviceFsTestVolume {
         [string] $FileSystem = 'NTFS'
     )
 
-    $allocation = if ($Fixed) { @{ Fixed = $true } } else { @{ Dynamic = $true } }
-    New-VHD -Path $Path -SizeBytes $SizeBytes @allocation | Out-Null
-    $image = Mount-DiskImage -ImagePath $Path -Access ReadWrite -NoDriveLetter -PassThru
-    $disks = @($image | Get-Disk)
-    if ($disks.Count -ne 1) {
-        throw "The new image '$Path' did not resolve to exactly one disk."
+    $PSNativeCommandUseErrorActionPreference = $false
+    $disk = [DeviceFsTestDisk]::Create($Path, $SizeBytes, $Fixed.IsPresent)
+    try {
+        # `format.com` rejects a volume GUID without a mount point or drive
+        # letter. A temporary directory mount satisfies that requirement while
+        # the command still identifies the volume by its GUID.
+        $format_mount = New-Item -ItemType Directory -Path (Join-Path (
+            [IO.Path]::GetDirectoryName($Path)) ('format-' + [Guid]::NewGuid().ToString('N')))
+        try {
+            $disk.Mount($format_mount.FullName)
+            try {
+                # `/A` accepts byte counts through 8192, then sizes such as
+                # `64K`. `/Y` prevents prompts; `/Q` avoids a full disk scan.
+                # https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/format
+                $allocation_size = if ($ClusterSize -ge 16KB) {
+                    "$($ClusterSize / 1KB)K"
+                } else { "$ClusterSize" }
+                $format_executable = Join-Path $env:WINDIR 'System32/format.com'
+                $format_arguments = @(
+                    $disk.VolumeName.TrimEnd('\')
+                    "/FS:$FileSystem"
+                    "/A:$allocation_size"
+                    "/V:$Label"
+                    '/Q'
+                    '/Y'
+                    if ($DevDrive) { '/DevDrv' }
+                )
+                $display_command = (@($format_executable) + $format_arguments |
+                    ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ' '
+                Write-Host "Formatting '$Path': & $display_command"
+                $format_output = & $format_executable @format_arguments 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Could not format the test volume in '$Path' as $FileSystem (format exit code $LASTEXITCODE):`n$($format_output -join "`n")"
+                }
+            } finally {
+                $disk.Unmount($format_mount.FullName)
+            }
+        } finally {
+            Remove-Item -LiteralPath $format_mount.FullName
+        }
+        return $disk
+    } catch {
+        $disk.Dispose()
+        throw
     }
-    $disk = $disks[0]
-    # `MSFT_Disk` uses `STORAGE_BUS_TYPE`'s `BusTypeFileBackedVirtual` (15) and
-    # `PartitionStyle`'s `RAW` (0). These checks precede all partition writes.
-    $file_backed_virtual_bus_type = [UInt16]15
-    $uninitialized_partition_style = [UInt16]0
-    if (($disk.CimInstanceProperties['BusType'].Value -ne $file_backed_virtual_bus_type) -or
-        ($disk.CimInstanceProperties['PartitionStyle'].Value -ne $uninitialized_partition_style) -or
-        ($disk.Size -ne $SizeBytes) -or $disk.IsBoot -or $disk.IsSystem -or
-        $disk.IsClustered -or $disk.IsOffline -or $disk.IsReadOnly) {
-        throw "The new image '$Path' did not resolve to a writable, uninitialized virtual disk of the requested size."
-    }
-    if (@(Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue).Count -ne 0) {
-        throw "The new image '$Path' unexpectedly contains partitions."
-    }
-
-    Initialize-Disk -Number $disk.Number -PartitionStyle GPT -PassThru | Out-Null
-    $partition = New-Partition -DiskNumber $disk.Number -UseMaximumSize -IsHidden
-    # A hidden partition cannot acquire a drive letter during creation.
-    # `NoDefaultDriveLetter` keeps it letterless when it becomes visible for
-    # formatting. PowerShell represents an absent drive letter as `U+0000`.
-    if ((-not $partition.IsHidden) -or ([char]$partition.DriveLetter -ne [char]0)) {
-        throw "The test partition in '$Path' was not created hidden and letterless."
-    }
-    Set-Partition -InputObject $partition -NoDefaultDriveLetter $true `
-        -IsHidden $false -Confirm:$false | Out-Null
-    $partition = Get-Partition -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber
-    if ($partition.IsHidden -or (-not $partition.NoDefaultDriveLetter) -or
-        ([char]$partition.DriveLetter -ne [char]0)) {
-        throw "The test partition in '$Path' did not become visible without a drive letter."
-    }
-    $format_options = if ($DevDrive) { @{ DevDrive = $true } } else { @{} }
-    Format-Volume -Partition $partition -FileSystem $FileSystem -AllocationUnitSize $ClusterSize `
-        -NewFileSystemLabel $Label @format_options -Force -Confirm:$false | Out-Null
-    return $partition
 }

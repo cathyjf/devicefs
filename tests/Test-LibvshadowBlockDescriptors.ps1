@@ -3,7 +3,6 @@
 
 #requires -Version 7.4
 #requires -RunAsAdministrator
-#requires -Modules Hyper-V
 
 <#
 .SYNOPSIS
@@ -401,16 +400,14 @@ try {
 
     $source_partition = New-DeviceFsTestVolume -Path $vhd_path -SizeBytes $test_vhd_size `
         -ClusterSize $ntfs_cluster_size -Label $source_label -Fixed
-    $disk = Get-Disk -Number $source_partition.DiskNumber
-    Add-PartitionAccessPath -InputObject $source_partition `
-        -AccessPath $source_mount
+    $source_partition.Mount($source_mount)
     $source_access_path_added = $true
 
     $source_volume_name = [DeviceFsTestNative]::GetVolumeName($source_mount)
     $source_identity = [DeviceFsTestNative]::InspectVolume($source_volume_name)
     Assert-Condition (
         ($source_identity.Label -ceq $source_label) -and
-            ($source_identity.DiskNumber -eq $disk.Number) -and
+            ($source_identity.DiskNumber -eq $source_partition.DiskNumber) -and
             ($source_identity.DiskStartingOffset -eq $source_partition.Offset) -and
             ($source_identity.DiskExtentLength -eq $source_partition.Size)) `
         'The NTFS volume does not map to the expected VHD partition.'
@@ -1269,8 +1266,7 @@ try {
 
     if ($devicefs_process_gone -and $source_access_path_added) {
         try {
-            Remove-PartitionAccessPath -InputObject $source_partition `
-                -AccessPath $source_mount -Confirm:$false
+            $source_partition.Unmount($source_mount)
         } catch {
             $cleanup_errors.Add($_.Exception)
         }
@@ -1279,12 +1275,8 @@ try {
     if ($devicefs_process_gone -and
         ($null -ne $vhd_path) -and [IO.File]::Exists($vhd_path)) {
         try {
-            $current_image = Get-DiskImage -ImagePath $vhd_path
-            if ($current_image.Attached) {
-                Dismount-DiskImage -ImagePath $vhd_path | Out-Null
-            }
-            $image_detached =
-                -not (Get-DiskImage -ImagePath $vhd_path).Attached
+            if ($null -ne $source_partition) { $source_partition.Detach() }
+            $image_detached = $true
         } catch {
             $cleanup_errors.Add($_.Exception)
         }

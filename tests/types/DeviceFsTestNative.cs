@@ -200,7 +200,7 @@ public static class DeviceFsTestNative {
         public uint BytesPerCluster;
     }
 
-    private readonly struct IoResult {
+    internal readonly struct IoResult {
         public byte[] Buffer { get; }
         public uint BytesReturned { get; }
 
@@ -334,7 +334,7 @@ public static class DeviceFsTestNative {
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode,
         SetLastError = true, EntryPoint = "CreateFileW")]
-    private static extern SafeFileHandle CreateFile(string fileName,
+    internal static extern SafeFileHandle CreateFile(string fileName,
         uint desiredAccess, uint shareMode, IntPtr securityAttributes,
         uint creationDisposition, uint flagsAndAttributes,
         IntPtr templateFile);
@@ -376,7 +376,7 @@ public static class DeviceFsTestNative {
         uint bufferSize);
 
     [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool DeviceIoControl(SafeFileHandle device,
+    internal static extern bool DeviceIoControl(SafeFileHandle device,
         uint controlCode, [In] byte[] input, uint inputSize,
         [Out] byte[] output, uint outputSize, out uint bytesReturned,
         IntPtr overlapped);
@@ -411,7 +411,7 @@ public static class DeviceFsTestNative {
     private static extern bool VirtualFree(IntPtr address, UIntPtr size,
         uint freeType);
 
-    private static Win32Exception Win32Error(string operation, int error) {
+    internal static Win32Exception Win32Error(string operation, int error) {
         var description = new Win32Exception(error).Message;
         return new Win32Exception(
             error, $"{operation}: {description} ({error})");
@@ -502,7 +502,7 @@ public static class DeviceFsTestNative {
         return handle;
     }
 
-    private static IoResult Control(SafeFileHandle device, uint code,
+    internal static IoResult Control(SafeFileHandle device, uint code,
         byte[] input, int outputSize, bool allowMoreData = false) {
         var output = outputSize == 0 ? null : new byte[outputSize];
         if (!DeviceIoControl(device, code, input,
@@ -1452,4 +1452,414 @@ public static class DeviceFsTestNative {
             offset, count, bitmap, summary);
         return summary;
     }
+}
+
+// The virtual-disk handle keeps the attachment alive. `Detach` reports native
+// failures before closing the handle; `Dispose` also closes partially prepared
+// attachments. No permanent attachment is requested, so closing the final
+// handle releases the attachment even during exception unwinding.
+// https://learn.microsoft.com/en-us/windows/win32/api/virtdisk/ne-virtdisk-attach_virtual_disk_flag
+public sealed class DeviceFsTestDisk : IDisposable {
+    private SafeFileHandle handle;
+    private DeviceFsTestDisk() {}
+    public uint DiskNumber { get; private set; }
+    public long DiskLength { get; private set; }
+    public uint PartitionNumber { get; private set; }
+    public long Offset { get; private set; }
+    public long Size { get; private set; }
+    public string VolumeName { get; private set; }
+
+    private const uint GenericRead = 0x80000000;
+    private const uint GenericWrite = 0x40000000;
+    private const uint AttachReadOnly = 1;
+    private const uint AttachNoDriveLetter = 2;
+    private const uint CreateFullAllocation = 1;
+    private const uint PartitionStyleGpt = 1;
+    // The data partition remains visible to Mount Manager but never receives
+    // a default drive letter, including its first arrival before formatting.
+    // https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-partition_information_gpt
+    private const ulong NoDefaultDriveLetter = 0x8000000000000000;
+    // One MiB is the fixture's partition-alignment policy, matching the earlier
+    // Windows partitioning-tool layout.
+    private const long PartitionAlignment = 1024 * 1024;
+    private const uint GptEntryCount = 128;
+    private static readonly Guid MicrosoftVirtualDiskVendor =
+        new Guid("ec984aec-a0f9-47e9-901f-71415a66345b");
+    private static readonly Guid BasicDataPartition =
+        new Guid("ebd0a0a2-b9e5-4433-87c0-68b6b72699c7");
+    // These are the Windows SDK CTL_CODE values for the corresponding IOCTLs.
+    private const uint IoctlDiskCreateDisk = 0x0007c058;
+    private const uint IoctlDiskGetDriveLayoutEx = 0x00070050;
+    private const uint IoctlDiskSetDriveLayoutEx = 0x0007c054;
+    private const uint IoctlStorageGetDeviceNumber = 0x002d1080;
+    private const uint IoctlDiskGetLengthInfo = 0x0007405c;
+    private const uint IoctlDiskUpdateProperties = 0x00070140;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct StorageType { public uint DeviceId; public Guid VendorId; }
+    // Version 2 supports both VHD and VHDX. The nested structure preserves the
+    // SDK union's alignment, including padding before `MaximumSize` and paths.
+    // https://learn.microsoft.com/en-us/windows/win32/api/virtdisk/ns-virtdisk-create_virtual_disk_parameters
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CreateVersion2 {
+        public Guid UniqueId;
+        public ulong MaximumSize;
+        public uint BlockSize, SectorSize, PhysicalSectorSize;
+        public IntPtr ParentPath, SourcePath;
+        public uint OpenFlags;
+        public StorageType ParentType, SourceType;
+        public Guid ResiliencyGuid;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CreateParameters {
+        public uint Version;
+        public CreateVersion2 Data;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct OpenParameters {
+        public uint Version;
+        public int GetInfoOnly, ReadOnly;
+        public Guid ResiliencyGuid;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CreateGpt {
+        public uint Style;
+        public Guid DiskId;
+        public uint MaxPartitions;
+    }
+    // The GPT members occupy the union storage in these SDK structures.
+    // Windows supplies the usable range; the data partition is aligned within
+    // that range, leaving the GPT headers and partition tables untouched.
+    // https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-drive_layout_information_ex
+    // https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-partition_information_ex
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LayoutHeader {
+        public uint Style, Count;
+        public Guid DiskId;
+        public long UsableStart, UsableLength;
+        public uint MaxPartitions;
+    }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct Partition {
+        public uint Style;
+        public ushort Ordinal;
+        public long Start, Length;
+        public uint Number;
+        public byte Rewrite, Service;
+        public Guid Type, Id;
+        public ulong Attributes;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 36)] public string Name;
+    }
+
+    [DllImport("virtdisk.dll", CharSet = CharSet.Unicode)]
+    private static extern uint CreateVirtualDisk(ref StorageType type,
+        string path, uint access, IntPtr security, uint flags, uint providerFlags,
+        ref CreateParameters parameters, IntPtr overlapped, out SafeFileHandle disk);
+    [DllImport("virtdisk.dll", CharSet = CharSet.Unicode)]
+    private static extern uint OpenVirtualDisk(ref StorageType type,
+        string path, uint access, uint flags, ref OpenParameters parameters,
+        out SafeFileHandle disk);
+    [DllImport("virtdisk.dll")]
+    private static extern uint AttachVirtualDisk(SafeFileHandle disk,
+        IntPtr security, uint flags, uint providerFlags, IntPtr parameters,
+        IntPtr overlapped);
+    [DllImport("virtdisk.dll")]
+    private static extern uint DetachVirtualDisk(SafeFileHandle disk,
+        uint flags, uint providerFlags);
+    [DllImport("virtdisk.dll", CharSet = CharSet.Unicode)]
+    private static extern uint GetVirtualDiskPhysicalPath(SafeFileHandle disk,
+        ref uint pathSize, StringBuilder path);
+    [DllImport("kernel32.dll", EntryPoint = "SetVolumeMountPointW",
+        CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool SetVolumeMountPoint(string mount, string volume);
+    [DllImport("kernel32.dll", EntryPoint = "DeleteVolumeMountPointW",
+        CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool DeleteVolumeMountPoint(string mount);
+
+    private static void RequireSuccess(uint result, string operation) {
+        if (result != 0) {
+            throw DeviceFsTestNative.Win32Error(operation, (int)result);
+        }
+    }
+    private static byte[] Bytes<T>(T value) where T : struct {
+        var buffer = new byte[Marshal.SizeOf<T>()];
+        var pinned = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+        try { Marshal.StructureToPtr(value, pinned.AddrOfPinnedObject(), false); }
+        finally { pinned.Free(); }
+        return buffer;
+    }
+    private static T Structure<T>(byte[] buffer, int offset = 0) where T : struct {
+        if (offset + Marshal.SizeOf<T>() > buffer.Length) {
+            throw new InvalidDataException("The native disk layout was incomplete.");
+        }
+        var pinned = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+        try { return Marshal.PtrToStructure<T>(IntPtr.Add(pinned.AddrOfPinnedObject(), offset)); }
+        finally { pinned.Free(); }
+    }
+    private static byte[] Control(SafeFileHandle disk, uint code,
+        byte[] input = null, int outputSize = 0) {
+        var result = DeviceFsTestNative.Control(disk, code, input, outputSize);
+        return result.Buffer.AsSpan(0, checked((int)result.BytesReturned)).ToArray();
+    }
+
+    // Volume devices arrive asynchronously after disk changes.
+    // Device notifications wake the query instead of guessed sleeps. Registration
+    // precedes the change, and each query precedes waiting, so an early arrival
+    // cannot be lost. The timeout reports failure rather than hanging a test.
+    // https://learn.microsoft.com/en-us/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_register_notification
+    private sealed class VolumeArrivals : IDisposable {
+        private readonly System.Threading.AutoResetEvent changed =
+            new System.Threading.AutoResetEvent(false);
+        private readonly Notification callback;
+        private IntPtr registration;
+        private delegate uint Notification(IntPtr notification, IntPtr context,
+            uint action, IntPtr data, uint size);
+        // CM_NOTIFY_FILTER's union includes a MAX_DEVICE_ID_LEN (200) WCHAR
+        // instance ID. Its size is therefore 16 header bytes plus 400 bytes.
+        // https://learn.microsoft.com/en-us/windows/win32/api/cfgmgr32/ns-cfgmgr32-cm_notify_filter
+        [StructLayout(LayoutKind.Explicit, Size = 416)]
+        private struct Filter {
+            [FieldOffset(0)] public uint Size;
+            [FieldOffset(16)] public Guid InterfaceClass;
+        }
+        [DllImport("cfgmgr32.dll")]
+        private static extern uint CM_Register_Notification(ref Filter filter,
+            IntPtr context, Notification callback, out IntPtr registration);
+        [DllImport("cfgmgr32.dll")]
+        private static extern uint CM_Unregister_Notification(IntPtr registration);
+        public VolumeArrivals() {
+            callback = (notification, context, action, data, size) => {
+                try {
+                    if (action == 0) { changed.Set(); }
+                    return 0;
+                } catch {
+                    // A managed exception cannot cross the native callback.
+                    return 31; // ERROR_GEN_FAILURE
+                }
+            };
+            var filter = new Filter {
+                Size = (uint)Marshal.SizeOf<Filter>(),
+                InterfaceClass = new Guid("53f5630d-b6bf-11d0-94f2-00a0c91efb8b"),
+            };
+            var result = CM_Register_Notification(ref filter, IntPtr.Zero,
+                callback, out registration);
+            if (result != 0) {
+                changed.Dispose();
+                throw new IOException($"CM_Register_Notification failed with CONFIGRET 0x{result:x8}.");
+            }
+        }
+        public T Wait<T>(Func<T> query, string description) where T : class {
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            var timeout = TimeSpan.FromSeconds(30);
+            for (;;) {
+                var result = query();
+                if (result != null) { return result; }
+                var remaining = timeout - elapsed.Elapsed;
+                if ((remaining <= TimeSpan.Zero) || !changed.WaitOne(remaining)) {
+                    throw new IOException($"Timed out waiting for {description}.");
+                }
+            }
+        }
+        public void Dispose() {
+            var result = CM_Unregister_Notification(registration);
+            if (result != 0) {
+                throw new IOException($"CM_Unregister_Notification failed with CONFIGRET 0x{result:x8}.");
+            }
+            GC.KeepAlive(callback);
+            changed.Dispose();
+        }
+    }
+
+    // Device IDs 2 and 3 select Microsoft's VHD and VHDX providers.
+    // https://learn.microsoft.com/en-us/windows/win32/api/virtdisk/ns-virtdisk-virtual_storage_type
+    private static StorageType TypeFor(string path) => new StorageType {
+        DeviceId = System.IO.Path.GetExtension(path).Equals(".vhdx",
+            StringComparison.OrdinalIgnoreCase) ? 3u : 2u,
+        VendorId = MicrosoftVirtualDiskVendor,
+    };
+
+    // Create a blank disk, attach it writable, and create one data partition.
+    // `fixedDisk` requests full allocation; otherwise the image grows on demand.
+    // The returned object retains the attachment until `Detach` or `Dispose`.
+    public static DeviceFsTestDisk Create(string path, ulong size, bool fixedDisk) {
+        var type = TypeFor(path);
+        var parameters = new CreateParameters {
+            Version = 2,
+            Data = new CreateVersion2 { MaximumSize = size, SectorSize = 512 },
+        };
+        RequireSuccess(CreateVirtualDisk(ref type, path, 0, IntPtr.Zero,
+            fixedDisk ? CreateFullAllocation : 0, 0, ref parameters,
+            IntPtr.Zero, out var handle), $"CreateVirtualDisk '{path}'");
+        return Prepare(handle, false, true, path);
+    }
+    // Attach an existing test image and locate its single data partition.
+    public static DeviceFsTestDisk Open(string path, bool readOnly = true) {
+        var type = TypeFor(path);
+        var parameters = new OpenParameters {
+            Version = 2, ReadOnly = readOnly ? 1 : 0,
+        };
+        RequireSuccess(OpenVirtualDisk(ref type, path, 0, 0, ref parameters,
+            out var handle), $"OpenVirtualDisk '{path}'");
+        return Prepare(handle, readOnly, false, path);
+    }
+    private static DeviceFsTestDisk Prepare(SafeFileHandle handle,
+        bool readOnly, bool initialize, string path) {
+        var result = new DeviceFsTestDisk { handle = handle };
+        try {
+            using var arrivals = new VolumeArrivals();
+            RequireSuccess(AttachVirtualDisk(handle, IntPtr.Zero,
+                AttachNoDriveLetter | (readOnly ? AttachReadOnly : 0), 0,
+                IntPtr.Zero, IntPtr.Zero), $"AttachVirtualDisk '{path}'");
+            uint pathSize = 0;
+            var status = GetVirtualDiskPhysicalPath(handle, ref pathSize, null);
+            if (status != 122) { RequireSuccess(status, "GetVirtualDiskPhysicalPath size"); }
+            var physicalPath = new StringBuilder(checked((int)pathSize / sizeof(char)));
+            RequireSuccess(GetVirtualDiskPhysicalPath(handle, ref pathSize,
+                physicalPath), $"GetVirtualDiskPhysicalPath '{path}'");
+            // The virtual-disk handle identifies the physical disk to initialize,
+            // so concurrent fixture creation cannot select another test's disk.
+            using var disk = DeviceFsTestNative.CreateFile(physicalPath.ToString(),
+                GenericRead | (initialize ? GenericWrite : 0), 7,
+                IntPtr.Zero, 3, 0, IntPtr.Zero);
+            if (disk.IsInvalid) {
+                RequireSuccess((uint)Marshal.GetLastWin32Error(), $"Open '{physicalPath}'");
+            }
+            var number = Control(disk, IoctlStorageGetDeviceNumber, outputSize: 3 * sizeof(uint));
+            result.DiskNumber = BitConverter.ToUInt32(number, sizeof(uint));
+            result.DiskLength = BitConverter.ToInt64(
+                Control(disk, IoctlDiskGetLengthInfo, outputSize: sizeof(long)), 0);
+            if (initialize) {
+                Control(disk, IoctlDiskCreateDisk, Bytes(new CreateGpt {
+                    Style = PartitionStyleGpt, DiskId = Guid.NewGuid(),
+                    MaxPartitions = GptEntryCount,
+                }));
+            }
+            // `IOCTL_DISK_UPDATE_PROPERTIES` makes Windows reread the initialized
+            // partition table before its usable range is queried.
+            // https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_disk_update_properties
+            if (initialize) { Control(disk, IoctlDiskUpdateProperties); }
+            var (header, partitions) = ReadLayout(disk);
+            if (header.Style != PartitionStyleGpt) {
+                throw new InvalidDataException($"'{path}' does not contain a GPT disk.");
+            }
+            if (initialize) {
+                var start = header.UsableStart;
+                foreach (var existing in partitions) {
+                    start = Math.Max(start, existing.Start + existing.Length);
+                }
+                start = checked((start + PartitionAlignment - 1) /
+                    PartitionAlignment * PartitionAlignment);
+                var end = (header.UsableStart + header.UsableLength) /
+                    PartitionAlignment * PartitionAlignment;
+                partitions.Add(new Partition {
+                    Style = PartitionStyleGpt, Start = start, Length = end - start,
+                    Rewrite = 1,
+                    Type = BasicDataPartition, Id = Guid.NewGuid(),
+                    Attributes = NoDefaultDriveLetter, Name = "DeviceFs test",
+                });
+                header.Count = (uint)partitions.Count;
+                var headerSize = Marshal.SizeOf<LayoutHeader>();
+                var entrySize = Marshal.SizeOf<Partition>();
+                var updated = new byte[headerSize + partitions.Count * entrySize];
+                Bytes(header).CopyTo(updated, 0);
+                for (int index = 0; index < partitions.Count; ++index) {
+                    var partition = partitions[index];
+                    partition.Rewrite = 1;
+                    Bytes(partition).CopyTo(updated, headerSize + index * entrySize);
+                }
+                Control(disk, IoctlDiskSetDriveLayoutEx, updated);
+                Control(disk, IoctlDiskUpdateProperties);
+                (_, partitions) = ReadLayout(disk);
+            }
+            var selected = partitions.FindAll(
+                partition => partition.Type == BasicDataPartition);
+            if (selected.Count != 1) {
+                throw new InvalidDataException($"'{path}' does not contain one basic-data partition.");
+            }
+            result.PartitionNumber = selected[0].Number;
+            result.Offset = selected[0].Start;
+            result.Size = selected[0].Length;
+            result.VolumeName = arrivals.Wait(() => result.FindVolumeName(),
+                $"volume arrival for '{path}'");
+            return result;
+        } catch {
+            result.Dispose();
+            throw;
+        }
+    }
+    private static (LayoutHeader Header, List<Partition> Partitions) ReadLayout(
+        SafeFileHandle disk) {
+        var headerSize = Marshal.SizeOf<LayoutHeader>();
+        var entrySize = Marshal.SizeOf<Partition>();
+        // Both the created fixtures and VhdxViewer use 128 GPT entries.
+        var layout = Control(disk, IoctlDiskGetDriveLayoutEx,
+            outputSize: headerSize + checked((int)GptEntryCount) * entrySize);
+        var header = Structure<LayoutHeader>(layout);
+        var partitions = new List<Partition>();
+        for (int index = 0; index < header.Count; ++index) {
+            var entry = Structure<Partition>(layout, headerSize + index * entrySize);
+            if (entry.Length != 0) { partitions.Add(entry); }
+        }
+        return (header, partitions);
+    }
+    [DllImport("kernel32.dll", EntryPoint = "FindFirstVolumeW",
+        CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr FindFirstVolume(StringBuilder name, uint size);
+    [DllImport("kernel32.dll", EntryPoint = "FindNextVolumeW",
+        CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool FindNextVolume(IntPtr search,
+        StringBuilder name, uint size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool FindVolumeClose(IntPtr search);
+
+    // Volume GUID names are available before formatting. Matching the storage
+    // device number identifies the partition without opening a filesystem root,
+    // which would require a filesystem already recognized by Windows.
+    // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstvolumew
+    // https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_storage_get_device_number
+    private string FindVolumeName() {
+        // A volume GUID name is \\?\Volume{36-character GUID}\ plus NUL.
+        var name = new StringBuilder(50);
+        var search = FindFirstVolume(name, (uint)name.Capacity);
+        if (search == new IntPtr(-1)) {
+            RequireSuccess((uint)Marshal.GetLastWin32Error(), "FindFirstVolume");
+        }
+        try {
+            do {
+                using var volume = DeviceFsTestNative.CreateFile(name.ToString().TrimEnd('\\'),
+                    0, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
+                if (!volume.IsInvalid) {
+                    var number = new byte[3 * sizeof(uint)];
+                    if (DeviceFsTestNative.DeviceIoControl(volume, IoctlStorageGetDeviceNumber,
+                            null, 0, number, (uint)number.Length,
+                            out var returned, IntPtr.Zero) &&
+                        returned == number.Length &&
+                        BitConverter.ToUInt32(number, sizeof(uint)) == DiskNumber &&
+                        BitConverter.ToUInt32(number, 2 * sizeof(uint)) == PartitionNumber) {
+                        return name.ToString();
+                    }
+                }
+            } while (FindNextVolume(search, name, (uint)name.Capacity));
+            var status = Marshal.GetLastWin32Error();
+            if (status != 18) { RequireSuccess((uint)status, "FindNextVolume"); }
+            return null;
+        } finally { FindVolumeClose(search); }
+    }
+    public void Mount(string directory) {
+        if (!SetVolumeMountPoint(directory.TrimEnd('\\') + "\\", VolumeName)) {
+            RequireSuccess((uint)Marshal.GetLastWin32Error(), $"SetVolumeMountPoint '{directory}'");
+        }
+    }
+    public void Unmount(string directory) {
+        if (!DeleteVolumeMountPoint(directory.TrimEnd('\\') + "\\")) {
+            RequireSuccess((uint)Marshal.GetLastWin32Error(), $"DeleteVolumeMountPoint '{directory}'");
+        }
+    }
+    public void Detach() {
+        if (!handle.IsClosed) {
+            RequireSuccess(DetachVirtualDisk(handle, 0, 0), "DetachVirtualDisk");
+            handle.Dispose();
+        }
+    }
+    public void Dispose() { handle.Dispose(); }
 }

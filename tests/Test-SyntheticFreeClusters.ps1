@@ -3,7 +3,6 @@
 
 #requires -Version 7.4
 #requires -RunAsAdministrator
-#requires -Modules Hyper-V
 
 <#
 .SYNOPSIS
@@ -77,7 +76,6 @@ foreach ($case in $selected_cases) {
         throw "Unknown case '$case'. Available cases: $($case_settings.Keys -join ', ')."
     }
 }
-$file_backed_virtual_bus_type = [UInt16]15
 . ([IO.Path]::Combine(
         $PSScriptRoot, 'include', 'DeviceFsTestProcess.ps1'))
 . (Join-Path $PSScriptRoot 'include/DeviceFsTestVolume.ps1')
@@ -180,53 +178,36 @@ function Mount-ValidatedReadOnlyVhd {
         $Fixture
     )
 
-    $disk_image = Mount-DiskImage -ImagePath $Path -StorageType VHD `
-        -Access ReadOnly -NoDriveLetter -PassThru
-    $disks = @($disk_image | Get-Disk)
-    Assert-Condition ($disks.Count -eq 1) `
-        'The read-only VHD did not resolve to exactly one disk.'
+    $attachment = [DeviceFsTestDisk]::Open($Path)
+    try {
+        Assert-Condition (
+            ($attachment.DiskLength -eq $Fixture.DiskLength) -and
+                ($attachment.PartitionNumber -eq $Fixture.PartitionNumber) -and
+                ($attachment.Offset -eq $Fixture.PartitionOffset) -and
+                ($attachment.Size -eq $Fixture.PartitionLength) -and
+                ($attachment.VolumeName -eq $Fixture.VolumeName)) `
+            'The read-only VHD partition identity changed.'
+        $identity = [DeviceFsTestNative]::InspectVolume($Fixture.VolumeName)
+        Assert-Condition (
+            ($identity.Label -ceq $Fixture.VolumeLabel) -and
+                ($identity.FileSystem -eq $Fixture.FileSystem) -and
+                ($identity.Length -eq $Fixture.VolumeLength) -and
+                ($identity.DiskNumber -eq $attachment.DiskNumber) -and
+                ($identity.DiskStartingOffset -eq $attachment.Offset) -and
+                ($identity.DiskExtentLength -eq $attachment.Size)) `
+            'The read-only volume does not map to the expected VHD partition.'
 
-    $disk = $disks[0]
-    Assert-Condition (
-        $disk.CimInstanceProperties['BusType'].Value -eq
-            $script:file_backed_virtual_bus_type) `
-        'The read-only test disk is not file-backed virtual storage.'
-    Assert-Condition (
-        ($disk.Size -eq $Fixture.DiskLength) -and (-not $disk.IsBoot) -and
-            (-not $disk.IsSystem) -and (-not $disk.IsClustered) -and
-            (-not $disk.IsOffline) -and $disk.IsReadOnly) `
-        'The read-only VHD does not satisfy the test-disk safety policy.'
-
-    $partition = Get-Partition -DiskNumber $disk.Number `
-        -PartitionNumber $Fixture.PartitionNumber
-    Assert-Condition (
-        ($partition.Offset -eq $Fixture.PartitionOffset) -and
-            ($partition.Size -eq $Fixture.PartitionLength) -and
-            (-not $partition.IsHidden) -and
-            $partition.NoDefaultDriveLetter -and
-            ([char]$partition.DriveLetter -eq [char]0)) `
-        'The read-only VHD partition identity or attributes changed.'
-    Assert-Condition (-not (Get-Partition -DiskNumber $disk.Number |
-            Where-Object { [char]$_.DriveLetter -ne [char]0 })) `
-        'The read-only test VHD consumed a drive letter.'
-
-    $identity = [DeviceFsTestNative]::InspectVolume($Fixture.VolumeName)
-    Assert-Condition (
-        ($identity.Label -ceq $Fixture.VolumeLabel) -and
-            ($identity.FileSystem -eq $Fixture.FileSystem) -and
-            ($identity.Length -eq $Fixture.VolumeLength) -and
-            ($identity.DiskNumber -eq $disk.Number) -and
-            ($identity.DiskStartingOffset -eq $partition.Offset) -and
-            ($identity.DiskExtentLength -eq $partition.Size)) `
-        'The read-only volume does not map to the expected VHD partition.'
-
-    $bitmap = [DeviceFsTestNative]::GetAllocationBitmap(
-        $Fixture.VolumeName, $true, { param($message) Write-TestLog $message })
-    Assert-Condition (
-        ($bitmap.Length -eq $Fixture.VolumeLength) -and
-            ($bitmap.ClusterSize -eq $Fixture.ClusterSize)) `
-        'The read-only allocation bitmap geometry is inconsistent with the fixture.'
-    return $bitmap
+        $bitmap = [DeviceFsTestNative]::GetAllocationBitmap(
+            $Fixture.VolumeName, $true, { param($message) Write-TestLog $message })
+        Assert-Condition (
+            ($bitmap.Length -eq $Fixture.VolumeLength) -and
+                ($bitmap.ClusterSize -eq $Fixture.ClusterSize)) `
+            'The read-only allocation bitmap geometry is inconsistent with the fixture.'
+        return [pscustomobject]@{ Attachment = $attachment; Bitmap = $bitmap }
+    } catch {
+        $attachment.Dispose()
+        throw
+    }
 }
 
 if (-not $IsWindows) {
@@ -264,6 +245,7 @@ function Invoke-SyntheticFreeClustersCase {
     $vhd_path = $null
     $source_mount = $null
     $source_partition = $null
+    $read_only = $null
     $source_access_path_added = $false
     $normal_invocation = $null
     $synthetic_invocation = $null
@@ -301,14 +283,8 @@ function Invoke-SyntheticFreeClustersCase {
         $source_partition = New-DeviceFsTestVolume -Path $vhd_path -SizeBytes $requested_disk_length `
             -ClusterSize $ClusterSize -FileSystem $FileSystem -Label $source_label -Fixed:(-not $DevDrive) `
             -DevDrive:$DevDrive
-        $disk = Get-Disk -Number $source_partition.DiskNumber
-        Add-PartitionAccessPath -InputObject $source_partition `
-            -AccessPath $source_mount
+        $source_partition.Mount($source_mount)
         $source_access_path_added = $true
-
-        Assert-Condition (-not (Get-Partition -DiskNumber $disk.Number |
-                Where-Object { [char]$_.DriveLetter -ne [char]0 })) `
-            'The test VHD consumed a drive letter.'
 
         $source_volume_name = [DeviceFsTestNative]::GetVolumeName($source_mount)
         $source_identity = [DeviceFsTestNative]::InspectVolume(
@@ -318,14 +294,14 @@ function Invoke-SyntheticFreeClustersCase {
         Assert-Condition ($source_identity.FileSystem -eq $FileSystem) `
             "Expected $FileSystem, but the fixture uses $($source_identity.FileSystem)."
         Assert-Condition (
-            ($source_identity.DiskNumber -eq $disk.Number) -and
+            ($source_identity.DiskNumber -eq $source_partition.DiskNumber) -and
                 ($source_identity.DiskStartingOffset -eq
                     $source_partition.Offset) -and
                 ($source_identity.DiskExtentLength -eq $source_partition.Size)) `
             'The source volume does not map to the expected VHD partition.'
 
         $fixture = [pscustomobject]@{
-            DiskLength = [long]$disk.Size
+            DiskLength = [long]$source_partition.DiskLength
             PartitionNumber = $source_partition.PartitionNumber
             PartitionOffset = [long]$source_partition.Offset
             PartitionLength = [long]$source_partition.Size
@@ -339,15 +315,12 @@ function Invoke-SyntheticFreeClustersCase {
         $witness_pattern = [byte[]]::new($ClusterSize)
         [Array]::Fill[byte]($witness_pattern, 0xA5)
 
-        Remove-PartitionAccessPath -InputObject $source_partition `
-            -AccessPath $source_mount -Confirm:$false
+        $source_partition.Unmount($source_mount)
         $source_access_path_added = $false
-        Dismount-DiskImage -ImagePath $vhd_path | Out-Null
-        Assert-Condition (-not (Get-DiskImage -ImagePath $vhd_path).Attached) `
-            'The VHD remained attached before the read-only bitmap query.'
+        $source_partition.Detach()
 
-        $selection_bitmap = Mount-ValidatedReadOnlyVhd `
-            -Path $vhd_path -Fixture $fixture
+        $read_only = Mount-ValidatedReadOnlyVhd -Path $vhd_path -Fixture $fixture
+        $selection_bitmap = $read_only.Bitmap
         $witness_lcn = -1L
         $free_to_allocated_lcn = -1L
         $run_start = -1L
@@ -382,17 +355,15 @@ function Invoke-SyntheticFreeClustersCase {
         Assert-Condition ($free_to_allocated_lcn -ge 0) `
             'Could not find a free-to-allocated transition.'
 
-        Dismount-DiskImage -ImagePath $vhd_path | Out-Null
-        Assert-Condition (-not (Get-DiskImage -ImagePath $vhd_path).Attached) `
-            'The read-only VHD remained attached before witness modification.'
+        $read_only.Attachment.Detach()
         Write-VhdCluster -Path $vhd_path -DiskLength $fixture.DiskLength `
             -PartitionOffset $fixture.PartitionOffset `
             -PartitionLength $fixture.PartitionLength `
             -ClusterSize $fixture.ClusterSize -Lcn $witness_lcn `
             -Pattern $witness_pattern
 
-        $bitmap = Mount-ValidatedReadOnlyVhd `
-            -Path $vhd_path -Fixture $fixture
+        $read_only = Mount-ValidatedReadOnlyVhd -Path $vhd_path -Fixture $fixture
+        $bitmap = $read_only.Bitmap
         Assert-Condition (
             ($bitmap.SectorSize -eq $selection_bitmap.SectorSize) -and
                 ($bitmap.ClusterSize -eq $selection_bitmap.ClusterSize) -and
@@ -528,10 +499,8 @@ function Invoke-SyntheticFreeClustersCase {
             "$($bitmap.ClusterSize) controlled nonzero witness bytes that " +
             'the synthetic view replaced with zeros.')
     } catch {
-        # `MSFT_Volume.Format` reports 43001 when the filesystem is unsupported.
-        # Matching the error ID also works when Windows localizes the message.
-        # https://learn.microsoft.com/en-us/windows-hardware/drivers/storage/format-msft-volume
-        if ($_.FullyQualifiedErrorId -eq 'StorageWMI 43001,Format-Volume') {
+        if (($_.Exception.Message -creplace '\s', '').Contains(
+            ('ReFS file system is not supported on this device' -creplace '\s', ''))) {
             $filesystem_unsupported = $true
         } else {
             $primary_error = $_
@@ -574,8 +543,7 @@ function Invoke-SyntheticFreeClustersCase {
 
         if ($devicefs_processes_gone -and $source_access_path_added) {
             try {
-                Remove-PartitionAccessPath -InputObject $source_partition `
-                    -AccessPath $source_mount -Confirm:$false
+                $source_partition.Unmount($source_mount)
                 $source_access_path_added = $false
             } catch {
                 $cleanup_errors.Add($_.Exception)
@@ -585,12 +553,9 @@ function Invoke-SyntheticFreeClustersCase {
         if ($devicefs_processes_gone -and (-not $source_access_path_added) -and
             ($null -ne $vhd_path) -and [IO.File]::Exists($vhd_path)) {
             try {
-                $current_image = Get-DiskImage -ImagePath $vhd_path
-                if ($current_image.Attached) {
-                    Dismount-DiskImage -ImagePath $vhd_path | Out-Null
-                }
-                $image_detached =
-                    -not (Get-DiskImage -ImagePath $vhd_path).Attached
+                if ($null -ne $read_only) { $read_only.Attachment.Detach() }
+                if ($null -ne $source_partition) { $source_partition.Detach() }
+                $image_detached = $true
             } catch {
                 $cleanup_errors.Add($_.Exception)
             }

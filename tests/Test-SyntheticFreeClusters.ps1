@@ -423,21 +423,7 @@ function Invoke-SyntheticFreeClustersCase {
             'The exposed bitmap has the wrong length.'
         Write-TestLog "PASS: the bitmap has the expected length of $($map.Length) bytes."
 
-        for ($chunk = 0L; $chunk -lt $chunk_count; ++$chunk) {
-            $first = [long][Math]::Floor($chunk * $KnownDataMapClusterSize / $bitmap.ClusterSize)
-            $end = [Math]::Min(($chunk + 1) * $KnownDataMapClusterSize, $bitmap.Length)
-            $last = [long][Math]::Floor(($end - 1) / $bitmap.ClusterSize)
-            $allocated = $false
-            for ($cluster = $first; $cluster -le $last; ++$cluster) {
-                if ($bitmap.IsAllocated($cluster)) {
-                    $allocated = $true
-                    break
-                }
-            }
-            $index = [int][Math]::Floor($chunk / 8)
-            $actual = ($map[$index] -band (1 -shl ($chunk % 8))) -ne 0
-            Assert-Condition ($actual -eq $allocated) "Known-data bitmap differs at chunk $chunk."
-        }
+        $bitmap.VerifyKnownDataBitmap($map, $KnownDataMapClusterSize)
         Write-TestLog ("PASS: all $chunk_count bits match the allocation bitmap " +
             "at $KnownDataMapClusterSize bytes per bit.")
 

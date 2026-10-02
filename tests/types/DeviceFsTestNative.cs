@@ -63,6 +63,52 @@ public sealed class VolumeAllocationBitmap {
 
         return (bits[cluster / 8] & (1 << (int)(cluster % 8))) != 0;
     }
+
+    public void VerifyKnownDataBitmap(byte[] map, long chunkSize) {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(chunkSize);
+        var chunkCount = Length / chunkSize + (Length % chunkSize != 0 ? 1 : 0);
+        var expected = new byte[checked((int)((chunkCount + 7) / 8))];
+        for (var chunk = 0L; chunk < chunkCount; ++chunk) {
+            var start = chunk * chunkSize;
+            var end = start + Math.Min(chunkSize, Length - start);
+            var first = start / ClusterSize;
+            var last = (end - 1) / ClusterSize;
+            if (HasAllocatedClusters(first, last)) {
+                expected[chunk / 8] |= (byte)(1 << (int)(chunk % 8));
+            }
+        }
+        var completeBytes = checked((int)(chunkCount / 8));
+        var remainingBits = (int)(chunkCount % 8);
+        if (expected.AsSpan(0, completeBytes).SequenceEqual(
+                map.AsSpan(0, completeBytes)) &&
+                ((remainingBits == 0) ||
+                    (((expected[completeBytes] ^ map[completeBytes]) &
+                        ((1 << remainingBits) - 1)) == 0))) {
+            return;
+        }
+        for (var chunk = 0L; chunk < chunkCount; ++chunk) {
+            if (((expected[chunk / 8] ^ map[chunk / 8]) &
+                    (1 << (int)(chunk % 8))) != 0) {
+                throw new InvalidDataException(
+                    $"Known-data bitmap differs at chunk {chunk}.");
+            }
+        }
+    }
+
+    private bool HasAllocatedClusters(long first, long last) {
+        if (((first % 8) == 0) && (((last + 1) % 8) == 0) &&
+                (last < ClusterCount)) {
+            return bits.AsSpan(checked((int)(first / 8)),
+                checked((int)((last - first + 1) / 8)))
+                .ContainsAnyExcept((byte)0);
+        }
+        for (var cluster = first; cluster <= last; ++cluster) {
+            if (IsAllocated(cluster)) {
+                return true;
+            }
+        }
+        return false;
+    }
 }
 
 public sealed class ComparisonSummary {
@@ -969,27 +1015,31 @@ public static unsafe class DeviceFsTestNative {
             var startIndex = checked((int)(position - offset));
             var length = checked((int)(next - position));
             var allocated = bitmap.IsAllocated(cluster);
-            for (var i = startIndex; i < startIndex + length; ++i) {
-                var absolute = checked(offset + i);
-                if (normal[i] != source[i]) {
+            var sourceRange = source.AsSpan(startIndex, length);
+            var syntheticRange = synthetic.AsSpan(startIndex, length);
+            var syntheticMatches = allocated
+                ? syntheticRange.SequenceEqual(sourceRange)
+                : !syntheticRange.ContainsAnyExcept((byte)0);
+            if ((!normal.AsSpan(startIndex, length).SequenceEqual(sourceRange)) ||
+                    !syntheticMatches) {
+                for (var i = startIndex; i < startIndex + length; ++i) {
+                    var normalMatches = normal[i] == source[i];
+                    var syntheticExpected = allocated ? source[i] : (byte)0;
+                    if (normalMatches && (synthetic[i] == syntheticExpected)) {
+                        continue;
+                    }
+                    var (view, expected, actual) = normalMatches
+                        ? ("synthetic", syntheticExpected, synthetic[i])
+                        : ("normal", source[i], normal[i]);
                     throw new InvalidDataException(
-                        $"normal devicefs view differs at offset 0x{absolute:X}, " +
-                        $"LCN {cluster}: source=0x{source[i]:X2}, " +
-                        $"actual=0x{normal[i]:X2}");
-                }
-
-                var expected = allocated ? source[i] : (byte)0;
-                if (synthetic[i] != expected) {
-                    throw new InvalidDataException(
-                        $"synthetic devicefs view differs at offset 0x{absolute:X}, " +
+                        $"{view} devicefs view differs at offset 0x{checked(offset + i):X}, " +
                         $"LCN {cluster}: allocated={allocated}, " +
                         $"source=0x{source[i]:X2}, expected=0x{expected:X2}, " +
-                        $"actual=0x{synthetic[i]:X2}");
+                        $"actual=0x{actual:X2}");
                 }
-
-                if (!allocated) {
-                    ++summary.FreeBytes;
-                }
+            }
+            if (!allocated) {
+                summary.FreeBytes += length;
             }
 
             position = next;

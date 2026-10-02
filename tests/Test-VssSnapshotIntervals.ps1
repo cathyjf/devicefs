@@ -173,7 +173,7 @@ function Invoke-IntervalCase {
     # cannot run.
     function Invoke-Check {
         param([string] $Name, [scriptblock] $Operation, [string] $SkipReason,
-            [switch] $Informational)
+            [switch] $Informational, [string] $ExpectedFailure)
         if ($SkipReason) {
             $checks.Add([pscustomobject]@{ Name = $Name; Status = 'Skipped'; Detail = $SkipReason })
             Write-Host "SKIP $Name`: $SkipReason"
@@ -188,7 +188,13 @@ function Invoke-IntervalCase {
         } catch {
             $status = if ($Informational) { 'Unavailable' } else { 'Failed' }
             $checks.Add([pscustomobject]@{ Name = $Name; Status = $status; Detail = $_.Exception.Message })
-            Write-Host "$status $Name`: $($_.Exception.Message)"
+            if ($ExpectedFailure) {
+                Write-Host (
+                    "INFO $Name`: expected failure $ExpectedFailure; " +
+                    "parser reported: $($_.Exception.Message)")
+            } else {
+                Write-Host "$status $Name`: $($_.Exception.Message)"
+            }
             return $null
         }
     }
@@ -233,10 +239,12 @@ function Invoke-IntervalCase {
     }
 
     function Read-Catalog {
-        param([string] $Name, [string] $Source, [switch] $Required, [string] $SkipReason)
+        param([string] $Name, [string] $Source, [switch] $Required,
+            [string] $SkipReason, [string] $ExpectedFailure)
         $result = Invoke-Check $Name {
             ConvertFrom-VssCatalogOutput (Read-Dump $Name $Source @('--catalog'))
-        } -Informational:(-not $Required) -SkipReason $SkipReason
+        } -Informational:(-not $Required) -SkipReason $SkipReason `
+            -ExpectedFailure $ExpectedFailure
         $report.Catalogs[$Name] = $result
         return ,$result
     }
@@ -274,11 +282,7 @@ function Invoke-IntervalCase {
             ($identity.DiskExtentLength -eq $partition.Size)) 'The fixture volume did not map to its new VHD.'
         $report['Volume'] = $volume_name
         $report['VolumeSize'] = $identity.Length
-        $vssadmin = Join-Path $env:WINDIR 'System32/vssadmin.exe'
-        $volume_argument = $volume_name.TrimEnd([char]'\')
-        & $vssadmin resize shadowstorage "/for=$volume_argument" "/on=$volume_argument" `
-            /maxsize=512MB > (Join-Path $directory 'shadowstorage.txt') 2>&1
-        Assert-Condition ($LASTEXITCODE -eq 0) 'Could not configure fixture shadow storage; see shadowstorage.txt.'
+        Initialize-TestShadowStorage -VolumeName $volume_name
 
         $witnesses = @(for ($i = 0; $i -le $IntermediateCount; ++$i) {
             [pscustomobject]@{ File = "interval-$i.bin"; Before = [byte](0x31 + $i); After = [byte](0xA5 + $i) }
@@ -296,7 +300,8 @@ function Invoke-IntervalCase {
             if ($i -lt $IntermediateCount) { $null = Add-Snapshot "I$($i + 1)" }
         }
         $b = Add-Snapshot 'B'
-        $null = Read-Catalog 'catalog-b-latest' $b.Device
+        $null = Read-Catalog 'catalog-b-latest' $b.Device `
+            -ExpectedFailure 'reading raw B while it is the latest snapshot'
         Write-FilePattern (Join-Path $mount 'after-b.bin') 0 $bulk_size 0xE5
         $successor = Invoke-Check 'create successor C' { Add-Snapshot 'C' }
         $successor_skip_reason = if ($null -eq $successor) {

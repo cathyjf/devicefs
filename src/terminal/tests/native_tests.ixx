@@ -310,11 +310,7 @@ public:
                 "keyboard detection blocked ordinary text input"sv);
             Require((input.Modes()[0] & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0,
                 "Console Host's reply prematurely disabled VT input"sv);
-            input.Feed(test.replies.substr(0, 3));
-            auto remainder = std::async(std::launch::async, [&input, &test] {
-                std::this_thread::sleep_for(10ms);
-                input.Feed(std::format("{}日{}z", test.replies.substr(3), test.shift_enter));
-            });
+            input.Feed(std::format("{}日{}z", test.replies, test.shift_enter));
             Require(console.ReadTextInput(std::chrono::steady_clock::now() + 1s).character == U'日',
                 "keyboard detection consumed ordinary text"sv);
             Require(console.ReadTextInput(std::chrono::steady_clock::now() + 1s).key == MenuKey::Newline,

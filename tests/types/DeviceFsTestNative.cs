@@ -16,6 +16,7 @@ using Windows.Win32.Storage.FileSystem;
 using Windows.Win32.Storage.Vhd;
 using Windows.Win32.System.Console;
 using Windows.Win32.System.Memory;
+using Windows.Win32.System.SystemInformation;
 using Windows.Win32.System.Ioctl;
 using Windows.Win32.Devices.DeviceAndDriverInstallation;
 using static Windows.Win32.PInvoke;
@@ -265,6 +266,24 @@ public static unsafe class DeviceFsTestNative {
 
     private static Win32Exception LastError(string operation) {
         return Win32Error(operation, Marshal.GetLastWin32Error());
+    }
+
+    public static bool IsWindowsServer() {
+        var version = new OSVERSIONINFOEXW {
+            dwOSVersionInfoSize = (uint)sizeof(OSVERSIONINFOEXW),
+            wProductType = (byte)VER_NT_WORKSTATION
+        };
+        var condition = VerSetConditionMask(
+            0, VER_FLAGS.VER_PRODUCT_TYPE, (byte)VER_EQUAL);
+        if (VerifyVersionInfo(
+                ref version, VER_FLAGS.VER_PRODUCT_TYPE, condition)) {
+            return false;
+        }
+        var error = Marshal.GetLastWin32Error();
+        if (error != (int)WIN32_ERROR.ERROR_OLD_WIN_VERSION) {
+            throw Win32Error("VerifyVersionInfoW failed", error);
+        }
+        return true;
     }
 
     // The exposure supervisor shares the harness's console and reads Ctrl+C

@@ -1,6 +1,35 @@
 # SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+function Initialize-TestShadowStorage {
+    param(
+        [Parameter(Mandatory)]
+        [string] $VolumeName
+    )
+
+    $vssadmin = [IO.Path]::Combine($env:WINDIR, 'System32', 'vssadmin.exe')
+    $volume_argument = $VolumeName.TrimEnd([char]'\')
+    $command = if ([DeviceFsTestNative]::IsWindowsServer()) {
+        # Windows Server requires a shadow association to be created with the
+        # `vssadmin add` command before that association can be used.
+        'add'
+    } else {
+        # On Windows 11, the `vssadmin add` command does not exist. Instead, a
+        # shadow association is implicitly created by resizing an association
+        # that does not yet exist.
+        'resize'
+    }
+    $arguments = @(
+        $command, 'shadowstorage',
+        "/for=$volume_argument", "/on=$volume_argument", '/maxsize=512MB'
+    )
+    Write-Host "`"$vssadmin`" $($arguments -join ' ')"
+    & $vssadmin @arguments 2>&1 | Out-Host
+    $exit_code = $LASTEXITCODE
+    Assert-Condition ($exit_code -eq 0) `
+        "VSS storage configuration failed with exit code $exit_code."
+}
+
 function New-TestShadowCopy {
     param(
         [Parameter(Mandatory)]

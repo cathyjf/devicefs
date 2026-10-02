@@ -18,7 +18,10 @@
       "environment": {
         "POWERSHELL_TELEMETRY_OPTOUT": "true",
         "POWERSHELL_UPDATECHECK": "Off",
-        "POWERSHELL_DIAGNOSTICS_OPTOUT": "true"
+        "POWERSHELL_DIAGNOSTICS_OPTOUT": "true",
+        "DOTNET_CLI_TELEMETRY_OPTOUT": "true",
+        "VSTEL_OPT_OUT": "1",
+        "VSCMD_SKIP_SENDTELEMETRY": "1"
       },
       "warnings": {
         "uninitialized": true

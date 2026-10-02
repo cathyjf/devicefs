@@ -413,17 +413,7 @@ try {
             ($source_identity.DiskExtentLength -eq $source_partition.Size)) `
         'The NTFS volume does not map to the expected VHD partition.'
 
-    $vssadmin = [IO.Path]::Combine(
-        $env:WINDIR, 'System32', 'vssadmin.exe')
-    $vssadmin_volume = $source_volume_name.TrimEnd([char]'\')
-    # Windows 11 creates a missing diff-area association when resizing it.
-    $storage_output = @(& $vssadmin resize shadowstorage `
-        "/for=$vssadmin_volume" "/on=$vssadmin_volume" `
-        '/maxsize=512MB' 2>&1)
-    $storage_exit_code = $LASTEXITCODE
-    Assert-Condition ($storage_exit_code -eq 0) (
-        "VSS storage configuration failed with exit code " +
-        "$storage_exit_code`: $($storage_output -join [Environment]::NewLine)")
+    Initialize-TestShadowStorage -VolumeName $source_volume_name
 
     $bulk_ab_path = [IO.Path]::Combine($source_mount, 'bulk-ab.bin')
     $bulk_bc_path = [IO.Path]::Combine($source_mount, 'bulk-bc.bin')
@@ -509,7 +499,7 @@ try {
                     "be completed: $message")
             }
         }
-        & $probe_b_select_a 'while latest immediately before C' `
+        & $probe_b_select_a 'while latest immediately before C (failure expected)' `
             'endpoint-b-while-latest-select-a'
     }
 
@@ -858,7 +848,7 @@ try {
                     SviBlocks = $svi_blocks_ab
                 },
                 [pscustomobject]@{
-                    Name = 'snapshot C while latest selecting store B'
+                    Name = 'snapshot C while latest selecting store B (failure expected)'
                     Artifact = 'endpoint-c-while-latest-select-b'
                     Source = $snapshot_c.DeviceObject
                     CopyId = $requests[1]

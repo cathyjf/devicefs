@@ -37,7 +37,7 @@ struct CapturedError {
     try {
         WinError("could not open '{}'", "test object", error);
     } catch (const std::system_error &failure) {
-        std::println("\u2192 {}", failure.what());
+        std::println("Expected test diagnostic: \u2192 {}", failure.what());
         if (failure.code().category() != std::system_category()) {
             throw std::runtime_error("a Windows error lost its system category");
         }
@@ -207,7 +207,7 @@ auto main() -> int try {
     try {
         WinError("could not open the test file");
     } catch (const std::system_error &failure) {
-        std::println("\u2192 {}", failure.what());
+        std::println("Expected test diagnostic: \u2192 {}", failure.what());
         if ((failure.code() != std::error_code{ERROR_FILE_NOT_FOUND, std::system_category()}) ||
             std::string_view{failure.what()}.contains("COM failure")) {
             throw std::runtime_error("implicit Win32 error capture used the wrong error information");

@@ -129,7 +129,7 @@ function Assert-BytesEqual {
     }
 }
 
-function Write-VhdCluster {
+function Write-VhdClusterRun {
     param(
         [Parameter(Mandatory)]
         [string] $Path,
@@ -153,8 +153,9 @@ function Write-VhdCluster {
         [byte[]] $Pattern
     )
 
-    Assert-Condition ($Pattern.Length -eq $ClusterSize) `
-        'The VHD witness pattern is not one cluster long.'
+    Assert-Condition (($Pattern.Length -gt 0) -and
+        (($Pattern.Length % $ClusterSize) -eq 0)) `
+        'The VHD witness pattern must contain complete clusters.'
     Assert-Condition (
         ($PartitionOffset -ge 0) -and ($PartitionLength -gt 0) -and
             ($PartitionOffset + $PartitionLength -le $DiskLength)) `
@@ -163,8 +164,8 @@ function Write-VhdCluster {
 
     $relative_offset = $Lcn * [long]$ClusterSize
     Assert-Condition (
-        $relative_offset -le ($PartitionLength - $ClusterSize)) `
-        'The VHD witness cluster is outside the partition.'
+        $relative_offset -le ($PartitionLength - $Pattern.Length)) `
+        'The VHD witness run is outside the partition.'
 
     [DeviceFsTestNative]::WriteVhdWitness(
         $Path, $DiskLength, ($PartitionOffset + $relative_offset), $Pattern)
@@ -313,8 +314,13 @@ function Invoke-SyntheticFreeClustersCase {
             ClusterSize = $ClusterSize
         }
 
-        $witness_pattern = [byte[]]::new($ClusterSize)
-        [Array]::Fill[byte]($witness_pattern, 0xA5)
+        $witness_pattern = [byte[]]::new($free_run_length * $ClusterSize)
+        # Every byte is nonzero, and higher position bits distinguish clusters
+        # so that a misplaced read cannot pass by returning a repeated cluster.
+        for ($index = 0; $index -lt $witness_pattern.Length; ++$index) {
+            $witness_pattern[$index] = 1 +
+                (($index -bxor ($index -shr 8) -bxor ($index -shr 16)) % 255)
+        }
 
         $source_partition.Unmount($source_mount)
         $source_access_path_added = $false
@@ -357,7 +363,7 @@ function Invoke-SyntheticFreeClustersCase {
             'Could not find a free-to-allocated transition.'
 
         $read_only.Attachment.Detach()
-        Write-VhdCluster -Path $vhd_path -DiskLength $fixture.DiskLength `
+        Write-VhdClusterRun -Path $vhd_path -DiskLength $fixture.DiskLength `
             -PartitionOffset $fixture.PartitionOffset `
             -PartitionLength $fixture.PartitionLength `
             -ClusterSize $fixture.ClusterSize -Lcn $witness_lcn `
@@ -385,7 +391,7 @@ function Invoke-SyntheticFreeClustersCase {
 
         $witness_offset = $witness_lcn * [long]$bitmap.ClusterSize
         $actual_pattern = [DeviceFsTestNative]::ReadDeviceAt(
-            $fixture.VolumeName, $witness_offset, $bitmap.ClusterSize)
+            $fixture.VolumeName, $witness_offset, $witness_pattern.Length)
         Assert-BytesEqual $witness_pattern $actual_pattern `
             'The read-only free-cluster witness'
 
@@ -441,7 +447,22 @@ function Invoke-SyntheticFreeClustersCase {
         $cluster_size = [long]$bitmap.ClusterSize
         $null = [DeviceFsTestNative]::CompareRange(
             $source_device, $normal_image, $synthetic_image, $bitmap,
-            $witness_offset, [int]$cluster_size)
+            $witness_offset, $witness_pattern.Length)
+        $rejected = $false
+        try {
+            $null = [DeviceFsTestNative]::CompareRange(
+                $source_device, $normal_image, $normal_image, $bitmap,
+                $witness_offset, $witness_pattern.Length)
+        } catch {
+            $failure = $_.Exception.GetBaseException()
+            if (($failure -isnot [IO.InvalidDataException]) -or
+                (-not $failure.Message.StartsWith('synthetic devicefs view differs'))) {
+                throw
+            }
+            $rejected = $true
+        }
+        Assert-Condition $rejected 'The zero-synthesis check accepted the ordinary view.'
+        Write-TestLog 'PASS: the zero-synthesis check rejects the ordinary nonzero view.'
 
         foreach ($test_case in @(
                 [pscustomobject]@{
@@ -483,7 +504,7 @@ function Invoke-SyntheticFreeClustersCase {
             'The sequential comparison did not cover the requested byte count.'
         Write-TestLog ("PASS: compared $($comparison.BytesCompared) bytes; " +
             "$($comparison.FreeBytes) bytes belonged to free clusters; targeted reads verified " +
-            "$($bitmap.ClusterSize) controlled nonzero witness bytes that " +
+            "$($witness_pattern.Length) controlled nonzero witness bytes that " +
             'the synthetic view replaced with zeros.')
     } catch {
         if (($_.Exception.Message -creplace '\s', '').Contains(

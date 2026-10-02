@@ -243,16 +243,35 @@ auto TestReads() -> void {
         throw std::runtime_error("the read-test file write was incomplete");
     }
 
-    const auto check = [&device, &contents](const std::uint64_t offset,
+    auto allocation_bits = std::vector<BYTE>{};
+    constexpr auto cluster_size = 4096u;
+    const auto check = [&device, &contents, &allocation_bits](const std::uint64_t offset,
                            const std::size_t count) {
+        const auto wanted = wil::safe_cast_failfast<ULONG>(count);
+        if ((wanted == 0) || (offset >= device.length) ||
+            (wanted > (device.length - offset))) {
+            throw std::invalid_argument(std::format(
+                "read-test request exceeds the fixture: offset {}, count {}, length {}",
+                offset, wanted, device.length));
+        }
+        auto expected = std::span{contents}.subspan(offset, count) |
+            std::ranges::to<std::vector>();
+        if (!allocation_bits.empty()) {
+            for (auto index = 0uz; index < count; ++index) {
+                const auto cluster = (offset + index) / cluster_size;
+                if ((allocation_bits.at(cluster / 8) & (1u << (cluster % 8))) == 0) {
+                    expected.at(index) = 0;
+                }
+            }
+        }
         auto output = std::vector<BYTE>(count + 2, kSentinelByte);
         auto transferred = ULONG{};
         const auto status = device.Read(std::span{output}.subspan(1, count).data(),
-            offset, wil::safe_cast_failfast<ULONG>(count), transferred);
+            offset, wanted, transferred);
         if ((status != 0) || (transferred != count) ||
             (output.front() != kSentinelByte) || (output.back() != kSentinelByte) ||
             !std::ranges::equal(std::span{output}.subspan(1, count),
-                std::span{contents}.subspan(offset, count))) {
+                expected)) {
             throw std::runtime_error(std::format(
                 "read differs from the source: {}-byte sectors, offset {}, "
                 "count {}, status {}, transferred {}",
@@ -281,6 +300,21 @@ auto TestReads() -> void {
         std::println("PASS: reads ending at the file's final byte match the source "
             "with {}-byte sectors.", sector_size);
     }
+    for (const auto pattern : {BYTE{0}, BYTE{0xff}, BYTE{0xaa}}) {
+        allocation_bits.assign((contents.size() / cluster_size) / 8, pattern);
+        device.allocation_bitmap = MakeBitmap(allocation_bits,
+            contents.size() / cluster_size, cluster_size);
+        for (const auto sector_size : {512u, 4096u}) {
+            device.sector_size = sector_size;
+            for (const auto offset : {0uz, 1uz, 4095uz}) {
+                for (const auto count : {1uz, 4097uz, 8192uz, (5uz * 1024 * 1024) + 1}) {
+                    check(offset, count);
+                }
+            }
+        }
+    }
+    std::println("PASS: bitmap-backed reads zero free clusters, retain allocated "
+        "contents, report exact counts, and leave surrounding sentinels unchanged.");
 }
 
 } // namespace

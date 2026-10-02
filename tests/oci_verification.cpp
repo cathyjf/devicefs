@@ -6,9 +6,52 @@
 import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import <cstdio>;
+import <io.h>;
+import devicefs.stream_redirector;
 import devicefs.supervisor.oci_verification;
+import devicefs.supervisor.oci_signature_sandbox;
+import devicefs.terminal.transcoding;
 
 namespace {
+
+template <typename Task>
+[[gsl::suppress("26429", justification:
+    "The `_In_` annotation reflects that `context` is not null.")]]
+auto CALLBACK RunQueuedVerification(PTP_CALLBACK_INSTANCE,
+    _In_ void *const context, PTP_WORK) noexcept -> void {
+    try {
+        std::invoke(*static_cast<Task *>(context));
+    } catch (...) {
+        // Each task is constructed with a callable and submitted
+        // once, so neither `future_error` condition (no shared
+        // state or a repeated invocation) can occur. Exceptions
+        // from verification are stored in the future rather than
+        // thrown by this call.
+        // https://eel.is/c++draft/futures.task.members
+        std::unreachable();
+    }
+}
+
+// CTest supplies `-SupervisorPath`. Without arguments, the test uses
+// `backup-supervisor.exe` beside its own executable.
+[[nodiscard]] auto ResolveSupervisorPath(
+    const std::span<const std::string_view> arguments) -> std::filesystem::path {
+    if (!arguments.empty()) {
+        if ((arguments.size() != 2) || (arguments[0] != "-SupervisorPath")) {
+            throw std::invalid_argument("expected [-SupervisorPath PATH]");
+        }
+        return std::filesystem::absolute(std::filesystem::path{
+            devicefs::terminal::Transcode<std::wstring>(arguments[1])});
+    }
+    auto executable = std::wstring{};
+    if (const auto result = wil::GetModuleFileNameW(nullptr, executable);
+        FAILED(result)) {
+        WinError("could not obtain the OCI verification test executable path",
+            ExplicitHresult{result});
+    }
+    return std::filesystem::path{executable}.parent_path() / "backup-supervisor.exe";
+}
 
 // Public signatures from the signed 20260928.4 release, independently verified
 // with GnuPG against the owner's exported key. No private key is needed here.
@@ -55,19 +98,96 @@ auto RequireFailure(const auto &operation) -> void {
 
 // Run without arguments. The file-hashing tests create and remove their own
 // directory under the invoking user's temporary directory.
-auto main() -> int try {
-    VerifyOciLayerSignature(kAmd64Digest, kAmd64Signature);
-    VerifyOciLayerSignature(kArm64Digest, kArm64Signature);
-    RequireFailure([] { VerifyOciLayerSignature(kAmd64Digest, kArm64Signature); });
-    RequireFailure([] { VerifyOciLayerSignature(kAmd64Digest, ""); });
+[[gsl::suppress("26429",
+    justification: "C++ [basic.start.main] guarantees that `argv` is not null.")]]
+auto main(_Pre_satisfies_(argc > 0) const int argc,
+    _In_reads_(argc) char **const argv) -> int try {
+    const auto arguments = std::span{argv, argv + argc} |
+        std::ranges::to<std::vector<std::string_view>>();
+    const auto null_output = [] {
+        auto file = wil::unique_file{};
+        ClearCrtIoError();
+        if (fopen_s(file.addressof(), "NUL", "wb") != 0) {
+            WinError("could not open NUL for the signature test output",
+                ExplicitCrtIoError{});
+        }
+        return file;
+    }();
+    auto standard_output = RedirectedStream{
+        _fileno(stdout), _fileno(null_output.get()), "stdout"};
+    auto standard_error = RedirectedStream{
+        _fileno(stderr), _fileno(null_output.get()), "stderr"};
+    const auto pool = wil::unique_any<
+        PTP_POOL, decltype(&CloseThreadpool), &CloseThreadpool>{
+            CreateThreadpool(nullptr)};
+    if (!pool) {
+        WinError("could not create the signature test thread pool");
+    }
+    auto environment = wil::unique_struct<TP_CALLBACK_ENVIRON,
+        decltype(&DestroyThreadpoolEnvironment), DestroyThreadpoolEnvironment,
+        decltype(&InitializeThreadpoolEnvironment),
+        InitializeThreadpoolEnvironment>{};
+    SetThreadpoolCallbackPool(&environment, pool.get());
+    // `tasks` keeps callback contexts at stable addresses while more cases
+    // are queued. `work_items` is destroyed first and waits for the callbacks,
+    // so those contexts and the redirected streams outlive every worker.
+    auto tasks = std::list<std::packaged_task<void()>>{};
+    auto work_items = std::vector<wil::unique_threadpool_work_nocancel>{};
+    const auto enqueue = [&tasks, &work_items, &environment](auto operation) {
+        auto &task = tasks.emplace_back(std::move(operation));
+        auto work = wil::unique_threadpool_work_nocancel{
+            CreateThreadpoolWork(
+                RunQueuedVerification<std::remove_reference_t<decltype(task)>>,
+                &task, &environment)};
+        if (!work) {
+            WinError("could not queue signature verification work");
+        }
+        work_items.push_back(std::move(work));
+        SubmitThreadpoolWork(work_items.back().get());
+    };
+    const auto queue_verification = [&enqueue, supervisor =
+            ResolveSupervisorPath(std::span{arguments}.subspan(1))](
+        const std::string_view digest, const std::string_view signature,
+        const bool reject) {
+        // The fixtures are NUL-terminated. Retaining their complete backing
+        // string and explicit extent preserves the zero-length-view test.
+        enqueue([supervisor, digest = std::string{digest},
+                signature = std::string{signature.data()},
+                length = signature.size(), reject] {
+            const auto message = std::string_view{signature.data(), length};
+            const auto verify_in_process = [&digest, message] {
+                VerifyOciLayerSignature(digest, message);
+            };
+            const auto verify_in_sandbox = [&supervisor, &digest, message] {
+                VerifyOciLayerSignatureInSandbox(supervisor, digest, message);
+            };
+            if (reject) {
+                RequireFailure(verify_in_process);
+                RequireFailure(verify_in_sandbox);
+                return;
+            }
+            verify_in_process();
+            verify_in_sandbox();
+        });
+    };
+    const auto verify_signature = [&queue_verification](
+        const std::string_view digest, const std::string_view signature) {
+        queue_verification(digest, signature, false);
+    };
+    const auto verify_rejection = [&queue_verification](
+        const std::string_view digest, const std::string_view signature) {
+        queue_verification(digest, signature, true);
+    };
+    verify_signature(kAmd64Digest, kAmd64Signature);
+    verify_signature(kArm64Digest, kArm64Signature);
+    verify_rejection(kAmd64Digest, kArm64Signature);
+    verify_rejection(kAmd64Digest, "");
     // A zero-length view over valid Base64 must not be decoded as a NUL-
     // terminated string by the Windows API's special zero-length convention.
-    RequireFailure([] {
-        VerifyOciLayerSignature(kAmd64Digest, std::string_view{kAmd64Signature, 0});
-    });
-    RequireFailure([] { VerifyOciLayerSignature(kAmd64Digest, "!not-base64!"); });
-    RequireFailure([] { VerifyOciLayerSignature("sha256:00", kAmd64Signature); });
-    RequireFailure([] { VerifyOciLayerSignature(std::string{kAmd64Digest} + "\n", kAmd64Signature); });
+    verify_rejection(kAmd64Digest, std::string_view{kAmd64Signature, 0});
+    verify_rejection(kAmd64Digest, "!not-base64!");
+    verify_rejection("sha256:00", kAmd64Signature);
+    verify_rejection(std::string{kAmd64Digest} + "\n", kAmd64Signature);
 
     auto size = DWORD{};
     if (!CryptStringToBinaryA(kAmd64Signature, 0, CRYPT_STRING_BASE64,
@@ -81,9 +201,7 @@ auto main() -> int try {
     }
     for (auto length = std::size_t{1}; length < packet.size(); ++length) {
         const auto encoded = Encode(std::span{packet}.first(length));
-        RequireFailure([&] {
-            VerifyOciLayerSignature(kAmd64Digest, encoded);
-        });
+        verify_rejection(kAmd64Digest, encoded);
     }
     // The fixture uses a legacy header with a one-byte body length. The outer
     // packet header is excluded from the signature hash, so the same signed
@@ -94,13 +212,13 @@ auto main() -> int try {
             std::vector<BYTE>{0xc2, 192, 20},
             std::vector<BYTE>{0xc2, 255, 0, 0, 0, 212}}) {
         header.append_range(body);
-        VerifyOciLayerSignature(kAmd64Digest, Encode(header));
+        verify_signature(kAmd64Digest, Encode(header));
     }
     for (const auto offset : {0uz, 1uz, 2uz, 3uz, 4uz, 5uz, 6uz, 7uz, 10uz, 213uz}) {
         auto altered = packet;
         altered[offset] ^= 0x40;
         const auto encoded = Encode(altered);
-        RequireFailure([&] { VerifyOciLayerSignature(kAmd64Digest, encoded); });
+        verify_rejection(kAmd64Digest, encoded);
     }
     // The legacy indeterminate-length header and the new partial-length header
     // cannot describe the single, explicitly delimited signature we accept.
@@ -109,7 +227,7 @@ auto main() -> int try {
         auto altered = packet;
         std::ranges::copy(header, altered.begin());
         const auto encoded = Encode(altered);
-        RequireFailure([&] { VerifyOciLayerSignature(kAmd64Digest, encoded); });
+        verify_rejection(kAmd64Digest, encoded);
     }
     // In this fixture the first MPI starts at byte 79, after both subpacket
     // areas and the hash prefix. A zero bit count leaves no first byte to
@@ -119,11 +237,17 @@ auto main() -> int try {
         altered[79] = wil::safe_cast_failfast<BYTE>(bits >> 8);
         altered[80] = wil::safe_cast_failfast<BYTE>(bits & 0xff);
         const auto encoded = Encode(altered);
-        RequireFailure([&] { VerifyOciLayerSignature(kAmd64Digest, encoded); });
+        verify_rejection(kAmd64Digest, encoded);
     }
     packet.push_back(0);
     const auto encoded = Encode(packet);
-    RequireFailure([&] { VerifyOciLayerSignature(kAmd64Digest, encoded); });
+    verify_rejection(kAmd64Digest, encoded);
+
+    for (auto &task : tasks) {
+        task.get_future().get();
+    }
+    standard_error.Restore();
+    standard_output.Restore();
 
     const auto directory = std::filesystem::temp_directory_path() /
         std::format("devicefs-oci-verification-{}", GetCurrentProcessId());

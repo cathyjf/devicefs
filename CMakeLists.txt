@@ -236,16 +236,22 @@ target_link_libraries(devicefs-error-messages-test PRIVATE
 
 add_executable(devicefs-oci-verification-test tests/oci_verification.cpp)
 target_module_interfaces(devicefs-oci-verification-test PRIVATE
+    src/modules/stream_redirector.ixx
     src/modules/supervisor/math.ixx
     src/modules/supervisor/oci_verification.ixx
+    src/modules/supervisor/oci_signature_sandbox.ixx
+    src/modules/supervisor/process_attribute_list.ixx
+    src/modules/supervisor/process_launch.ixx
 )
 target_link_libraries(devicefs-oci-verification-test PRIVATE
-    ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-windows-imports bcrypt crypt32
+    ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-windows-imports advapi32 bcrypt crypt32 userenv
 )
 
 add_test(NAME devicefs_read_path COMMAND devicefs-read-path-test)
 add_test(NAME devicefs_error_messages COMMAND devicefs-error-messages-test)
-add_test(NAME devicefs_oci_verification COMMAND devicefs-oci-verification-test)
+add_test(NAME devicefs_oci_verification COMMAND devicefs-oci-verification-test
+    -SupervisorPath $<TARGET_FILE:backup-supervisor>
+)
 function(devicefs_powershell_test name filename)
     add_test(NAME "${name}"
         COMMAND "${POWERSHELL_EXECUTABLE}" -NoProfile -NonInteractive -File
@@ -281,6 +287,7 @@ add_executable(backup-supervisor
     src/modules/supervisor/native_backup/incremental_diagnostics.cpp
     src/modules/filesystem_allocation_changes.cpp
 )
+add_dependencies(devicefs-oci-verification-test backup-supervisor)
 devicefs_version_info(backup-supervisor "DeviceFs Backup Supervisor" 0.1)
 target_link_libraries(backup-supervisor PRIVATE
     ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-rpc-block-device
@@ -345,6 +352,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/native_backup/port_selection.cpp
     src/modules/supervisor/native_backup/s4u_logon.cpp
     src/modules/supervisor/native_backup/vhdx_attachment.cpp
+    src/modules/supervisor/oci_signature_sandbox.ixx
     src/modules/supervisor/oci_verification.ixx
     src/modules/supervisor/process_attribute_list.ixx
     src/modules/supervisor/process_diagnostics.ixx
@@ -352,6 +360,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/process_privileges.ixx
     src/modules/supervisor/temporary_paths.ixx
     src/modules/supervisor/view_output.ixx
+    src/modules/stream_redirector.ixx
     src/modules/supervisor/vshadow.ixx
     src/modules/supervisor/winrt_apartment.ixx
 )
@@ -421,6 +430,12 @@ target_compile_definitions(backup-supervisor PRIVATE _WIN32_WINNT=0x0A00)
 target_link_libraries(backup-supervisor PRIVATE
     "${DISM_LIBRARY}"
     advapi32 bcrypt crypt32 msi netapi32 ntdll ole32 pathcch secur32 shell32 userenv virtdisk windowsapp ws2_32
+)
+# These delay-loaded DLLs are used only by the installer.
+target_link_options(backup-supervisor PRIVATE
+    /DELAYLOAD:DismApi.dll
+    /DELAYLOAD:msi.dll
+    /DELAYLOAD:wintrust.dll
 )
 
 add_custom_target(check-native-code-analysis ALL

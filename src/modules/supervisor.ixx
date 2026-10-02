@@ -33,6 +33,7 @@ import devicefs.supervisor.launch_powershell;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.logging_console;
 import devicefs.supervisor.materialize_oci;
+import devicefs.supervisor.oci_signature_sandbox;
 import devicefs.supervisor.native_backup;
 import devicefs.supervisor.process_diagnostics;
 import devicefs.supervisor.process_launch;
@@ -1046,6 +1047,9 @@ export auto BackupSupervisorMain(
             return 0;
         }
         const auto option = arguments.front();
+        if (option == kVerifyOpenPgpDetachedSignatureOption) {
+            return RunOciSignatureWorker(arguments.subspan(1));
+        }
         if (option == "--devicefs") {
             return devicefs::Main(arguments);
         }

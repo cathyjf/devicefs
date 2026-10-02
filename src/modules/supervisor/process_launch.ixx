@@ -65,13 +65,14 @@ export [[nodiscard]] auto DuplicateInheritableHandle(const HANDLE source) {
     return duplicate;
 }
 
-export template <typename Start>
+export template <typename Start, typename... Attributes>
 [[nodiscard]] auto StartProcessWithHandles(
     const HANDLE standard_input,
     const HANDLE standard_output,
     const HANDLE standard_error,
     const Start &start,
-    const wil::zstring_view operation) {
+    const wil::zstring_view operation,
+    Attributes &&...additional_attributes) {
     const auto child_handles = std::array{
         DuplicateInheritableHandle(standard_input),
         DuplicateInheritableHandle(standard_output),
@@ -82,7 +83,8 @@ export template <typename Start>
     };
     const auto attributes = ProcessAttributeList{
         std::tuple{PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            inherited_handles.data(), sizeof(inherited_handles)}};
+            inherited_handles.data(), sizeof(inherited_handles)},
+        std::forward<Attributes>(additional_attributes)...};
 
     auto startup = STARTUPINFOEXA{
         .StartupInfo = {
@@ -109,7 +111,7 @@ export template <typename Consumer>
         Consumer &, std::span<const char8_t>>
 [[nodiscard]] auto ReadPipeOutput(
     const HANDLE source,
-    Consumer &consumer) noexcept(std::is_nothrow_invocable_v<
+    Consumer &&consumer) noexcept(std::is_nothrow_invocable_v<
         Consumer &, std::span<const char8_t>>) -> DWORD {
     constexpr auto kBufferSize = DWORD{4096};
     auto buffer = std::array<char8_t, kBufferSize>{};

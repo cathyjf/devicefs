@@ -30,6 +30,7 @@ import devicefs.supervisor.account_management;
 import devicefs.supervisor.https_download;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.oci_verification;
+import devicefs.supervisor.oci_signature_sandbox;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.temporary_paths;
 import devicefs.supervisor.winrt_apartment;
@@ -370,7 +371,7 @@ auto ExtractArchiveMember(
                 ExplicitHresult{error.code()});
         }
     }();
-    VerifyOciLayerSignature(digest, signature);
+    VerifyOciLayerSignatureInSandbox(CurrentExecutablePath(), digest, signature);
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: verified the signature for OCI layer '{}' in '{}'\n",
         digest, image);

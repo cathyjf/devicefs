@@ -122,15 +122,16 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 . (Join-Path $PSScriptRoot 'include/DeviceFsTestProcess.ps1')
 . (Join-Path $PSScriptRoot 'include/DeviceFsTestVolume.ps1')
+. (Join-Path $PSScriptRoot 'include/DeviceFsTestTypes.ps1')
 if ($null -ne ([Management.Automation.PSTypeName]'DeviceFsTestNative').Type) {
     throw 'DeviceFsTestNative is already loaded. Run the test in a fresh pwsh process.'
 }
-Add-Type -Path (Join-Path $PSScriptRoot 'types/DeviceFsTestNative.cs')
 
 if (-not $SupervisorPath) {
     $SupervisorPath = Get-DefaultTestExecutablePath 'backup-supervisor.exe'
 }
 $SupervisorPath = (Resolve-Path -LiteralPath $SupervisorPath).Path
+Add-DeviceFsTestTypes -SourcePath (Join-Path $PSScriptRoot 'types/DeviceFsTestNative.cs') -SupervisorPath $SupervisorPath
 $fish_program = Join-Path $PSScriptRoot 'measure-pbs-known-data-map.fish'
 $OutputDirectory = (New-Item -ItemType Directory -Path $OutputDirectory).FullName
 

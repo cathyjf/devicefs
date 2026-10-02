@@ -9,6 +9,16 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
+using Windows.Win32;
+using Windows.Win32.Foundation;
+using Windows.Win32.Security;
+using Windows.Win32.Storage.FileSystem;
+using Windows.Win32.Storage.Vhd;
+using Windows.Win32.System.Console;
+using Windows.Win32.System.Memory;
+using Windows.Win32.System.Ioctl;
+using Windows.Win32.Devices.DeviceAndDriverInstallation;
+using static Windows.Win32.PInvoke;
 
 public sealed class VolumeIdentity {
     public string Label { get; }
@@ -91,114 +101,17 @@ public sealed class AllocationChangeBlocks {
     }
 }
 
-public static class DeviceFsTestNative {
-    private const uint GenericRead = 0x80000000;
-    private const uint GenericWrite = 0x40000000;
-    private const uint TokenQuery = 0x00000008;
-    private const uint TokenAdjustPrivileges = 0x00000020;
-    private const uint SePrivilegeEnabled = 0x00000002;
-    private const uint FileShareRead = 0x00000001;
-    private const uint FileShareWrite = 0x00000002;
-    private const uint FileShareDelete = 0x00000004;
-    private const uint OpenExisting = 3;
-    private const uint SecurityIdentification = 0x00010000;
-    private const uint SecuritySqosPresent = 0x00100000;
-    private const uint FileFlagOpenReparsePoint = 0x00200000;
-    private const uint FileFlagBackupSemantics = 0x02000000;
-    private const uint FileReadOnlyVolume = 0x00080000;
-    private const uint MemCommit = 0x00001000;
-    private const uint MemReserve = 0x00002000;
-    private const uint MemRelease = 0x00008000;
-    private const uint PageReadWrite = 0x04;
-    private const uint FileBegin = 0;
-    private const int DiskLengthInformationSize = 8;
-    private const int DiskGeometrySize = 24;
-    private const int DiskGeometrySectorSizeOffset = 20;
-    private const int NtfsVolumeDataSize = 96;
-    private const int RefsVolumeDataSize = 152;
-    private const int VolumeBitmapHeaderSize = 16;
-    private const int VolumeBitmapStructureSize = 24;
-    private const int VolumeDiskExtentsSize = 32;
-    private const int RetrievalPointerBaseSize = 8;
-    private const int RetrievalPointersHeaderSize = 16;
-    private const int RetrievalPointersExtentSize = 16;
-    private const int FileStreamInfo = 7;
-    private const int FileAttributeTagInfo = 9;
-    private const int FileFullDirectoryInfo = 14;
-    private const int FileFullDirectoryRestartInfo = 15;
-    private const int FileStreamInfoHeaderSize = 24;
+public static unsafe class DeviceFsTestNative {
+    private static readonly int VolumeBitmapHeaderSize =
+        Marshal.OffsetOf<VOLUME_BITMAP_BUFFER>(nameof(VOLUME_BITMAP_BUFFER.Buffer)).ToInt32();
+    private static readonly int RetrievalPointersHeaderSize =
+        Marshal.OffsetOf<RETRIEVAL_POINTERS_BUFFER>(nameof(RETRIEVAL_POINTERS_BUFFER.Extents)).ToInt32();
+    private static readonly int RetrievalPointersExtentSize =
+        sizeof(RETRIEVAL_POINTERS_BUFFER._Anonymous_e__Struct);
+    private static readonly int FileStreamInfoHeaderSize =
+        Marshal.OffsetOf<FILE_STREAM_INFO>(nameof(FILE_STREAM_INFO.StreamName)).ToInt32();
     private const int InitialStreamInformationSize = 4096;
     private const int DirectoryInformationBufferSize = 64 * 1024;
-    private const int ErrorNoMoreFiles = 18;
-    private const int ErrorHandleEof = 38;
-    private const int ErrorInsufficientBuffer = 122;
-    private const int ErrorMoreData = 234;
-    private const int ErrorNotAllAssigned = 1300;
-    private const string BackupPrivilegeName = "SeBackupPrivilege";
-    private const ushort KeyEvent = 0x0001;
-    private const uint LeftCtrlPressed = 0x0008;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct KeyEventRecord {
-        public int KeyDown;
-        public ushort RepeatCount;
-        public ushort VirtualKeyCode;
-        public ushort VirtualScanCode;
-        public ushort UnicodeChar;
-        public uint ControlKeyState;
-    }
-
-    // Only the key-event member of INPUT_RECORD's union is needed here.
-    // Sequential layout supplies the padding before the DWORD-aligned member.
-    // https://learn.microsoft.com/en-us/windows/console/input-record-str
-    [StructLayout(LayoutKind.Sequential)]
-    private struct InputRecord {
-        public ushort EventType;
-        public KeyEventRecord Key;
-    }
-
-    // These control codes are normally produced by Windows SDK CTL_CODE macros.
-    private const uint FsctlGetNtfsVolumeData = 0x00090064;
-    private const uint FsctlGetRefsVolumeData = 0x000902D8;
-    private const uint FsctlGetVolumeBitmap = 0x0009006F;
-    private const uint FsctlGetRetrievalPointers = 0x00090073;
-    private const uint FsctlAllowExtendedDasdIo = 0x00090083;
-    private const uint FsctlGetRetrievalPointerBase = 0x00090234;
-    private const uint IoctlDiskGetDriveGeometry = 0x00070000;
-    private const uint IoctlDiskGetLengthInfo = 0x0007405C;
-    private const uint IoctlVolumeGetVolumeDiskExtents = 0x00560000;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct NtfsVolumeData {
-        public long VolumeSerialNumber;
-        public long NumberSectors;
-        public long TotalClusters;
-        public long FreeClusters;
-        public long TotalReserved;
-        public uint BytesPerSector;
-        public uint BytesPerCluster;
-        public uint BytesPerFileRecordSegment;
-        public uint ClustersPerFileRecordSegment;
-        public long MftValidDataLength;
-        public long MftStartLcn;
-        public long Mft2StartLcn;
-        public long MftZoneStart;
-        public long MftZoneEnd;
-    }
-
-    // `REFS_VOLUME_DATA_BUFFER` also contains version, serial-number and
-    // reserved fields. The geometry query only reads these three fields.
-    [StructLayout(LayoutKind.Explicit, Size = RefsVolumeDataSize)]
-    private struct RefsVolumeData {
-        [FieldOffset(32)]
-        public long TotalClusters;
-
-        [FieldOffset(56)]
-        public uint BytesPerSector;
-
-        [FieldOffset(60)]
-        public uint BytesPerCluster;
-    }
 
     internal readonly struct IoResult {
         public byte[] Buffer { get; }
@@ -210,75 +123,40 @@ public static class DeviceFsTestNative {
         }
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct FileAttributeTagInformation {
-        public FileAttributes FileAttributes;
-        public uint ReparseTag;
-    }
-
-    // FILE_FULL_DIR_INFO ends its fixed header immediately before FileName.
-    [StructLayout(LayoutKind.Explicit, Size = 68)]
-    private struct FileFullDirectoryInformationHeader {
-        [FieldOffset(0)]
-        public uint NextEntryOffset;
-
-        [FieldOffset(56)]
-        public FileAttributes FileAttributes;
-
-        [FieldOffset(60)]
-        public uint FileNameLength;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Luid {
-        public uint LowPart;
-        public int HighPart;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct LuidAndAttributes {
-        public Luid Luid;
-        public uint Attributes;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct TokenPrivileges {
-        public uint PrivilegeCount;
-        public LuidAndAttributes Privileges;
-    }
-
     private sealed class BackupPrivilegeScope : IDisposable {
-        private SafeAccessTokenHandle token;
-        private TokenPrivileges previousState;
+        private SafeFileHandle token;
+        private TOKEN_PRIVILEGES previousState;
 
         public BackupPrivilegeScope() {
-            if (!OpenProcessToken(GetCurrentProcess(),
-                    TokenAdjustPrivileges | TokenQuery, out var openedToken)) {
+            if (!OpenProcessToken(GetCurrentProcess_SafeHandle(),
+                    (TOKEN_ACCESS_MASK.TOKEN_ADJUST_PRIVILEGES | TOKEN_ACCESS_MASK.TOKEN_QUERY), out var openedToken)) {
                 throw LastError("could not open the PowerShell process token");
             }
 
             try {
                 if (!LookupPrivilegeValue(
-                        null, BackupPrivilegeName, out var luid)) {
+                        null, SE_BACKUP_NAME, out var luid)) {
                     throw LastError("could not identify SeBackupPrivilege");
                 }
-                var requestedState = new TokenPrivileges {
-                    PrivilegeCount = 1,
-                    Privileges = new LuidAndAttributes {
-                        Luid = luid,
-                        Attributes = SePrivilegeEnabled,
-                    },
+                var requestedState = new TOKEN_PRIVILEGES { PrivilegeCount = 1 };
+                requestedState.Privileges[0] = new LUID_AND_ATTRIBUTES {
+                    Luid = luid,
+                    Attributes = TOKEN_PRIVILEGES_ATTRIBUTES.SE_PRIVILEGE_ENABLED,
                 };
+                var previous = new TOKEN_PRIVILEGES();
+                // `ReturnLength` must be non-null when `PreviousState` is requested.
+                // https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-adjusttokenprivileges
                 Marshal.SetLastPInvokeError(0);
                 if (!AdjustTokenPrivileges(openedToken, false,
-                        ref requestedState,
-                        (uint)Marshal.SizeOf<TokenPrivileges>(),
-                        out previousState, out _)) {
+                        &requestedState,
+                        MemoryMarshal.AsBytes(MemoryMarshal.CreateSpan(ref previous, 1)),
+                        out _)) {
                     throw LastError("could not enable SeBackupPrivilege");
                 }
                 var error = Marshal.GetLastWin32Error();
+                previousState = previous;
                 if (error != 0) {
-                    var operation = error == ErrorNotAllAssigned
+                    var operation = error == (int)WIN32_ERROR.ERROR_NOT_ALL_ASSIGNED
                         ? "the process token does not contain SeBackupPrivilege"
                         : "could not enable SeBackupPrivilege";
                     throw Win32Error(operation, error);
@@ -300,8 +178,8 @@ public static class DeviceFsTestNative {
             if (previousState.PrivilegeCount != 0) {
                 var state = previousState;
                 Marshal.SetLastPInvokeError(0);
-                var restored = RestoreTokenPrivileges(
-                    token, false, ref state, 0, IntPtr.Zero, IntPtr.Zero);
+                var restored = AdjustTokenPrivileges(
+                    token, false, &state, default);
                 var error = Marshal.GetLastWin32Error();
                 if (!restored || (error != 0)) {
                     throw Win32Error(
@@ -320,96 +198,18 @@ public static class DeviceFsTestNative {
                 throw new ArgumentOutOfRangeException(nameof(size));
             }
 
-            SetHandle(VirtualAlloc(IntPtr.Zero, new UIntPtr((uint)size),
-                MemCommit | MemReserve, PageReadWrite));
+            SetHandle((IntPtr)VirtualAlloc(null, (nuint)size,
+                (VIRTUAL_ALLOCATION_TYPE.MEM_COMMIT | VIRTUAL_ALLOCATION_TYPE.MEM_RESERVE),
+                PAGE_PROTECTION_FLAGS.PAGE_READWRITE));
             if (IsInvalid) {
                 throw LastError("VirtualAlloc failed");
             }
         }
 
         protected override bool ReleaseHandle() {
-            return VirtualFree(handle, UIntPtr.Zero, MemRelease);
+            return VirtualFree((void*)handle, 0, VIRTUAL_FREE_TYPE.MEM_RELEASE);
         }
     }
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode,
-        SetLastError = true, EntryPoint = "CreateFileW")]
-    internal static extern SafeFileHandle CreateFile(string fileName,
-        uint desiredAccess, uint shareMode, IntPtr securityAttributes,
-        uint creationDisposition, uint flagsAndAttributes,
-        IntPtr templateFile);
-
-    [DllImport("kernel32.dll", SetLastError = true,
-        EntryPoint = "WriteConsoleInputW")]
-    private static extern bool WriteConsoleInput(SafeFileHandle input,
-        [In] InputRecord[] records, uint count, out uint written);
-
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr GetCurrentProcess();
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    private static extern bool OpenProcessToken(IntPtr process,
-        uint desiredAccess, out SafeAccessTokenHandle token);
-
-    [DllImport("advapi32.dll", CharSet = CharSet.Unicode,
-        EntryPoint = "LookupPrivilegeValueW", SetLastError = true)]
-    private static extern bool LookupPrivilegeValue(string systemName,
-        string name, out Luid luid);
-
-    [DllImport("advapi32.dll", EntryPoint = "AdjustTokenPrivileges",
-        SetLastError = true)]
-    private static extern bool AdjustTokenPrivileges(
-        SafeAccessTokenHandle token, bool disableAllPrivileges,
-        ref TokenPrivileges newState, uint bufferLength,
-        out TokenPrivileges previousState, out uint returnLength);
-
-    [DllImport("advapi32.dll", EntryPoint = "AdjustTokenPrivileges",
-        SetLastError = true)]
-    private static extern bool RestoreTokenPrivileges(
-        SafeAccessTokenHandle token, bool disableAllPrivileges,
-        ref TokenPrivileges newState, uint bufferLength,
-        IntPtr previousState, IntPtr returnLength);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GetFileInformationByHandleEx(
-        SafeFileHandle file, int informationClass, IntPtr information,
-        uint bufferSize);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    internal static extern bool DeviceIoControl(SafeFileHandle device,
-        uint controlCode, [In] byte[] input, uint inputSize,
-        [Out] byte[] output, uint outputSize, out uint bytesReturned,
-        IntPtr overlapped);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true,
-        EntryPoint = "GetVolumeNameForVolumeMountPointW")]
-    private static extern bool GetVolumeNameForVolumeMountPoint(
-        string mountPoint, StringBuilder volumeName, uint bufferLength);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true,
-        EntryPoint = "GetVolumeInformationByHandleW")]
-    private static extern bool GetVolumeInformationByHandle(
-        SafeFileHandle volume, StringBuilder volumeName,
-        uint volumeNameSize, IntPtr volumeSerialNumber,
-        IntPtr maximumComponentLength, out uint fileSystemFlags,
-        StringBuilder fileSystemName, uint fileSystemNameSize);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetFilePointerEx(SafeFileHandle file,
-        long distance, out long newPosition, uint moveMethod);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool ReadFile(SafeFileHandle file,
-        IntPtr buffer, uint bytesToRead, out uint bytesRead,
-        IntPtr overlapped);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr VirtualAlloc(IntPtr address, UIntPtr size,
-        uint allocationType, uint protection);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool VirtualFree(IntPtr address, UIntPtr size,
-        uint freeType);
 
     internal static Win32Exception Win32Error(string operation, int error) {
         var description = new Win32Exception(error).Message;
@@ -427,25 +227,22 @@ public static class DeviceFsTestNative {
     // The harness calls this while exposure is the console input reader.
     // https://learn.microsoft.com/en-us/windows/console/writeconsoleinput
     public static void SendCtrlC() {
-        using (var input = CreateFile("CONIN$", GenericWrite,
-                FileShareRead | FileShareWrite, IntPtr.Zero, OpenExisting,
-                0, IntPtr.Zero)) {
+        using (var input = CreateFile("CONIN$", (uint)GENERIC_ACCESS_RIGHTS.GENERIC_WRITE,
+                (FILE_SHARE_MODE.FILE_SHARE_READ | FILE_SHARE_MODE.FILE_SHARE_WRITE), null,
+                FILE_CREATION_DISPOSITION.OPEN_EXISTING, 0, null)) {
             if (input.IsInvalid) {
                 throw LastError("could not open console input to send Ctrl+C");
             }
-            var records = new[] {
-                new InputRecord {
-                    EventType = KeyEvent,
-                    Key = new KeyEventRecord {
-                        KeyDown = 1,
-                        RepeatCount = 1,
-                        VirtualKeyCode = 'C',
-                        UnicodeChar = '\u0003',
-                        ControlKeyState = LeftCtrlPressed,
-                    },
-                },
+            var record = new INPUT_RECORD { EventType = (ushort)KEY_EVENT };
+            record.Event.KeyEvent = new KEY_EVENT_RECORD {
+                bKeyDown = true,
+                wRepeatCount = 1,
+                wVirtualKeyCode = 'C',
+                dwControlKeyState = LEFT_CTRL_PRESSED,
             };
-            if (!WriteConsoleInput(input, records, (uint)records.Length,
+            record.Event.KeyEvent.uChar.UnicodeChar = '\u0003';
+            var records = new[] { record };
+            if (!WriteConsoleInput(input, records,
                     out var written)) {
                 throw LastError("could not send Ctrl+C to console input");
             }
@@ -462,10 +259,10 @@ public static class DeviceFsTestNative {
     }
 
     private static SafeFileHandle OpenDevice(string path) {
-        var handle = CreateFile(DevicePath(path), GenericRead,
-            FileShareRead | FileShareWrite | FileShareDelete,
-            IntPtr.Zero, OpenExisting,
-            SecuritySqosPresent | SecurityIdentification, IntPtr.Zero);
+        var handle = CreateFile(DevicePath(path), (uint)GENERIC_ACCESS_RIGHTS.GENERIC_READ,
+            (FILE_SHARE_MODE.FILE_SHARE_READ | FILE_SHARE_MODE.FILE_SHARE_WRITE | FILE_SHARE_MODE.FILE_SHARE_DELETE),
+            null, FILE_CREATION_DISPOSITION.OPEN_EXISTING,
+            (FILE_FLAGS_AND_ATTRIBUTES.SECURITY_SQOS_PRESENT | FILE_FLAGS_AND_ATTRIBUTES.SECURITY_IDENTIFICATION), null);
         if (handle.IsInvalid) {
             var error = LastError("could not open volume device");
             handle.Dispose();
@@ -478,7 +275,7 @@ public static class DeviceFsTestNative {
     private static SafeFileHandle OpenRawReadDevice(string path) {
         var device = OpenDevice(path);
         try {
-            _ = Control(device, FsctlAllowExtendedDasdIo, null, 0);
+            _ = Control(device, FSCTL_ALLOW_EXTENDED_DASD_IO, null, 0);
             return device;
         } catch {
             device.Dispose();
@@ -487,12 +284,11 @@ public static class DeviceFsTestNative {
     }
 
     private static SafeFileHandle OpenObjectForExtents(string path) {
-        var handle = CreateFile(path, GenericRead,
-            FileShareRead | FileShareWrite | FileShareDelete,
-            IntPtr.Zero, OpenExisting,
-            SecuritySqosPresent | SecurityIdentification |
-                FileFlagOpenReparsePoint | FileFlagBackupSemantics,
-            IntPtr.Zero);
+        var handle = CreateFile(path, (uint)GENERIC_ACCESS_RIGHTS.GENERIC_READ,
+            (FILE_SHARE_MODE.FILE_SHARE_READ | FILE_SHARE_MODE.FILE_SHARE_WRITE | FILE_SHARE_MODE.FILE_SHARE_DELETE),
+            null, FILE_CREATION_DISPOSITION.OPEN_EXISTING,
+            (FILE_FLAGS_AND_ATTRIBUTES.SECURITY_SQOS_PRESENT | FILE_FLAGS_AND_ATTRIBUTES.SECURITY_IDENTIFICATION |
+                FILE_FLAGS_AND_ATTRIBUTES.FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAGS_AND_ATTRIBUTES.FILE_FLAG_BACKUP_SEMANTICS), null);
         if (handle.IsInvalid) {
             var error = LastError($"could not open '{path}'");
             handle.Dispose();
@@ -505,11 +301,9 @@ public static class DeviceFsTestNative {
     internal static IoResult Control(SafeFileHandle device, uint code,
         byte[] input, int outputSize, bool allowMoreData = false) {
         var output = outputSize == 0 ? null : new byte[outputSize];
-        if (!DeviceIoControl(device, code, input,
-                (uint)(input == null ? 0 : input.Length), output,
-                (uint)outputSize, out var returned, IntPtr.Zero)) {
+        if (!DeviceIoControl(device, code, input, output, out var returned, null)) {
             var error = Marshal.GetLastWin32Error();
-            if (!allowMoreData || (error != ErrorMoreData)) {
+            if (!allowMoreData || (error != (int)WIN32_ERROR.ERROR_MORE_DATA)) {
                 throw Win32Error($"DeviceIoControl 0x{code:X8} failed", error);
             }
         }
@@ -519,13 +313,13 @@ public static class DeviceFsTestNative {
 
     private static long QueryLength(SafeFileHandle device) {
         var result = Control(
-            device, IoctlDiskGetLengthInfo, null, DiskLengthInformationSize);
-        if (result.BytesReturned < DiskLengthInformationSize) {
+            device, IOCTL_DISK_GET_LENGTH_INFO, null, sizeof(GET_LENGTH_INFORMATION));
+        if (result.BytesReturned < sizeof(GET_LENGTH_INFORMATION)) {
             throw new InvalidDataException(
                 "IOCTL_DISK_GET_LENGTH_INFO returned incomplete data");
         }
 
-        var length = BitConverter.ToInt64(result.Buffer, 0);
+        var length = MemoryMarshal.Read<GET_LENGTH_INFORMATION>(result.Buffer).Length;
         if (length < 0) {
             throw new InvalidDataException(
                 "IOCTL_DISK_GET_LENGTH_INFO returned a negative length");
@@ -536,14 +330,13 @@ public static class DeviceFsTestNative {
 
     private static uint QuerySectorSize(SafeFileHandle device) {
         var result = Control(
-            device, IoctlDiskGetDriveGeometry, null, DiskGeometrySize);
-        if (result.BytesReturned < DiskGeometrySize) {
+            device, IOCTL_DISK_GET_DRIVE_GEOMETRY, null, sizeof(DISK_GEOMETRY));
+        if (result.BytesReturned < sizeof(DISK_GEOMETRY)) {
             throw new InvalidDataException(
                 "IOCTL_DISK_GET_DRIVE_GEOMETRY returned incomplete data");
         }
 
-        var sectorSize = BitConverter.ToUInt32(
-            result.Buffer, DiskGeometrySectorSizeOffset);
+        var sectorSize = MemoryMarshal.Read<DISK_GEOMETRY>(result.Buffer).BytesPerSector;
         if (sectorSize == 0) {
             throw new InvalidDataException(
                 "IOCTL_DISK_GET_DRIVE_GEOMETRY returned a zero sector size");
@@ -552,20 +345,15 @@ public static class DeviceFsTestNative {
         return sectorSize;
     }
 
-    private static NtfsVolumeData QueryNtfsData(SafeFileHandle device) {
-        if (Marshal.SizeOf<NtfsVolumeData>() != NtfsVolumeDataSize) {
-            throw new InvalidOperationException(
-                "unexpected NTFS_VOLUME_DATA_BUFFER layout");
-        }
-
+    private static NTFS_VOLUME_DATA_BUFFER QueryNtfsData(SafeFileHandle device) {
         var result = Control(
-            device, FsctlGetNtfsVolumeData, null, NtfsVolumeDataSize);
-        if (result.BytesReturned < NtfsVolumeDataSize) {
+            device, FSCTL_GET_NTFS_VOLUME_DATA, null, sizeof(NTFS_VOLUME_DATA_BUFFER));
+        if (result.BytesReturned < sizeof(NTFS_VOLUME_DATA_BUFFER)) {
             throw new InvalidDataException(
                 "FSCTL_GET_NTFS_VOLUME_DATA returned incomplete data");
         }
 
-        return MemoryMarshal.Read<NtfsVolumeData>(result.Buffer);
+        return MemoryMarshal.Read<NTFS_VOLUME_DATA_BUFFER>(result.Buffer);
     }
 
     private static (long ClusterCount, uint ClusterSize, uint SectorSize)
@@ -575,11 +363,11 @@ public static class DeviceFsTestNative {
             return (ntfs.TotalClusters, ntfs.BytesPerCluster, ntfs.BytesPerSector);
         }
         if (string.Equals(fileSystemName, "ReFS", StringComparison.OrdinalIgnoreCase)) {
-            var result = Control(device, FsctlGetRefsVolumeData, null, RefsVolumeDataSize);
-            if (result.BytesReturned < RefsVolumeDataSize) {
+            var result = Control(device, FSCTL_GET_REFS_VOLUME_DATA, null, sizeof(REFS_VOLUME_DATA_BUFFER));
+            if (result.BytesReturned < sizeof(REFS_VOLUME_DATA_BUFFER)) {
                 throw new InvalidDataException("FSCTL_GET_REFS_VOLUME_DATA returned incomplete data");
             }
-            var refs = MemoryMarshal.Read<RefsVolumeData>(result.Buffer);
+            var refs = MemoryMarshal.Read<REFS_VOLUME_DATA_BUFFER>(result.Buffer);
             return (refs.TotalClusters, refs.BytesPerCluster, refs.BytesPerSector);
         }
         throw new InvalidDataException($"unsupported test filesystem '{fileSystemName}'");
@@ -599,24 +387,22 @@ public static class DeviceFsTestNative {
     private static void QueryVolumeInformation(SafeFileHandle device,
         out string label, out string fileSystemName,
         out uint fileSystemFlags) {
-        var labelBuffer = new StringBuilder(261);
-        var fileSystemBuffer = new StringBuilder(261);
+        var labelBuffer = new char[MAX_PATH + 1];
+        var fileSystemBuffer = new char[MAX_PATH + 1];
         if (!GetVolumeInformationByHandle(device, labelBuffer,
-                (uint)labelBuffer.Capacity, IntPtr.Zero,
-                IntPtr.Zero, out fileSystemFlags,
-                fileSystemBuffer, (uint)fileSystemBuffer.Capacity)) {
+                out _, out _, out fileSystemFlags, fileSystemBuffer)) {
             throw LastError("GetVolumeInformationByHandleW failed");
         }
 
-        label = labelBuffer.ToString();
-        fileSystemName = fileSystemBuffer.ToString();
+        label = new string(labelBuffer).TrimEnd('\0');
+        fileSystemName = new string(fileSystemBuffer).TrimEnd('\0');
     }
 
     private static VolumeAllocationBitmap QueryBitmap(SafeFileHandle device,
         bool requireReadOnly, Action<string> log) {
         QueryVolumeInformation(device, out _, out var fileSystemName,
             out var fileSystemFlags);
-        if (requireReadOnly && ((fileSystemFlags & FileReadOnlyVolume) == 0)) {
+        if (requireReadOnly && ((fileSystemFlags & FILE_READ_ONLY_VOLUME) == 0)) {
             throw new InvalidDataException(
                 "volume is not reported read-only");
         }
@@ -626,10 +412,10 @@ public static class DeviceFsTestNative {
         var geometry = QueryVolumeGeometry(device, fileSystemName);
         ValidateVolumeGeometry(length, sectorSize, geometry);
 
-        var retrievalBase = Control(device, FsctlGetRetrievalPointerBase,
-            null, RetrievalPointerBaseSize);
-        if ((retrievalBase.BytesReturned < RetrievalPointerBaseSize) ||
-            (BitConverter.ToInt64(retrievalBase.Buffer, 0) != 0)) {
+        var retrievalBase = Control(device, FSCTL_GET_RETRIEVAL_POINTER_BASE,
+            null, sizeof(RETRIEVAL_POINTER_BASE));
+        if ((retrievalBase.BytesReturned < sizeof(RETRIEVAL_POINTER_BASE)) ||
+            (MemoryMarshal.Read<RETRIEVAL_POINTER_BASE>(retrievalBase.Buffer).FileAreaOffset != 0)) {
             throw new InvalidDataException(
                 "LCN 0 does not begin at device offset 0");
         }
@@ -642,11 +428,12 @@ public static class DeviceFsTestNative {
         }
 
         var input = new byte[sizeof(long)];
-        var result = Control(device, FsctlGetVolumeBitmap, input,
-            Math.Max(VolumeBitmapStructureSize, (int)requiredSize), allowMoreData: true);
+        var result = Control(device, FSCTL_GET_VOLUME_BITMAP, input,
+            Math.Max(sizeof(VOLUME_BITMAP_BUFFER), (int)requiredSize), allowMoreData: true);
+        var bitmap = MemoryMarshal.Read<VOLUME_BITMAP_BUFFER>(result.Buffer);
         if ((result.BytesReturned < requiredSize) ||
-            (BitConverter.ToInt64(result.Buffer, 0) != 0) ||
-            (BitConverter.ToInt64(result.Buffer, 8) < geometry.ClusterCount)) {
+            (bitmap.StartingLcn != 0) ||
+            (bitmap.BitmapSize < geometry.ClusterCount)) {
             throw new InvalidDataException(
                 "FSCTL_GET_VOLUME_BITMAP returned incomplete or inconsistent data");
         }
@@ -656,7 +443,7 @@ public static class DeviceFsTestNative {
             result.Buffer, VolumeBitmapHeaderSize, bits, 0, bits.Length);
         log($"{fileSystemName}: {geometry.ClusterCount} clusters of " +
             $"{geometry.ClusterSize} bytes; bitmap reports " +
-            $"{BitConverter.ToInt64(result.Buffer, 8)} clusters, " +
+            $"{bitmap.BitmapSize} clusters, " +
             $"returned {result.BytesReturned} bytes.");
         return new VolumeAllocationBitmap(length, sectorSize, geometry.ClusterSize,
             geometry.ClusterCount, bits);
@@ -667,24 +454,24 @@ public static class DeviceFsTestNative {
             out _);
 
         var length = QueryLength(device);
-        var extents = Control(device, IoctlVolumeGetVolumeDiskExtents,
-            null, VolumeDiskExtentsSize);
-        if ((extents.BytesReturned < VolumeDiskExtentsSize) ||
-            (BitConverter.ToUInt32(extents.Buffer, 0) != 1)) {
+        var extents = Control(device, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+            null, sizeof(VOLUME_DISK_EXTENTS));
+        if ((extents.BytesReturned < sizeof(VOLUME_DISK_EXTENTS)) ||
+            (MemoryMarshal.Read<VOLUME_DISK_EXTENTS>(extents.Buffer).NumberOfDiskExtents != 1)) {
             throw new InvalidDataException(
                 "test volume does not have exactly one disk extent");
         }
 
+        var extent = MemoryMarshal.Read<VOLUME_DISK_EXTENTS>(extents.Buffer).Extents[0];
         return new VolumeIdentity(label, fileSystemName, length,
-            BitConverter.ToUInt32(extents.Buffer, 8),
-            BitConverter.ToInt64(extents.Buffer, 16),
-            BitConverter.ToInt64(extents.Buffer, 24));
+            extent.DiskNumber, extent.StartingOffset, extent.ExtentLength);
     }
 
     private static void ReadExact(SafeFileHandle device,
         AlignedBuffer buffer, int count) {
-        if (!ReadFile(device, buffer.DangerousGetHandle(), (uint)count,
-                out var read, IntPtr.Zero)) {
+        var read = 0u;
+        if (!ReadFile(device,
+                (byte*)buffer.DangerousGetHandle(), (uint)count, &read, null)) {
             throw LastError("raw ReadFile failed");
         }
         if (read != count) {
@@ -715,7 +502,7 @@ public static class DeviceFsTestNative {
                 "VirtualAlloc did not satisfy volume alignment");
         }
 
-        if (!SetFilePointerEx(device, rawStart, out _, FileBegin)) {
+        if (!SetFilePointerEx(device, rawStart, out _, SET_FILE_POINTER_MOVE_METHOD.FILE_BEGIN)) {
             throw LastError("SetFilePointerEx failed");
         }
         ReadExact(device, buffer, rawLength);
@@ -730,13 +517,13 @@ public static class DeviceFsTestNative {
             mountRoot += "\\";
         }
 
-        var result = new StringBuilder(50);
+        var result = new char[MAX_PATH + 1];
         if (!GetVolumeNameForVolumeMountPoint(
-                mountRoot, result, (uint)result.Capacity)) {
+                mountRoot, result)) {
             throw LastError("GetVolumeNameForVolumeMountPointW failed");
         }
 
-        return result.ToString();
+        return new string(result).TrimEnd('\0');
     }
 
     public static VolumeIdentity InspectVolume(string volumeName) {
@@ -770,14 +557,13 @@ public static class DeviceFsTestNative {
         while (true) {
             Buffer.BlockCopy(
                 BitConverter.GetBytes(startingVcn), 0, input, 0, input.Length);
-            var completed = DeviceIoControl(handle,
-                FsctlGetRetrievalPointers, input, (uint)input.Length,
-                output, (uint)output.Length, out var returned, IntPtr.Zero);
+            bool completed = DeviceIoControl(handle,
+                FSCTL_GET_RETRIEVAL_POINTERS, input, output, out var returned, null);
             var error = completed ? 0 : Marshal.GetLastWin32Error();
-            if ((!completed) && (error == ErrorHandleEof)) {
+            if ((!completed) && (error == (int)WIN32_ERROR.ERROR_HANDLE_EOF)) {
                 return;
             }
-            if ((!completed) && (error != ErrorMoreData)) {
+            if ((!completed) && (error != (int)WIN32_ERROR.ERROR_MORE_DATA)) {
                 throw Win32Error(
                     $"could not retrieve the extents of '{path}'", error);
             }
@@ -786,7 +572,8 @@ public static class DeviceFsTestNative {
                     $"extent data for '{path}' was incomplete");
             }
 
-            var extentCount = BitConverter.ToUInt32(output, 0);
+            var extents = MemoryMarshal.Read<RETRIEVAL_POINTERS_BUFFER>(output);
+            var extentCount = extents.ExtentCount;
             var required = checked(RetrievalPointersHeaderSize +
                 ((long)extentCount * RetrievalPointersExtentSize));
             if (required > returned) {
@@ -794,12 +581,14 @@ public static class DeviceFsTestNative {
                     $"extent data for '{path}' was truncated");
             }
 
-            var currentVcn = BitConverter.ToInt64(output, 8);
+            var currentVcn = extents.StartingVcn;
             for (var index = 0; index < extentCount; ++index) {
                 var offset = checked(RetrievalPointersHeaderSize +
                     (index * RetrievalPointersExtentSize));
-                var nextVcn = BitConverter.ToInt64(output, offset);
-                var lcn = BitConverter.ToInt64(output, offset + sizeof(long));
+                var extent = MemoryMarshal.Read<RETRIEVAL_POINTERS_BUFFER._Anonymous_e__Struct>(
+                    output.AsSpan(offset));
+                var nextVcn = extent.NextVcn;
+                var lcn = extent.Lcn;
                 if (nextVcn <= currentVcn) {
                     throw new InvalidDataException(
                         $"extent data for '{path}' did not advance");
@@ -837,9 +626,9 @@ public static class DeviceFsTestNative {
             }
 
             var entry = IntPtr.Add(buffer, offset);
-            var nextEntryOffset = unchecked((uint)Marshal.ReadInt32(entry));
-            var nameByteLength = unchecked(
-                (uint)Marshal.ReadInt32(entry, sizeof(uint)));
+            ref readonly var stream = ref System.Runtime.CompilerServices.Unsafe.AsRef<FILE_STREAM_INFO>((void*)entry);
+            var nextEntryOffset = stream.NextEntryOffset;
+            var nameByteLength = stream.StreamNameLength;
             if ((nameByteLength % sizeof(char)) != 0) {
                 throw new InvalidDataException(
                     $"stream information for '{path}' contained an " +
@@ -899,18 +688,19 @@ public static class DeviceFsTestNative {
         var bufferSize = InitialStreamInformationSize;
         while (true) {
             using var buffer = new AlignedBuffer(bufferSize);
-            if (GetFileInformationByHandleEx(handle, FileStreamInfo,
-                    buffer.DangerousGetHandle(), (uint)bufferSize)) {
+            if (GetFileInformationByHandleEx(handle,
+                    FILE_INFO_BY_HANDLE_CLASS.FileStreamInfo,
+                    new Span<byte>((void*)buffer.DangerousGetHandle(), bufferSize))) {
                 return ParseNamedDataStreams(
                     buffer.DangerousGetHandle(), bufferSize, path);
             }
 
             var error = Marshal.GetLastWin32Error();
-            if (error == ErrorHandleEof) {
+            if (error == (int)WIN32_ERROR.ERROR_HANDLE_EOF) {
                 return Array.Empty<string>();
             }
-            if ((error != ErrorInsufficientBuffer) &&
-                (error != ErrorMoreData)) {
+            if ((error != (int)WIN32_ERROR.ERROR_INSUFFICIENT_BUFFER) &&
+                (error != (int)WIN32_ERROR.ERROR_MORE_DATA)) {
                 throw Win32Error(
                     $"could not enumerate streams of '{path}'", error);
             }
@@ -924,35 +714,35 @@ public static class DeviceFsTestNative {
 
     private static FileAttributes GetFileAttributes(
         SafeFileHandle handle, string path) {
-        var size = Marshal.SizeOf<FileAttributeTagInformation>();
+        var size = Marshal.SizeOf<FILE_ATTRIBUTE_TAG_INFO>();
         using var buffer = new AlignedBuffer(size);
-        if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo,
-                buffer.DangerousGetHandle(), (uint)size)) {
+        if (!GetFileInformationByHandleEx(handle,
+                FILE_INFO_BY_HANDLE_CLASS.FileAttributeTagInfo,
+                new Span<byte>((void*)buffer.DangerousGetHandle(), size))) {
             throw LastError($"could not query the attributes of '{path}'");
         }
 
-        return Marshal.PtrToStructure<FileAttributeTagInformation>(
+        return (FileAttributes)Marshal.PtrToStructure<FILE_ATTRIBUTE_TAG_INFO>(
             buffer.DangerousGetHandle()).FileAttributes;
     }
 
     private static void EnumerateDirectoryTree(string path,
         SafeFileHandle directory, List<NativeFileSystemEntry> result) {
-        var headerSize = Marshal.SizeOf<
-            FileFullDirectoryInformationHeader>();
+        var headerSize = Marshal.OffsetOf<FILE_FULL_DIR_INFO>(nameof(FILE_FULL_DIR_INFO.FileName)).ToInt32();
         using var buffer = new AlignedBuffer(DirectoryInformationBufferSize);
-        var informationClass = FileFullDirectoryRestartInfo;
+        var informationClass = FILE_INFO_BY_HANDLE_CLASS.FileFullDirectoryRestartInfo;
         while (true) {
             if (!GetFileInformationByHandleEx(directory, informationClass,
-                    buffer.DangerousGetHandle(),
-                    DirectoryInformationBufferSize)) {
+                    new Span<byte>((void*)buffer.DangerousGetHandle(),
+                        DirectoryInformationBufferSize))) {
                 var error = Marshal.GetLastWin32Error();
-                if (error == ErrorNoMoreFiles) {
+                if (error == (int)WIN32_ERROR.ERROR_NO_MORE_FILES) {
                     return;
                 }
                 throw Win32Error(
                     $"could not enumerate the directory '{path}'", error);
             }
-            informationClass = FileFullDirectoryInfo;
+            informationClass = FILE_INFO_BY_HANDLE_CLASS.FileFullDirectoryInfo;
 
             var offset = 0;
             while (true) {
@@ -964,8 +754,8 @@ public static class DeviceFsTestNative {
 
                 var entryAddress = IntPtr.Add(
                     buffer.DangerousGetHandle(), offset);
-                var entry = Marshal.PtrToStructure<
-                    FileFullDirectoryInformationHeader>(entryAddress);
+                ref readonly var entry = ref System.Runtime.CompilerServices.Unsafe.AsRef<
+                    FILE_FULL_DIR_INFO>((void*)entryAddress);
                 if ((entry.FileNameLength % sizeof(char)) != 0) {
                     throw new InvalidDataException(
                         $"directory information for '{path}' contained an " +
@@ -998,10 +788,10 @@ public static class DeviceFsTestNative {
                         ? path + name
                         : path + "\\" + name;
                     result.Add(new NativeFileSystemEntry(
-                        childPath, entry.FileAttributes));
-                    if (((entry.FileAttributes & FileAttributes.Directory) !=
+                        childPath, (FileAttributes)entry.FileAttributes));
+                    if ((((FileAttributes)entry.FileAttributes & FileAttributes.Directory) !=
                             0) &&
-                        ((entry.FileAttributes & FileAttributes.ReparsePoint) ==
+                        (((FileAttributes)entry.FileAttributes & FileAttributes.ReparsePoint) ==
                             0)) {
                         using var child = OpenObjectForExtents(childPath);
                         EnumerateDirectoryTree(childPath, child, result);
@@ -1459,7 +1249,7 @@ public static class DeviceFsTestNative {
 // attachments. No permanent attachment is requested, so closing the final
 // handle releases the attachment even during exception unwinding.
 // https://learn.microsoft.com/en-us/windows/win32/api/virtdisk/ne-virtdisk-attach_virtual_disk_flag
-public sealed class DeviceFsTestDisk : IDisposable {
+public sealed unsafe class DeviceFsTestDisk : IDisposable {
     private SafeFileHandle handle;
     private DeviceFsTestDisk() {}
     public uint DiskNumber { get; private set; }
@@ -1469,132 +1259,29 @@ public sealed class DeviceFsTestDisk : IDisposable {
     public long Size { get; private set; }
     public string VolumeName { get; private set; }
 
-    private const uint GenericRead = 0x80000000;
-    private const uint GenericWrite = 0x40000000;
-    private const uint AttachReadOnly = 1;
-    private const uint AttachNoDriveLetter = 2;
-    private const uint CreateFullAllocation = 1;
-    private const uint PartitionStyleGpt = 1;
     // The data partition remains visible to Mount Manager but never receives
     // a default drive letter, including its first arrival before formatting.
     // https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-partition_information_gpt
-    private const ulong NoDefaultDriveLetter = 0x8000000000000000;
+    private const GPT_ATTRIBUTES NoDefaultDriveLetter =
+        GPT_ATTRIBUTES.GPT_BASIC_DATA_ATTRIBUTE_NO_DRIVE_LETTER;
     // One MiB is the fixture's partition-alignment policy, matching the earlier
     // Windows partitioning-tool layout.
     private const long PartitionAlignment = 1024 * 1024;
     private const uint GptEntryCount = 128;
-    private static readonly Guid MicrosoftVirtualDiskVendor =
-        new Guid("ec984aec-a0f9-47e9-901f-71415a66345b");
-    private static readonly Guid BasicDataPartition =
-        new Guid("ebd0a0a2-b9e5-4433-87c0-68b6b72699c7");
-    // These are the Windows SDK CTL_CODE values for the corresponding IOCTLs.
-    private const uint IoctlDiskCreateDisk = 0x0007c058;
-    private const uint IoctlDiskGetDriveLayoutEx = 0x00070050;
-    private const uint IoctlDiskSetDriveLayoutEx = 0x0007c054;
-    private const uint IoctlStorageGetDeviceNumber = 0x002d1080;
-    private const uint IoctlDiskGetLengthInfo = 0x0007405c;
-    private const uint IoctlDiskUpdateProperties = 0x00070140;
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct StorageType { public uint DeviceId; public Guid VendorId; }
-    // Version 2 supports both VHD and VHDX. The nested structure preserves the
-    // SDK union's alignment, including padding before `MaximumSize` and paths.
-    // https://learn.microsoft.com/en-us/windows/win32/api/virtdisk/ns-virtdisk-create_virtual_disk_parameters
-    [StructLayout(LayoutKind.Sequential)]
-    private struct CreateVersion2 {
-        public Guid UniqueId;
-        public ulong MaximumSize;
-        public uint BlockSize, SectorSize, PhysicalSectorSize;
-        public IntPtr ParentPath, SourcePath;
-        public uint OpenFlags;
-        public StorageType ParentType, SourceType;
-        public Guid ResiliencyGuid;
-    }
-    [StructLayout(LayoutKind.Sequential)]
-    private struct CreateParameters {
-        public uint Version;
-        public CreateVersion2 Data;
-    }
-    [StructLayout(LayoutKind.Sequential)]
-    private struct OpenParameters {
-        public uint Version;
-        public int GetInfoOnly, ReadOnly;
-        public Guid ResiliencyGuid;
-    }
-    [StructLayout(LayoutKind.Sequential)]
-    private struct CreateGpt {
-        public uint Style;
-        public Guid DiskId;
-        public uint MaxPartitions;
-    }
-    // The GPT members occupy the union storage in these SDK structures.
-    // Windows supplies the usable range; the data partition is aligned within
-    // that range, leaving the GPT headers and partition tables untouched.
-    // https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-drive_layout_information_ex
-    // https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-partition_information_ex
-    [StructLayout(LayoutKind.Sequential)]
-    private struct LayoutHeader {
-        public uint Style, Count;
-        public Guid DiskId;
-        public long UsableStart, UsableLength;
-        public uint MaxPartitions;
-    }
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct Partition {
-        public uint Style;
-        public ushort Ordinal;
-        public long Start, Length;
-        public uint Number;
-        public byte Rewrite, Service;
-        public Guid Type, Id;
-        public ulong Attributes;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 36)] public string Name;
-    }
-
-    [DllImport("virtdisk.dll", CharSet = CharSet.Unicode)]
-    private static extern uint CreateVirtualDisk(ref StorageType type,
-        string path, uint access, IntPtr security, uint flags, uint providerFlags,
-        ref CreateParameters parameters, IntPtr overlapped, out SafeFileHandle disk);
-    [DllImport("virtdisk.dll", CharSet = CharSet.Unicode)]
-    private static extern uint OpenVirtualDisk(ref StorageType type,
-        string path, uint access, uint flags, ref OpenParameters parameters,
-        out SafeFileHandle disk);
-    [DllImport("virtdisk.dll")]
-    private static extern uint AttachVirtualDisk(SafeFileHandle disk,
-        IntPtr security, uint flags, uint providerFlags, IntPtr parameters,
-        IntPtr overlapped);
-    [DllImport("virtdisk.dll")]
-    private static extern uint DetachVirtualDisk(SafeFileHandle disk,
-        uint flags, uint providerFlags);
-    [DllImport("virtdisk.dll", CharSet = CharSet.Unicode)]
-    private static extern uint GetVirtualDiskPhysicalPath(SafeFileHandle disk,
-        ref uint pathSize, StringBuilder path);
-    [DllImport("kernel32.dll", EntryPoint = "SetVolumeMountPointW",
-        CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool SetVolumeMountPoint(string mount, string volume);
-    [DllImport("kernel32.dll", EntryPoint = "DeleteVolumeMountPointW",
-        CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool DeleteVolumeMountPoint(string mount);
-
-    private static void RequireSuccess(uint result, string operation) {
-        if (result != 0) {
+    private static void RequireSuccess(WIN32_ERROR result, string operation) {
+        if (result != WIN32_ERROR.ERROR_SUCCESS) {
             throw DeviceFsTestNative.Win32Error(operation, (int)result);
         }
     }
-    private static byte[] Bytes<T>(T value) where T : struct {
-        var buffer = new byte[Marshal.SizeOf<T>()];
-        var pinned = GCHandle.Alloc(buffer, GCHandleType.Pinned);
-        try { Marshal.StructureToPtr(value, pinned.AddrOfPinnedObject(), false); }
-        finally { pinned.Free(); }
-        return buffer;
+    private static byte[] Bytes<T>(T value) where T : unmanaged {
+        return MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref value, 1)).ToArray();
     }
-    private static T Structure<T>(byte[] buffer, int offset = 0) where T : struct {
-        if (offset + Marshal.SizeOf<T>() > buffer.Length) {
+    private static T Structure<T>(byte[] buffer, int offset = 0) where T : unmanaged {
+        if (offset + sizeof(T) > buffer.Length) {
             throw new InvalidDataException("The native disk layout was incomplete.");
         }
-        var pinned = GCHandle.Alloc(buffer, GCHandleType.Pinned);
-        try { return Marshal.PtrToStructure<T>(IntPtr.Add(pinned.AddrOfPinnedObject(), offset)); }
-        finally { pinned.Free(); }
+        return MemoryMarshal.Read<T>(buffer.AsSpan(offset));
     }
     private static byte[] Control(SafeFileHandle disk, uint code,
         byte[] input = null, int outputSize = 0) {
@@ -1610,40 +1297,27 @@ public sealed class DeviceFsTestDisk : IDisposable {
     private sealed class VolumeArrivals : IDisposable {
         private readonly System.Threading.AutoResetEvent changed =
             new System.Threading.AutoResetEvent(false);
-        private readonly Notification callback;
-        private IntPtr registration;
-        private delegate uint Notification(IntPtr notification, IntPtr context,
-            uint action, IntPtr data, uint size);
-        // CM_NOTIFY_FILTER's union includes a MAX_DEVICE_ID_LEN (200) WCHAR
-        // instance ID. Its size is therefore 16 header bytes plus 400 bytes.
-        // https://learn.microsoft.com/en-us/windows/win32/api/cfgmgr32/ns-cfgmgr32-cm_notify_filter
-        [StructLayout(LayoutKind.Explicit, Size = 416)]
-        private struct Filter {
-            [FieldOffset(0)] public uint Size;
-            [FieldOffset(16)] public Guid InterfaceClass;
-        }
-        [DllImport("cfgmgr32.dll")]
-        private static extern uint CM_Register_Notification(ref Filter filter,
-            IntPtr context, Notification callback, out IntPtr registration);
-        [DllImport("cfgmgr32.dll")]
-        private static extern uint CM_Unregister_Notification(IntPtr registration);
+        private readonly PCM_NOTIFY_CALLBACK callback;
+        private HCMNOTIFICATION registration;
         public VolumeArrivals() {
             callback = (notification, context, action, data, size) => {
                 try {
-                    if (action == 0) { changed.Set(); }
+                    if (action == CM_NOTIFY_ACTION.CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL) { changed.Set(); }
                     return 0;
                 } catch {
                     // A managed exception cannot cross the native callback.
-                    return 31; // ERROR_GEN_FAILURE
+                    return (uint)WIN32_ERROR.ERROR_GEN_FAILURE;
                 }
             };
-            var filter = new Filter {
-                Size = (uint)Marshal.SizeOf<Filter>(),
-                InterfaceClass = new Guid("53f5630d-b6bf-11d0-94f2-00a0c91efb8b"),
+            var filter = new CM_NOTIFY_FILTER {
+                cbSize = (uint)sizeof(CM_NOTIFY_FILTER),
+                FilterType = CM_NOTIFY_FILTER_TYPE.CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE,
             };
-            var result = CM_Register_Notification(ref filter, IntPtr.Zero,
-                callback, out registration);
-            if (result != 0) {
+            filter.u.DeviceInterface.ClassGuid = GUID_DEVINTERFACE_VOLUME;
+            var registered = new HCMNOTIFICATION();
+            var result = CM_Register_Notification(&filter, null, callback, &registered);
+            registration = registered;
+            if (result != CONFIGRET.CR_SUCCESS) {
                 changed.Dispose();
                 throw new IOException($"CM_Register_Notification failed with CONFIGRET 0x{result:x8}.");
             }
@@ -1662,7 +1336,7 @@ public sealed class DeviceFsTestDisk : IDisposable {
         }
         public void Dispose() {
             var result = CM_Unregister_Notification(registration);
-            if (result != 0) {
+            if (result != CONFIGRET.CR_SUCCESS) {
                 throw new IOException($"CM_Unregister_Notification failed with CONFIGRET 0x{result:x8}.");
             }
             GC.KeepAlive(callback);
@@ -1670,12 +1344,12 @@ public sealed class DeviceFsTestDisk : IDisposable {
         }
     }
 
-    // Device IDs 2 and 3 select Microsoft's VHD and VHDX providers.
     // https://learn.microsoft.com/en-us/windows/win32/api/virtdisk/ns-virtdisk-virtual_storage_type
-    private static StorageType TypeFor(string path) => new StorageType {
+    private static VIRTUAL_STORAGE_TYPE TypeFor(string path) => new VIRTUAL_STORAGE_TYPE {
         DeviceId = System.IO.Path.GetExtension(path).Equals(".vhdx",
-            StringComparison.OrdinalIgnoreCase) ? 3u : 2u,
-        VendorId = MicrosoftVirtualDiskVendor,
+            StringComparison.OrdinalIgnoreCase)
+                ? VIRTUAL_STORAGE_TYPE_DEVICE_VHDX : VIRTUAL_STORAGE_TYPE_DEVICE_VHD,
+        VendorId = VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT,
     };
 
     // Create a blank disk, attach it writable, and create one data partition.
@@ -1683,22 +1357,24 @@ public sealed class DeviceFsTestDisk : IDisposable {
     // The returned object retains the attachment until `Detach` or `Dispose`.
     public static DeviceFsTestDisk Create(string path, ulong size, bool fixedDisk) {
         var type = TypeFor(path);
-        var parameters = new CreateParameters {
-            Version = 2,
-            Data = new CreateVersion2 { MaximumSize = size, SectorSize = 512 },
+        var parameters = new CREATE_VIRTUAL_DISK_PARAMETERS {
+            Version = CREATE_VIRTUAL_DISK_VERSION.CREATE_VIRTUAL_DISK_VERSION_2,
         };
-        RequireSuccess(CreateVirtualDisk(ref type, path, 0, IntPtr.Zero,
-            fixedDisk ? CreateFullAllocation : 0, 0, ref parameters,
-            IntPtr.Zero, out var handle), $"CreateVirtualDisk '{path}'");
+        parameters.Version2.MaximumSize = size;
+        parameters.Version2.SectorSizeInBytes = 512;
+        RequireSuccess(CreateVirtualDisk(type, path, 0, default,
+            fixedDisk ? CREATE_VIRTUAL_DISK_FLAG.CREATE_VIRTUAL_DISK_FLAG_FULL_PHYSICAL_ALLOCATION : 0,
+            0, parameters, null, out var handle), $"CreateVirtualDisk '{path}'");
         return Prepare(handle, false, true, path);
     }
     // Attach an existing test image and locate its single data partition.
     public static DeviceFsTestDisk Open(string path, bool readOnly = true) {
         var type = TypeFor(path);
-        var parameters = new OpenParameters {
-            Version = 2, ReadOnly = readOnly ? 1 : 0,
+        var parameters = new OPEN_VIRTUAL_DISK_PARAMETERS {
+            Version = OPEN_VIRTUAL_DISK_VERSION.OPEN_VIRTUAL_DISK_VERSION_2,
         };
-        RequireSuccess(OpenVirtualDisk(ref type, path, 0, 0, ref parameters,
+        parameters.Version2.ReadOnly = readOnly;
+        RequireSuccess(OpenVirtualDisk(type, path, 0, 0, parameters,
             out var handle), $"OpenVirtualDisk '{path}'");
         return Prepare(handle, readOnly, false, path);
     }
@@ -1707,78 +1383,87 @@ public sealed class DeviceFsTestDisk : IDisposable {
         var result = new DeviceFsTestDisk { handle = handle };
         try {
             using var arrivals = new VolumeArrivals();
-            RequireSuccess(AttachVirtualDisk(handle, IntPtr.Zero,
-                AttachNoDriveLetter | (readOnly ? AttachReadOnly : 0), 0,
-                IntPtr.Zero, IntPtr.Zero), $"AttachVirtualDisk '{path}'");
+            RequireSuccess(AttachVirtualDisk(handle, default,
+                ATTACH_VIRTUAL_DISK_FLAG.ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER |
+                    (readOnly ? ATTACH_VIRTUAL_DISK_FLAG.ATTACH_VIRTUAL_DISK_FLAG_READ_ONLY : 0),
+                0, null, null), $"AttachVirtualDisk '{path}'");
             uint pathSize = 0;
             var status = GetVirtualDiskPhysicalPath(handle, ref pathSize, null);
-            if (status != 122) { RequireSuccess(status, "GetVirtualDiskPhysicalPath size"); }
-            var physicalPath = new StringBuilder(checked((int)pathSize / sizeof(char)));
+            if (status != WIN32_ERROR.ERROR_INSUFFICIENT_BUFFER) {
+                RequireSuccess(status, "GetVirtualDiskPhysicalPath size");
+            }
+            var physicalPathBuffer = new char[checked((int)pathSize / sizeof(char))];
             RequireSuccess(GetVirtualDiskPhysicalPath(handle, ref pathSize,
-                physicalPath), $"GetVirtualDiskPhysicalPath '{path}'");
+                physicalPathBuffer), $"GetVirtualDiskPhysicalPath '{path}'");
+            var physicalPath = new string(physicalPathBuffer).TrimEnd('\0');
             // The virtual-disk handle identifies the physical disk to initialize,
             // so concurrent fixture creation cannot select another test's disk.
-            using var disk = DeviceFsTestNative.CreateFile(physicalPath.ToString(),
-                GenericRead | (initialize ? GenericWrite : 0), 7,
-                IntPtr.Zero, 3, 0, IntPtr.Zero);
+            using var disk = CreateFile(physicalPath,
+                (uint)GENERIC_ACCESS_RIGHTS.GENERIC_READ | (initialize ? (uint)GENERIC_ACCESS_RIGHTS.GENERIC_WRITE : 0),
+                FILE_SHARE_MODE.FILE_SHARE_READ | FILE_SHARE_MODE.FILE_SHARE_WRITE | FILE_SHARE_MODE.FILE_SHARE_DELETE,
+                null, FILE_CREATION_DISPOSITION.OPEN_EXISTING, 0, null);
             if (disk.IsInvalid) {
-                RequireSuccess((uint)Marshal.GetLastWin32Error(), $"Open '{physicalPath}'");
+                RequireSuccess((WIN32_ERROR)Marshal.GetLastWin32Error(), $"Open '{physicalPath}'");
             }
-            var number = Control(disk, IoctlStorageGetDeviceNumber, outputSize: 3 * sizeof(uint));
-            result.DiskNumber = BitConverter.ToUInt32(number, sizeof(uint));
-            result.DiskLength = BitConverter.ToInt64(
-                Control(disk, IoctlDiskGetLengthInfo, outputSize: sizeof(long)), 0);
+            var number = Structure<STORAGE_DEVICE_NUMBER>(Control(
+                disk, IOCTL_STORAGE_GET_DEVICE_NUMBER, outputSize: sizeof(STORAGE_DEVICE_NUMBER)));
+            result.DiskNumber = number.DeviceNumber;
+            result.DiskLength = Structure<GET_LENGTH_INFORMATION>(Control(
+                disk, IOCTL_DISK_GET_LENGTH_INFO, outputSize: sizeof(GET_LENGTH_INFORMATION))).Length;
             if (initialize) {
-                Control(disk, IoctlDiskCreateDisk, Bytes(new CreateGpt {
-                    Style = PartitionStyleGpt, DiskId = Guid.NewGuid(),
-                    MaxPartitions = GptEntryCount,
-                }));
+                var create = new CREATE_DISK { PartitionStyle = PARTITION_STYLE.PARTITION_STYLE_GPT };
+                create.Gpt = new CREATE_DISK_GPT { DiskId = Guid.NewGuid(), MaxPartitionCount = GptEntryCount };
+                Control(disk, IOCTL_DISK_CREATE_DISK, Bytes(create));
             }
             // `IOCTL_DISK_UPDATE_PROPERTIES` makes Windows reread the initialized
             // partition table before its usable range is queried.
             // https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_disk_update_properties
-            if (initialize) { Control(disk, IoctlDiskUpdateProperties); }
+            if (initialize) { Control(disk, IOCTL_DISK_UPDATE_PROPERTIES); }
             var (header, partitions) = ReadLayout(disk);
-            if (header.Style != PartitionStyleGpt) {
+            if (header.PartitionStyle != (uint)PARTITION_STYLE.PARTITION_STYLE_GPT) {
                 throw new InvalidDataException($"'{path}' does not contain a GPT disk.");
             }
             if (initialize) {
-                var start = header.UsableStart;
+                var start = header.Gpt.StartingUsableOffset;
                 foreach (var existing in partitions) {
-                    start = Math.Max(start, existing.Start + existing.Length);
+                    start = Math.Max(start, existing.StartingOffset + existing.PartitionLength);
                 }
                 start = checked((start + PartitionAlignment - 1) /
                     PartitionAlignment * PartitionAlignment);
-                var end = (header.UsableStart + header.UsableLength) /
+                var end = (header.Gpt.StartingUsableOffset + header.Gpt.UsableLength) /
                     PartitionAlignment * PartitionAlignment;
-                partitions.Add(new Partition {
-                    Style = PartitionStyleGpt, Start = start, Length = end - start,
-                    Rewrite = 1,
-                    Type = BasicDataPartition, Id = Guid.NewGuid(),
-                    Attributes = NoDefaultDriveLetter, Name = "DeviceFs test",
-                });
-                header.Count = (uint)partitions.Count;
-                var headerSize = Marshal.SizeOf<LayoutHeader>();
-                var entrySize = Marshal.SizeOf<Partition>();
+                var data = new PARTITION_INFORMATION_EX {
+                    PartitionStyle = PARTITION_STYLE.PARTITION_STYLE_GPT,
+                    StartingOffset = start, PartitionLength = end - start,
+                    RewritePartition = true,
+                };
+                data.Gpt.PartitionType = PARTITION_BASIC_DATA_GUID;
+                data.Gpt.PartitionId = Guid.NewGuid();
+                data.Gpt.Attributes = NoDefaultDriveLetter;
+                "DeviceFs test".AsSpan().CopyTo(data.Gpt.Name.AsSpan());
+                partitions.Add(data);
+                header.PartitionCount = (uint)partitions.Count;
+                var headerSize = Marshal.OffsetOf<DRIVE_LAYOUT_INFORMATION_EX>(nameof(DRIVE_LAYOUT_INFORMATION_EX.PartitionEntry)).ToInt32();
+                var entrySize = sizeof(PARTITION_INFORMATION_EX);
                 var updated = new byte[headerSize + partitions.Count * entrySize];
-                Bytes(header).CopyTo(updated, 0);
+                Bytes(header).AsSpan(0, headerSize).CopyTo(updated);
                 for (int index = 0; index < partitions.Count; ++index) {
                     var partition = partitions[index];
-                    partition.Rewrite = 1;
+                    partition.RewritePartition = true;
                     Bytes(partition).CopyTo(updated, headerSize + index * entrySize);
                 }
-                Control(disk, IoctlDiskSetDriveLayoutEx, updated);
-                Control(disk, IoctlDiskUpdateProperties);
+                Control(disk, IOCTL_DISK_SET_DRIVE_LAYOUT_EX, updated);
+                Control(disk, IOCTL_DISK_UPDATE_PROPERTIES);
                 (_, partitions) = ReadLayout(disk);
             }
             var selected = partitions.FindAll(
-                partition => partition.Type == BasicDataPartition);
+                partition => partition.Gpt.PartitionType == PARTITION_BASIC_DATA_GUID);
             if (selected.Count != 1) {
                 throw new InvalidDataException($"'{path}' does not contain one basic-data partition.");
             }
-            result.PartitionNumber = selected[0].Number;
-            result.Offset = selected[0].Start;
-            result.Size = selected[0].Length;
+            result.PartitionNumber = selected[0].PartitionNumber;
+            result.Offset = selected[0].StartingOffset;
+            result.Size = selected[0].PartitionLength;
             result.VolumeName = arrivals.Wait(() => result.FindVolumeName(),
                 $"volume arrival for '{path}'");
             return result;
@@ -1787,30 +1472,27 @@ public sealed class DeviceFsTestDisk : IDisposable {
             throw;
         }
     }
-    private static (LayoutHeader Header, List<Partition> Partitions) ReadLayout(
+    private static (DRIVE_LAYOUT_INFORMATION_EX Header, List<PARTITION_INFORMATION_EX> Partitions) ReadLayout(
         SafeFileHandle disk) {
-        var headerSize = Marshal.SizeOf<LayoutHeader>();
-        var entrySize = Marshal.SizeOf<Partition>();
+        // `PartitionEntry` begins the variable-length partition list. The
+        // generated structure includes its first element, but only the bytes
+        // preceding that member belong to the fixed header.
+        // https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-drive_layout_information_ex
+        var headerSize = Marshal.OffsetOf<DRIVE_LAYOUT_INFORMATION_EX>(nameof(DRIVE_LAYOUT_INFORMATION_EX.PartitionEntry)).ToInt32();
+        var entrySize = sizeof(PARTITION_INFORMATION_EX);
         // Both the created fixtures and VhdxViewer use 128 GPT entries.
-        var layout = Control(disk, IoctlDiskGetDriveLayoutEx,
+        var layout = Control(disk, IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
             outputSize: headerSize + checked((int)GptEntryCount) * entrySize);
-        var header = Structure<LayoutHeader>(layout);
-        var partitions = new List<Partition>();
-        for (int index = 0; index < header.Count; ++index) {
-            var entry = Structure<Partition>(layout, headerSize + index * entrySize);
-            if (entry.Length != 0) { partitions.Add(entry); }
+        var header = new DRIVE_LAYOUT_INFORMATION_EX();
+        layout.AsSpan(0, headerSize).CopyTo(
+            MemoryMarshal.AsBytes(MemoryMarshal.CreateSpan(ref header, 1)));
+        var partitions = new List<PARTITION_INFORMATION_EX>();
+        for (int index = 0; index < header.PartitionCount; ++index) {
+            var entry = Structure<PARTITION_INFORMATION_EX>(layout, headerSize + index * entrySize);
+            if (entry.PartitionLength != 0) { partitions.Add(entry); }
         }
         return (header, partitions);
     }
-    [DllImport("kernel32.dll", EntryPoint = "FindFirstVolumeW",
-        CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern IntPtr FindFirstVolume(StringBuilder name, uint size);
-    [DllImport("kernel32.dll", EntryPoint = "FindNextVolumeW",
-        CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool FindNextVolume(IntPtr search,
-        StringBuilder name, uint size);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool FindVolumeClose(IntPtr search);
 
     // Volume GUID names are available before formatting. Matching the storage
     // device number identifies the partition without opening a filesystem root,
@@ -1818,41 +1500,41 @@ public sealed class DeviceFsTestDisk : IDisposable {
     // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstvolumew
     // https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_storage_get_device_number
     private string FindVolumeName() {
-        // A volume GUID name is \\?\Volume{36-character GUID}\ plus NUL.
-        var name = new StringBuilder(50);
-        var search = FindFirstVolume(name, (uint)name.Capacity);
-        if (search == new IntPtr(-1)) {
-            RequireSuccess((uint)Marshal.GetLastWin32Error(), "FindFirstVolume");
+        var name = new char[MAX_PATH + 1];
+        var search = FindFirstVolume(name);
+        if (search.IsInvalid) {
+            RequireSuccess((WIN32_ERROR)Marshal.GetLastWin32Error(), "FindFirstVolume");
         }
         try {
             do {
-                using var volume = DeviceFsTestNative.CreateFile(name.ToString().TrimEnd('\\'),
-                    0, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
+                using var volume = CreateFile(new string(name).TrimEnd('\0').TrimEnd('\\'),
+                    0, FILE_SHARE_MODE.FILE_SHARE_READ | FILE_SHARE_MODE.FILE_SHARE_WRITE |
+                        FILE_SHARE_MODE.FILE_SHARE_DELETE, null,
+                    FILE_CREATION_DISPOSITION.OPEN_EXISTING, 0, null);
                 if (!volume.IsInvalid) {
-                    var number = new byte[3 * sizeof(uint)];
-                    if (DeviceFsTestNative.DeviceIoControl(volume, IoctlStorageGetDeviceNumber,
-                            null, 0, number, (uint)number.Length,
-                            out var returned, IntPtr.Zero) &&
+                    var number = new byte[sizeof(STORAGE_DEVICE_NUMBER)];
+                    if (DeviceIoControl(volume, IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                            null, number, out var returned, null) &&
                         returned == number.Length &&
-                        BitConverter.ToUInt32(number, sizeof(uint)) == DiskNumber &&
-                        BitConverter.ToUInt32(number, 2 * sizeof(uint)) == PartitionNumber) {
-                        return name.ToString();
+                        Structure<STORAGE_DEVICE_NUMBER>(number).DeviceNumber == DiskNumber &&
+                        Structure<STORAGE_DEVICE_NUMBER>(number).PartitionNumber == PartitionNumber) {
+                        return new string(name).TrimEnd('\0');
                     }
                 }
-            } while (FindNextVolume(search, name, (uint)name.Capacity));
+            } while (FindNextVolume((HANDLE)search.DangerousGetHandle(), name));
             var status = Marshal.GetLastWin32Error();
-            if (status != 18) { RequireSuccess((uint)status, "FindNextVolume"); }
+            if (status != (int)WIN32_ERROR.ERROR_NO_MORE_FILES) { RequireSuccess((WIN32_ERROR)status, "FindNextVolume"); }
             return null;
-        } finally { FindVolumeClose(search); }
+        } finally { search.Dispose(); }
     }
     public void Mount(string directory) {
         if (!SetVolumeMountPoint(directory.TrimEnd('\\') + "\\", VolumeName)) {
-            RequireSuccess((uint)Marshal.GetLastWin32Error(), $"SetVolumeMountPoint '{directory}'");
+            RequireSuccess((WIN32_ERROR)Marshal.GetLastWin32Error(), $"SetVolumeMountPoint '{directory}'");
         }
     }
     public void Unmount(string directory) {
         if (!DeleteVolumeMountPoint(directory.TrimEnd('\\') + "\\")) {
-            RequireSuccess((uint)Marshal.GetLastWin32Error(), $"DeleteVolumeMountPoint '{directory}'");
+            RequireSuccess((WIN32_ERROR)Marshal.GetLastWin32Error(), $"DeleteVolumeMountPoint '{directory}'");
         }
     }
     public void Detach() {

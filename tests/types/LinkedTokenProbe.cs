@@ -6,10 +6,13 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using Microsoft.Win32.SafeHandles;
+using Windows.Win32.Foundation;
+using Windows.Win32.Security;
+using static Windows.Win32.PInvoke;
 
 namespace DeviceFs.Tests;
 
-public static class LinkedTokenProbe {
+public static unsafe class LinkedTokenProbe {
     public enum ElevationType {
         Default = 1,
         Full,
@@ -18,84 +21,50 @@ public static class LinkedTokenProbe {
 
     public sealed record Identity(string Account, string Sid, ElevationType Elevation);
 
-    private enum TokenInformationClass {
-        User = 1,
-        ElevationType = 18,
-        LinkedToken = 19
-    }
-
-    private const uint TokenQuery = 0x0008;
-    private const int ErrorInsufficientBuffer = 122;
-
-    [DllImport("kernel32.dll", ExactSpelling = true)]
-    private static extern IntPtr GetCurrentProcess();
-
-    [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool OpenProcessToken(
-        IntPtr process, uint desiredAccess, out SafeAccessTokenHandle token);
-
-    [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetTokenInformation(
-        SafeAccessTokenHandle token, TokenInformationClass informationClass,
-        IntPtr information, uint informationLength, out uint returnLength);
-
-    [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetTokenInformation(
-        SafeAccessTokenHandle token, TokenInformationClass informationClass,
-        out ElevationType information, uint informationLength, out uint returnLength);
-
-    [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetTokenInformation(
-        SafeAccessTokenHandle token, TokenInformationClass informationClass,
-        out IntPtr information, uint informationLength, out uint returnLength);
-
     private static Win32Exception NativeError(string operation, int error) {
         return new Win32Exception(error,
             $"{operation}: Windows error 0x{error:x8}: {new Win32Exception(error).Message}");
     }
 
-    private static SafeAccessTokenHandle OpenCurrentToken() {
-        if (!OpenProcessToken(GetCurrentProcess(), TokenQuery, out var token)) {
+    private static SafeFileHandle OpenCurrentToken() {
+        if (!OpenProcessToken(GetCurrentProcess_SafeHandle(),
+                TOKEN_ACCESS_MASK.TOKEN_QUERY, out var token)) {
             throw NativeError("OpenProcessToken", Marshal.GetLastWin32Error());
         }
         return token;
     }
 
-    private static SecurityIdentifier ReadUserSid(SafeAccessTokenHandle token) {
-        GetTokenInformation(token, TokenInformationClass.User, IntPtr.Zero, 0, out var length);
+    private static SecurityIdentifier ReadUserSid(SafeFileHandle token) {
+        GetTokenInformation(token, TOKEN_INFORMATION_CLASS.TokenUser, default, out var length);
         var error = Marshal.GetLastWin32Error();
-        if (error != ErrorInsufficientBuffer) {
+        if (error != (int)WIN32_ERROR.ERROR_INSUFFICIENT_BUFFER) {
             throw NativeError("GetTokenInformation(TokenUser) size query", error);
         }
 
-        var buffer = Marshal.AllocHGlobal(checked((int)length));
-        try {
-            if (!GetTokenInformation(token, TokenInformationClass.User, buffer, length, out length)) {
+        var buffer = new byte[checked((int)length)];
+        // `TOKEN_USER.User.Sid` points into the returned buffer. The buffer
+        // remains pinned from the query until `SecurityIdentifier` copies the
+        // SID, so a garbage collection cannot invalidate that pointer.
+        fixed (byte* data = buffer) {
+            if (!GetTokenInformation(token, TOKEN_INFORMATION_CLASS.TokenUser,
+                    data, length, out _)) {
                 throw NativeError("GetTokenInformation(TokenUser)",
                     Marshal.GetLastWin32Error());
             }
-            // TOKEN_USER begins with SID_AND_ATTRIBUTES, whose first member is
-            // the SID pointer. SecurityIdentifier copies the SID before the
-            // buffer is freed.
-            return new SecurityIdentifier(Marshal.ReadIntPtr(buffer));
-        } finally {
-            Marshal.FreeHGlobal(buffer);
+            return new SecurityIdentifier((IntPtr)((TOKEN_USER*)data)->User.Sid.Value);
         }
     }
 
-    private static Identity Describe(SafeAccessTokenHandle token) {
+    private static Identity Describe(SafeFileHandle token) {
         var sid = ReadUserSid(token);
         var account = AccountName(sid);
-        if (!GetTokenInformation(token, TokenInformationClass.ElevationType,
-            out ElevationType elevation, sizeof(int), out _)) {
+        var elevation = new TOKEN_ELEVATION_TYPE();
+        if (!GetTokenInformation(token, TOKEN_INFORMATION_CLASS.TokenElevationType,
+                new Span<byte>(&elevation, sizeof(TOKEN_ELEVATION_TYPE)), out _)) {
             throw NativeError("GetTokenInformation(TokenElevationType)",
                 Marshal.GetLastWin32Error());
         }
-        return new Identity(account, sid.Value, elevation);
+        return new Identity(account, sid.Value, (ElevationType)elevation);
     }
 
     private static string AccountName(SecurityIdentifier sid) {
@@ -115,12 +84,13 @@ public static class LinkedTokenProbe {
         using var token = OpenCurrentToken();
         // TOKEN_LINKED_TOKEN contains one handle, which the caller must close.
         // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-token_linked_token
-        if (!GetTokenInformation(token, TokenInformationClass.LinkedToken,
-            out IntPtr linkedHandle, (uint)IntPtr.Size, out _)) {
+        var linkedToken = new TOKEN_LINKED_TOKEN();
+        if (!GetTokenInformation(token, TOKEN_INFORMATION_CLASS.TokenLinkedToken,
+                new Span<byte>(&linkedToken, sizeof(TOKEN_LINKED_TOKEN)), out _)) {
             throw NativeError("GetTokenInformation(TokenLinkedToken)",
                 Marshal.GetLastWin32Error());
         }
-        using var linked = new SafeAccessTokenHandle(linkedHandle);
+        using var linked = new SafeFileHandle(linkedToken.LinkedToken, ownsHandle: true);
         return Describe(linked);
     }
 }

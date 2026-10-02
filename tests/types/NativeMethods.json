@@ -1,0 +1,10 @@
+{
+    "$schema": "https://aka.ms/CsWin32.schema.json",
+    "emitSingleFile": true,
+    "friendlyOverloads": {
+        "includePointerOverloads": true
+    },
+    "comInterop": {
+        "useComSourceGenerators": false
+    }
+}

@@ -111,6 +111,36 @@ set(DEVICEFS_COMMON_LINK_LIBRARIES
 )
 
 find_program(POWERSHELL_EXECUTABLE NAMES pwsh REQUIRED)
+find_program(NUGET_EXECUTABLE NAMES nuget)
+# Visual Studio installs dotnet.exe under `dotnet/<version>/runtime`, which may
+# not be on the PATH. The directories are sorted to select the newest version.
+file(GLOB DEVICEFS_DOTNET_RUNTIME_DIRECTORIES LIST_DIRECTORIES true
+    "${CMAKE_GENERATOR_INSTANCE}/dotnet/*/runtime")
+list(SORT DEVICEFS_DOTNET_RUNTIME_DIRECTORIES
+    COMPARE NATURAL ORDER DESCENDING)
+find_program(DOTNET_EXECUTABLE NAMES dotnet
+    HINTS ${DEVICEFS_DOTNET_RUNTIME_DIRECTORIES})
+
+set(DEVICEFS_NATIVE_METHODS
+    "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/Windows.Win32.NativeMethods.g.cs")
+add_custom_command(
+    OUTPUT "${DEVICEFS_NATIVE_METHODS}"
+    COMMAND "${POWERSHELL_EXECUTABLE}" -NoProfile -NonInteractive -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/types/Generate-NativeMethods.ps1"
+        -CMakeCachePath "${CMAKE_CURRENT_BINARY_DIR}/CMakeCache.txt"
+        -Configuration "$<CONFIG>"
+    DEPENDS
+        tests/types/Generate-NativeMethods.ps1
+        tests/types/packages.config
+        tests/types/packages.lock.json
+        tests/types/NuGet.Config
+        tests/types/NativeMethods.txt
+        tests/types/NativeMethods.json
+        src/unix/tests/include/cmake.ps1
+    VERBATIM
+)
+add_custom_target(devicefs-test-native-methods ALL
+    DEPENDS "${DEVICEFS_NATIVE_METHODS}")
 
 set(DEVICEFS_RPC_DEFINITION
     "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/filesystem/rpc_block_device.idl"

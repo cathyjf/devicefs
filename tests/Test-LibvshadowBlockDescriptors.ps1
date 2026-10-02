@@ -75,6 +75,7 @@ $vshadow_overlay_flag = 2
 . ([IO.Path]::Combine(
         $PSScriptRoot, 'include', 'DeviceFsTestProcess.ps1'))
 . (Join-Path $PSScriptRoot 'include/DeviceFsTestVolume.ps1')
+. (Join-Path $PSScriptRoot 'include/DeviceFsTestTypes.ps1')
 . (Join-Path $PSScriptRoot 'include/VssTestWorkload.ps1')
 
 function Assert-Condition {
@@ -356,7 +357,7 @@ $native_source_path = [IO.Path]::Combine(
 if ($null -ne ([Management.Automation.PSTypeName]'DeviceFsTestNative').Type) {
     throw 'DeviceFsTestNative is already loaded. Run the test in a fresh pwsh process.'
 }
-Add-Type -Path $native_source_path
+Add-DeviceFsTestTypes -SourcePath $native_source_path -SupervisorPath $SupervisorPath
 
 $run_id = [Guid]::NewGuid().ToString('N')
 $test_root = $null

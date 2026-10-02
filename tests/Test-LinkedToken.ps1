@@ -29,8 +29,11 @@ if (-not $IsWindows) {
     throw 'This test requires Windows.'
 }
 
+. (Join-Path $PSScriptRoot 'include/DeviceFsTestProcess.ps1')
+. (Join-Path $PSScriptRoot 'include/DeviceFsTestTypes.ps1')
+
 if (-not ('DeviceFs.Tests.LinkedTokenProbe' -as [type])) {
-    Add-Type -Path (Join-Path $PSScriptRoot 'types/LinkedTokenProbe.cs')
+    Add-DeviceFsTestTypes -SourcePath (Join-Path $PSScriptRoot 'types/LinkedTokenProbe.cs')
 }
 
 Write-Host 'Current process token:'

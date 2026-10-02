@@ -112,6 +112,7 @@ if ($KeepImages -and $RemoveTemporaryFiles) {
 }
 . (Join-Path $PSScriptRoot 'include/DeviceFsTestProcess.ps1')
 . (Join-Path $PSScriptRoot 'include/DeviceFsTestVolume.ps1')
+. (Join-Path $PSScriptRoot 'include/DeviceFsTestTypes.ps1')
 . (Join-Path $PSScriptRoot 'include/VssTestWorkload.ps1')
 . (Join-Path $PSScriptRoot 'include/VssDescriptorOutput.ps1')
 
@@ -130,7 +131,7 @@ if ($VShadowInfoPath) {
 if ($null -ne ([Management.Automation.PSTypeName]'DeviceFsTestNative').Type) {
     throw 'DeviceFsTestNative is already loaded. Run the suite in a fresh pwsh process.'
 }
-Add-Type -Path (Join-Path $PSScriptRoot 'types/DeviceFsTestNative.cs')
+Add-DeviceFsTestTypes -SourcePath (Join-Path $PSScriptRoot 'types/DeviceFsTestNative.cs') -SupervisorPath $SupervisorPath
 $root = (New-Item -ItemType Directory -Path (Join-Path $OutputDirectory (
     'devicefs-vss-intervals-' + [Guid]::NewGuid().ToString('N')))).FullName
 Start-Transcript -LiteralPath (Join-Path $root 'console.txt') | Out-Null

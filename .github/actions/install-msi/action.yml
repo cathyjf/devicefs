@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Install verified MSI
+description: Download an MSI, verify its SHA-256, and install it.
+
+inputs:
+  uri:
+    description: URI of the MSI to download.
+    required: true
+  sha256:
+    description: Expected SHA-256 of the MSI.
+    required: true
+  arguments:
+    description: Additional msiexec arguments, one per line.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - shell: pwsh
+      env:
+        MSI_URI: ${{ inputs.uri }}
+        MSI_SHA256: ${{ inputs.sha256 }}
+        MSI_ARGUMENTS: ${{ inputs.arguments }}
+      run: |
+        $msi_path = New-TemporaryFile
+        Invoke-WebRequest -Uri $env:MSI_URI -OutFile $msi_path
+        $hash = (Get-FileHash -LiteralPath $msi_path -Algorithm SHA256).Hash
+        if ($hash -ne $env:MSI_SHA256) {
+          throw ("MSI '$env:MSI_URI' SHA-256 mismatch: " +
+            "expected $env:MSI_SHA256; got $hash.")
+        }
+        $arguments = @($env:MSI_ARGUMENTS -split '\r?\n' |
+          Where-Object { $_ -ne '' })
+        $msi_log = New-TemporaryFile
+        try {
+          $PSNativeCommandUseErrorActionPreference = $true
+          msiexec.exe /i $msi_path /qn REBOOT=ReallySuppress `
+            /L*V $msi_log @arguments | Out-Host
+        } catch {
+          Get-Content -LiteralPath $msi_log -ErrorAction Continue | Out-Host
+          throw
+        }

@@ -238,7 +238,8 @@ private:
 
     // Terminal reports and keystrokes share one byte stream. This is its only
     // reader; every received byte enters `pending_` before either consumer
-    // interprets it. Interrupted waits retry against the original deadline.
+    // interprets it. Interrupted waits retry against the original deadline;
+    // an expired deadline polls for queued input without waiting.
     [[nodiscard]] auto ReceiveUntil(const std::chrono::steady_clock::time_point deadline)
         -> bool {
         // `pselect` reads a bitmap sized by `descriptor_ + 1`. An array of
@@ -258,10 +259,8 @@ private:
         auto readable = std::vector<fd_set>{(descriptor_ / FD_SETSIZE) + 1uz};
         FD_SET(descriptor_ % FD_SETSIZE, &readable.back());
         for (;;) {
-            const auto remaining = deadline - std::chrono::steady_clock::now();
-            if (remaining <= remaining.zero()) {
-                return false;
-            }
+            const auto remaining = std::max(std::chrono::steady_clock::duration::zero(),
+                deadline - std::chrono::steady_clock::now());
             // `ReceiveUntil` waits for readable input only until the supplied
             // deadline, so a missing terminal reply cannot block a query
             // indefinitely. For `/dev/tty`, macOS `poll` reports `POLLNVAL`.
@@ -318,7 +317,7 @@ private:
             if (ConsumeCancellation()) {
                 throw InputCancelled{};
             }
-            if (!ReceiveUntil(deadline)) {
+            if ((std::chrono::steady_clock::now() >= deadline) || !ReceiveUntil(deadline)) {
                 return std::nullopt;
             }
             const auto cancellation = FindCancellation();

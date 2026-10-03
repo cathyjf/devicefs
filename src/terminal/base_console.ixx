@@ -128,7 +128,9 @@ protected:
 
     // Read a keyboard sequence beginning with the queued ESC, or return Back
     // for a lone Escape. Complete sequences are decoded immediately. An
-    // incomplete sequence gets up to `kEscapeTimeout` to receive more input.
+    // incomplete sequence waits up to `kEscapeTimeout` for more input. However,
+    // input already queued by the operating system remains available after
+    // that timeout, so a scheduling delay cannot split an available sequence.
     // If the caller's refresh deadline comes first, the queued characters and
     // the original Escape deadline remain available to the next call.
     //
@@ -143,6 +145,9 @@ protected:
             self.escape_deadline_ = std::chrono::steady_clock::now() + kEscapeTimeout;
         }
         for (;;) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return std::nullopt;
+            }
             // Ctrl+C can arrive inside a fragmented terminal reply. Consuming
             // only the cancellation leaves the reply and other keys queued.
             if (self.ConsumeCancellation()) {

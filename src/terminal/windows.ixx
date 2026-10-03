@@ -330,14 +330,13 @@ private:
         return record;
     }
 
-    // Receive one console record before `deadline`, retaining its native key
-    // and resize information for the keyboard reader or a pending VT query.
+    // Receive one console record, waiting only until `deadline`. An expired
+    // deadline still polls for queued input without waiting. The record retains
+    // its native key and resize information for the keyboard reader or a VT query.
     [[nodiscard]] auto ReceiveUntil(const std::chrono::steady_clock::time_point deadline)
         -> bool {
-        const auto remaining = deadline - std::chrono::steady_clock::now();
-        if (remaining <= remaining.zero()) {
-            return false;
-        }
+        const auto remaining = std::max(std::chrono::steady_clock::duration::zero(),
+            deadline - std::chrono::steady_clock::now());
         const auto timeout = (deadline == std::chrono::steady_clock::time_point::max()) ?
             INFINITE : FailFastCast<DWORD>(std::min<std::int64_t>(INFINITE - 1,
                 std::chrono::ceil<std::chrono::milliseconds>(remaining).count()));
@@ -434,7 +433,7 @@ private:
             if (ConsumeCancellation()) {
                 throw InputCancelled{};
             }
-            if (!ReceiveUntil(deadline)) {
+            if ((std::chrono::steady_clock::now() >= deadline) || !ReceiveUntil(deadline)) {
                 return std::nullopt;
             }
             const auto position = std::prev(pending_.end());

@@ -239,6 +239,10 @@ class TestConsole : public NativeConsole {
 public:
     using NativeConsole::NativeConsole;
 
+    auto ExpireEscapeDeadline() -> void {
+        escape_deadline_ = std::chrono::steady_clock::now();
+    }
+
     GSL_SUPPRESS("26434",
         "BaseConsole dispatches Write through its explicit object parameter. "
         "This test adapter replaces output so native queries receive only "
@@ -384,6 +388,23 @@ public:
         Require(console.ReadMenuInput(std::chrono::steady_clock::now() + 1ms).key == MenuKey::Timeout,
             "a refresh deadline prematurely consumed a lone Escape"sv);
         Require(console.ReadMenuInput().key == MenuKey::Back, "a lone Escape was lost between waits"sv);
+    });
+    passed &= Test("native queued continuation surviving an expired Escape deadline"sv, [&] {
+        auto console = make_console();
+        // Reading a CPR leaves the preceding partial arrow in the native
+        // reader's queue. Expiring its Escape deadline before supplying the
+        // rest models a scheduling delay without relying on thread timing.
+        console.on_write = [&input](const auto) { input.Feed("\x1b[\x1b[4;9R"sv); };
+        Require(console.QueryCursor() == CursorPosition{4, 9},
+            "the setup cursor query did not return its supplied reply"sv);
+        console.ExpireEscapeDeadline();
+        input.Feed("B日"sv);
+        Require(console.ReadTextInput(std::chrono::steady_clock::now()).key == MenuKey::Timeout,
+            "queued continuation bypassed the caller's expired deadline"sv);
+        Require(console.ReadMenuInput().key == MenuKey::Down,
+            "an expired Escape deadline split an already available arrow"sv);
+        Require(console.ReadTextInput().character == U'日',
+            "completing the arrow consumed the following Unicode character"sv);
     });
     passed &= Test("native incomplete sequences expire without consuming following text"sv, [&] {
         for (const auto prefix : std::array{"\x1b"sv, "\x1b["sv, "\x1bO"sv}) {

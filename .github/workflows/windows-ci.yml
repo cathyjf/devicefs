@@ -36,38 +36,80 @@ jobs:
 
       # Some tests require a specific lock file to exist in the filesystem.
       - name: Create lock file
+        background: true
         run: |
           $credentials_dir = [IO.Path]::Combine( `
             $env:ProgramData, 'devicefs', 'credentials')
           [IO.Directory]::CreateDirectory($credentials_dir) | Out-Null
           [IO.File]::Open([IO.Path]::Combine($credentials_dir, `
             'pbs-vss-backup.lock'), [IO.FileMode]::OpenOrCreate).Dispose()
+
+      - name: Acquire DISM SDK files
         background: true
-
-      # The `windows-2025-vs2026` runner includes WinGet.
-      # The `windows-11-vs2026-arm` runner does not include WinGet.
-      - name: Install WinGet
-        if: matrix.runner == 'windows-11-vs2026-arm'
         run: |
-          Install-Module Microsoft.WinGet.Client -Repository PSGallery `
-            -Force -Scope CurrentUser
-          Repair-WinGetPackageManager -AllUsers -Latest -Verbose
-        env:
-          # GitHub rate limiting can prevent acquisition of WinGet.
-          # Supplying a GitHub token can mitigate that issue.
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          $sdk_root = [IO.Path]::Combine(
+            [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+              [Microsoft.Win32.RegistryHive]::LocalMachine,
+              [Microsoft.Win32.RegistryView]::Registry32).OpenSubKey(
+                'SOFTWARE\Microsoft\Windows Kits\Installed Roots').GetValue(
+                  'KitsRoot10'),
+            'Assessment and Deployment Kit/Deployment Tools/SDKs/DismApi')
 
-      - name: Install Windows ADK deployment tools
-        run: |
-          winget install -e --id Microsoft.WindowsADK --source winget `
-            --silent --accept-package-agreements --accept-source-agreements `
-            --custom "/features OptionId.DeploymentTools"
+          # These cabinets contain the DISM SDK files from ADK 10.1.28000.1.
+          # Files inside them have names beginning with `fil`, rather than
+          # `DismApi.h` or `DismApi.lib`. The ADK's "Headers and Libraries" MSI
+          # maps those names to the installed filenames used below.
+          $download_url = (
+            'https://download.microsoft.com/download/' +
+            '615540bc-be0b-433a-b91b-1f2b0642bb24/adk/Installers')
+          $libraries = @{
+            x64 = @{
+              Cabinet = '500e0afd7cc09e1e1d6daca01bc67430.cab'
+              Hash = 'f9c42535f407077c72f595480eb4aea22560f387f58eabe40fef3e02f78523b9'
+              Member = 'fil96d47d97b00ce7bb72fce2ce9fd158c1'
+              Destination = 'Lib/amd64/DismApi.lib'
+            }
+            arm64 = @{
+              Cabinet = 'a29a0c716f903f42aca181dca250f681.cab'
+              Hash = 'f66462ae72935317c656c881c0988c141f44d16ab8dcbb9303bb07e80da8e2e9'
+              Member = 'fil10d782c6c7c16a94babbc97dabd8b89b'
+              Destination = 'Lib/arm64/DismApi.lib'
+            }
+          }
+          $payloads = @(
+            @{
+              Cabinet = 'ea9c0c38594fd7df374ddfc620f4a1fd.cab'
+              Hash = '928ddc485d8c83dd9283fcdd0162a232316f1718775f60237a199c18b8b88e86'
+              Member = 'fil826ac1fee14c773fae7aadd5b48e79dd'
+              Destination = 'Include/DismApi.h'
+            }
+            $libraries['${{ matrix.architecture }}']
+          )
+          $payloads | ForEach-Object -Parallel {
+            $ErrorActionPreference = 'Stop'
+            $PSNativeCommandUseErrorActionPreference = $true
+            $payload = $_
+            $cabinet = Join-Path $env:RUNNER_TEMP $payload.Cabinet
+            Invoke-WebRequest -Uri "$using:download_url/$($payload.Cabinet)" `
+              -OutFile $cabinet
+            $hash = (Get-FileHash -LiteralPath $cabinet -Algorithm SHA256).Hash
+            if ($hash -ne $payload.Hash) {
+              throw ("DISM SDK cabinet '$($payload.Cabinet)' SHA-256 mismatch: " +
+                "expected $($payload.Hash); got $hash.")
+            }
+            $destination = Join-Path $using:sdk_root $payload.Destination
+            $directory = Split-Path -Parent $destination
+            [IO.Directory]::CreateDirectory($directory) | Out-Null
+            tar.exe -xOf $cabinet $payload.Member > $destination
+          }
 
       - name: Install WinFsp
-        run: |
-          winget install -e --id WinFsp.WinFsp --source winget `
-            --silent --accept-package-agreements --accept-source-agreements `
-            --custom "ADDLOCAL=F.Main,F.User,F.Developer"
+        uses: $/.github/actions/install-msi
+        background: true
+        with:
+          uri: https://github.com/winfsp/winfsp/releases/download/v2.2B4/winfsp-2.2.26215.msi
+          sha256: 2ECB5C89405488A95BBD8A01875E02C48534FD37BBDFD84488F7590464D65944
+          arguments: ADDLOCAL=F.Main,F.User,F.Developer
 
       - name: Wait for preparation to finish
         wait-all:
@@ -160,31 +202,10 @@ jobs:
       - parallel:
           - name: Acquire and install the WSL package
             if: matrix.runner == 'windows-11-vs2026-arm'
-            run: |
-              $wsl_path = New-TemporaryFile
-              Invoke-WebRequest `
-                -Uri (
-                  'https://github.com/microsoft/WSL/releases/download/3.0.1/' +
-                  'wsl.3.0.1.0.arm64.msi') `
-                -OutFile $wsl_path
-              $expected_hash = (
-                '857ddbb335ec7d05ffa71d0fd2203750' +
-                'c0e8fc29bb164f8a95db92bd7bba4263')
-              $hash = (Get-FileHash -LiteralPath $wsl_path `
-                -Algorithm SHA256).Hash
-              if ($hash -ne $expected_hash) {
-                throw "WSL MSI SHA-256 mismatch: expected $expected_hash; " +
-                  "got $hash."
-              }
-              $wsl_log = New-TemporaryFile
-              try {
-                $PSNativeCommandUseErrorActionPreference = $true
-                msiexec.exe /i $wsl_path /qn REBOOT=ReallySuppress `
-                  /L*V $wsl_log | Out-Host
-              } catch {
-                Get-Content -LiteralPath $wsl_log | Out-Host
-                throw
-              }
+            uses: $/.github/actions/install-msi
+            with:
+              uri: https://github.com/microsoft/WSL/releases/download/3.0.1/wsl.3.0.1.0.arm64.msi
+              sha256: 857ddbb335ec7d05ffa71d0fd2203750c0e8fc29bb164f8a95db92bd7bba4263
 
           - name: Enable the WSL1 component
             if: matrix.runner == 'windows-11-vs2026-arm'

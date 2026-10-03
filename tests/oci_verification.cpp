@@ -53,6 +53,84 @@ auto CALLBACK RunQueuedVerification(PTP_CALLBACK_INSTANCE,
     return std::filesystem::path{executable}.parent_path() / "backup-supervisor.exe";
 }
 
+[[nodiscard]] auto CanRunSupervisorInAppContainer(
+    const std::filesystem::path &supervisor) -> bool {
+    const auto native_machine = [] {
+        auto process_machine = USHORT{};
+        auto native_machine = USHORT{};
+        if (!IsWow64Process2(GetCurrentProcess(),
+            &process_machine, &native_machine)) {
+            WinError("could not determine the native machine architecture");
+        }
+        return native_machine;
+    }();
+    struct ImageFileMachines {
+        ULONG x86 : 1;
+        ULONG amd64 : 1;
+        ULONG arm : 1;
+        ULONG arm64 : 1;
+        ULONG arm64ec : 1;
+    };
+    static_assert(sizeof(ImageFileMachines) == sizeof(ULONG));
+    const auto machines = [&supervisor]
+        -> std::expected<ImageFileMachines, std::unique_ptr<std::runtime_error>> {
+        // RtlGetImageFileMachines has no public SDK declaration or import library.
+        // https://learn.microsoft.com/windows/win32/devnotes/rtlgetimagefilemachines
+        const auto ntdll_handle = GetModuleHandleW(L"ntdll.dll");
+        if (!ntdll_handle) {
+            WinError("failed to get a module handle for `ntdll.dll`");
+        }
+        [[gsl::suppress("26490", justification:
+            "`GetProcAddress` returns the address of the requested function "
+            "but with an incorrect return type.")]]
+        const auto get_machines = reinterpret_cast<
+            auto (NTAPI *)(_In_ PCWSTR, _Out_ ImageFileMachines *) -> NTSTATUS>(
+                GetProcAddress(ntdll_handle, "RtlGetImageFileMachines"));
+        if (!get_machines) {
+            return std::unexpected{TryConstructWinError(
+                "failed to find `RtlGetImageFileMachines` in `ntdll.dll`")};
+        }
+        auto machines = ImageFileMachines{};
+        if (const auto status = get_machines(supervisor.c_str(), &machines);
+            status != 0) {
+            return std::unexpected{TryConstructWinError(
+                "could not inspect the OCI test supervisor '{}'",
+                std::wstring_view{supervisor.native()},
+                ExplicitHresult{HRESULT_FROM_NT(status)})};
+        }
+        return machines;
+    }();
+    if (!machines) {
+        std::println(stderr,
+            "INFO: skipping OCI verification AppContainer checks: encountered "
+            "error while attempting to determine the architecture of '{}'. "
+            "In-process checks will still run. Error details: {}",
+            supervisor.string(),
+            machines.error() ? machines.error()->what() : "unknown error");
+        return false;
+    }
+    if (((native_machine == IMAGE_FILE_MACHINE_AMD64) && machines->amd64) ||
+        ((native_machine == IMAGE_FILE_MACHINE_ARM64) && machines->arm64)) {
+        return true;
+    }
+    std::println(stderr,
+        "INFO: skipping OCI verification AppContainer checks: executable '{}' "
+        "is an {} binary, but the native machine architecture is {}. This "
+        "test currently does not support emulated AppContainer execution. "
+        "In-process checks will still run.",
+        supervisor.string(),
+        machines->amd64 ? "amd64" : "arm64",
+        [native_machine] {
+            if (native_machine == IMAGE_FILE_MACHINE_AMD64) {
+                return "amd64";
+            } else if (native_machine == IMAGE_FILE_MACHINE_ARM64) {
+                return "arm64";
+            }
+            return "unknown";
+        }());
+    return false;
+}
+
 // Public signatures from the signed 20260928.4 release, independently verified
 // with GnuPG against the owner's exported key. No private key is needed here.
 constexpr auto kAmd64Digest = "sha256:9c3cc95411275846157e8f9f5f62659234cc53ec8f63a797cd6320df1652a6a3";
@@ -104,6 +182,9 @@ auto main(_Pre_satisfies_(argc > 0) const int argc,
     _In_reads_(argc) char **const argv) -> int try {
     const auto arguments = std::span{argv, argv + argc} |
         std::ranges::to<std::vector<std::string_view>>();
+    const auto supervisor =
+        ResolveSupervisorPath(std::span{arguments}.subspan(1));
+    const auto run_sandbox = CanRunSupervisorInAppContainer(supervisor);
     const auto null_output = [] {
         auto file = wil::unique_file{};
         ClearCrtIoError();
@@ -145,15 +226,14 @@ auto main(_Pre_satisfies_(argc > 0) const int argc,
         work_items.push_back(std::move(work));
         SubmitThreadpoolWork(work_items.back().get());
     };
-    const auto queue_verification = [&enqueue, supervisor =
-            ResolveSupervisorPath(std::span{arguments}.subspan(1))](
+    const auto queue_verification = [&enqueue, &supervisor, run_sandbox](
         const std::string_view digest, const std::string_view signature,
         const bool reject) {
         // The fixtures are NUL-terminated. Retaining their complete backing
         // string and explicit extent preserves the zero-length-view test.
         enqueue([supervisor, digest = std::string{digest},
                 signature = std::string{signature.data()},
-                length = signature.size(), reject] {
+                length = signature.size(), reject, run_sandbox] {
             const auto message = std::string_view{signature.data(), length};
             const auto verify_in_process = [&digest, message] {
                 VerifyOciLayerSignature(digest, message);
@@ -163,11 +243,15 @@ auto main(_Pre_satisfies_(argc > 0) const int argc,
             };
             if (reject) {
                 RequireFailure(verify_in_process);
-                RequireFailure(verify_in_sandbox);
+                if (run_sandbox) {
+                    RequireFailure(verify_in_sandbox);
+                }
                 return;
             }
             verify_in_process();
-            verify_in_sandbox();
+            if (run_sandbox) {
+                verify_in_sandbox();
+            }
         });
     };
     const auto verify_signature = [&queue_verification](

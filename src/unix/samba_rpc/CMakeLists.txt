@@ -233,7 +233,6 @@ if(BUILD_TESTING)
         )
         find_program(MKFS_FAT_EXECUTABLE NAMES mkfs.fat
             PATH_SUFFIXES sbin
-            REQUIRED
         )
         find_program(MOUNT_EXECUTABLE NAMES mount
             PATH_SUFFIXES bin sbin

@@ -603,16 +603,15 @@ make install
 EOF
 
 #
-# This is also an ordinary clone of the current default branch. The resulting
-# commit is recorded after the build, but no branch, tag, or commit is selected.
+# Use a checkout mounted at /usr/src/devicefs, or clone the default branch
+# when that directory is absent.
 #
 # https://github.com/cathyjf/devicefs
 # https://git-scm.com/docs/git-clone
 #
 RUN /bin/devicefs-sh <<'EOF'
-git clone \
-    https://github.com/cathyjf/devicefs \
-    /usr/src/devicefs
+[[ -d /usr/src/devicefs ]] || \
+    git clone https://github.com/cathyjf/devicefs /usr/src/devicefs
 EOF
 
 WORKDIR /usr/src/devicefs/src/unix
@@ -632,11 +631,16 @@ WORKDIR /usr/src/devicefs/src/unix
 # https://cmake.org/cmake/help/latest/manual/cmake.1.html
 #
 RUN /bin/devicefs-sh <<'EOF'
-cmake --preset release -DBUILD_TESTING=OFF
-cmake --build --preset release --parallel --target \
+# Keep build outputs in the image even when the source is bind mounted.
+cmake --preset release -B /usr/src/devicefs-build -DBUILD_TESTING=OFF
+cmake --build /usr/src/devicefs-build --parallel --target \
     rpcd_devicefs \
     devicefs-wsl-startup-broker
 EOF
+
+FROM samba-helper-build AS samba-helper-production
+
+ARG SAMBA_PIDL_TAG
 
 #
 # As with the Rust client, the copied executables are stripped before entering the
@@ -668,10 +672,10 @@ EOF
 
 RUN /bin/devicefs-sh <<'EOF'
 install -D --mode=0755 \
-    /usr/src/devicefs/build/unix/samba_rpc/rpcd_devicefs \
+    /usr/src/devicefs-build/samba_rpc/rpcd_devicefs \
     /out/rootfs/usr/local/bin/rpcd_devicefs
 install -D --mode=0755 \
-    /usr/src/devicefs/build/unix/devicefs-wsl-startup-broker \
+    /usr/src/devicefs-build/devicefs-wsl-startup-broker \
     /out/rootfs/usr/local/bin/devicefs-wsl-startup-broker
 /usr/lib/llvm-23/bin/llvm-strip \
     --strip-unneeded \
@@ -692,6 +696,49 @@ git -C /usr/src/devicefs rev-parse HEAD \
     > /out/rootfs/usr/share/devicefs-build/devicefs.commit
 printf '%s\n' "${SAMBA_PIDL_TAG}" \
     > /out/rootfs/usr/share/devicefs-build/samba-pidl.tag
+EOF
+
+# ---------------------------------------------------------------------------
+# Testing environment for the samba_rpc helper.
+#
+# This stage does not become part of the final runtime filesystem.
+# ---------------------------------------------------------------------------
+FROM samba-helper-build AS samba-helper-tests
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# https://learn.microsoft.com/powershell/scripting/install/install-debian
+RUN /bin/devicefs-sh <<'EOF'
+curl --fail --location --show-error \
+    --output /usr/share/keyrings/microsoft-prod.asc \
+    https://packages.microsoft.com/keys/microsoft-2025.asc
+printf '%s  %s\n' \
+    'd45224d594d969f084232deaaf97c58ca502a9d964c362d7aaef5a76e16b3dd1' \
+    '/usr/share/keyrings/microsoft-prod.asc' \
+    | sha256sum --check -
+EOF
+
+COPY <<'EOF' /etc/apt/sources.list.d/microsoft-prod.sources
+Types: deb
+URIs: https://packages.microsoft.com/debian/13/prod
+Suites: trixie
+Components: main
+Signed-By: /usr/share/keyrings/microsoft-prod.asc
+EOF
+
+RUN /bin/devicefs-sh <<'EOF'
+apt-get update
+nala install -y --no-autoremove --no-install-recommends \
+    mount \
+    powershell \
+    samba \
+    util-linux
+rm -rf /var/lib/apt/lists
+EOF
+
+RUN /bin/devicefs-sh <<'EOF'
+cmake --preset release -B /usr/src/devicefs-build -DBUILD_TESTING=ON
+cmake --build /usr/src/devicefs-build --parallel
 EOF
 
 
@@ -749,7 +796,7 @@ EOF
 COPY --from=pbs-build \
     /out/proxmox-backup-client.dependencies \
     /tmp/proxmox-backup-client.dependencies
-COPY --from=samba-helper-build \
+COPY --from=samba-helper-production \
     /out/rpcd_devicefs.dependencies \
     /tmp/rpcd_devicefs.dependencies
 
@@ -838,7 +885,7 @@ EOF
 # https://github.com/containers/common/blob/main/docs/Containerfile.5.md
 #
 COPY --from=pbs-build /out/rootfs/ /
-COPY --from=samba-helper-build /out/rootfs/ /
+COPY --from=samba-helper-production /out/rootfs/ /
 
 #
 # This is a dedicated WSL distribution, so it has one ordinary unprivileged

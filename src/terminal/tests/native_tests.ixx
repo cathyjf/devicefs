@@ -235,9 +235,36 @@ private:
 volatile std::sig_atomic_t received_signal = 0;
 #endif
 
+[[nodiscard]] auto ReadKeyboardInput(const auto &read,
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::time_point::max()) -> MenuInput {
+    // Console Host can supply size notifications independently of the keys
+    // injected by a test. Keyboard assertions ignore those notifications;
+    // tests of resize delivery use the native reader directly. Keeping the
+    // original deadline prevents notifications from extending the input wait.
+    for (;;) {
+        const auto input = read(deadline);
+        if (input.key != MenuKey::Resize) {
+            return input;
+        }
+    }
+}
+
 class TestConsole : public NativeConsole {
 public:
     using NativeConsole::NativeConsole;
+
+    GSL_SUPPRESS("26434",
+        "BaseConsole dispatches ReadTextInput through its explicit object "
+        "parameter. This test adapter excludes unrelated resize events "
+        "from keyboard assertions.")
+    [[nodiscard]] auto ReadTextInput(
+        const std::chrono::steady_clock::time_point deadline =
+            std::chrono::steady_clock::time_point::max()) -> MenuInput {
+        return ReadKeyboardInput([this](const auto until) {
+            return NativeConsole::ReadTextInput(until);
+        }, deadline);
+    }
 
     auto ExpireEscapeDeadline() -> void {
         escape_deadline_ = std::chrono::steady_clock::now();
@@ -276,12 +303,95 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+[[nodiscard]] auto InputKeyName(const MenuKey key) -> std::string_view {
+    switch (key) {
+    case MenuKey::Up: return "Up"sv;
+    case MenuKey::Down: return "Down"sv;
+    case MenuKey::PageUp: return "PageUp"sv;
+    case MenuKey::PageDown: return "PageDown"sv;
+    case MenuKey::Home: return "Home"sv;
+    case MenuKey::End: return "End"sv;
+    case MenuKey::Accept: return "Accept"sv;
+    case MenuKey::Back: return "Back"sv;
+    case MenuKey::Cancel: return "Cancel"sv;
+    case MenuKey::Details: return "Details"sv;
+    case MenuKey::Resize: return "Resize"sv;
+    case MenuKey::Redraw: return "Redraw"sv;
+    case MenuKey::SwitchArea: return "SwitchArea"sv;
+    case MenuKey::Timeout: return "Timeout"sv;
+    case MenuKey::Left: return "Left"sv;
+    case MenuKey::Right: return "Right"sv;
+    case MenuKey::Backspace: return "Backspace"sv;
+    case MenuKey::Delete: return "Delete"sv;
+    case MenuKey::Newline: return "Newline"sv;
+    case MenuKey::Text: return "Text"sv;
+    default: return "Unknown"sv;
+    }
+}
+
+auto RequireInput(const MenuInput received, const MenuInput expected,
+    const std::string_view context) -> void {
+    if ((received.key != expected.key) ||
+        (received.character != expected.character) ||
+        (received.repeat != expected.repeat)) {
+        throw std::runtime_error(std::format(
+            "{}: expected {} (MenuKey {}), character U+{:04X}, repeat {}; "
+            "received {} (MenuKey {}), character U+{:04X}, repeat {}",
+            context, InputKeyName(expected.key),
+            std::to_underlying(expected.key), +expected.character,
+            expected.repeat, InputKeyName(received.key),
+            std::to_underlying(received.key),
+            +received.character, received.repeat));
+    }
+}
+
 [[nodiscard]] auto TestNativeInput(NativeInput &input, const auto &...console_arguments) -> bool {
     const auto make_console = [&console_arguments...]<class T = TestConsole> {
         return T{console_arguments...};
     };
     const auto original_modes = input.Modes();
     auto passed = true;
+    passed &= Test("keyboard assertions skipping only resize notifications"sv,
+        [] {
+            constexpr auto expected = std::array{
+                MenuInput{.key = MenuKey::Text, .repeat = 3, .character = U'界'},
+                MenuInput{.key = MenuKey::Cancel},
+                MenuInput{.key = MenuKey::Back},
+                MenuInput{.key = MenuKey::Timeout}};
+            const auto events = std::array{
+                MenuInput{.key = MenuKey::Resize}, expected[0],
+                MenuInput{.key = MenuKey::Resize}, expected[1],
+                expected[2], MenuInput{.key = MenuKey::Resize}, expected[3]};
+            const auto deadline = std::chrono::steady_clock::now() + 1s;
+            auto position = 0uz;
+            for (const auto event : expected) {
+                RequireInput(ReadKeyboardInput([&](const auto until) {
+                    Require(until == deadline,
+                        "a resize changed the keyboard input deadline"sv);
+                    return events.at(position++);
+                }, deadline), event, "filtering native size notifications"sv);
+            }
+        });
+    passed &= Test("input mismatch diagnostics identifying the returned event"sv,
+        [] {
+            try {
+                RequireInput({.key = MenuKey::Back},
+                    {.key = MenuKey::Text, .character = U'a'},
+                    "ordinary text during keyboard detection"sv);
+            } catch (const std::runtime_error &error) {
+                const auto message = std::string_view{error.what()};
+                Require(message.contains(
+                        "ordinary text during keyboard detection"sv) &&
+                    message.contains("expected Text"sv) &&
+                    message.contains("character U+0061"sv) &&
+                    message.contains("received Back"sv) &&
+                    message.contains("character U+0000"sv) &&
+                    message.contains("repeat 1"sv),
+                    "the input mismatch omitted expected or received values"sv);
+                return;
+            }
+            Require(false, "an unexpected key passed the input assertion"sv);
+        });
 #ifdef _WIN32
     // These replies advertise disabled extensions, demonstrating that support
     // does not depend on an extension already being enabled by the shell.
@@ -309,18 +419,29 @@ public:
             // No keyboard reply is supplied until after screen entry and an
             // ordinary keystroke. Both operations must finish during detection.
             const auto screen = console.EnterScreen();
+            auto resize = INPUT_RECORD{.EventType = WINDOW_BUFFER_SIZE_EVENT};
+            resize.Event.WindowBufferSizeEvent.dwSize = {90, 30};
+            input.FeedRecords(std::span{&resize, 1});
             input.Feed("a"sv);
-            Require(console.ReadTextInput(std::chrono::steady_clock::now() + 1s).character == U'a',
-                "keyboard detection blocked ordinary text input"sv);
+            RequireInput(console.ReadTextInput(
+                    std::chrono::steady_clock::now() + 1s),
+                {.key = MenuKey::Text, .character = U'a'},
+                "ordinary text during keyboard detection"sv);
             Require((input.Modes()[0] & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0,
                 "Console Host's reply prematurely disabled VT input"sv);
             input.Feed(std::format("{}日{}z", test.replies, test.shift_enter));
-            Require(console.ReadTextInput(std::chrono::steady_clock::now() + 1s).character == U'日',
-                "keyboard detection consumed ordinary text"sv);
-            Require(console.ReadTextInput(std::chrono::steady_clock::now() + 1s).key == MenuKey::Newline,
-                "Shift+Enter was lost after detecting the keyboard extension"sv);
-            Require(console.ReadTextInput(std::chrono::steady_clock::now() + 1s).character == U'z',
-                "keyboard detection reordered ordinary text"sv);
+            RequireInput(console.ReadTextInput(
+                    std::chrono::steady_clock::now() + 1s),
+                {.key = MenuKey::Text, .character = U'日'},
+                "Unicode text after the keyboard reply"sv);
+            RequireInput(console.ReadTextInput(
+                    std::chrono::steady_clock::now() + 1s),
+                {.key = MenuKey::Newline},
+                "Shift+Enter after detecting the keyboard extension"sv);
+            RequireInput(console.ReadTextInput(
+                    std::chrono::steady_clock::now() + 1s),
+                {.key = MenuKey::Text, .character = U'z'},
+                "text following Shift+Enter"sv);
             Require((input.Modes()[0] & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0,
                 "a supported keyboard extension lost VT input"sv);
         });
@@ -331,8 +452,10 @@ public:
             console.on_keyboard_query = [] {};
             const auto screen = console.EnterScreen();
             input.Feed("\x03"sv);
-            Require(console.ReadTextInput(std::chrono::steady_clock::now() + 1s).key == MenuKey::Cancel,
-                "pending keyboard detection blocked Ctrl+C"sv);
+            RequireInput(console.ReadTextInput(
+                    std::chrono::steady_clock::now() + 1s),
+                {.key = MenuKey::Cancel},
+                "Ctrl+C during keyboard detection"sv);
         }
         Require(input.Modes() == original_modes,
             "cancelling keyboard detection left the console modes changed"sv);
@@ -343,8 +466,9 @@ public:
         const auto screen = console.EnterScreen();
         Require((input.Modes()[0] & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0,
             "VT input was disabled before the keyboard-reply deadline"sv);
-        Require(console.ReadTextInput(std::chrono::steady_clock::now() + 6s).key == MenuKey::Timeout,
-            "expiring keyboard detection produced a keystroke"sv);
+        RequireInput(console.ReadTextInput(
+                std::chrono::steady_clock::now() + 6s),
+            {.key = MenuKey::Timeout}, "keyboard-detection deadline"sv);
         Require((input.Modes()[0] & ENABLE_VIRTUAL_TERMINAL_INPUT) == 0,
             "a terminal without replies retained VT input after the deadline"sv);
         for (const auto test : std::array{
@@ -357,8 +481,9 @@ public:
                 .wVirtualKeyCode = VK_RETURN, .wVirtualScanCode = 0,
                 .uChar = {.UnicodeChar = L'\r'}, .dwControlKeyState = FailFastCast<DWORD>(test.first)};
             input.FeedRecords(std::span{&record, 1});
-            Require(console.ReadTextInput(std::chrono::steady_clock::now() + 1s).key == test.second,
-                "the native Return modifier selected the wrong action"sv);
+            RequireInput(console.ReadTextInput(
+                    std::chrono::steady_clock::now() + 1s),
+                {.key = test.second}, "native Return modifier"sv);
         }
     });
 #endif
@@ -463,7 +588,9 @@ public:
             console.PresentFrame();
         }
         input.Feed("\x0c"sv);
-        Require(console.ReadMenuInput().key == MenuKey::Redraw,
+        Require(ReadKeyboardInput([&console](const auto) {
+                return console.ReadMenuInput();
+            }).key == MenuKey::Redraw,
             "recording an update changed the supplied input"sv);
         const auto &measurement = console.measurements.at(0);
         Require(measurement.writes == 3, "an update control write was not counted"sv);
@@ -633,7 +760,8 @@ public:
         } catch (const InputCancelled &) {
         }
         const auto deadline = std::chrono::steady_clock::now() + 1s;
-        Require((console.ReadTextInput(deadline).key == MenuKey::Resize) &&
+        Require((console.NativeConsole::ReadTextInput(deadline).key ==
+                MenuKey::Resize) &&
             (console.ReadTextInput(deadline).character == U'z'),
             "removing a cancellation report also removed unrelated input"sv);
     });
@@ -820,7 +948,8 @@ public:
             (retained.wRepeatCount == 3) && (retained.wVirtualKeyCode == VK_DOWN) &&
             (retained.wVirtualScanCode == 80) && (retained.uChar.UnicodeChar == L'界') &&
             (retained.dwControlKeyState == SHIFT_PRESSED), "the saved key event changed"sv);
-        Require(console.ReadMenuInput().key == MenuKey::Resize, "the resize event was lost"sv);
+        Require(console.NativeConsole::ReadTextInput().key == MenuKey::Resize,
+            "the resize event was lost"sv);
         // CPR (`CSI 1;1 R`) is split around a key event and followed by Ctrl+L.
         // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
         input.Feed("\x1b[1;"sv);

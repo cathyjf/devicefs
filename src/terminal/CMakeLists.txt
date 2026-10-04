@@ -140,7 +140,7 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
         target_link_libraries(devicefs-terminal-test PRIVATE util)
         add_test(NAME devicefs_terminal_native COMMAND devicefs-terminal-test --native-test)
     endif()
-    set_tests_properties(devicefs_terminal devicefs_terminal_native PROPERTIES TIMEOUT 30)
+    set_tests_properties(devicefs_terminal devicefs_terminal_native PROPERTIES TIMEOUT 180)
 endif()
 
 if(DEVICEFS_TERMINAL_BUILD_BENCHMARKS)

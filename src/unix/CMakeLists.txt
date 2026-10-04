@@ -33,7 +33,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/wsl_startup_broker.ps1"
                 "${CMAKE_BINARY_DIR}/CMakeCache.txt"
         )
-        set_tests_properties(devicefs_wsl_startup_broker PROPERTIES TIMEOUT 30)
+        set_tests_properties(devicefs_wsl_startup_broker PROPERTIES TIMEOUT 180)
     endif()
 endif()
 

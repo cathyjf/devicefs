@@ -12,13 +12,13 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: windows-${{ matrix.architecture }}-privileged
+  build:
+    name: windows-${{ matrix.architecture }}-build
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix: &test_matrix
-        include:
+        include: &windows_runners
           - architecture: x64
             runner: windows-2025-vs2026
             builder_runner: ubuntu-26.04
@@ -33,16 +33,6 @@ jobs:
         with:
           submodules: recursive
         background: true
-
-      # Some tests require a specific lock file to exist in the filesystem.
-      - name: Create lock file
-        background: true
-        run: |
-          $credentials_dir = [IO.Path]::Combine( `
-            $env:ProgramData, 'devicefs', 'credentials')
-          [IO.Directory]::CreateDirectory($credentials_dir) | Out-Null
-          [IO.File]::Open([IO.Path]::Combine($credentials_dir, `
-            'pbs-vss-backup.lock'), [IO.FileMode]::OpenOrCreate).Dispose()
 
       - name: Acquire DISM SDK files
         background: true
@@ -103,7 +93,8 @@ jobs:
             tar.exe -xOf $cabinet $payload.Member > $destination
           }
 
-      - name: Install WinFsp
+      - &install_winfsp
+        name: Install WinFsp
         uses: $/.github/actions/install-msi
         background: true
         with:
@@ -122,6 +113,80 @@ jobs:
       - name: Build
         run: cmake --build --preset windows-${{ matrix.architecture }}-release
 
+      - name: Prepare native test artifact
+        run: |
+          ./.github/scripts/Export-NativeTestArtifacts.ps1 `
+            -BuildDirectory "build/windows-${{ matrix.architecture }}" `
+            -ArtifactDirectory "$env:RUNNER_TEMP/native-tests"
+
+      - name: Upload native test artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-${{ matrix.architecture }}-native-tests
+          path: ${{ runner.temp }}/native-tests/
+          if-no-files-found: error
+
+  test:
+    name: windows-${{ matrix.architecture }}-${{ matrix.test_group }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [x64, arm64]
+        test_group: [snapshot-intervals, other]
+        include: *windows_runners
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
+        background: true
+
+      # Some tests require a specific lock file to exist in the filesystem.
+      - name: Create lock file
+        background: true
+        run: |
+          $credentials_dir = [IO.Path]::Combine( `
+            $env:ProgramData, 'devicefs', 'credentials')
+          [IO.Directory]::CreateDirectory($credentials_dir) | Out-Null
+          [IO.File]::Open([IO.Path]::Combine($credentials_dir, `
+            'pbs-vss-backup.lock'), [IO.FileMode]::OpenOrCreate).Dispose()
+
+      - *install_winfsp
+
+      - name: Wait for the native build
+        uses: cathyjf-forks/wait-for-jobs@1e45c7c2ebce7401ba1e8076e720b2ee582cd81f
+        with:
+          jobs: windows-${{ matrix.architecture }}-build
+          ttl: 15
+
+      - name: Wait for checkout to finish
+        wait: checkout
+
+      - name: Download native test artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: windows-${{ matrix.architecture }}-native-tests
+          path: build/windows-${{ matrix.architecture }}/
+
+      - name: Restore the builder's checkout path
+        run: |
+          $source_directory = [IO.Path]::GetFullPath((Get-Content -LiteralPath `
+            'build/windows-${{ matrix.architecture }}/source-directory.txt' -Raw))
+          if ($source_directory -ne [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)) {
+            [IO.Directory]::CreateDirectory( `
+              [IO.Path]::GetDirectoryName($source_directory)) | Out-Null
+            New-Item -ItemType SymbolicLink -Path $source_directory `
+              -Target $env:GITHUB_WORKSPACE | Out-Null
+          }
+
+      - name: Wait for preparation to finish
+        wait-all:
+
       # Some tests require standard input to be attached to a console.
       # To satisfy that need, we run `ctest` inside `conhost.exe`.
       # This requires creating a temporary file to collect the exit status.
@@ -129,6 +194,11 @@ jobs:
         run: |
           $env:DEVICEFS_CTEST_RESULT = Join-Path $env:RUNNER_TEMP `
             "ctest-$([guid]::NewGuid()).exit"
+          $test_filter = if ('${{ matrix.test_group }}' -eq 'snapshot-intervals') {
+            '-R'
+          } else {
+            '-E'
+          }
 
           $start = [Diagnostics.ProcessStartInfo]::new('conhost.exe')
           $start.UseShellExecute = $false
@@ -138,7 +208,8 @@ jobs:
             '--headless', 'pwsh', '-NoProfile', '-NonInteractive', '-Command',
             (
               '$ErrorActionPreference = "Stop"; ' +
-              'ctest --preset windows-${{ matrix.architecture }}-privileged; ' +
+              'ctest --preset windows-${{ matrix.architecture }}-privileged ' +
+              "$test_filter '^devicefs_vss_snapshot_intervals$' --no-tests=error; " +
               '$LASTEXITCODE | Set-Content -LiteralPath $env:DEVICEFS_CTEST_RESULT'
             )
           )) {
@@ -159,7 +230,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: windows-${{ matrix.architecture }}-test-logs
+          name: windows-${{ matrix.architecture }}-${{ matrix.test_group }}-test-logs
           path: build/windows-${{ matrix.architecture }}/Testing/Temporary/
 
   build-wsl-rootfs:

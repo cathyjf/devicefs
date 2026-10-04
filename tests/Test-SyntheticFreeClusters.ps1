@@ -572,6 +572,28 @@ function Invoke-SyntheticFreeClustersCase {
                 (-not [IO.File]::Exists($vhd_path))
         }
 
+        if (($null -ne $primary_error) -or ($cleanup_errors.Count -ne 0)) {
+            foreach ($invocation in @(
+                    $synthetic_invocation, $normal_invocation)) {
+                if (($null -eq $invocation) -or
+                    (-not $invocation.OutputCollected)) {
+                    continue
+                }
+                foreach ($log_path in @(
+                        $invocation.OutputLog, $invocation.ErrorLog)) {
+                    try {
+                        $output = [IO.File]::ReadAllText($log_path)
+                        if ($output.Length -ne 0) {
+                            Write-TestLog (
+                                "devicefs output from '$log_path':`n$output")
+                        }
+                    } catch {
+                        $cleanup_errors.Add($_.Exception)
+                    }
+                }
+            }
+        }
+
         $preserve = (($null -ne $primary_error) -and $KeepArtifactsOnFailure) -or
             ($cleanup_errors.Count -ne 0) -or (-not $devicefs_processes_gone) -or
             (-not $image_detached)
@@ -613,7 +635,7 @@ if ($ParallelWorker) {
             Error = $null
         }
     } catch {
-        return [pscustomobject]@{ Case = $case; Available = $false; Error = $_.Exception }
+        return [pscustomobject]@{ Case = $case; Available = $false; Error = $_ }
     }
 }
 
@@ -633,8 +655,12 @@ $results = @($selected_cases | ForEach-Object -Parallel {
 $failures = [Collections.Generic.List[Exception]]::new()
 foreach ($result in $results) {
     if ($null -ne $result.Error) {
-        Write-TestLog -CaseName $result.Case "FAIL: $($result.Error.Message)"
-        $failures.Add($result.Error)
+        Write-TestLog -CaseName $result.Case (
+            "FAIL: $($result.Error.Exception.Message)")
+        Write-TestLog -CaseName $result.Case (
+            $result.Error.InvocationInfo.PositionMessage)
+        Write-TestLog -CaseName $result.Case $result.Error.ScriptStackTrace
+        $failures.Add($result.Error.Exception)
     } elseif ($result.Available) {
         Write-TestLog -CaseName $result.Case 'PASS'
     } else {

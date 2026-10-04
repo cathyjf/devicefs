@@ -136,13 +136,16 @@ function Wait-DeviceFsReady {
         $ready = $true
         foreach ($image_path in $Invocation.ImagePaths.Values) {
             $stream = $null
+            # A WinFsp directory mount can be visible before its dispatcher is
+            # ready. Such opens raise `OperationCanceledException` instead of
+            # `IOException`, so both outcomes need the readiness retry.
             try {
                 $stream = [IO.File]::Open(
                     $image_path,
                     [IO.FileMode]::Open,
                     [IO.FileAccess]::Read,
                     [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
-            } catch [IO.IOException] {
+            } catch [IO.IOException], [OperationCanceledException] {
                 $ready = $false
                 break
             } finally {

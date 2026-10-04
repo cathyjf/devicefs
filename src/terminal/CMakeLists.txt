@@ -30,6 +30,8 @@ endif()
 
 option(DEVICEFS_TERMINAL_BUILD_TESTS "Build the terminal test entry point" OFF)
 option(DEVICEFS_TERMINAL_BUILD_BENCHMARKS "Build the transcoding capacity benchmark" OFF)
+option(DEVICEFS_TERMINAL_BUILD_PUBLISHER
+    "Build the interactive GitHub release publisher" OFF)
 
 get_filename_component(DEVICEFS_ROOT "../.." ABSOLUTE)
 set(WIL_INCLUDE_DIR "${DEVICEFS_ROOT}/dependencies/wil/include")
@@ -141,6 +143,10 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
         add_test(NAME devicefs_terminal_native COMMAND devicefs-terminal-test --native-test)
     endif()
     set_tests_properties(devicefs_terminal devicefs_terminal_native PROPERTIES TIMEOUT 180)
+endif()
+
+if(DEVICEFS_TERMINAL_BUILD_PUBLISHER)
+    add_subdirectory(publisher)
 endif()
 
 if(DEVICEFS_TERMINAL_BUILD_BENCHMARKS)

@@ -190,7 +190,10 @@ protected:
                 }
             }
             if (!self.ReceiveUntil(std::min(deadline, *self.escape_deadline_))) {
-                if (std::chrono::steady_clock::now() < *self.escape_deadline_) {
+                // A wait can resume after both deadlines. The caller's expired
+                // deadline still returns control without consuming the key.
+                const auto now = std::chrono::steady_clock::now();
+                if ((now >= deadline) || (now < *self.escape_deadline_)) {
                     return std::nullopt;
                 }
                 self.escape_deadline_.reset();

@@ -243,18 +243,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build the WSL1 test rootfs
+        # Specifying `bash` as the shell enables `pipefail`.
+        # See <https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsshell>.
+        shell: bash
         run: |
           sudo podman build \
-            --network host --jobs 0 --target samba-helper-tests \
-            --output "type=tar,dest=${RUNNER_TEMP}/wsl1-test-rootfs.tar" \
+            --network=host --jobs=0 --target=samba-helper-tests \
+            --output - --layers=false --logfile=/dev/stderr \
             --volume "${GITHUB_WORKSPACE}:/usr/src/devicefs:ro" \
-            "${GITHUB_WORKSPACE}/src/wsl"
+            "${GITHUB_WORKSPACE}/src/wsl" |
+              pigz >"${RUNNER_TEMP}/wsl1-test-rootfs.tar.gz"
 
       - name: Upload the WSL1 test rootfs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wsl-rootfs-${{ matrix.architecture }}
-          path: ${{ runner.temp }}/wsl1-test-rootfs.tar
+          path: ${{ runner.temp }}/wsl1-test-rootfs.tar.gz
+          compression-level: 0
           if-no-files-found: error
 
   test-wsl:
@@ -308,7 +313,7 @@ jobs:
       - name: Test the DeviceFs `samba_rpc` helper under WSL1
         run: |
           ./.github/scripts/Test-SambaRpcWsl.ps1 `
-            -rootfs "$env:RUNNER_TEMP/wsl-rootfs/wsl1-test-rootfs.tar" `
+            -rootfs "$env:RUNNER_TEMP/wsl-rootfs/wsl1-test-rootfs.tar.gz" `
             -logs_directory "$env:RUNNER_TEMP/wsl-test-logs"
 
       - name: Upload WSL1 test logs

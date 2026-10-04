@@ -1,15 +1,41 @@
 // SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+module;
+
+#ifndef _WIN32
+    #include <cstdio>
+#endif
+
 export module devicefs.terminal.test_support;
 
 import std;
+#ifdef _WIN32
+    import <cstdio>;
+#endif
 import devicefs.terminal;
 import devicefs.terminal.menu;
 
 using namespace std::string_view_literals;
 
 export namespace devicefs::terminal::tests {
+
+inline auto output_prefix = std::string{};
+
+template <class... Argument>
+auto Println(std::FILE *const stream,
+    const std::format_string<Argument...> format, Argument &&...argument)
+    -> void {
+    std::println(stream, "{}{}", output_prefix,
+        std::format(format, std::forward<Argument>(argument)...));
+    std::ignore = std::fflush(stream);
+}
+
+template <class... Argument>
+auto Println(const std::format_string<Argument...> format,
+    Argument &&...argument) -> void {
+    Println(stdout, format, std::forward<Argument>(argument)...);
+}
 
 // The regression fixtures describe headers as fixed rows so their expected
 // screens can identify exactly which rows changed. This callback writes those
@@ -36,14 +62,13 @@ auto Require(const bool condition, const std::string_view message) -> void {
 }
 
 [[nodiscard]] auto Test(const std::string_view name, const auto &operation) -> bool {
-    std::println("Testing {}.", name);
-    std::cout.flush();
+    Println("Testing {}.", name);
     try {
         std::invoke(operation);
-        std::println("PASS: {}.", name);
+        Println("PASS: {}.", name);
         return true;
     } catch (const std::exception &error) {
-        std::println(std::cerr, "FAIL: {}: {}", name, error.what());
+        Println(stderr, "FAIL: {}: {}", name, error.what());
         return false;
     }
 }

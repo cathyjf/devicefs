@@ -24,6 +24,9 @@ using namespace std::string_view_literals;
 
 export namespace devicefs::terminal {
 
+template <class T>
+concept Clock = std::chrono::is_clock_v<T>;
+
 struct CursorPosition {
     int row = 1;
     int column = 1;

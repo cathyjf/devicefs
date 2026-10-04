@@ -707,6 +707,7 @@ public:
     [[nodiscard]] auto Select(MenuTerminal<Policy> auto &terminal,
         auto &&draw_header, auto &&update) -> std::optional<std::size_t> try {
         using namespace std::chrono_literals;
+        using Clock = typename std::remove_cvref_t<decltype(terminal)>::clock_type;
         constexpr auto kRefreshInterval = 50ms;
         auto size = std::optional<TerminalSize>{};
         auto input = MenuInput{MenuKey::Redraw};
@@ -731,7 +732,8 @@ public:
                 dirty_ = false;
                 retry = false;
             }
-            input = terminal.ReadMenuInput(std::chrono::steady_clock::now() + kRefreshInterval);
+            input = terminal.ReadMenuInput(Clock::now() +
+                std::chrono::ceil<typename Clock::duration>(kRefreshInterval));
             if ((input.key == MenuKey::Back) || (input.key == MenuKey::Cancel)) {
                 return std::nullopt;
             }

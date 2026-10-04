@@ -20,12 +20,14 @@
     // The <clocale> header unit is needed for `LC_CTYPE`.
     // It is imported on Windows and textually included on other platforms.
     #include <clocale>
+    #include <cstdio>
 #endif
 
 import std;
 
 #ifdef _WIN32
     import <clocale>;
+    import <cstdio>;
 #endif
 
 import devicefs.terminal;
@@ -857,13 +859,14 @@ constexpr auto EXIT_FAILURE = 1;
     passed &= TestMenu();
     passed &= RunFrameTests();
     passed &= TestReports();
-    std::println("\nTerminal library self-tests {}.", passed ? "passed" : "failed");
+    Println("");
+    Println("Terminal library self-tests {}.", passed ? "passed" : "failed");
     return passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 constexpr auto kHelp = R"(Usage:
-  devicefs-terminal-test --self-test
-  devicefs-terminal-test --native-test
+  devicefs-terminal-test --self-test [INDEX]
+  devicefs-terminal-test --native-test [INDEX]
   devicefs-terminal-test --menu
   devicefs-terminal-test --measure-menu
   devicefs-terminal-test --output-menu
@@ -949,9 +952,9 @@ Text begins at the current cursor position and uses the remaining screen rows.
         return selected;
     }();
     if (last_selection) {
-        std::println("Last output-menu command: {}", *last_selection);
+        Println("Last output-menu command: {}", *last_selection);
     } else {
-        std::println("Output menu cancelled.");
+        Println("Output menu cancelled.");
     }
     return EXIT_SUCCESS;
 }
@@ -1034,9 +1037,9 @@ template <MenuTerminal Console = NativeConsole>
         }
     }();
     if (selection) {
-        std::println("Selected submenu index: {}", *selection);
+        Println("Selected submenu index: {}", *selection);
     } else {
-        std::println("Menu cancelled.");
+        Println("Menu cancelled.");
     }
     PrintMenuMeasurements(measurements);
     return EXIT_SUCCESS;
@@ -1052,6 +1055,13 @@ auto main(const int argc, char *const argv[]) -> int {
 #endif
     const auto arguments = std::span{argv, argv + argc};
     try {
+        if (arguments.size() == 3) {
+            const auto mode = std::string_view{arguments[1]};
+            if ((mode == "--self-test"sv) || (mode == "--native-test"sv)) {
+                output_prefix = std::format(
+                    "[{} {}] ", mode.substr(2), arguments[2]);
+            }
+        }
         if (std::setlocale(LC_CTYPE, kLocaleCodeset) == nullptr) {
             throw std::runtime_error(std::format(
                 "failed to set the character encoding to {}", kLocaleCodeset));
@@ -1068,17 +1078,15 @@ auto main(const int argc, char *const argv[]) -> int {
             (std::string_view{arguments[1]} == "--measure-menu"sv)) {
             return MenuDemo<MeasuringConsole<NativeConsole>>();
         }
-        if ((arguments.size() == 2) &&
-            (std::string_view{arguments[1]} == "--self-test"sv)) {
-            return SelfTest();
-        }
-        if ((arguments.size() == 2) &&
-            (std::string_view{arguments[1]} == "--native-test"sv)) {
-            return RunNativeTests();
+        if ((arguments.size() == 2) || (arguments.size() == 3)) {
+            const auto mode = std::string_view{arguments[1]};
+            if ((mode == "--self-test"sv) || (mode == "--native-test"sv)) {
+                return mode == "--self-test"sv ? SelfTest() : RunNativeTests();
+            }
         }
         if ((arguments.size() == 2) &&
             (std::string_view{arguments[1]} == "--help"sv)) {
-            std::print("{}", kHelp);
+            Println("{}", kHelp.substr(0, kHelp.size() - 1));
             return EXIT_SUCCESS;
         }
         const auto text = [arguments] {
@@ -1121,15 +1129,15 @@ auto main(const int argc, char *const argv[]) -> int {
                     .continuation_column = std::min(3, size->columns),
                     .maximum_rows = size->rows});
         }();
-        std::println();
+        Println("");
         if (!result) {
-            std::println("The terminal did not report its dimensions; "
+            Println("The terminal did not report its dimensions; "
                 "the text was displayed without continuation indentation.");
         } else if (result->stop == WrappingStop::RedrawRequired) {
-            std::println("The terminal layout could not be confirmed; "
+            Println("The terminal layout could not be confirmed; "
                 "the displayed text may be incomplete.");
         } else if (!result->remaining.empty()) {
-            std::println("{} {} bytes remain.",
+            Println("{} {} bytes remain.",
                 result->stop == WrappingStop::OversizedCluster
                     ? "The next joined sequence exceeds the conservative width limit."
                     : "The available display rows are full.",
@@ -1137,7 +1145,7 @@ auto main(const int argc, char *const argv[]) -> int {
         }
         return EXIT_SUCCESS;
     } catch (const std::exception &error) {
-        std::println(std::cerr, "devicefs-terminal-test: {}", error.what());
+        Println(stderr, "devicefs-terminal-test: {}", error.what());
         return EXIT_FAILURE;
     }
 }

@@ -65,9 +65,10 @@ export namespace devicefs::terminal {
 // A query returns an empty optional when a usable report is unavailable within
 // its timeout. Failures to open, configure, read, or write the console throw
 // exceptions. Ctrl+C during a query raises InputCancelled.
-class WindowsConsole : public BaseConsole {
+template <Clock Clock = std::chrono::steady_clock>
+class BasicWindowsConsole : public BasicBaseConsole<Clock> {
 public:
-    WindowsConsole() = default;
+    BasicWindowsConsole() = default;
 
     auto Write(const std::string_view text) -> void {
         if (text.empty()) {
@@ -114,15 +115,15 @@ public:
 
     // Wait for text or navigation until `deadline`. Timeout returns control to callers
     // that also display arriving output; omitting the deadline waits for input.
-    [[nodiscard]] auto ReadTextInput(const std::chrono::steady_clock::time_point deadline =
-        std::chrono::steady_clock::time_point::max()) -> MenuInput {
+    [[nodiscard]] auto ReadTextInput(const typename Clock::time_point deadline =
+        Clock::time_point::max()) -> MenuInput {
         for (;;) {
-            if (std::chrono::steady_clock::now() >= deadline) {
+            if (Clock::now() >= deadline) {
                 return {.key = MenuKey::Timeout};
             }
             if (pending_.empty()) {
                 if (keyboard_detection_deadline_ &&
-                    (std::chrono::steady_clock::now() >= *keyboard_detection_deadline_)) {
+                    (Clock::now() >= *keyboard_detection_deadline_)) {
                     SelectKeyboardProtocol(detail::KeyboardProtocol::Legacy);
                 }
                 if (!ReceiveUntil(std::min(deadline,
@@ -132,7 +133,7 @@ public:
             }
             if (IsSequenceCharacter(pending_.front()) &&
                 (pending_.front().Event.KeyEvent.uChar.UnicodeChar == vt::kEscape)) {
-                if (const auto action = ReadEscape(deadline)) {
+                if (const auto action = this->ReadEscape(deadline)) {
                     return *action;
                 }
                 continue;
@@ -179,7 +180,7 @@ public:
             if (character != L'\0') {
                 high_surrogate_.reset();
             }
-            escape_deadline_.reset();
+            this->escape_deadline_.reset();
             auto action = [&key]() -> std::optional<MenuInput> {
                 switch (key.wVirtualKeyCode) {
                 case VK_LEFT:
@@ -218,7 +219,7 @@ public:
                 default:
                     break;
                 }
-                return CharacterInput(key.uChar.UnicodeChar);
+                return BasicBaseConsole<Clock>::CharacterInput(key.uChar.UnicodeChar);
             }();
             if (action) {
                 action->repeat = key.wRepeatCount;
@@ -228,7 +229,7 @@ public:
     }
 
 private:
-    friend class BaseConsole;
+    friend class BasicBaseConsole<Clock>;
 
     static constexpr auto kEnterScreen =
         vt::Concatenate<vt::kEnterAlternateScreen, vt::kHideCursor>();
@@ -278,7 +279,8 @@ private:
             throw std::system_error(GetLastError(), std::system_category(),
                 "could not enable VT input for keyboard detection");
         }
-        self.keyboard_detection_deadline_ = std::chrono::steady_clock::now() + kDetectionTimeout;
+        self.keyboard_detection_deadline_ = Clock::now() +
+            std::chrono::ceil<typename Clock::duration>(kDetectionTimeout);
         self.Write(vt::kRequestKeyboardSupport);
     }
 
@@ -333,11 +335,11 @@ private:
     // Receive one console record, waiting only until `deadline`. An expired
     // deadline still polls for queued input without waiting. The record retains
     // its native key and resize information for the keyboard reader or a VT query.
-    [[nodiscard]] auto ReceiveUntil(const std::chrono::steady_clock::time_point deadline)
+    [[nodiscard]] auto ReceiveUntil(const typename Clock::time_point deadline)
         -> bool {
-        const auto remaining = std::max(std::chrono::steady_clock::duration::zero(),
-            deadline - std::chrono::steady_clock::now());
-        const auto timeout = (deadline == std::chrono::steady_clock::time_point::max()) ?
+        const auto remaining = std::max(Clock::duration::zero(),
+            deadline - Clock::now());
+        const auto timeout = (deadline == Clock::time_point::max()) ?
             INFINITE : FailFastCast<DWORD>(std::min<std::int64_t>(INFINITE - 1,
                 std::chrono::ceil<std::chrono::milliseconds>(remaining).count()));
         const auto wait = WaitForSingleObject(input_.get(), timeout);
@@ -408,8 +410,8 @@ private:
             }
             positions.push_back(position);
             sequence.push_back(FailFastCast<char>(character));
-            if (KeySequenceLength(sequence) != 0) {
-                if (SequenceInput(sequence).transform(
+            if (this->KeySequenceLength(sequence) != 0) {
+                if (this->SequenceInput(sequence).transform(
                         [](const auto input) { return input.key; }) == MenuKey::Cancel) {
                     for (const auto &position_to_erase : positions) {
                         pending_.erase(position_to_erase);
@@ -423,7 +425,7 @@ private:
     }
 
     [[nodiscard]] auto ReceiveReport(const detail::TerminalReport report,
-        const std::chrono::steady_clock::time_point deadline)
+        const typename Clock::time_point deadline)
         -> std::optional<std::array<int, 3>> {
         auto reader = detail::ReportReader<std::list<INPUT_RECORD>::iterator>{report};
         for (;;) {
@@ -433,7 +435,7 @@ private:
             if (ConsumeCancellation()) {
                 throw InputCancelled{};
             }
-            if ((std::chrono::steady_clock::now() >= deadline) || !ReceiveUntil(deadline)) {
+            if ((Clock::now() >= deadline) || !ReceiveUntil(deadline)) {
                 return std::nullopt;
             }
             const auto position = std::prev(pending_.end());
@@ -473,7 +475,9 @@ private:
     std::list<INPUT_RECORD> pending_;
     std::optional<wchar_t> high_surrogate_;
     std::string_view keyboard_restore_;
-    std::optional<std::chrono::steady_clock::time_point> keyboard_detection_deadline_;
+    std::optional<typename Clock::time_point> keyboard_detection_deadline_;
 };
+
+using WindowsConsole = BasicWindowsConsole<>;
 
 }

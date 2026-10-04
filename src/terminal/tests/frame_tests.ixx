@@ -479,7 +479,7 @@ export [[nodiscard]] auto RunFrameTests() -> bool {
         auto frame = FrameBuffer{TerminalSize{.rows = 2, .columns = 80}};
         frame.rows.front().text = "日本 👩‍💻 é Installation";
         Require(presenter.Flip(terminal, frame), "the initial frame was not presented"sv);
-        std::println("Initial frame: {} writes, {} bytes, {} cursor queries.",
+        Println("Initial frame: {} writes, {} bytes, {} cursor queries.",
             terminal.writes, terminal.bytes, terminal.queries);
         terminal.ResetActivity();
         frame.rows.front().reverse = true;
@@ -489,7 +489,7 @@ export [[nodiscard]] auto RunFrameTests() -> bool {
         Require((terminal.writes == 1) && (terminal.queries == 0) &&
             (terminal.cursor_moves == 1) && (terminal.attribute_changes == 2),
             "adjacent cached groups produced redundant writes, queries, or control sequences"sv);
-        std::println("Highlight change: {} write, {} bytes, {} cursor queries.",
+        Println("Highlight change: {} write, {} bytes, {} cursor queries.",
             terminal.writes, terminal.bytes, terminal.queries);
     });
     passed &= Test("changing one digit beside Japanese, joined emoji and a combining accent"sv, [] {

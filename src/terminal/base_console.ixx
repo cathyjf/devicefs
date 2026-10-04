@@ -20,8 +20,11 @@ export namespace devicefs::terminal {
 // BaseConsole owns the terminal protocol used for drawing frames and measuring
 // their layout. Native consoles inherit these operations and supply terminal
 // I/O, input queues, and restoration of the caller's screen and cursor.
-class BaseConsole {
+template <Clock Clock = std::chrono::steady_clock>
+class BasicBaseConsole {
 public:
+    using clock_type = Clock;
+
     template <WidthPolicy Policy = WidthPolicy::AllModes>
     [[nodiscard]] auto Flip(this auto &self, const FrameBuffer &frame) -> bool {
         return self.presenter_.template Flip<Policy>(self, frame);
@@ -103,8 +106,8 @@ public:
     // Read navigation through the same decoder used for text entry. Ordinary
     // characters are ignored by menus, except for the `1` details shortcut.
     [[nodiscard]] auto ReadMenuInput(this auto &self,
-        const std::chrono::steady_clock::time_point deadline =
-            std::chrono::steady_clock::time_point::max()) -> MenuInput {
+        const typename Clock::time_point deadline =
+            Clock::time_point::max()) -> MenuInput {
         for (;;) {
             auto input = self.ReadTextInput(deadline);
             if (input.key == MenuKey::Newline) {
@@ -139,13 +142,14 @@ protected:
     // native key records that arrive between characters of a sequence.
     // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#disambiguate-escape-codes
     [[nodiscard]] auto ReadEscape(this auto &self,
-        const std::chrono::steady_clock::time_point deadline)
+        const typename Clock::time_point deadline)
         -> std::optional<MenuInput> {
         if (!self.escape_deadline_) {
-            self.escape_deadline_ = std::chrono::steady_clock::now() + kEscapeTimeout;
+            self.escape_deadline_ = Clock::now() +
+                std::chrono::ceil<typename Clock::duration>(kEscapeTimeout);
         }
         for (;;) {
-            if (std::chrono::steady_clock::now() >= deadline) {
+            if (Clock::now() >= deadline) {
                 return std::nullopt;
             }
             // Ctrl+C can arrive inside a fragmented terminal reply. Consuming
@@ -192,7 +196,7 @@ protected:
             if (!self.ReceiveUntil(std::min(deadline, *self.escape_deadline_))) {
                 // A wait can resume after both deadlines. The caller's expired
                 // deadline still returns control without consuming the key.
-                const auto now = std::chrono::steady_clock::now();
+                const auto now = Clock::now();
                 if ((now >= deadline) || (now < *self.escape_deadline_)) {
                     return std::nullopt;
                 }
@@ -203,7 +207,7 @@ protected:
         }
     }
 
-    std::optional<std::chrono::steady_clock::time_point> escape_deadline_;
+    std::optional<typename Clock::time_point> escape_deadline_;
 
     // Ctrl+C cancels and Ctrl+L requests a redraw. Text entry also uses Ctrl+J
     // to insert a line break, leaving Enter available to accept the text.
@@ -407,12 +411,15 @@ private:
     [[nodiscard]] auto Query(this auto &self, const detail::TerminalReport report)
         -> std::optional<std::array<int, 3>> {
         constexpr auto kReplyTimeout = 5s;
-        const auto deadline = std::chrono::steady_clock::now() + kReplyTimeout;
+        const auto deadline = Clock::now() +
+            std::chrono::ceil<typename Clock::duration>(kReplyTimeout);
         self.Write(detail::ReportRequest(report));
         return self.ReceiveReport(report, deadline);
     }
 
     DeltaFramePresenter presenter_;
 };
+
+using BaseConsole = BasicBaseConsole<>;
 
 }

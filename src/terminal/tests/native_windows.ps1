@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-param([Parameter(Mandatory)][string] $Executable)
+param(
+    [Parameter(Mandatory)][string] $Executable,
+    [string] $Index
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -13,6 +16,9 @@ $start.CreateNoWindow = $true
 $start.RedirectStandardOutput = $true
 $start.RedirectStandardError = $true
 $start.ArgumentList.Add('--native-test')
+if ($Index) {
+    $start.ArgumentList.Add($Index)
+}
 $process = [Diagnostics.Process]::Start($start)
 try {
     $output = $process.StandardOutput.BaseStream.CopyToAsync(

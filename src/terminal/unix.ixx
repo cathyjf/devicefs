@@ -3,17 +3,6 @@
 
 module;
 
-// Waiting on a terminal descriptor above `FD_SETSIZE - 1` requires Apple's
-// extended `pselect` wrapper. The ordinary wrapper rejects `nfds > FD_SETSIZE`
-// with `EINVAL` before calling the kernel. Defining `_DARWIN_UNLIMITED_SELECT`
-// makes `<sys/select.h>` select the `$DARWIN_EXTSN` symbol, whose wrapper omits
-// that check and passes the descriptor count and sets to the kernel.
-// Symbol selection:
-//   https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/select.h
-// Wrapper implementations:
-//   https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/select-base.c
-#define _DARWIN_UNLIMITED_SELECT
-
 #include <cerrno>
 #include <fcntl.h>
 #include <sys/select.h>
@@ -133,13 +122,14 @@ export namespace devicefs::terminal {
 // closes the descriptor.
 // Unavailable reports return an empty optional. Terminal I/O failures throw;
 // Ctrl+C during a query raises `InputCancelled`.
-class UnixConsole : public BaseConsole {
+template <Clock Clock = std::chrono::steady_clock>
+class BasicUnixConsole : public BasicBaseConsole<Clock> {
 public:
     // `device` includes its terminating NUL so `open` can use its storage directly.
-    explicit UnixConsole(const std::span<const char> device = std::span{"/dev/tty"})
+    explicit BasicUnixConsole(const std::span<const char> device = std::span{"/dev/tty"})
         : descriptor_(unix_detail::OpenTerminal(device)) {}
-    UnixConsole(const UnixConsole &) = delete;
-    auto operator=(const UnixConsole &) -> UnixConsole & = delete;
+    BasicUnixConsole(const BasicUnixConsole &) = delete;
+    auto operator=(const BasicUnixConsole &) -> BasicUnixConsole & = delete;
 
     auto Write(const std::string_view text) -> void {
         if (const auto error = unix_detail::WriteTerminal(descriptor_, text)) {
@@ -150,10 +140,10 @@ public:
 
     // A deadline lets an output view refresh while no key is pressed. Partial
     // key sequences remain queued between calls, with their own Escape timeout.
-    [[nodiscard]] auto ReadTextInput(const std::chrono::steady_clock::time_point deadline =
-        std::chrono::steady_clock::time_point::max()) -> MenuInput {
+    [[nodiscard]] auto ReadTextInput(const typename Clock::time_point deadline =
+        Clock::time_point::max()) -> MenuInput {
         for (;;) {
-            if (std::chrono::steady_clock::now() >= deadline) {
+            if (Clock::now() >= deadline) {
                 return {.key = MenuKey::Timeout};
             }
             // The driver records window-size changes even while no key is
@@ -167,13 +157,14 @@ public:
             }
             if (pending_.empty()) {
                 std::ignore = ReceiveUntil(std::min(deadline,
-                    std::chrono::steady_clock::now() + unix_detail::kInputPollInterval));
+                    Clock::now() + std::chrono::ceil<typename Clock::duration>(
+                        unix_detail::kInputPollInterval)));
                 continue;
             }
             // ESC (0x1B) begins a terminal sequence; a lone ESC is the Escape key.
             // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
             if (pending_.front() == vt::kEscape) {
-                if (const auto action = ReadEscape(deadline)) {
+                if (const auto action = this->ReadEscape(deadline)) {
                     return *action;
                 }
                 continue;
@@ -183,13 +174,14 @@ public:
             const auto length = DecodeNextCodePoint(character, pending_, conversion);
             if (length == -2uz) {
                 std::ignore = ReceiveUntil(std::min(deadline,
-                    std::chrono::steady_clock::now() + unix_detail::kInputPollInterval));
+                    Clock::now() + std::chrono::ceil<typename Clock::duration>(
+                        unix_detail::kInputPollInterval)));
                 continue;
             }
-            escape_deadline_.reset();
+            this->escape_deadline_.reset();
             pending_.erase(0, (length == -1uz) ? 1 : std::max(1uz, length));
             if (length != -1uz) {
-                if (const auto action = CharacterInput(character)) {
+                if (const auto action = this->CharacterInput(character)) {
                     return *action;
                 }
             }
@@ -197,7 +189,7 @@ public:
     }
 
 private:
-    friend class BaseConsole;
+    friend class BasicBaseConsole<Clock>;
 
     // Kitty's keyboard-mode stack belongs to the active screen. Enter the
     // alternate screen before pushing flag 1, and pop that screen's saved mode
@@ -224,7 +216,7 @@ private:
     // https://invisible-mirror.net/xterm/ctlseqs/ctlseqs.html
     [[nodiscard]] auto RestoreScreenOnExit() {
         return ScopeExit{std::bind(
-            &UnixConsole::WriteControlSequenceNoThrow, this, kLeaveScreen)};
+            &BasicUnixConsole::WriteControlSequenceNoThrow, this, kLeaveScreen)};
     }
 
     [[nodiscard]] auto ReadWindowSize() const -> TerminalSize {
@@ -240,7 +232,7 @@ private:
     // reader; every received byte enters `pending_` before either consumer
     // interprets it. Interrupted waits retry against the original deadline;
     // an expired deadline polls for queued input without waiting.
-    [[nodiscard]] auto ReceiveUntil(const std::chrono::steady_clock::time_point deadline)
+    [[nodiscard]] auto ReceiveUntil(const typename Clock::time_point deadline)
         -> bool {
         // `pselect` reads a bitmap sized by `descriptor_ + 1`. An array of
         // `fd_set` objects supplies enough bits for high-numbered descriptors.
@@ -259,8 +251,8 @@ private:
         auto readable = std::vector<fd_set>{(descriptor_ / FD_SETSIZE) + 1uz};
         FD_SET(descriptor_ % FD_SETSIZE, &readable.back());
         for (;;) {
-            const auto remaining = std::max(std::chrono::steady_clock::duration::zero(),
-                deadline - std::chrono::steady_clock::now());
+            const auto remaining = std::max(Clock::duration::zero(),
+                deadline - Clock::now());
             // `ReceiveUntil` waits for readable input only until the supplied
             // deadline, so a missing terminal reply cannot block a query
             // indefinitely. For `/dev/tty`, macOS `poll` reports `POLLNVAL`.
@@ -304,7 +296,7 @@ private:
     }
 
     [[nodiscard]] auto ReceiveReport(const detail::TerminalReport report,
-        const std::chrono::steady_clock::time_point deadline)
+        const typename Clock::time_point deadline)
         -> std::optional<std::array<int, 3>> {
         // Only newly received bytes can answer this query. Earlier input may
         // include a report left over from a request that timed out.
@@ -317,7 +309,7 @@ private:
             if (ConsumeCancellation()) {
                 throw InputCancelled{};
             }
-            if ((std::chrono::steady_clock::now() >= deadline) || !ReceiveUntil(deadline)) {
+            if ((Clock::now() >= deadline) || !ReceiveUntil(deadline)) {
                 return std::nullopt;
             }
             const auto cancellation = FindCancellation();
@@ -355,8 +347,8 @@ private:
                 return CancellationRange{position, 1};
             }
             const auto sequence = std::string_view{pending_}.substr(position);
-            const auto length = KeySequenceLength(sequence);
-            if ((length != 0) && (SequenceInput(sequence.substr(0, length)).transform(
+            const auto length = this->KeySequenceLength(sequence);
+            if ((length != 0) && (this->SequenceInput(sequence.substr(0, length)).transform(
                     [](const auto input) { return input.key; }) == MenuKey::Cancel)) {
                 return CancellationRange{position, length};
             }
@@ -389,5 +381,7 @@ private:
     TerminalSize window_size_ = ReadWindowSize();
     std::string pending_;
 };
+
+using UnixConsole = BasicUnixConsole<>;
 
 }

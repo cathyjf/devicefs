@@ -69,6 +69,16 @@ add_custom_target(generate-simdutf DEPENDS "${SIMDUTF_GENERATED_HEADER}")
 add_library(devicefs-terminal ${DEVICEFS_TERMINAL_LIBRARY_TYPE}
     dependencies/terminal/src/types/CodepointWidthDetector.cpp
 )
+# Waiting on a macOS terminal descriptor above `FD_SETSIZE - 1` requires Apple's
+# extended `pselect` wrapper; the ordinary wrapper rejects `nfds > FD_SETSIZE`.
+# All consumers need this definition before including any headers. Otherwise,
+# GCC can merge an importer's ordinary declaration into the console template
+# and replace its reference to the extended symbol with the ordinary one.
+# Symbol selection:
+#   https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/select.h
+# Wrapper implementations:
+#   https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/select-base.c
+target_compile_definitions(devicefs-terminal PUBLIC _DARWIN_UNLIMITED_SELECT)
 add_dependencies(devicefs-terminal generate-simdutf)
 target_include_directories(devicefs-terminal SYSTEM PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/generated"
@@ -119,6 +129,7 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
         FILE_SET CXX_MODULES FILES tests/menu_tests.ixx tests/frame_tests.ixx
             tests/test_support.ixx tests/native_tests.ixx tests/text_tests.ixx
             tests/menu_measurements.ixx tests/transcoding_tests.ixx
+            tests/test_clock.ixx
     )
     target_link_libraries(devicefs-terminal-test PRIVATE
         devicefs-terminal
@@ -128,21 +139,34 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
     )
     list(APPEND DEVICEFS_TERMINAL_ANALYSIS_TARGETS devicefs-terminal-test)
 
-    enable_testing()
-    add_test(NAME devicefs_terminal
-        COMMAND devicefs-terminal-test --self-test
-    )
-    if(WIN32)
-        add_test(NAME devicefs_terminal_native
-            COMMAND "${POWERSHELL_EXECUTABLE}" -NoProfile -NonInteractive
-                -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/native_windows.ps1"
-                -Executable "$<TARGET_FILE:devicefs-terminal-test>"
-        )
-    else()
-        target_link_libraries(devicefs-terminal-test PRIVATE util)
-        add_test(NAME devicefs_terminal_native COMMAND devicefs-terminal-test --native-test)
+    if(NOT WIN32)
+        target_link_libraries(devicefs-terminal-test PRIVATE util ${CMAKE_DL_LIBS})
     endif()
-    set_tests_properties(devicefs_terminal devicefs_terminal_native PROPERTIES TIMEOUT 180)
+
+    enable_testing()
+    # Separate registrations let CTest run copies concurrently, increasing
+    # contention to expose remaining scheduling-sensitive behavior.
+    foreach(index RANGE 1 40)
+        add_test(NAME devicefs_terminal_${index}
+            COMMAND devicefs-terminal-test --self-test "${index}"
+        )
+        if(WIN32)
+            add_test(NAME devicefs_terminal_native_${index}
+                COMMAND "${POWERSHELL_EXECUTABLE}" -NoProfile -NonInteractive
+                    -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/native_windows.ps1"
+                    -Executable "$<TARGET_FILE:devicefs-terminal-test>"
+                    -Index "${index}"
+            )
+        else()
+            add_test(NAME devicefs_terminal_native_${index}
+                COMMAND devicefs-terminal-test --native-test "${index}"
+            )
+        endif()
+        set_tests_properties(
+            devicefs_terminal_${index} devicefs_terminal_native_${index}
+            PROPERTIES TIMEOUT 180
+        )
+    endforeach()
 endif()
 
 if(DEVICEFS_TERMINAL_BUILD_PUBLISHER)

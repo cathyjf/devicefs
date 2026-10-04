@@ -6,6 +6,7 @@ export module devicefs.terminal.menu_measurements;
 import std;
 import devicefs.terminal;
 import devicefs.terminal.menu;
+import devicefs.terminal.test_support;
 
 using namespace std::string_view_literals;
 
@@ -93,7 +94,7 @@ auto PrintMenuMeasurements(const std::span<const MenuMeasurement> measurements) 
             default: return "Input without a selection change"sv;
             }
         }();
-        std::println("{}: {:.3f} ms, {} writes, {} bytes, {} cursor queries, {} size queries.",
+        Println("{}: {:.3f} ms, {} writes, {} bytes, {} cursor queries, {} size queries.",
             operation, std::chrono::duration<double, std::milli>{measurement.elapsed}.count(),
             measurement.writes, measurement.bytes, measurement.cursor_queries, measurement.size_queries);
     }

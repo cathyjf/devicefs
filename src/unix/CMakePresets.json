@@ -35,6 +35,9 @@
     {
       "name": "release",
       "configurePreset": "release",
+      "execution": {
+        "jobs": 0
+      },
       "output": {
         "verbosity": "verbose"
       }

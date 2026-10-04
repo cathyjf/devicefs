@@ -13,6 +13,7 @@ import devicefs.terminal.layout;
 import devicefs.terminal.menu;
 import devicefs.terminal.text_input;
 import devicefs.terminal.menu_measurements;
+import devicefs.terminal.test_clock;
 
 using namespace std::string_view_literals;
 using namespace devicefs::terminal;
@@ -43,6 +44,8 @@ public:
 // The final row also records individual changed columns to check status updates.
 class MenuConsole {
 public:
+    using clock_type = TestClock;
+
     explicit MenuConsole(const std::span<const MenuInput> input,
         const TerminalSize size = {.rows = 8, .columns = 80})
         : input_{input}, size_{size} {}
@@ -240,8 +243,8 @@ public:
         return found == displayed_.lines.end() ? ""sv : std::string_view{found->second};
     }
 
-    [[nodiscard]] auto ReadMenuInput(const std::chrono::steady_clock::time_point =
-        std::chrono::steady_clock::time_point::max()) -> MenuInput {
+    [[nodiscard]] auto ReadMenuInput(const TestClock::time_point deadline =
+        TestClock::time_point::max()) -> MenuInput {
         Require(active, "menu input was read without an active screen owner"sv);
         Require(!updating, "the menu waited for input with a screen update unfinished"sv);
         auto frame = std::string{};
@@ -260,6 +263,13 @@ public:
         }
         const auto input = input_.front();
         input_ = input_.subspan(1);
+        if (input.key == MenuKey::Timeout) {
+            Require(deadline != TestClock::time_point::max(),
+                "an unbounded input wait returned a timeout"sv);
+            Require(deadline > TestClock::now(),
+                "the menu did not request a future refresh deadline"sv);
+            TestClock::current = deadline;
+        }
         if ((input.key == MenuKey::Resize) && !resize_sequence.empty()) {
             resize_to = resize_sequence.front();
             resize_sequence = resize_sequence.subspan(1);

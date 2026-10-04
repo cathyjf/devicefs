@@ -66,7 +66,7 @@ enum class CommandExit { Zero, ZeroOrOne, Inspect };
 // scrolling view receives both, but parsing never sees progress or warnings.
 class Commands {
 public:
-    Commands(Console &terminal, const PublicationContext &context)
+    Commands(Console &terminal, const PublicationContext &context) noexcept
         : terminal_(terminal), context_(context) {}
 
     [[nodiscard]] auto Run(const std::string_view title,

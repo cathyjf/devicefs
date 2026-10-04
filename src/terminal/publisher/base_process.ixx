@@ -51,6 +51,11 @@ public:
         return contents_;
     }
 
+    BaseProcess(const BaseProcess &) = delete;
+    auto operator=(const BaseProcess &) -> BaseProcess & = delete;
+    BaseProcess(BaseProcess &&) = delete;
+    auto operator=(BaseProcess &&) -> BaseProcess & = delete;
+
 protected:
     std::future<void> input_writer_;
 

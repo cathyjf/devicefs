@@ -281,11 +281,11 @@ public:
         }, deadline);
     }
 
-    auto ExpireEscapeDeadline() -> void {
+    auto ExpireEscapeDeadline() noexcept -> void {
         escape_deadline_ = std::chrono::steady_clock::now();
     }
 
-    auto DeferEscapeDeadline() -> void {
+    auto DeferEscapeDeadline() noexcept -> void {
         // Split-input tests control the deadline explicitly rather than relying
         // on the scheduler to finish their setup within thirty milliseconds.
         escape_deadline_ = std::chrono::steady_clock::time_point::max();
@@ -337,7 +337,8 @@ public:
     }
 
     auto SetEscapeDeadline(
-        const std::chrono::steady_clock::time_point deadline) -> void {
+        const std::chrono::steady_clock::time_point deadline) noexcept
+        -> void {
         escape_deadline_ = deadline;
     }
 
@@ -345,7 +346,7 @@ public:
         return false;
     }
 
-    [[nodiscard]] auto SequenceCharacters() const -> std::string_view {
+    [[nodiscard]] auto SequenceCharacters() const noexcept -> std::string_view {
         return pending;
     }
 
@@ -371,7 +372,8 @@ public:
     std::function<void(std::chrono::steady_clock::time_point)> on_receive;
 };
 
-[[nodiscard]] auto InputKeyName(const MenuKey key) -> std::string_view {
+[[nodiscard]] auto InputKeyName(const MenuKey key) noexcept
+    -> std::string_view {
     switch (key) {
     case MenuKey::Up: return "Up"sv;
     case MenuKey::Down: return "Down"sv;

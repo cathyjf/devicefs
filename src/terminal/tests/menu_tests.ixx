@@ -455,6 +455,8 @@ export [[nodiscard]] auto TestMenu() -> bool {
             case 2:
                 output.AppendLine("Separate"sv);
                 break;
+            default:
+                ;
             }
         }), "Back selected a command"sv);
         Require(terminal.frames.at(0).contains("First\nSecond\n"sv),

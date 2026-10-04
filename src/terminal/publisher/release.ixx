@@ -113,7 +113,8 @@ struct PublicationContext {
     }
 };
 
-[[nodiscard]] auto TrimTrailingNewlines(std::string text) -> std::string {
+[[nodiscard]] auto TrimTrailingNewlines(std::string text) noexcept
+    -> std::string {
     while (!text.empty() &&
         ((text.back() == '\n') || (text.back() == '\r'))) {
         text.pop_back();

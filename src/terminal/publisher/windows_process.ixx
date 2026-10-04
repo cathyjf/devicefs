@@ -106,7 +106,16 @@ public:
     }
 
     WindowsProcess(const WindowsProcess &) = delete;
+    WindowsProcess(WindowsProcess &&) = delete;
+
+    [[gsl::suppress("26456", justification:
+        "The base class's assignment operator is deleted.")]]
     auto operator=(const WindowsProcess &) -> WindowsProcess & = delete;
+
+    [[gsl::suppress("26456", justification:
+        "The base class's move assignment operator is deleted.")]]
+    auto operator=(WindowsProcess &&) -> WindowsProcess & = delete;
+
     ~WindowsProcess() {
         if (!Result().exit_code) {
             std::ignore = TerminateProcess(process_.hProcess, 1);

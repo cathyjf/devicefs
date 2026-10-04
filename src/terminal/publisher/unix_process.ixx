@@ -25,8 +25,14 @@ extern "C" {
 
 namespace devicefs::publisher::unix_detail {
 
-using PipeStream = std::unique_ptr<std::FILE,
-    std::integral_constant<decltype(&std::fclose), std::fclose>>;
+// A lambda inlined into the definition of `PipeStream` would be TU-local.
+// By contrast, the type of this named `PipeStreamDeleter` object can be
+// used in the module interface.
+auto PipeStreamDeleter = [](std::FILE *const file) noexcept {
+    std::ignore = std::fclose(file);
+};
+
+using PipeStream = std::unique_ptr<std::FILE, decltype(PipeStreamDeleter)>;
 
 struct Pipe {
     PipeStream read;

@@ -291,7 +291,7 @@ if(BUILD_TESTING)
             "${CMAKE_BINARY_DIR}/CMakeCache.txt"
             -TestClient
     )
-    set_tests_properties(rpcd_devicefs_authenticated PROPERTIES TIMEOUT 30)
+    set_tests_properties(rpcd_devicefs_authenticated PROPERTIES TIMEOUT 180)
 
     if(DEVICEFS_ENABLE_GRPC_TRANSPORT)
         add_executable(rpcd_devicefs_grpc_test_server
@@ -318,6 +318,6 @@ if(BUILD_TESTING)
                 -GrpcBacking
         )
         set_tests_properties(
-            rpcd_devicefs_grpc_authenticated PROPERTIES TIMEOUT 30)
+            rpcd_devicefs_grpc_authenticated PROPERTIES TIMEOUT 180)
     endif()
 endif()

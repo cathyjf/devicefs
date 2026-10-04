@@ -15,11 +15,13 @@ $start.RedirectStandardError = $true
 $start.ArgumentList.Add('--native-test')
 $process = [Diagnostics.Process]::Start($start)
 try {
-    $output = $process.StandardOutput.ReadToEndAsync()
-    $errors = $process.StandardError.ReadToEndAsync()
+    $output = $process.StandardOutput.BaseStream.CopyToAsync(
+        [Console]::OpenStandardOutput())
+    $errors = $process.StandardError.BaseStream.CopyToAsync(
+        [Console]::OpenStandardError())
     $process.WaitForExit()
-    [Console]::Out.Write($output.Result)
-    [Console]::Error.Write($errors.Result)
+    [void] $output.GetAwaiter().GetResult()
+    [void] $errors.GetAwaiter().GetResult()
     exit $process.ExitCode
 } finally {
     $process.Dispose()

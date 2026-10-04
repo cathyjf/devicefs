@@ -225,9 +225,13 @@ jobs:
     name: wsl-rootfs-${{ inputs.architecture }}
     runs-on: ${{ inputs.builder_runner }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - parallel:
+          - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Build the WSL1 test rootfs
+          - name: Set up artifact streaming
+            uses: cathyjf/github-artifact-stream@77085ed8136f2d60636d1b2e76eae4485fd575e4
+
+      - name: Build and upload the WSL1 test rootfs
         # Specifying `bash` as the shell enables `pipefail`.
         # See <https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsshell>.
         shell: bash
@@ -237,14 +241,9 @@ jobs:
             --output - --layers=false --logfile=/dev/stderr \
             --volume "${GITHUB_WORKSPACE}:/usr/src/devicefs:ro" \
             "${GITHUB_WORKSPACE}/src/wsl" |
-              pigz >"${RUNNER_TEMP}/wsl-rootfs-${{ inputs.architecture }}.tar.gz"
-
-      - name: Upload the WSL1 test rootfs
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          path: ${{ runner.temp }}/wsl-rootfs-${{ inputs.architecture }}.tar.gz
-          archive: false
-          if-no-files-found: error
+              pigz |
+                artifact-stream upload \
+                  "wsl-rootfs-${{ inputs.architecture }}.tar.gz"
 
   test-wsl:
     needs: build-wsl-rootfs

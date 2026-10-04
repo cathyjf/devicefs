@@ -1,0 +1,297 @@
+# SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Windows CI suite
+
+on:
+  workflow_call:
+    inputs:
+      architecture:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+      builder_runner:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: windows-${{ inputs.architecture }}-build
+    runs-on: ${{ inputs.runner }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+        background: true
+
+      - name: Acquire DISM SDK files
+        background: true
+        run: |
+          $sdk_root = [IO.Path]::Combine(
+            [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+              [Microsoft.Win32.RegistryHive]::LocalMachine,
+              [Microsoft.Win32.RegistryView]::Registry32).OpenSubKey(
+                'SOFTWARE\Microsoft\Windows Kits\Installed Roots').GetValue(
+                  'KitsRoot10'),
+            'Assessment and Deployment Kit/Deployment Tools/SDKs/DismApi')
+
+          # These cabinets contain the DISM SDK files from ADK 10.1.28000.1.
+          # Files inside them have names beginning with `fil`, rather than
+          # `DismApi.h` or `DismApi.lib`. The ADK's "Headers and Libraries" MSI
+          # maps those names to the installed filenames used below.
+          $download_url = (
+            'https://download.microsoft.com/download/' +
+            '615540bc-be0b-433a-b91b-1f2b0642bb24/adk/Installers')
+          $libraries = @{
+            x64 = @{
+              Cabinet = '500e0afd7cc09e1e1d6daca01bc67430.cab'
+              Hash = 'f9c42535f407077c72f595480eb4aea22560f387f58eabe40fef3e02f78523b9'
+              Member = 'fil96d47d97b00ce7bb72fce2ce9fd158c1'
+              Destination = 'Lib/amd64/DismApi.lib'
+            }
+            arm64 = @{
+              Cabinet = 'a29a0c716f903f42aca181dca250f681.cab'
+              Hash = 'f66462ae72935317c656c881c0988c141f44d16ab8dcbb9303bb07e80da8e2e9'
+              Member = 'fil10d782c6c7c16a94babbc97dabd8b89b'
+              Destination = 'Lib/arm64/DismApi.lib'
+            }
+          }
+          $payloads = @(
+            @{
+              Cabinet = 'ea9c0c38594fd7df374ddfc620f4a1fd.cab'
+              Hash = '928ddc485d8c83dd9283fcdd0162a232316f1718775f60237a199c18b8b88e86'
+              Member = 'fil826ac1fee14c773fae7aadd5b48e79dd'
+              Destination = 'Include/DismApi.h'
+            }
+            $libraries['${{ inputs.architecture }}']
+          )
+          $payloads | ForEach-Object -Parallel {
+            $ErrorActionPreference = 'Stop'
+            $PSNativeCommandUseErrorActionPreference = $true
+            $payload = $_
+            $cabinet = Join-Path $env:RUNNER_TEMP $payload.Cabinet
+            Invoke-WebRequest -Uri "$using:download_url/$($payload.Cabinet)" `
+              -OutFile $cabinet
+            $hash = (Get-FileHash -LiteralPath $cabinet -Algorithm SHA256).Hash
+            if ($hash -ne $payload.Hash) {
+              throw ("DISM SDK cabinet '$($payload.Cabinet)' SHA-256 mismatch: " +
+                "expected $($payload.Hash); got $hash.")
+            }
+            $destination = Join-Path $using:sdk_root $payload.Destination
+            $directory = Split-Path -Parent $destination
+            [IO.Directory]::CreateDirectory($directory) | Out-Null
+            tar.exe -xOf $cabinet $payload.Member > $destination
+          }
+
+      - &install_winfsp
+        name: Install WinFsp
+        uses: $/.github/actions/install-msi
+        background: true
+        with:
+          uri: https://github.com/winfsp/winfsp/releases/download/v2.2B4/winfsp-2.2.26215.msi
+          sha256: 2ECB5C89405488A95BBD8A01875E02C48534FD37BBDFD84488F7590464D65944
+          arguments: ADDLOCAL=F.Main,F.User,F.Developer
+
+      - name: Wait for preparation to finish
+        wait-all:
+
+      - name: Configure
+        run: |
+          cmake --preset windows-${{ inputs.architecture }} `
+            -DDEVICEFS_TERMINAL_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build --preset windows-${{ inputs.architecture }}-release
+
+      - name: Prepare native test artifact
+        run: |
+          ./.github/scripts/Export-NativeTestArtifacts.ps1 `
+            -BuildDirectory "build/windows-${{ inputs.architecture }}" `
+            -ArtifactDirectory "$env:RUNNER_TEMP/native-tests"
+
+      - name: Upload native test artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-${{ inputs.architecture }}-native-tests
+          path: ${{ runner.temp }}/native-tests/
+          if-no-files-found: error
+
+  test:
+    needs: build
+    name: windows-${{ inputs.architecture }}-${{ matrix.test_group }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        test_group: [snapshot-intervals, other]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
+        background: true
+
+      # Some tests require a specific lock file to exist in the filesystem.
+      - name: Create lock file
+        background: true
+        run: |
+          $credentials_dir = [IO.Path]::Combine( `
+            $env:ProgramData, 'devicefs', 'credentials')
+          [IO.Directory]::CreateDirectory($credentials_dir) | Out-Null
+          [IO.File]::Open([IO.Path]::Combine($credentials_dir, `
+            'pbs-vss-backup.lock'), [IO.FileMode]::OpenOrCreate).Dispose()
+
+      - *install_winfsp
+
+      - name: Wait for checkout to finish
+        wait: checkout
+
+      - name: Download native test artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: windows-${{ inputs.architecture }}-native-tests
+          path: build/windows-${{ inputs.architecture }}/
+
+      - name: Restore the builder's checkout path
+        run: |
+          $source_directory = [IO.Path]::GetFullPath((Get-Content -LiteralPath `
+            'build/windows-${{ inputs.architecture }}/source-directory.txt' -Raw))
+          if ($source_directory -ne [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)) {
+            [IO.Directory]::CreateDirectory( `
+              [IO.Path]::GetDirectoryName($source_directory)) | Out-Null
+            New-Item -ItemType SymbolicLink -Path $source_directory `
+              -Target $env:GITHUB_WORKSPACE | Out-Null
+          }
+
+      - name: Wait for preparation to finish
+        wait-all:
+
+      # Some tests require standard input to be attached to a console.
+      # To satisfy that need, we run `ctest` inside `conhost.exe`.
+      # This requires creating a temporary file to collect the exit status.
+      - name: Test
+        run: |
+          $env:DEVICEFS_CTEST_RESULT = Join-Path $env:RUNNER_TEMP `
+            "ctest-$([guid]::NewGuid()).exit"
+          $test_filter = if ('${{ matrix.test_group }}' -eq 'snapshot-intervals') {
+            '-R'
+          } else {
+            '-E'
+          }
+
+          $start = [Diagnostics.ProcessStartInfo]::new('conhost.exe')
+          $start.UseShellExecute = $false
+          $start.CreateNoWindow = $true
+          $start.RedirectStandardInput = $true
+          foreach ($argument in @(
+            '--headless', 'pwsh', '-NoProfile', '-NonInteractive', '-Command',
+            (
+              '$ErrorActionPreference = "Stop"; ' +
+              'ctest --preset windows-${{ inputs.architecture }}-privileged ' +
+              "$test_filter '^devicefs_vss_snapshot_intervals$' --no-tests=error; " +
+              '$LASTEXITCODE | Set-Content -LiteralPath $env:DEVICEFS_CTEST_RESULT'
+            )
+          )) {
+            $start.ArgumentList.Add($argument)
+          }
+
+          $process = [Diagnostics.Process]::Start($start)
+          try {
+            $process.WaitForExit()
+          } finally {
+            $process.Dispose()
+          }
+
+          exit [int](Get-Content -LiteralPath $env:DEVICEFS_CTEST_RESULT `
+            -ErrorAction Stop)
+
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-${{ inputs.architecture }}-${{ matrix.test_group }}-test-logs
+          path: build/windows-${{ inputs.architecture }}/Testing/Temporary/
+
+  build-wsl-rootfs:
+    name: wsl-rootfs-${{ inputs.architecture }}
+    runs-on: ${{ inputs.builder_runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the WSL1 test rootfs
+        # Specifying `bash` as the shell enables `pipefail`.
+        # See <https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsshell>.
+        shell: bash
+        run: |
+          sudo podman build \
+            --network=host --jobs=0 --target=samba-helper-tests \
+            --output - --layers=false --logfile=/dev/stderr \
+            --volume "${GITHUB_WORKSPACE}:/usr/src/devicefs:ro" \
+            "${GITHUB_WORKSPACE}/src/wsl" |
+              pigz >"${RUNNER_TEMP}/wsl-rootfs-${{ inputs.architecture }}.tar.gz"
+
+      - name: Upload the WSL1 test rootfs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: ${{ runner.temp }}/wsl-rootfs-${{ inputs.architecture }}.tar.gz
+          archive: false
+          if-no-files-found: error
+
+  test-wsl:
+    needs: build-wsl-rootfs
+    name: wsl-${{ inputs.architecture }}
+    runs-on: ${{ inputs.runner }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      # The `windows-2025-vs2026` runner includes WSL.
+      # The `windows-11-vs2026-arm` runner does not include WSL.
+      - name: Acquire and install the WSL package
+        if: inputs.runner == 'windows-11-vs2026-arm'
+        uses: $/.github/actions/install-msi
+        background: true
+        with:
+          uri: https://github.com/microsoft/WSL/releases/download/3.0.1/wsl.3.0.1.0.arm64.msi
+          sha256: 857ddbb335ec7d05ffa71d0fd2203750c0e8fc29bb164f8a95db92bd7bba4263
+
+      - name: Enable the WSL1 component
+        if: inputs.runner == 'windows-11-vs2026-arm'
+        background: true
+        run: |
+          dism.exe /online /enable-feature `
+            /featurename:Microsoft-Windows-Subsystem-Linux /all
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        background: true
+
+      - name: Download the WSL1 test rootfs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wsl-rootfs-${{ inputs.architecture }}.tar.gz
+          path: ${{ runner.temp }}/wsl-rootfs
+
+      - name: Wait for preparation to finish
+        wait-all:
+
+      - name: Test the DeviceFs `samba_rpc` helper under WSL1
+        run: |
+          ./.github/scripts/Test-SambaRpcWsl.ps1 `
+            -rootfs "$env:RUNNER_TEMP/wsl-rootfs/wsl-rootfs-${{ inputs.architecture }}.tar.gz" `
+            -logs_directory "$env:RUNNER_TEMP/wsl-test-logs"
+
+      - name: Upload WSL1 test logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wsl-${{ inputs.architecture }}-test-logs
+          path: ${{ runner.temp }}/wsl-test-logs/Testing/Temporary/

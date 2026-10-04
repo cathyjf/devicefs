@@ -188,8 +188,10 @@ jobs:
 
   test-wsl:
     name: wsl-${{ matrix.architecture }}
-    needs: build-wsl-rootfs
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix: *test_matrix
@@ -199,27 +201,38 @@ jobs:
     steps:
       # The `windows-2025-vs2026` runner includes WSL.
       # The `windows-11-vs2026-arm` runner does not include WSL.
-      - parallel:
-          - name: Acquire and install the WSL package
-            if: matrix.runner == 'windows-11-vs2026-arm'
-            uses: $/.github/actions/install-msi
-            with:
-              uri: https://github.com/microsoft/WSL/releases/download/3.0.1/wsl.3.0.1.0.arm64.msi
-              sha256: 857ddbb335ec7d05ffa71d0fd2203750c0e8fc29bb164f8a95db92bd7bba4263
+      - name: Acquire and install the WSL package
+        if: matrix.runner == 'windows-11-vs2026-arm'
+        uses: $/.github/actions/install-msi
+        background: true
+        with:
+          uri: https://github.com/microsoft/WSL/releases/download/3.0.1/wsl.3.0.1.0.arm64.msi
+          sha256: 857ddbb335ec7d05ffa71d0fd2203750c0e8fc29bb164f8a95db92bd7bba4263
 
-          - name: Enable the WSL1 component
-            if: matrix.runner == 'windows-11-vs2026-arm'
-            run: |
-              dism.exe /online /enable-feature `
-                /featurename:Microsoft-Windows-Subsystem-Linux /all
+      - name: Enable the WSL1 component
+        if: matrix.runner == 'windows-11-vs2026-arm'
+        background: true
+        run: |
+          dism.exe /online /enable-feature `
+            /featurename:Microsoft-Windows-Subsystem-Linux /all
 
-          - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        background: true
 
-          - name: Download the WSL1 test rootfs
-            uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-            with:
-              name: wsl-rootfs-${{ matrix.architecture }}
-              path: ${{ runner.temp }}/wsl-rootfs
+      - name: Wait for the WSL1 test rootfs
+        uses: cathyjf-forks/wait-for-jobs@1e45c7c2ebce7401ba1e8076e720b2ee582cd81f
+        with:
+          jobs: wsl-rootfs-${{ matrix.architecture }}
+          ttl: 10
+
+      - name: Download the WSL1 test rootfs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wsl-rootfs-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/wsl-rootfs
+
+      - name: Wait for preparation to finish
+        wait-all:
 
       - name: Test the DeviceFs `samba_rpc` helper under WSL1
         run: |

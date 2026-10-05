@@ -7,6 +7,7 @@ target_sources(github-release-publisher-support PUBLIC
 )
 target_link_libraries(github-release-publisher-support PUBLIC devicefs-terminal)
 if(WIN32)
+    target_link_libraries(github-release-publisher-support PUBLIC advapi32)
     target_sources(github-release-publisher-support PUBLIC
         FILE_SET CXX_MODULES FILES windows_process.ixx)
 else()

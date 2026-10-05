@@ -54,8 +54,8 @@ public:
         const ProcessOutput &result)
         : std::runtime_error(std::format(
             "command {} failed with exit status {}\n{}",
-            FormatCommand(command), *result.exit_code, result.diagnostic)),
-          exit_code(*result.exit_code) {}
+            FormatCommand(command), result.exit_code, result.diagnostic)),
+          exit_code(result.exit_code) {}
     const int exit_code;
 };
 
@@ -74,41 +74,71 @@ public:
         const CommandOutput output = CommandOutput::OnFailure,
         const CommandExit exit = CommandExit::Zero, std::string input = {})
         -> ProcessOutput {
-        using namespace std::chrono_literals;
         auto view = OutputMenu{};
         view.AppendLine(FormatCommand(arguments));
-        auto process = NativeProcess{arguments, std::move(input)};
-        auto completed = false;
-        const auto failed = [&] {
-            return (process.Result().exit_code != 0) &&
-                !((exit == CommandExit::ZeroOrOne) &&
-                    (process.Result().exit_code == 1));
+        struct CommandState {
+            std::mutex mutex;
+            std::string output;
+            std::optional<ProcessOutput> result;
+            std::exception_ptr error;
         };
-        const auto update = [&](auto &view) {
-            if (completed) {
+        auto state = CommandState{};
+        auto process = NativeProcess{arguments, std::move(input),
+            [&state](const std::string_view text) {
+                const auto lock = std::lock_guard{state.mutex};
+                state.output += text;
+            }};
+        auto command = std::async(std::launch::async, [&process, &state] {
+            try {
+                auto result = process.Wait();
+                const auto lock = std::lock_guard{state.mutex};
+                state.result.emplace(std::move(result));
+            } catch (...) {
+                const auto lock = std::lock_guard{state.mutex};
+                state.error = std::current_exception();
+            }
+        });
+        auto result = std::optional<ProcessOutput>{};
+        // Cancelling the view must terminate the child before `command` joins
+        // its worker. Otherwise destruction would wait for the command to
+        // finish naturally, leaving cancellation unable to stop it.
+        const auto stop = ScopeExit{[&process, &result] {
+            if (!result) {
+                process.Terminate();
+            }
+        }};
+        const auto failed = [&result, exit] {
+            return (result->exit_code != 0) &&
+                !((exit == CommandExit::ZeroOrOne) &&
+                    (result->exit_code == 1));
+        };
+        const auto update = [&state, &result, &failed, exit](auto &view) {
+            if (result) {
                 return;
             }
-            const auto poll = process.Poll();
-            view.AppendText(poll.output);
-            view.AppendText(poll.diagnostic);
-            completed = poll.exit_code.has_value();
-            if (completed) {
+            auto pending = [&state] {
+                const auto lock = std::lock_guard{state.mutex};
+                if (state.error) {
+                    std::rethrow_exception(state.error);
+                }
+                return std::pair{std::exchange(state.output, {}),
+                    std::move(state.result)};
+            }();
+            view.AppendText(pending.first);
+            if (pending.second) {
+                result = std::move(pending.second);
                 view.AppendLine(
-                    std::format("Exit status: {}", *poll.exit_code));
+                    std::format("Exit status: {}", result->exit_code));
                 view.SetCommands(std::array{OutputCommand{1,
                     (failed() && (exit != CommandExit::Inspect)) ?
                         "Close"sv : "Continue"sv}});
             }
         };
         if (output == CommandOutput::OnFailure) {
-            while (!completed) {
-                update(view);
-                if (!completed) {
-                    std::this_thread::sleep_for(10ms);
-                }
-            }
+            command.get();
+            update(view);
             if (!failed()) {
-                return process.Result();
+                return std::move(*result);
             }
         }
         const auto choice = view.Select(terminal_,
@@ -116,16 +146,16 @@ public:
                 context_.Draw(frame);
                 frame.Write("{}\n\n", title);
             }, update);
-        if (!completed) {
+        if (!result) {
             throw InputCancelled{};
         }
         if (failed() && (exit != CommandExit::Inspect)) {
-            throw CommandFailure{arguments, process.Result()};
+            throw CommandFailure{arguments, *result};
         }
         if (!choice) {
             throw InputCancelled{};
         }
-        return process.Result();
+        return std::move(*result);
     }
 
 private:

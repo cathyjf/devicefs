@@ -8,6 +8,7 @@ module;
 #include <cstdio>
 #include <fcntl.h>
 #include <pthread.h>
+#include <poll.h>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -39,7 +40,7 @@ struct Pipe {
     PipeStream write;
 };
 
-[[nodiscard]] auto MakePipe(const bool nonblocking_read = true) -> Pipe {
+[[nodiscard]] auto MakePipe() -> Pipe {
     auto descriptors = std::array<int, 2>{};
     if (pipe(descriptors.data()) < 0) {
         throw std::system_error(errno, std::generic_category(),
@@ -69,11 +70,6 @@ struct Pipe {
                 "could not prevent child-output pipe inheritance");
         }
     }
-    if (nonblocking_read &&
-        (fcntl(descriptors[0], F_SETFL, O_NONBLOCK) < 0)) {
-        throw std::system_error(errno, std::generic_category(),
-            "could not enable nonblocking child-output reads");
-    }
     const auto adopt = [&descriptors](const auto index) {
         auto stream = PipeStream{fdopen(
             descriptors[index], (index == 0) ? "r" : "w")};
@@ -87,27 +83,78 @@ struct Pipe {
     return {.read = adopt(0), .write = adopt(1)};
 }
 
+struct Cancellation {
+    const Pipe pipe = MakePipe();
+    std::atomic_flag requested;
+
+    auto Stop() noexcept -> void {
+        if (!requested.test_and_set()) {
+            // Leave the byte unread so every I/O worker observes cancellation.
+            // Only one byte is written, so the cancellation pipe cannot fill.
+            while ((write(fileno(pipe.write.get()), "x", 1) < 0) &&
+                (errno == EINTR)) {}
+        }
+    }
+
+    [[nodiscard]] auto Wait(const int descriptor, const short events) const
+        -> bool {
+        auto descriptors = std::array{
+            pollfd{.fd = fileno(pipe.read.get()), .events = POLLIN,
+                .revents = 0},
+            pollfd{.fd = descriptor, .events = events, .revents = 0}};
+        for (;;) {
+            if (poll(descriptors.data(), descriptors.size(), -1) < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                throw std::system_error(errno, std::generic_category(),
+                    "could not wait for child-pipe I/O or cancellation");
+            }
+            return descriptors.front().revents == 0;
+        }
+    }
+};
+
+struct Endpoint {
+    PipeStream stream;
+    std::shared_ptr<Cancellation> cancellation;
+};
+
+[[nodiscard]] auto Cancellable(PipeStream stream,
+    const std::shared_ptr<Cancellation> &cancellation) -> Endpoint {
+    if (fcntl(fileno(stream.get()), F_SETFL, O_NONBLOCK) < 0) {
+        throw std::system_error(errno, std::generic_category(),
+            "could not enable cancellable child-pipe I/O");
+    }
+    return {.stream = std::move(stream), .cancellation = cancellation};
+}
+
 }
 
 export namespace devicefs::publisher {
 
 // Launch an executable with inherited environment and working directory, EOF
 // on stdin after sending any supplied input, and separate output pipes.
-// A writer feeds stdin independently of output consumption. Destruction kills
-// and reaps an unfinished direct child before joining that writer; this is not
-// process-tree supervision.
+// A writer feeds stdin independently of output consumption. Destruction
+// terminates the direct child, joins the I/O workers, and then reaps the child;
+// it does not supervise descendants.
 class UnixProcess : public BaseProcess {
 public:
     explicit UnixProcess(const std::span<const std::string> arguments,
-        std::string input = {})
+        std::string input = {},
+        const std::function<void(std::string_view)> &write_output = {})
         : BaseProcess(arguments) {
         auto output = unix_detail::MakePipe();
         auto diagnostic = unix_detail::MakePipe();
-        const auto input_source = [&]() -> unix_detail::PipeStream {
+        StartReaders(
+            unix_detail::Cancellable(std::move(output.read), cancellation_),
+            unix_detail::Cancellable(
+                std::move(diagnostic.read), cancellation_), write_output);
+        const auto input_source = [this, &input]() -> unix_detail::PipeStream {
             if (input.empty()) {
                 return {};
             }
-            auto pipe = unix_detail::MakePipe(false);
+            auto pipe = unix_detail::MakePipe();
 #ifdef __APPLE__
             // A failed launch or early child exit can close stdin during a
             // write. On macOS, XNU's `fp_writev` sends the resulting `SIGPIPE`
@@ -123,8 +170,8 @@ public:
                     "could not suppress SIGPIPE on the child-stdin pipe");
             }
 #endif
-            input_writer_ = std::async(std::launch::async,
-                [](const unix_detail::PipeStream writer,
+            input_writer_ = StartWorker(
+                [](const unix_detail::Endpoint writer,
                     const std::string input) {
 #ifndef __APPLE__
                     // POSIX.1's 2004 corrigendum changed broken-pipe `SIGPIPE`
@@ -145,11 +192,16 @@ public:
 #endif
                     auto remaining = std::string_view{input};
                     while (!remaining.empty()) {
-                        const auto count = write(fileno(writer.get()),
+                        const auto descriptor = fileno(writer.stream.get());
+                        if (!writer.cancellation->Wait(descriptor, POLLOUT)) {
+                            return;
+                        }
+                        const auto count = write(descriptor,
                             remaining.data(),
                             std::min(remaining.size(), 8192uz));
                         if (count < 0) {
-                            if (errno == EINTR) {
+                            if ((errno == EINTR) || (errno == EAGAIN) ||
+                                (errno == EWOULDBLOCK)) {
                                 continue;
                             }
                             throw std::system_error(errno,
@@ -164,7 +216,8 @@ public:
                         remaining.remove_prefix(devicefs::terminal::
                             FailFastCast<std::size_t>(count));
                     }
-                }, std::move(pipe.write), std::move(input));
+                }, unix_detail::Cancellable(
+                    std::move(pipe.write), cancellation_), std::move(input));
             return std::move(pipe.read);
         }();
         auto actions = posix_spawn_file_actions_t{};
@@ -203,15 +256,19 @@ public:
             throw std::system_error(result, std::generic_category(),
                 std::format("could not start '{}'", arguments.front()));
         }
-        output_ = std::move(output.read);
-        diagnostic_ = std::move(diagnostic.read);
     }
 
     UnixProcess(const UnixProcess &) = delete;
     auto operator=(const UnixProcess &) -> UnixProcess & = delete;
+    auto Terminate() const noexcept -> void {
+        cancellation_->Stop();
+        std::ignore = kill(pid_, SIGKILL);
+    }
+
     ~UnixProcess() {
         if (pid_ > 0) {
-            std::ignore = kill(pid_, SIGKILL);
+            Terminate();
+            JoinIo();
             // `waitpid` reaps the terminated child. A signal can interrupt
             // that wait without reaping it, so only `EINTR` warrants retrying.
             while ((waitpid(pid_, nullptr, 0) < 0) && (errno == EINTR)) {}
@@ -221,42 +278,48 @@ public:
 private:
     friend class BaseProcess;
 
-    [[nodiscard]] static auto ReadAvailable(unix_detail::PipeStream &source)
+    [[nodiscard]] static auto Read(const unix_detail::Endpoint &source)
         -> std::string {
         auto buffer = std::array<char, 8192>{};
-        const auto count = read(
-            fileno(source.get()), buffer.data(), buffer.size());
-        if (count < 0) {
-            if ((errno == EAGAIN) || (errno == EWOULDBLOCK) ||
-                (errno == EINTR)) {
+        for (;;) {
+            const auto descriptor = fileno(source.stream.get());
+            if (!source.cancellation->Wait(descriptor, POLLIN)) {
                 return {};
             }
-            throw std::system_error(errno, std::generic_category(),
-                "could not read a child-output pipe");
+            const auto count = read(
+                descriptor, buffer.data(), buffer.size());
+            if (count < 0) {
+                if ((errno == EINTR) || (errno == EAGAIN) ||
+                    (errno == EWOULDBLOCK)) {
+                    continue;
+                }
+                throw std::system_error(errno, std::generic_category(),
+                    "could not read a child-output pipe");
+            }
+            return {buffer.data(),
+                devicefs::terminal::FailFastCast<std::size_t>(count)};
         }
-        if (count == 0) {
-            source.reset();
-        }
-        return {buffer.data(),
-            devicefs::terminal::FailFastCast<std::size_t>(count)};
     }
 
-    [[nodiscard]] auto ReadExitCode() -> std::optional<int> {
-        auto status = int{};
-        const auto waited = waitpid(pid_, &status, WNOHANG);
-        if ((waited < 0) && (errno != EINTR)) {
-            throw std::system_error(errno, std::generic_category(),
-                "could not wait for the child process");
+    [[nodiscard]] auto WaitForExit() const -> int {
+        // `WNOWAIT` leaves the exited child unreaped until destruction. Its PID
+        // therefore remains reserved while another thread can call `Terminate`;
+        // reaping it here would permit cancellation to signal a reused PID.
+        auto status = siginfo_t{};
+        while (waitid(P_PID,
+            devicefs::terminal::FailFastCast<id_t>(pid_), &status,
+            WEXITED | WNOWAIT) < 0) {
+            if (errno != EINTR) {
+                throw std::system_error(errno, std::generic_category(),
+                    "could not wait for the child process");
+            }
         }
-        if (waited <= 0) {
-            return std::nullopt;
-        }
-        pid_ = -1;
-        return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+        return (status.si_code == CLD_EXITED) ?
+            status.si_status : 128 + status.si_status;
     }
 
-    unix_detail::PipeStream output_;
-    unix_detail::PipeStream diagnostic_;
+    const std::shared_ptr<unix_detail::Cancellation> cancellation_ =
+        std::make_shared<unix_detail::Cancellation>();
     pid_t pid_ = -1;
 };
 

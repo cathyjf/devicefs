@@ -152,10 +152,11 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
         )
         if(WIN32)
             add_test(NAME devicefs_terminal_native_${index}
-                COMMAND "${POWERSHELL_EXECUTABLE}" -NoProfile -NonInteractive
-                    -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/native_windows.ps1"
-                    -Executable "$<TARGET_FILE:devicefs-terminal-test>"
-                    -Index "${index}"
+                COMMAND "${CMAKE_COMMAND}"
+                    "-DPOWERSHELL_EXECUTABLE=${POWERSHELL_EXECUTABLE}"
+                    "-DTEST_EXECUTABLE=$<TARGET_FILE:devicefs-terminal-test>"
+                    "-DINDEX=${index}"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/native_windows.cmake"
             )
         else()
             add_test(NAME devicefs_terminal_native_${index}

@@ -3,7 +3,8 @@
 
 param(
     [Parameter(Mandatory)][string] $Executable,
-    [string] $Index
+    [string] $Index,
+    [string] $ResultFile
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,6 +29,9 @@ try {
     $process.WaitForExit()
     [void] $output.GetAwaiter().GetResult()
     [void] $errors.GetAwaiter().GetResult()
+    if ($ResultFile) {
+        $process.ExitCode | Set-Content -LiteralPath $ResultFile
+    }
     exit $process.ExitCode
 } finally {
     $process.Dispose()

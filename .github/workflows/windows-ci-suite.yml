@@ -106,7 +106,8 @@ jobs:
       - name: Configure
         run: |
           cmake --preset windows-${{ inputs.architecture }} `
-            -DDEVICEFS_TERMINAL_BUILD_TESTS=ON
+            -D DEVICEFS_TERMINAL_BUILD_TESTS=ON `
+            -D DEVICEFS_TERMINAL_BUILD_PUBLISHER=ON
 
       - name: Build
         run: cmake --build --preset windows-${{ inputs.architecture }}-release

@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Run Unix terminal tests
+description: Configure, build, and run Unix terminal tests
+
+inputs:
+  preset:
+    description: The preset to supply to CMake and CTest
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Configure, build, and run the '${{ inputs.preset }}' preset
+      shell: bash
+      env:
+        PRESET: ${{ inputs.preset }}
+      run: |
+        [[ $(uname) == 'Darwin' ]] || {
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          [[ $PRESET != 'unix' ]] || {
+            llvm_dir=$(brew --prefix llvm)
+            export LDFLAGS=-L${llvm_dir}/lib
+            export LD_LIBRARY_PATH=${llvm_dir}/lib:$LD_LIBRARY_PATH
+          }
+        }
+        build_dir=$(mktemp -d "${RUNNER_TEMP}/${PRESET}.XXXXXX")
+        cmake -B "$build_dir" -S src/terminal --preset "$PRESET"
+        cmake --build "$build_dir" --preset "$PRESET"
+        ctest --test-dir "$build_dir" \
+          --presets-file src/terminal/CMakePresets.json \
+          --preset "$PRESET"

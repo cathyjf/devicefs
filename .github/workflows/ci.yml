@@ -59,33 +59,13 @@ jobs:
               }
               brew install "${packages[@]}"
 
-      - name: Run terminal tests with LLVM and GCC toolchains
-        run: |
-          [[ $(uname) == 'Darwin' ]] || \
-            eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-          declare -a pids
-          for preset in unix unix-gcc; do
-            (
-              set -eo pipefail
-              {
-                [[ ($preset != 'unix') || ($(uname) == 'Darwin') ]] || {
-                  llvm_dir=$(brew --prefix llvm)
-                  export LDFLAGS=-L${llvm_dir}/lib
-                  export LD_LIBRARY_PATH=${llvm_dir}/lib:$LD_LIBRARY_PATH
-                }
-                build_dir=$(mktemp -d "${RUNNER_TEMP}/${preset}.XXXXXX")
-                cmake -B "$build_dir" -S src/terminal --preset "$preset"
-                cmake --build "$build_dir" --preset "$preset"
-                ctest --test-dir "$build_dir" \
-                  --presets-file src/terminal/CMakePresets.json \
-                  --preset "$preset"
-              } 2>&1 | awk -v preset="$preset" \
-                '{print "[" preset "] " $0; fflush()}'
-            ) &
-            pids+=("$!")
-          done
-          status=0
-          for pid in "${pids[@]}"; do
-            wait "$pid" || status=$?
-          done
-          exit "$status"
+      - parallel:
+          - name: Run terminal tests with the LLVM/libc++ toolchain
+            uses: $/.github/actions/run-unix-terminal-tests
+            with:
+              preset: unix
+
+          - name: Run terminal tests with the GCC/libstdc++ toolchain
+            uses: $/.github/actions/run-unix-terminal-tests
+            with:
+              preset: unix-gcc

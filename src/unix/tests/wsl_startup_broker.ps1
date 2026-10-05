@@ -157,11 +157,8 @@ exit 37
     }
 }
 
-# WSL1 reports its kernel release as `4.4.0-<Windows build number>-Microsoft`.
-# WSL1 supports mount namespaces but not user namespaces, so on WSL1 this test
-# omits the user namespace and relies on the caller having root privileges.
 $namespace_arguments = @(
-    if ((& uname -r) -cnotmatch '\A4\.4\.0-[0-9]+-Microsoft\z') {
+    if ((& id -u) -ne '0') {
         '--map-root-user'
     }
     '--mount'

@@ -1,20 +1,24 @@
 # SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-name: Run Unix terminal tests
-description: Configure, build, and run Unix terminal tests
+name: Run Unix tests
+description: Configure, build, and run Unix tests
 
 inputs:
+  path:
+    description: Source path to use for configuration, building, and testing
+    required: true
   preset:
-    description: The preset to supply to CMake and CTest
+    description: Preset to supply to CMake and CTest
     required: true
 
 runs:
   using: composite
   steps:
-    - name: Configure, build, and run the '${{ inputs.preset }}' preset
+    - name: Test the '${{ inputs.preset }}' preset under '${{ inputs.path }}'
       shell: bash
       env:
+        SOURCE_PATH: ${{ inputs.path }}
         PRESET: ${{ inputs.preset }}
       run: |
         [[ $(uname) == 'Darwin' ]] || {
@@ -26,8 +30,8 @@ runs:
           }
         }
         build_dir=$(mktemp -d "${RUNNER_TEMP}/${PRESET}.XXXXXX")
-        cmake -B "$build_dir" -S src/terminal --preset "$PRESET"
+        cmake -B "$build_dir" -S "$SOURCE_PATH" --preset "$PRESET"
         cmake --build "$build_dir" --preset "$PRESET"
         ctest --test-dir "$build_dir" \
-          --presets-file src/terminal/CMakePresets.json \
+          --presets-file "${SOURCE_PATH}/CMakePresets.json" \
           --preset "$PRESET"

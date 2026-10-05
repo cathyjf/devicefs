@@ -74,6 +74,7 @@ $GrpcServerPath = [IO.Path]::Combine(
 if (-not $GrpcBacking) {
     if ($IsMacOS) {
         $HdiutilPath = Get-CachedPath 'HDIUTIL_EXECUTABLE'
+        $DiskutilPath = Get-CachedPath 'DISKUTIL_EXECUTABLE'
     } else {
         $LosetupPath = Get-CachedPath 'LOSETUP_EXECUTABLE'
     }
@@ -230,7 +231,7 @@ try {
     } else {
         if ($IsMacOS) {
             $attachment = @(& $HdiutilPath attach -nomount -readonly `
-                -imagekey diskimage-class=CRawDiskImage $backing 2>&1)
+                -imagekey diskimage-class=CRawDiskImage $backing)
             if ($LASTEXITCODE -ne 0) {
                 throw "hdiutil attach failed:`n$($attachment | Out-String)"
             }
@@ -379,8 +380,8 @@ try {
     }
     if ($null -ne $device) {
         if ($IsMacOS) {
-            $detach_operation = 'hdiutil detach'
-            $detach_output = & $HdiutilPath detach $device 2>&1
+            $detach_operation = 'diskutil eject'
+            $detach_output = & $DiskutilPath eject $device 2>&1
         } else {
             $detach_operation = 'losetup --detach'
             $detach_output = & $LosetupPath --detach $device 2>&1

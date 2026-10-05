@@ -220,12 +220,15 @@ if(BUILD_TESTING)
     )
     find_program(SAMBA_DCERPCD_EXECUTABLE
         NAMES samba-dcerpcd
-        HINTS /opt/homebrew/opt/samba/libexec/samba
+        HINTS
+            /opt/homebrew/opt/samba/libexec/samba
+            /home/linuxbrew/.linuxbrew/opt/samba/libexec/samba
         PATH_SUFFIXES libexec/samba
         REQUIRED
     )
     if(APPLE)
         find_program(HDIUTIL_EXECUTABLE NAMES hdiutil REQUIRED)
+        find_program(DISKUTIL_EXECUTABLE NAMES diskutil REQUIRED)
     elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         find_program(LOSETUP_EXECUTABLE NAMES losetup
             PATH_SUFFIXES sbin

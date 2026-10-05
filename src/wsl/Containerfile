@@ -586,20 +586,10 @@ ENV PATH=/opt/cmake/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:
 # https://git-scm.com/docs/git-sparse-checkout
 # https://packages.debian.org/trixie/libparse-yapp-perl
 #
+COPY install-pidl.sh /usr/local/share/install-pidl.sh
 RUN /bin/devicefs-sh <<'EOF'
-git clone \
-    --branch "${SAMBA_PIDL_TAG}" \
-    --depth=1 \
-    --filter=blob:none \
-    --single-branch \
-    --sparse \
-    https://gitlab.com/samba-team/samba.git \
-    /usr/src/samba-pidl
-git -C /usr/src/samba-pidl sparse-checkout set pidl
-cd /usr/src/samba-pidl/pidl
-perl Makefile.PL
-make -j
-make install
+. /usr/local/share/install-pidl.sh /usr/src/samba-pidl
+rm /usr/local/share/install-pidl.sh
 EOF
 
 #

@@ -50,22 +50,49 @@ jobs:
 
           - name: Acquire toolchains
             run: |
-              export HOMEBREW_NO_ASK=1
               packages=(llvm lld gcc)
               [[ $(uname) == 'Darwin' ]] || {
                 eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
                 # Note: glibc must be installed before gcc.
                 packages=(cmake glibc "${packages[@]}")
               }
-              brew install "${packages[@]}"
+              HOMEBREW_NO_ASK=1 brew install "${packages[@]}"
 
-      - parallel:
-          - name: Run terminal tests with the LLVM/libc++ toolchain
-            uses: $/.github/actions/run-unix-terminal-tests
-            with:
-              preset: unix
+      - name: Acquire dependencies for the remaining macOS tests
+        id: additional-dependencies
+        if: matrix.os == 'mac'
+        background: true
+        run: |
+          HOMEBREW_NO_ASK=1 brew install perl samba grpc
+          perl_bin_dir=$(brew --prefix perl)/bin
+          export PATH="${perl_bin_dir}:$PATH"
+          printf '%s\n' "$perl_bin_dir" >> "$GITHUB_PATH"
+          cpan ExtUtils::MakeMaker Parse::Yapp
+          . src/wsl/install-pidl.sh
 
-          - name: Run terminal tests with the GCC/libstdc++ toolchain
-            uses: $/.github/actions/run-unix-terminal-tests
-            with:
-              preset: unix-gcc
+      - name: Run terminal tests with the LLVM/libc++ toolchain
+        uses: $/.github/actions/run-unix-tests
+        background: true
+        with:
+          path: src/terminal
+          preset: unix
+
+      - name: Run terminal tests with the GCC/libstdc++ toolchain
+        uses: $/.github/actions/run-unix-tests
+        background: true
+        with:
+          path: src/terminal
+          preset: unix-gcc
+
+      - name: Wait for acquisition of remaining macOS dependencies
+        wait: additional-dependencies
+
+      - name: Run the remaining macOS tests
+        if: matrix.os == 'mac'
+        uses: $/.github/actions/run-unix-tests
+        with:
+          path: src/unix
+          preset: release
+
+      - name: Wait for completion
+        wait-all:

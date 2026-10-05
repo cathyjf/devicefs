@@ -4,10 +4,8 @@
 
 set -l magic_subshell_flag --push-image-internal-subshell
 set -l magic_reader_flag --push-image-internal-reader
-set -l magic_literal_prepend_flag --push-image-internal-literal-prefix-prepend-subshell
 set -l magic_publish_flag --push-image-internal-publish
-set -l magic_flags $magic_subshell_flag $magic_reader_flag $magic_literal_prepend_flag \
-    $magic_publish_flag
+set -l magic_flags $magic_subshell_flag $magic_reader_flag $magic_publish_flag
 set -l argv0 (status basename)
 set -l image_repository ghcr.io/cathyjf/devicefs-wsl
 set -l gpg_signing_fingerprint EDC7363F595C58D2F07930FEB69A7D95683C6E2A
@@ -73,12 +71,6 @@ function prepend_timestamps -V magic_reader_flag
     return $job_exit_code
 end
 
-function prepend_literal_prefixes -a prefix
-    while read -l line
-        echo -- $prefix $line
-    end
-end
-
 function print_and_invoke
     escape_argv $argv
     $argv[1] $argv[2..]
@@ -133,10 +125,6 @@ if ! contains -- "$argv[1]" $magic_flags
 else if test "$argv[1]" = $magic_reader_flag
     read_while_job_exists $argv[2..]
     # The return status of the reader subshell is ignored.
-    exit 0
-else if test "$argv[1]" = $magic_literal_prepend_flag
-    prepend_literal_prefixes $argv[2..]
-    # The return status of the literal prepending subshell is ignored.
     exit 0
 else if test "$argv[1]" = $magic_publish_flag
     publish_image $argv[2..]
@@ -262,8 +250,9 @@ for builder in $builders
         $label_args \
         $annotation_args \
         (status dirname)
-    set -l prefix (printf '[%s]' $builder)
-    escape_argv $podman_argv | prepend_literal_prefixes $prefix
+    set -l awk_argv awk -v builder={$builder} \
+        '{print "[" builder "] " $0; fflush()}'
+    escape_argv $podman_argv | $awk_argv[1] $awk_argv[2..]
     set -l log_file (mktemp_autoclean)
     $podman_argv[1] $podman_argv[2..] &>$log_file &
     set -a podman_pids $last_pid
@@ -275,7 +264,7 @@ for builder in $builders
         set -g podman_exit_codes[$index] $argv[3]
     end
     $fish -N (status filename) $magic_reader_flag $podman_pids[$index] <$log_file |
-        $fish -N (status filename) $magic_literal_prepend_flag $prefix &
+        $awk_argv[1] $awk_argv[2..] &
 end
 test (count $podman_pids) -gt 0 || die 'did not launch any builders'
 

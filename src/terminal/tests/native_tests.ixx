@@ -1408,8 +1408,10 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
 #endif
         } catch (const std::runtime_error &error) {
             const auto message = std::string_view{error.what()};
-            Require(message.contains("terminal"sv) && message.contains("input"sv),
-                "screen or mode restoration replaced the terminal input failure"sv);
+            Require((message.contains("terminal"sv)) &&
+                (message.contains("input"sv)),
+                std::format("expected a terminal input failure after "
+                    "disconnection; received: {}", message));
             return;
         }
         Require(false, "disconnected terminal input returned normally"sv);
@@ -1425,25 +1427,24 @@ export auto RunNativeTests() -> int {
     auto input = NativeInput{};
     return TestNativeInput(input) ? 0 : 1;
 #else
-    // The child uses this pseudoterminal as its controlling terminal. Standard
-    // output and error remain connected to CTest, so test results contain no
-    // drawing codes.
-    auto input = NativeInput{};
     const auto child = fork();
     if (child < 0) {
         throw std::system_error(errno, std::generic_category(), "could not create the native test process");
     }
     if (child == 0) {
-        const auto passed = Test("isolated Unix native input tests"sv, [&] {
+        const auto passed = Test("isolated Unix native input tests"sv, [] {
+            // Creating the pseudoterminal after `fork` keeps its master
+            // descriptor out of the parent. Otherwise, disconnecting might
+            // leave the terminal connected until the parent closes its copy.
+            // Standard output and error remain connected to CTest rather than
+            // the controlling terminal, keeping drawing codes out of results.
+            auto input = NativeInput{};
             input.Attach();
             Require(TestNativeInput(input, input.DevicePath()),
                 "one or more native input tests failed"sv);
         });
         return passed ? 0 : 1;
     }
-    // Only the child may retain a master descriptor: the disconnection test
-    // closes that last reference to simulate the terminal application exiting.
-    input.Disconnect();
     auto status = 0;
     while (waitpid(child, &status, 0) < 0) {
         if (errno != EINTR) {

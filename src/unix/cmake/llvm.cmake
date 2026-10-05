@@ -1,6 +1,8 @@
 find_program(LLVM_C_COMPILER
     NAMES clang-24 clang-23 clang-22 clang
-    HINTS /opt/homebrew/opt/llvm/bin
+    HINTS
+        /opt/homebrew/opt/llvm/bin
+        /home/linuxbrew/.linuxbrew/opt/llvm/bin
     REQUIRED
 )
 get_filename_component(CMAKE_C_COMPILER "${LLVM_C_COMPILER}" REALPATH)
@@ -25,7 +27,7 @@ if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
     )
 else()
     find_program(CMAKE_LINKER ld.lld
-        HINTS "${LLVM_BIN_DIRECTORY}"
+        HINTS "${LLVM_BIN_DIRECTORY}" /home/linuxbrew/.linuxbrew/opt/lld/bin
         REQUIRED
     )
 endif()

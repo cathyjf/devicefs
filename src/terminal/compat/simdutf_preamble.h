@@ -4,11 +4,14 @@
 #pragma once
 
 // The generated simdutf header uses `import std` for library declarations and
-// these headers for macros. GCC reports redefinitions when the textual headers
-// follow the import, so they precede `utf_code_units.h`, which imports `std`.
+// these headers for macros and textual dependencies. GCC reports redefinitions
+// when the textual headers follow the import, so they precede `utf_code_units.h`,
+// which imports `std`. GCC's x64 intrinsic headers include `<cstdlib>` through
+// `<mm_malloc.h>`, so that dependency must also precede the import.
 // https://gcc.gnu.org/onlinedocs/gcc/C_002b_002b-Modules.html
 #include <climits>
 #include <cstdint>
+#include <cstdlib>
 #include <version>
 #ifndef _WIN32
     // When _WIN32 is not defined, simdutf also includes `strings.h`. We

@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: windows-${{ matrix.architecture }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            runner: windows-2025-vs2026
+            builder_runner: ubuntu-26.04
+          - architecture: arm64
+            runner: windows-11-vs2026-arm
+            builder_runner: ubuntu-26.04-arm
+    uses: $/.github/workflows/windows-ci-suite.yml
+    with:
+      architecture: ${{ matrix.architecture }}
+      runner: ${{ matrix.runner }}
+      builder_runner: ${{ matrix.builder_runner }}
+
+  unix:
+    name: unix-${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: mac
+            runner: xcode-27
+          - os: gnu-linux
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - parallel:
+          - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+          - name: Acquire toolchains
+            run: |
+              export HOMEBREW_NO_ASK=1
+              packages=(llvm lld gcc)
+              [[ $(uname) == 'Darwin' ]] || {
+                eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+                # Note: glibc must be installed before gcc.
+                packages=(cmake glibc "${packages[@]}")
+              }
+              brew install "${packages[@]}"
+
+      - name: Run terminal tests with LLVM and GCC toolchains
+        run: |
+          [[ $(uname) == 'Darwin' ]] || \
+            eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          declare -a pids
+          for preset in unix unix-gcc; do
+            (
+              set -eo pipefail
+              {
+                [[ ($preset != 'unix') || ($(uname) == 'Darwin') ]] || {
+                  llvm_dir=$(brew --prefix llvm)
+                  export LDFLAGS=-L${llvm_dir}/lib
+                  export LD_LIBRARY_PATH=${llvm_dir}/lib:$LD_LIBRARY_PATH
+                }
+                build_dir=$(mktemp -d "${RUNNER_TEMP}/${preset}.XXXXXX")
+                cmake -B "$build_dir" -S src/terminal --preset "$preset"
+                cmake --build "$build_dir" --preset "$preset"
+                ctest --test-dir "$build_dir" \
+                  --presets-file src/terminal/CMakePresets.json \
+                  --preset "$preset"
+              } 2>&1 | awk -v preset="$preset" \
+                '{print "[" preset "] " $0; fflush()}'
+            ) &
+            pids+=("$!")
+          done
+          status=0
+          for pid in "${pids[@]}"; do
+            wait "$pid" || status=$?
+          done
+          exit "$status"

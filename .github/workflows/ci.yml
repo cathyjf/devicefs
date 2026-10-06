@@ -45,18 +45,26 @@ jobs:
       run:
         shell: bash
     steps:
-      - parallel:
-          - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        background: true
+        id: checkout
 
-          - name: Acquire toolchains
-            run: |
-              packages=(llvm lld gcc)
-              [[ $(uname) == 'Darwin' ]] || {
-                eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-                # Note: glibc must be installed before gcc.
-                packages=(cmake glibc "${packages[@]}")
-              }
-              HOMEBREW_NO_ASK=1 brew install "${packages[@]}"
+      - uses: $/.github/actions/remove-ipv6-addresses
+        with:
+          os: ${{ matrix.os }}
+
+      - name: Acquire toolchains
+        run: |
+          packages=(llvm lld gcc)
+          [[ $(uname) == 'Darwin' ]] || {
+            eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+            # Note: glibc must be installed before gcc.
+            packages=(cmake glibc "${packages[@]}")
+          }
+          HOMEBREW_NO_ASK=1 brew install "${packages[@]}"
+
+      - name: Wait for checkout
+        wait: checkout
 
       - name: Acquire dependencies for the remaining macOS tests
         id: additional-dependencies

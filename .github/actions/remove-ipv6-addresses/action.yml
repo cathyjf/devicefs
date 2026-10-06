@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+#
+# Although IPv6 was adopted as an Internet Standard in 2017, GitHub runners
+# apparently do not provide outbound IPv6 connectivity.
+# See <https://github.com/actions/runner-images/issues/668#issuecomment-624080758>.
+#
+# Despite the lack of IPv6 connectivity, some runners come configured with
+# network interfaces that include IPv6 addresses. This can cause software to
+# query AAAA records and attempt connection to unreachable IPv6 addresses.
+#
+# This action deletes IPv6 addresses from network interfaces on a runner.
+#
+
+name: Remove IPv6 addresses
+description: Remove IPv6 addresses from network interfaces on the runner
+
+inputs:
+  os:
+    description: Token specifying the operating system of the runner
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Remove IPv6 addresses from GNU/Linux host
+      if: inputs.os == 'gnu-linux'
+      shell: bash
+      run: |
+        . "$GITHUB_ACTION_PATH"/show-ipv6-addresses.sh
+        show_ipv6_addresses
+        sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
+        show_ipv6_addresses
+
+    - name: Remove IPv6 addresses from macOS host
+      if: inputs.os == 'mac'
+      shell: bash
+      run: |
+        . "$GITHUB_ACTION_PATH"/show-ipv6-addresses.sh
+        show_ipv6_addresses
+
+        # Turn off IPv6.
+        networksetup -listallnetworkservices |
+          while IFS= read -r service; do
+            networksetup -getnetworkserviceenabled "$service" &> /dev/null &&
+              sudo networksetup -setv6off "$service" || true
+          done
+
+        # Delete existing IPv6 addresses.
+        for interface in $(ifconfig -l inet6); do
+          ifconfig "$interface" inet6 | \
+            awk '/^[[:space:]]*inet6 / { print $2 }' |
+              while IFS= read -r address; do
+                sudo ifconfig "$interface" inet6 "$address" delete || true
+              done
+        done
+
+        show_ipv6_addresses
+
+    - name: Remove IPv6 addresses from Windows host
+      if: inputs.os == 'windows'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'SilentlyContinue'
+        . $env:GITHUB_ACTION_PATH/show-ipv6-addresses.ps1
+        Show-Ipv6Addresses
+
+        # Turn off IPv6.
+        Disable-NetAdapterBinding -Name '*' -ComponentID ms_tcpip6 `
+            -IncludeHidden
+
+        # Delete existing IPv6 addresses.
+        try {
+            Get-NetIPAddress -AddressFamily IPv6 -IncludeAllCompartments `
+                -ErrorAction Stop |
+                  Remove-NetIPAddress -Confirm:$false
+        } catch {
+            Write-Output ('Failed to remove IPv6 addresses: {0}' -f $_)
+        }
+
+        Show-Ipv6Addresses

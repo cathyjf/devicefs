@@ -49,9 +49,7 @@ jobs:
         background: true
         id: checkout
 
-      - uses: $/.github/actions/remove-ipv6-addresses
-        with:
-          os: ${{ matrix.os }}
+      - uses: cathyjf/github-disable-ipv6@6d58ece49a7ce5790a9a9c1fe1baa6410bb57201
 
       - name: Acquire toolchains
         run: |

@@ -3,24 +3,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 set -l magic_subshell_flag --push-image-internal-subshell
-set -l magic_reader_flag --push-image-internal-reader
 set -l magic_publish_flag --push-image-internal-publish
-set -l magic_flags $magic_subshell_flag $magic_reader_flag $magic_publish_flag
+set -l magic_flags $magic_subshell_flag $magic_publish_flag
 set -l argv0 (status basename)
 set -l image_repository ghcr.io/cathyjf/devicefs-wsl
 set -l gpg_signing_fingerprint EDC7363F595C58D2F07930FEB69A7D95683C6E2A
 
+source (status dirname)/include/utility.fish
+
 function format_date
     date $argv +%FT%T%z
-end
-
-function read_while_job_exists -a pid
-    set -l parent_pid (ps -o ppid= -p $fish_pid | string trim)
-    while pgrep -F (echo -- $pid | psub) -P $parent_pid >/dev/null
-        cat || return
-        sleep 0.1
-    end
-    cat
 end
 
 function prepend_line_with_timestamp -a line
@@ -32,43 +24,12 @@ function escape_argv
     string escape -- $argv | string join ' '
 end
 
-function log -V argv0
-    printf '%s: %s.\n' $argv0 (string join ' ' $argv)
-end
-
-function die
-    set -l exit_status $status
-    test "$exit_status" -ne 0 || set -l exit_status 1
-    log $argv >&2
-    exit $exit_status
-end
-
-function mktemp_autoclean
-    set -l temp_file (mktemp $argv) || die 'failed to create temporary path'
-    set -gq mktemp_autoclean_index || set -g mktemp_autoclean_index 0
-    set -g mktemp_autoclean_index (math $mktemp_autoclean_index + 1)
-    function __remove_temp_file_{$mktemp_autoclean_index} -e fish_exit -V temp_file
-        rm -rf -- $temp_file
-    end
-    echo -- $temp_file
-end
-
-function prepend_timestamps -V magic_reader_flag
+function prepend_timestamps
     prepend_line_with_timestamp (escape_argv $argv)
-    set -l log_file (mktemp_autoclean)
-    $argv[1] $argv[2..] >$log_file 2>&1 &
-    set -l job_pid $last_pid
-    set -g job_exit_code 1
-    function __handle_child_exit -p $job_pid
-        set -g job_exit_code $argv[3]
+    $argv[1] $argv[2..] 2>&1 | while read -l line
+        prepend_line_with_timestamp $line
     end
-    set -l fish (status fish-path)
-    $fish -N (status filename) $magic_reader_flag $job_pid <$log_file | \
-        while read -l line
-            prepend_line_with_timestamp $line
-        end
-    wait $job_pid
-    return $job_exit_code
+    return $pipestatus[1]
 end
 
 function print_and_invoke
@@ -122,10 +83,6 @@ if ! contains -- "$argv[1]" $magic_flags
     prepend_timestamps (status fish-path) -N (status filename) \
         $magic_subshell_flag $argv
     exit
-else if test "$argv[1]" = $magic_reader_flag
-    read_while_job_exists $argv[2..]
-    # The return status of the reader subshell is ignored.
-    exit 0
 else if test "$argv[1]" = $magic_publish_flag
     publish_image $argv[2..]
     exit
@@ -253,9 +210,10 @@ for builder in $builders
     set -l awk_argv awk -v builder={$builder} \
         '{print "[" builder "] " $0; fflush()}'
     escape_argv $podman_argv | $awk_argv[1] $awk_argv[2..]
-    set -l log_file (mktemp_autoclean)
-    $podman_argv[1] $podman_argv[2..] &>$log_file &
-    set -a podman_pids $last_pid
+    source (status dirname)/include/pipeline.fish \
+        (string join0 -- $podman_argv | psub) \
+        (string join0 -- $awk_argv | psub)
+    set -a podman_pids $__writer_pid
     set -a build_connections $hostname_
     set -a image_id_files $image_id_file
     set -a podman_exit_codes 0
@@ -263,8 +221,6 @@ for builder in $builders
     function __handle_podman_exit_{$index} -p $podman_pids[$index] -V index
         set -g podman_exit_codes[$index] $argv[3]
     end
-    $fish -N (status filename) $magic_reader_flag $podman_pids[$index] <$log_file |
-        $awk_argv[1] $awk_argv[2..] &
 end
 test (count $podman_pids) -gt 0 || die 'did not launch any builders'
 

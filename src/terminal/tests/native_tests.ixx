@@ -10,6 +10,8 @@ module;
 #else
     #include <cerrno>
     #include <csignal>
+    #include <cstdio>
+    #include <string.h>
     #include <sys/ioctl.h>
     #include <sys/wait.h>
     #include <termios.h>
@@ -1385,9 +1387,6 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
         Require(console.ReadMenuInput().key == MenuKey::Accept, "Enter did not produce Accept"sv);
     });
     passed &= run_test("native terminal disconnection reporting I/O errors and preserving the primary failure"sv, [&] {
-#ifndef _WIN32
-        const auto hangup = SetSignalHandlerScoped(SIGHUP, SIG_IGN);
-#endif
         try {
             auto console = make_console();
             const auto screen = console.EnterScreen();
@@ -1419,31 +1418,31 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
     return passed;
 }
 
+#ifndef _WIN32
+auto WithNativeInput(const auto &operation) -> void {
+    // Closing the controlling terminal's master sends `SIGHUP` to this session
+    // leader. Ignoring it until after `NativeInput` is destroyed lets setup
+    // exceptions reach `Test` instead of terminating during cleanup.
+    const auto hangup = SetSignalHandlerScoped(SIGHUP, SIG_IGN);
+    // Creating the pseudoterminal after `fork` keeps its master descriptor out
+    // of the parent, whose copy would otherwise prevent disconnection.
+    // Standard output and error remain connected to CTest rather than the
+    // controlling terminal, keeping drawing codes out of results.
+    auto input = NativeInput{};
+    input.Attach();
+    std::invoke(operation, input);
 }
 
-export auto RunNativeTests() -> int {
-#ifdef _WIN32
-    // The CTest launcher gives this process a hidden, private Windows console.
-    auto input = NativeInput{};
-    return TestNativeInput(input) ? 0 : 1;
-#else
+[[nodiscard]] auto RunIsolatedNativeTest(const std::string_view name,
+    const auto &operation) -> int {
     const auto child = fork();
     if (child < 0) {
-        throw std::system_error(errno, std::generic_category(), "could not create the native test process");
+        throw std::system_error(errno, std::generic_category(),
+            "could not create the native test process");
     }
     if (child == 0) {
-        const auto passed = Test("isolated Unix native input tests"sv, [] {
-            // Creating the pseudoterminal after `fork` keeps its master
-            // descriptor out of the parent. Otherwise, disconnecting might
-            // leave the terminal connected until the parent closes its copy.
-            // Standard output and error remain connected to CTest rather than
-            // the controlling terminal, keeping drawing codes out of results.
-            auto input = NativeInput{};
-            input.Attach();
-            Require(TestNativeInput(input, input.DevicePath()),
-                "one or more native input tests failed"sv);
-        });
-        return passed ? 0 : 1;
+        // Returning would resume the parent's remaining tests in this child.
+        std::exit(Test(name, operation) ? 0 : 1);
     }
     auto status = 0;
     while (waitpid(child, &status, 0) < 0) {
@@ -1452,6 +1451,48 @@ export auto RunNativeTests() -> int {
                 "could not collect the native test process");
         }
     }
-    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+        const auto signal = WTERMSIG(status);
+        Println(stderr, "FAIL: {}: child process {} terminated by signal {} "
+            "({}).", name, child, signal, strsignal(signal));
+    }
+    return 1;
+}
+#endif
+
+}
+
+export auto RunNativeTests() -> int {
+#ifdef _WIN32
+    // The CTest launcher gives this process a hidden, private Windows console.
+    auto input = NativeInput{};
+    return TestNativeInput(input) ? 0 : 1;
+#else
+    const auto cleanup_status = RunIsolatedNativeTest(
+        "Unix native fixture cleanup preserving a setup exception"sv, [] {
+            constexpr auto message = "injected native fixture setup failure"sv;
+            try {
+                WithNativeInput([message](auto &) {
+                    throw std::runtime_error(std::string{message});
+                });
+            } catch (const std::runtime_error &error) {
+                Require(std::string_view{error.what()} == message,
+                    std::format("expected the injected setup exception after "
+                        "native fixture cleanup; received: {}", error.what()));
+                return;
+            }
+            Require(false, "the injected setup exception was not reported"sv);
+        });
+    const auto native_status = RunIsolatedNativeTest(
+        "isolated Unix native input tests"sv, [] {
+            WithNativeInput([](auto &input) {
+                Require(TestNativeInput(input, input.DevicePath()),
+                    "one or more native input tests failed"sv);
+            });
+        });
+    return ((cleanup_status == 0) && (native_status == 0)) ? 0 : 1;
 #endif
 }

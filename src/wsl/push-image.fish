@@ -144,14 +144,19 @@ function unix_timestamp_now
         die 'unix timestamp was not an integer:' $timestamp
 end
 
-if date --version &>/dev/null
-    # The BSD `date` command does not support `--version`.
-    function date_timestamp_args -a seconds
-        printf %s\n -d @$seconds
-    end
-else
-    function date_timestamp_args -a seconds
-        printf %s\n -r $seconds
+begin
+    if set -l date_ (date -ur 100 +%T 2>&1) && test "$date_" = '00:01:40'
+        function date_timestamp_args -a seconds
+            printf %s\n -r $seconds
+        end
+    else if set -l date_ (date -ud @100 +%T 2>&1) && test "$date_" = '00:01:40'
+        function date_timestamp_args -a seconds
+            printf %s\n -d @$seconds
+        end
+    else
+        set -g date_timestamp_args_unknown
+        function date_timestamp_args
+        end
     end
 end
 
@@ -298,11 +303,13 @@ set -l wall_clock_final (unix_timestamp_now)
 log 'wall clock stopped at' \
     (format_date (date_timestamp_args $wall_clock_final))
 
-# This formatting method assumes that the time elapsed was less than 24 hours.
-# That is a reasonable assumption here.
-set -l date_args \
-    (date_timestamp_args (math $wall_clock_final - $wall_clock_initial))
-log 'completed successfully in' (date -u $date_args +%T)
+set -gq date_timestamp_args_unknown || {
+    # This formatter assumes that the time elapsed was less than 24 hours.
+    # That is a reasonable assumption here.
+    set -l date_args \
+        (date_timestamp_args (math $wall_clock_final - $wall_clock_initial))
+    log 'completed successfully in' (date -u $date_args +%T)
+}
 
 if jobs -q
     log 'waiting for log reader processes to exit'

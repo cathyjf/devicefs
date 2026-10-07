@@ -111,6 +111,15 @@ function qualified_tag -a tag -V image_repository
 end
 
 argparse -n $argv0 '/tag=' '/latest' -- $argv || exit
+
+# The following statement is designed to work around a Fish defect experienced
+# in Fish version 4.9.3. When this program later sources `pipeline.fish`, the
+# Fish parser defectively relies on the global `argv` to determine whether the
+# program is syntactically valid, rather than relying on the `argv` passed to
+# the sourced program. Unsetting the global `argv` here prevents this defect
+# from occurring.
+set -ge argv
+
 if ! set -q _flag_tag
     set -l registry_tags (skopeo list-tags docker://{$image_repository}) || \
         die 'failed to list tags for' $image_repository 'to select a default tag'

@@ -35,6 +35,7 @@ option(DEVICEFS_TERMINAL_BUILD_PUBLISHER
 
 get_filename_component(DEVICEFS_ROOT "../.." ABSOLUTE)
 set(WIL_INCLUDE_DIR "${DEVICEFS_ROOT}/dependencies/wil/include")
+include("${DEVICEFS_ROOT}/misc/MsvcNativeCodeAnalysis.cmake")
 
 if(WIN32)
     enable_language(RC)
@@ -183,34 +184,13 @@ foreach(target IN LISTS DEVICEFS_TERMINAL_ANALYSIS_TARGETS)
         target_compile_options(${target} PRIVATE -Wall -Wextra -Werror)
         continue()
     endif()
-    set_target_properties(${target} PROPERTIES
-        VS_GLOBAL_EnableCppCoreCheck true
-        VS_GLOBAL_RunCodeAnalysis true
-        VS_GLOBAL_CodeAnalysisRuleSet "${DEVICEFS_ROOT}/.ruleset"
-        VS_GLOBAL_CAExcludePath
-            "${SIMDUTF_ANALYSIS_EXCLUDE_DIRECTORIES};${WIL_INCLUDE_DIR};$(CAExcludePath)"
+    devicefs_enable_native_code_analysis(${target}
+        ${SIMDUTF_ANALYSIS_EXCLUDE_DIRECTORIES} "${WIL_INCLUDE_DIR}"
     )
     target_include_directories(${target} SYSTEM PRIVATE "${WIL_INCLUDE_DIR}")
     target_compile_definitions(${target} PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _MSVC_STL_HARDENING=1
     )
-    target_compile_options(${target} PRIVATE
-        /W4 /WX /permissive-
-        /analyze:external- "SHELL:/analyze:log $(IntDir)"
-        /analyze:log:format:sarif /analyze:sarif:configuration
-        /analyze:log:compilerwarnings
-    )
 endforeach()
 
-if(WIN32 AND PROJECT_IS_TOP_LEVEL)
-    add_custom_target(check-terminal-code-analysis ALL
-        COMMAND "${POWERSHELL_EXECUTABLE}"
-            -NoProfile -NonInteractive -File
-            "${DEVICEFS_ROOT}/misc/Check-NativeCodeAnalysis.ps1"
-            -BuildDirectory "${CMAKE_CURRENT_BINARY_DIR}"
-            -Configuration "$<CONFIG>"
-        USES_TERMINAL
-        VERBATIM
-    )
-    add_dependencies(check-terminal-code-analysis ${DEVICEFS_TERMINAL_ANALYSIS_TARGETS})
-endif()
+devicefs_add_native_code_analysis_check()

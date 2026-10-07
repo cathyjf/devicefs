@@ -34,6 +34,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 include(misc/MsvcFlags.cmake)
+include(misc/MsvcNativeCodeAnalysis.cmake)
 include(misc/WindowsVersionInfo.cmake)
 
 option(DEVICEFS_MEASURE_FREE_CLUSTER_DATA
@@ -417,11 +418,8 @@ set(DEVICEFS_CODE_ANALYSIS_TARGETS
     backup-supervisor
 )
 foreach(target IN LISTS DEVICEFS_CODE_ANALYSIS_TARGETS)
-    set_target_properties(${target} PROPERTIES
-        VS_GLOBAL_EnableCppCoreCheck true
-        VS_GLOBAL_RunCodeAnalysis true
-        VS_GLOBAL_CodeAnalysisRuleSet "${CMAKE_CURRENT_SOURCE_DIR}/.ruleset"
-        VS_GLOBAL_CAExcludePath "${WINFSP_INCLUDE_DIR};${WIL_INCLUDE_DIR};$(CAExcludePath)"
+    devicefs_enable_native_code_analysis(${target}
+        "${WINFSP_INCLUDE_DIR}" "${WIL_INCLUDE_DIR}"
     )
     target_include_directories(${target} SYSTEM PRIVATE
         "${WIL_INCLUDE_DIR}" "${DISM_INCLUDE_DIR}" "${WINFSP_INCLUDE_DIR}"
@@ -431,12 +429,6 @@ foreach(target IN LISTS DEVICEFS_CODE_ANALYSIS_TARGETS)
     )
     target_compile_definitions(${target} PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _MSVC_STL_HARDENING=1
-    )
-    target_compile_options(${target} PRIVATE
-        /W4 /WX /permissive-
-        /analyze:external- "SHELL:/analyze:log $(IntDir)"
-        /analyze:log:format:sarif /analyze:sarif:configuration
-        /analyze:log:compilerwarnings
     )
 endforeach()
 
@@ -468,15 +460,4 @@ target_link_options(backup-supervisor PRIVATE
     /DELAYLOAD:wintrust.dll
 )
 
-add_custom_target(check-native-code-analysis ALL
-    COMMAND "${POWERSHELL_EXECUTABLE}"
-        -NoProfile -NonInteractive -File
-        "${CMAKE_CURRENT_SOURCE_DIR}/misc/Check-NativeCodeAnalysis.ps1"
-        -BuildDirectory "${CMAKE_CURRENT_BINARY_DIR}"
-        -Configuration "$<CONFIG>"
-    USES_TERMINAL
-    VERBATIM
-)
-add_dependencies(check-native-code-analysis
-    ${DEVICEFS_CODE_ANALYSIS_TARGETS}
-)
+devicefs_add_native_code_analysis_check()

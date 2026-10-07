@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<RuleSet Name="devicefs" Description="Code-analysis rules enforced by devicefs." ToolsVersion="10.0">
+<RuleSet Name="devicefs" Description="Native code analysis rules enforced by DeviceFs." ToolsVersion="10.0">
   <Include Path="NativeRecommendedRules.ruleset" Action="Error" />
   <Include Path="CppCoreCheckRules.ruleset" Action="Error" />
   <Rules AnalyzerId="Microsoft.Analyzers.NativeCodeAnalysis" RuleNamespace="Microsoft.Rules.Native">

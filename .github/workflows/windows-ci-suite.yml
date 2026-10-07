@@ -93,14 +93,9 @@ jobs:
             tar.exe -xOf $cabinet $payload.Member > $destination
           }
 
-      - &install_winfsp
-        name: Install WinFsp
-        uses: $/.github/actions/install-msi
+      - name: Install WinFsp
+        uses: $/.github/actions/install-winfsp
         background: true
-        with:
-          uri: https://github.com/winfsp/winfsp/releases/download/v2.2B4/winfsp-2.2.26215.msi
-          sha256: 2ECB5C89405488A95BBD8A01875E02C48534FD37BBDFD84488F7590464D65944
-          arguments: ADDLOCAL=F.Main,F.User,F.Developer
 
       - name: Wait for preparation to finish
         wait-all:
@@ -116,7 +111,7 @@ jobs:
 
       - name: Prepare native test artifact
         run: |
-          ./.github/scripts/Export-NativeTestArtifacts.ps1 `
+          .github/scripts/Export-NativeTestArtifacts.ps1 `
             -BuildDirectory "build/windows-${{ inputs.architecture }}" `
             -ArtifactDirectory "$env:RUNNER_TEMP/native-tests"
 
@@ -134,7 +129,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test_group: [snapshot-intervals, other]
+        test_group: [snapshot-intervals, install, other]
     defaults:
       run:
         shell: pwsh
@@ -145,6 +140,7 @@ jobs:
 
       # Some tests require a specific lock file to exist in the filesystem.
       - name: Create lock file
+        if: matrix.test_group != 'install'
         background: true
         run: |
           $credentials_dir = [IO.Path]::Combine( `
@@ -155,7 +151,10 @@ jobs:
 
       - uses: cathyjf/github-disable-ipv6@6d58ece49a7ce5790a9a9c1fe1baa6410bb57201
 
-      - *install_winfsp
+      - name: Install WinFsp
+        if: matrix.test_group != 'install'
+        uses: $/.github/actions/install-winfsp
+        background: true
 
       - name: Wait for checkout to finish
         wait: checkout
@@ -180,47 +179,34 @@ jobs:
       - name: Wait for preparation to finish
         wait-all:
 
-      # Some tests require standard input to be attached to a console.
-      # To satisfy that need, we run `ctest` inside `conhost.exe`.
-      # This requires creating a temporary file to collect the exit status.
       - name: Test
+        if: matrix.test_group != 'install'
         run: |
-          $env:DEVICEFS_CTEST_RESULT = Join-Path $env:RUNNER_TEMP `
-            "ctest-$([guid]::NewGuid()).exit"
           $test_filter = if ('${{ matrix.test_group }}' -eq 'snapshot-intervals') {
             '-R'
           } else {
             '-E'
           }
 
-          $start = [Diagnostics.ProcessStartInfo]::new('conhost.exe')
-          $start.UseShellExecute = $false
-          $start.CreateNoWindow = $true
-          $start.RedirectStandardInput = $true
-          foreach ($argument in @(
-            '--headless', 'pwsh', '-NoProfile', '-NonInteractive', '-Command',
-            (
-              '$ErrorActionPreference = "Stop"; ' +
-              'ctest --preset windows-${{ inputs.architecture }}-privileged ' +
-              "$test_filter '^devicefs_vss_snapshot_intervals$' --no-tests=error; " +
-              '$LASTEXITCODE | Set-Content -LiteralPath $env:DEVICEFS_CTEST_RESULT'
-            )
-          )) {
-            $start.ArgumentList.Add($argument)
-          }
+          .github/scripts/Run-ConsoleTests.ps1 (
+            'ctest --preset windows-${{ inputs.architecture }}-privileged ' +
+            "$test_filter '^devicefs_vss_snapshot_intervals$' --no-tests=error"
+          )
 
-          $process = [Diagnostics.Process]::Start($start)
-          try {
-            $process.WaitForExit()
-          } finally {
-            $process.Dispose()
+      - name: Test the installer
+        if: matrix.test_group == 'install'
+        run: |
+          $run = '.github/scripts/Run-ConsoleTests.ps1'
+          & $run ('build/windows-{0}/Release/backup-supervisor.exe --install' `
+            -f '${{ inputs.architecture }}')
+          if ($LASTEXITCODE -eq 0) {
+            & $run ('{0} --run-fish-program {1}' -f
+              'C:\Program` Files\devicefs\backup-supervisor.exe',
+              '.github/scripts/ensure-map-grpc-exists.fish')
           }
-
-          exit [int](Get-Content -LiteralPath $env:DEVICEFS_CTEST_RESULT `
-            -ErrorAction Stop)
 
       - name: Upload test logs
-        if: failure()
+        if: failure() && (matrix.test_group != 'install')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: windows-${{ inputs.architecture }}-${{ matrix.test_group }}-test-logs
@@ -293,7 +279,7 @@ jobs:
 
       - name: Test the DeviceFs `samba_rpc` helper under WSL1
         run: |
-          ./.github/scripts/Test-SambaRpcWsl.ps1 `
+          .github/scripts/Test-SambaRpcWsl.ps1 `
             -rootfs "$env:RUNNER_TEMP/wsl-rootfs/wsl-rootfs-${{ inputs.architecture }}.tar.gz" `
             -logs_directory "$env:RUNNER_TEMP/wsl-test-logs"
 

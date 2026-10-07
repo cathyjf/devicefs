@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Install WinFsp
+description: Install the WinFsp runtime and development files.
+
+runs:
+  using: composite
+  steps:
+    - name: Download, verify, and install WinFsp
+      uses: $/.github/actions/install-msi
+      with:
+        uri: https://github.com/winfsp/winfsp/releases/download/v2.2B4/winfsp-2.2.26215.msi
+        sha256: 2ECB5C89405488A95BBD8A01875E02C48534FD37BBDFD84488F7590464D65944
+        arguments: ADDLOCAL=F.Main,F.User,F.Developer

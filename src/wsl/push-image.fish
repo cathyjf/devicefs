@@ -26,21 +26,17 @@ end
 
 function prepend_timestamps
     prepend_line_with_timestamp (escape_argv $argv)
-    $argv[1] $argv[2..] 2>&1 | while read -l line
+    $argv 2>&1 | while read -l line
         prepend_line_with_timestamp $line
     end
     return $pipestatus[1]
 end
 
-function print_and_invoke
-    escape_argv $argv
-    $argv[1] $argv[2..]
-end
-
 # Define `podman_` and `skopeo_`.
 for i in podman skopeo
     function {$i}_ -V i
-        print_and_invoke $i $argv
+        escape_argv $i $argv
+        $i $argv
     end
 end
 
@@ -214,10 +210,8 @@ for builder in $builders
         (status dirname)
     set -l awk_argv awk -v builder={$builder} \
         '{print "[" builder "] " $0; fflush()}'
-    escape_argv $podman_argv | $awk_argv[1] $awk_argv[2..]
-    source (status dirname)/include/pipeline.fish \
-        (string join0 -- $podman_argv | psub) \
-        (string join0 -- $awk_argv | psub)
+    escape_argv $podman_argv | $awk_argv
+    source (status dirname)/include/pipeline.fish podman_argv awk_argv
     set -a podman_pids $__writer_pid
     set -a build_connections $hostname_
     set -a image_id_files $image_id_file

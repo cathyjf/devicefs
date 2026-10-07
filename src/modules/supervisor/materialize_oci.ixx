@@ -42,6 +42,7 @@ namespace {
 
 using namespace std::string_literals;
 using namespace std::string_view_literals;
+using namespace wil::literals;
 
 constexpr auto kWslRegistration =
     L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss";
@@ -450,6 +451,31 @@ auto ReplaceDistribution(
     }
 }
 
+auto TrySetWslUtf8EnvironmentVariable() noexcept {
+    constexpr auto env_variable_name = L"WSL_UTF8"_zv;
+    constexpr auto env_variable_value = L"1"_zv;
+    const auto print_error = [name = std::wstring_view{env_variable_name},
+        value = std::wstring_view{env_variable_value}](
+            const std::string_view operation_description,
+            auto &&...additional_arguments) noexcept {
+        devicefs::WriteToStream(devicefs::stderr, "backup-supervisor: {}\n",
+            TryConstructWinError(
+                "failed to set {}={} in the {}; continuing anyway",
+                name, value, operation_description, additional_arguments...));
+    };
+    if (const auto result = wil::reg::set_value_string_nothrow(
+            HKEY_CURRENT_USER, L"Environment",
+            env_variable_name.c_str(), env_variable_value.c_str());
+        FAILED(result)) {
+        print_error("profile of the internal Windows account",
+            ExplicitHresult{result});
+    }
+    if (!SetEnvironmentVariableW(env_variable_name.c_str(),
+        env_variable_value.c_str())) {
+        print_error("environment block of the current process");
+    }
+}
+
 } // namespace
 
 // Read the OCI layer marker for the distribution registered to the WSL process's
@@ -497,6 +523,7 @@ export [[nodiscard]] auto ReadWslOciLayerDigest(
 export [[nodiscard]] auto MaterializeOci(
     const std::string_view distribution,
     const std::optional<std::filesystem::path> &oci) -> bool {
+    TrySetWslUtf8EnvironmentVariable();
     const auto previous = FindDistribution(distribution);
     const auto previous_directory = [previous_ = previous.get(), distribution]
         -> std::filesystem::path {

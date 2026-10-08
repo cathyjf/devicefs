@@ -328,6 +328,25 @@ export [[nodiscard]] auto ResolvePersistentPaths() {
     return result;
 }
 
+export [[nodiscard]] auto BackupServiceExists() {
+    const auto manager = wil::unique_schandle{OpenSCManagerW(
+        nullptr, nullptr, SC_MANAGER_CONNECT)};
+    if (!manager) {
+        WinError("could not open the Service Control Manager");
+    }
+    const auto service = wil::unique_schandle{OpenServiceA(
+        manager.get(), kServiceName.data(), SERVICE_QUERY_STATUS)};
+    if (service) {
+        return true;
+    }
+    const auto error = GetLastError();
+    if (error == ERROR_SERVICE_DOES_NOT_EXIST) {
+        return false;
+    }
+    WinError("could not check whether service '{}' exists", kServiceName,
+        ExplicitWin32Error{error});
+}
+
 export auto InstallService(
     const std::chrono::milliseconds preshutdown_timeout) {
     auto manager = wil::unique_schandle(OpenSCManagerW(

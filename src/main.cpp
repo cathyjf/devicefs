@@ -17,6 +17,7 @@
 import std;
 import <clocale>;
 import <sal.h>;
+import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.supervisor;
@@ -31,6 +32,13 @@ import devicefs.supervisor;
 auto main(
     _Pre_satisfies_(argc > 0) const int argc,
     _In_reads_(argc) char **const argv) -> int {
+    const auto restore_prior_console_encoding = wil::scope_exit([
+        prior_cp = GetConsoleCP(), prior_output_cp = GetConsoleOutputCP()] {
+        std::ignore = SetConsoleCP(prior_cp);
+        std::ignore = SetConsoleOutputCP(prior_output_cp);
+    });
+    std::ignore = SetConsoleCP(CP_UTF8);
+    std::ignore = SetConsoleOutputCP(CP_UTF8);
     if (std::setlocale(LC_CTYPE, ".UTF8") == nullptr) {
         devicefs::WriteToStream(
             devicefs::stderr,

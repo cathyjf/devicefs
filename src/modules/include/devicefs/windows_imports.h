@@ -39,6 +39,7 @@ using PNTSTATUS = NTSTATUS *;
 #include <rpcasync.h>
 #include <sal.h>
 #include <sddl.h>
+#include <shellapi.h>
 #include <shlobj.h>
 #define SECURITY_WIN32
 #include <sspi.h>

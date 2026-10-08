@@ -92,16 +92,19 @@ private:
 
 } // namespace view_output_detail
 
-// Run `operation(cancellation_event)` while displaying its standard output
-// and standard error in a scrolling menu. Choosing Close signals cancellation
-// and waits for the operation to stop. If the operation finishes first, its
-// output remains visible until Close is chosen. Return its exit code, or an
-// empty optional if the user closes the menu while it is still running.
+// The scrolling menu displays standard output and standard error from
+// `operation()`, which runs on a worker thread. Close becomes available after
+// the worker finishes, and the output remains visible until the menu closes.
+// The return value is the operation's exit code.
+//
+// Escape or Ctrl+C while the operation is running invokes `cancel()`. If the
+// callback returns, this function waits for the worker and returns an empty
+// optional. A presentation failure also invokes `cancel()` during stack
+// unwinding, before waiting for a running worker.
 // The caller keeps `terminal` and its `EnterScreen` owner alive for this call.
-export template <typename Operation, typename Header>
-[[nodiscard]] auto RunViewWithOutput(devicefs::terminal::WindowsConsole &terminal,
-    const HANDLE cancellation_event,
-    Operation operation, const Header draw_header) -> std::optional<int> {
+export template <typename Operation, typename Header, typename Cancellation>
+[[nodiscard]] auto RunOperationWithOutput(devicefs::terminal::WindowsConsole &terminal,
+    Operation operation, const Header draw_header, Cancellation cancel) -> std::optional<int> {
     using namespace std::chrono_literals;
     const auto path = TemporarySystemDirectoryPath("devicefs-view-output");
     // Declaring `remove_file` before `output` makes deletion happen after
@@ -112,12 +115,18 @@ export template <typename Operation, typename Header>
     });
     auto output = view_output_detail::ViewOutput{path};
     auto view = devicefs::terminal::OutputMenu{};
-    view.SetCommands(std::array{devicefs::terminal::OutputCommand{0, "Close"}});
-    auto task = std::async(std::launch::async, std::move(operation), cancellation_event);
-    // Destruction of `task` waits for the operation. If reading or displaying
-    // output throws, this guard requests cancellation before that wait begins.
-    auto cancel_on_failure = wil::scope_exit([cancellation_event] noexcept {
-        std::ignore = SetEvent(cancellation_event);
+    auto task = std::async(std::launch::async, std::move(operation));
+    // The destructor of `task` waits for its worker. This guard is destroyed
+    // first, giving `cancel()` a chance to stop the worker before that wait.
+    auto cancel_on_failure = wil::scope_exit([&task, &cancel] noexcept {
+        if (task.valid() && (task.wait_for(0ms) != std::future_status::ready)) {
+            try {
+                cancel();
+            } catch (...) {
+                // The presentation failure remains the reported error even if
+                // requesting cancellation also fails.
+            }
+        }
     });
     auto finished = false;
     auto result = std::optional<int>{};
@@ -139,20 +148,18 @@ export template <typename Operation, typename Header>
                 menu.AppendLine(error.what());
             }
             finished = true;
-            menu.AppendLine("The backup view operation has finished.");
+            menu.SetCommands(std::array{devicefs::terminal::OutputCommand{0, "Close"}});
         });
+    cancel_on_failure.release();
     if (!finished) {
-        if (!SetEvent(cancellation_event)) {
-            WinError("failed to request closing the backup view");
-        }
+        cancel();
         try {
             std::ignore = task.get();
         } catch (...) {
-            // An exception during shutdown must not replace the user's
-            // cancellation result.
+            // The result remains cancellation even if the worker fails
+            // while shutting down.
         }
     }
-    cancel_on_failure.release();
     if (failure) {
         std::rethrow_exception(failure);
     }

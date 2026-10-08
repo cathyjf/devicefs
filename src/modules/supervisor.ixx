@@ -39,6 +39,7 @@ import devicefs.supervisor.process_diagnostics;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.vshadow;
 import devicefs.supervisor.view_output;
+import devicefs.terminal.menu;
 import devicefs.terminal.transcoding;
 import devicefs.terminal.windows;
 import devicefs.vss_block_descriptors.cli;
@@ -805,8 +806,8 @@ struct SelectiveViewOptions {
     const auto cancellation_event = CreateCancellationEvent(nullptr);
     const auto &account = (view_user.shell_user && *view_user.shell_user)
         ? **view_user.shell_user : view_user.invoking_user;
-    return RunViewWithOutput(terminal, cancellation_event.get(),
-        [&options, &view_user, &account](const HANDLE cancellation_event) {
+    return RunOperationWithOutput(terminal,
+        [&options, &view_user, &account, cancellation_event = cancellation_event.get()] {
             if (!view_user.shell_user) {
                 devicefs::WriteToStream(devicefs::stdout,
                     "Information: Backup viewing will continue with inspection permission for the invoking user.\n"
@@ -840,6 +841,10 @@ struct SelectiveViewOptions {
                 namespace_name,
                 options.timestamp ? std::format("{}/{}", backup, *options.timestamp) : backup,
                 options.archive);
+        }, [cancellation_event = cancellation_event.get()] {
+            if (!SetEvent(cancellation_event)) {
+                WinError("failed to request closing the backup view");
+            }
         }).value_or(kCancelledExitCode);
 }
 
@@ -998,10 +1003,98 @@ auto RunServiceDispatcher() {
     return 0;
 }
 
+auto RunInstallerInScrollingView(auto &&terminal, auto &&screen) {
+    return RunOperationWithOutput(*terminal, [] {
+        InstallService(ServiceContext::kMinimumPreshutdownTimeout);
+        return 0;
+    }, [](auto &frame) {
+        frame.Write("DeviceFs Backup Supervisor\n"
+            "Install or update backup environment\n\n");
+    }, [&screen, &terminal] {
+        // A presentation failure is already propagating during unwinding.
+        // Returning allows the future's destructor to wait for installation,
+        // after which the original error reaches the caller.
+        if (std::uncaught_exceptions() != 0) {
+            return;
+        }
+        screen.reset();
+        terminal.reset();
+        ExitProcess(ERROR_CANCELLED);
+    }).value_or(kCancelledExitCode);
+}
+
+auto InvokeSelfAsAdministrator() {
+    const auto com_result = CoInitializeEx(
+        nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    const auto uninitialize = wil::unique_couninitialize_call{SUCCEEDED(com_result)};
+    if (FAILED(com_result)) {
+        WinError("failed to initialize COM before requesting administrator access",
+            ExplicitHresult{com_result});
+    }
+    const auto executable = CurrentExecutablePath();
+    auto launch = SHELLEXECUTEINFOW{
+        .cbSize = sizeof(SHELLEXECUTEINFOW),
+        .fMask = SEE_MASK_NOASYNC,
+        .lpVerb = L"runas",
+        .lpFile = executable.c_str(),
+        .nShow = SW_SHOWNORMAL,
+    };
+    if (!ShellExecuteExW(&launch)) {
+        WinError("failed to relaunch backup supervisor '{}' as an administrator",
+            std::wstring_view{executable.native()});
+    }
+}
+
+[[nodiscard]] auto RunMainMenu() {
+    const auto is_administrator = [] {
+        auto is_administrator = bool{};
+        const auto token_result = wil::test_token_membership_nothrow(
+            &is_administrator, nullptr, SECURITY_NT_AUTHORITY,
+            SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS);
+        if (FAILED(token_result)) {
+            devicefs::WriteToStream(
+                devicefs::stderr, "backup-supervisor: {}\n",
+                    TryConstructWinError(
+                        "failed to determine whether invoking user has "
+                        "administrator access; continuing anyway",
+                        ExplicitHresult{token_result}));
+            return true;
+        }
+        return is_administrator;
+    }();
+    if (!is_administrator) {
+        InvokeSelfAsAdministrator();
+        return 0;
+    }
+
+    std::ignore = GetForegroundConsoleInput(
+        "the main menu requires an attached console");
+    auto terminal = std::optional<devicefs::terminal::WindowsConsole>{std::in_place};
+    auto screen = terminal->EnterScreen();
+    if (!BackupServiceExists()) {
+        return RunInstallerInScrollingView(terminal, screen);
+    }
+    const auto entries = std::array{
+        "Install or update backup environment"sv,
+        "Close"sv,
+    };
+    const auto selection = devicefs::terminal::SelectMenuItem(*terminal,
+        [](auto &frame) {
+            frame.Write("DeviceFs Backup Supervisor\nMain menu\n\n");
+        }, entries);
+    if (selection == 0) {
+        return RunInstallerInScrollingView(terminal, screen);
+    }
+    return 0;
+}
+
 auto PrintHelp() noexcept {
     devicefs::WriteToStream(
         devicefs::stdout,
         "Usage:\n"
+        "  backup-supervisor.exe\n"
+        "      Request administrator access, then install or open the main menu.\n"
+        "  backup-supervisor.exe --help\n"
         "  backup-supervisor.exe --devicefs [devicefs arguments]\n"
         "  backup-supervisor.exe --backup-console\n"
         "  backup-supervisor.exe --foreground [--no-writers] "
@@ -1043,10 +1136,13 @@ export auto BackupSupervisorMain(
     const std::span<const std::string_view> arguments) -> int {
     try {
         if (arguments.empty()) {
+            return RunMainMenu();
+        }
+        const auto option = arguments.front();
+        if (option == "--help") {
             PrintHelp();
             return 0;
         }
-        const auto option = arguments.front();
         if (option == kVerifyOpenPgpDetachedSignatureOption) {
             return RunOciSignatureWorker(arguments.subspan(1));
         }

@@ -344,7 +344,8 @@ set(ARTIFACT_RESOURCE_SCRIPT
     "${CMAKE_CURRENT_BINARY_DIR}/backup-supervisor-artifacts.rc"
 )
 file(GENERATE OUTPUT "${ARTIFACT_RESOURCE_SCRIPT}" CONTENT
-    "START_PBS DEVICEFS_ARTIFACT \"${START_PBS}\"\n"
+    "1 ICON \"${CMAKE_CURRENT_SOURCE_DIR}/src/resources/devicefs.ico\"
+    START_PBS DEVICEFS_ARTIFACT \"${START_PBS}\""
 )
 target_sources(backup-supervisor PRIVATE "${ARTIFACT_RESOURCE_SCRIPT}")
 target_module_interfaces(backup-supervisor PRIVATE

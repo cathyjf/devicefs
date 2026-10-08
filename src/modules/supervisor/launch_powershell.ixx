@@ -38,8 +38,12 @@ using devicefs::terminal::Transcode;
 using namespace std::string_literals;
 using namespace std::string_view_literals;
 
-export constexpr auto kRegisterMsixOption = "--internal-register-msix"sv;
-export constexpr auto kPreparePowerShellProfileOption = "--internal-prepare-powershell-profile"sv;
+export constexpr auto kRegisterMsixOption =
+    "--internal-register-msix"sv;
+export constexpr auto kPreparePowerShellProfileOption =
+    "--internal-prepare-powershell-profile"sv;
+export constexpr auto kRunInWindowsTerminalOption =
+    "--internal-run-in-windows-terminal"sv;
 
 namespace {
 
@@ -126,10 +130,10 @@ function prompt {
     return true;
 }
 
-[[nodiscard]] auto FindAndPrepareMsixApplication(
-    const wil::zwstring_view username,
+[[nodiscard]] auto FindAndRegisterMsixApplication(
     const wil::zwstring_view package_family,
-    const std::wstring_view executable)
+    const std::wstring_view executable,
+    const auto &register_package)
     -> std::optional<std::filesystem::path> {
     const auto apartment = WinrtApartment{
         "could not initialize WinRT to find a console package", RO_INIT_MULTITHREADED};
@@ -164,17 +168,27 @@ function prompt {
         std::ranges::max(packages, {}, sortable_version);
     const auto location = selected.InstalledLocation().Path();
     // The package files are shared across users, but Windows requires the
-    // backup account to register the package before it can execute its programs.
-    // Register the exact Store-signed version selected above by running the
-    // installed supervisor as that account, and wait for it to finish before
-    // returning the executable to the interactive-console launcher.
-    if (!TryRunConsolePreparation(username,
-            std::format("MSIX registration of '{}'", Transcode<std::string>(package_family)),
-            std::string{kRegisterMsixOption},
-            Transcode<std::string>(selected.Id().FullName()))) {
+    // launching user to register the package before executing its programs.
+    // Registration finishes before the executable path reaches the launcher.
+    if (!register_package(selected.Id().FullName())) {
         return std::nullopt;
     }
     return std::filesystem::path(location.c_str()) / executable;
+}
+
+[[nodiscard]] auto PrepareBackupAccountMsixApplication(
+    const wil::zwstring_view username,
+    const wil::zwstring_view package_family,
+    const std::wstring_view executable)
+    -> std::optional<std::filesystem::path> {
+    return FindAndRegisterMsixApplication(package_family, executable,
+        [username, package_family](const auto &package_full_name) {
+            return TryRunConsolePreparation(username,
+                std::format("MSIX registration of '{}'",
+                    Transcode<std::string>(package_family)),
+                std::string{kRegisterMsixOption},
+                Transcode<std::string>(package_full_name));
+        });
 }
 
 [[nodiscard]] auto TryFindAndPrepareApplication(
@@ -200,7 +214,7 @@ function prompt {
         }
     }
     return TryFindAndPrepareApplication("PowerShell"sv, [username] {
-        return FindAndPrepareMsixApplication(
+        return PrepareBackupAccountMsixApplication(
             username, kPowerShellPackageFamily, L"pwsh.exe"sv);
     });
 }
@@ -211,9 +225,60 @@ function prompt {
         // Terminal's package manifest declares `wt.exe` as its command-line
         // entry point, so use that launcher from the selected package. See
         // <https://github.com/microsoft/terminal/blob/main/src/cascadia/CascadiaPackage/Package.appxmanifest>.
-        return FindAndPrepareMsixApplication(
+        return PrepareBackupAccountMsixApplication(
             username, kTerminalPackageFamily, L"wt.exe"sv);
     });
+}
+
+[[nodiscard]] auto WindowsTerminalCommandLine(
+    const std::filesystem::path &terminal,
+    const std::filesystem::path &executable) {
+    // The explicit executable keeps Terminal's profile selection from
+    // substituting another program. The new-window option overrides its
+    // preference for reusing a window.
+    // Terminal splits commands at semicolons even within quoted arguments,
+    // so semicolons in the executable path are escaped before applying
+    // ordinary Windows command-line quoting. See
+    // <https://github.com/microsoft/terminal/blob/main/src/cascadia/TerminalApp/AppCommandlineArgs.cpp>.
+    const auto terminal_shell = Transcode<std::string>(executable.native()) |
+        std::views::split(';') | std::views::join_with("\\;"sv) |
+        std::ranges::to<std::string>();
+    const auto arguments = std::array{
+        Transcode<std::string>(terminal.native()),
+        "-w"s, "new"s, "new-tab"s, "--"s, terminal_shell,
+    };
+    return Transcode<std::wstring>(wil::ArgvToCommandLine(arguments));
+}
+
+struct ProcessStartupError {
+    DWORD win_error;
+    DWORD exit_code;
+};
+
+[[nodiscard]] auto CheckProcessStartup(const HANDLE process)
+    -> std::expected<void, ProcessStartupError> {
+    constexpr auto kProcessStartWait = std::chrono::milliseconds{300};
+    std::this_thread::sleep_for(kProcessStartWait);
+    auto exit_code = DWORD{};
+    if (!GetExitCodeProcess(process, &exit_code)) {
+        return std::unexpected{
+            ProcessStartupError{.win_error = GetLastError()}};
+    } else if ((exit_code != STILL_ACTIVE) && (exit_code != 0)) {
+        return std::unexpected{ProcessStartupError{.exit_code = exit_code}};
+    }
+    return {};
+}
+
+auto WriteProcessStartupError(
+    const ProcessStartupError &error) noexcept {
+    if (error.win_error != 0) {
+        devicefs::WriteToStream(devicefs::stderr, "{}\n",
+            TryConstructWinError("",
+                ExplicitWin32Error{error.win_error}));
+    } else {
+        devicefs::WriteToStream(devicefs::stderr,
+            "Exit code: 0x{:08x}\n", error.exit_code);
+    }
 }
 
 } // namespace
@@ -318,14 +383,75 @@ export auto EnsureConsoleMsixRegistration(const wil::zwstring_view package_full_
         Transcode<std::string>(package_full_name), user_name);
 }
 
-export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) -> int {
-    struct ShellError {
-        DWORD win_error;
-        DWORD exit_code;
+export [[nodiscard]] auto LaunchSupervisorConsole() -> int {
+    const auto terminal = TryFindAndPrepareApplication("Windows Terminal"sv, [] {
+        return FindAndRegisterMsixApplication(
+            kTerminalPackageFamily, L"wt.exe"sv,
+            [](const auto &package_full_name) {
+                try {
+                    EnsureConsoleMsixRegistration(
+                        package_full_name.c_str());
+                } catch (const std::runtime_error &error) {
+                    devicefs::WriteToStream(devicefs::stderr,
+                        "backup-supervisor: could not prepare "
+                        "Windows Terminal: {}; "
+                        "using Windows Console Host\n", error.what());
+                    return false;
+                }
+                return true;
+            });
+        });
+    const auto executable = CurrentExecutablePath();
+    const auto try_console = [](
+        const std::filesystem::path &application,
+        std::wstring command, const DWORD flags)
+        -> std::expected<void, ProcessStartupError> {
+        auto startup = STARTUPINFOW{
+            .cb = sizeof(STARTUPINFOW),
+            .dwFlags = STARTF_USESHOWWINDOW,
+            .wShowWindow = SW_SHOWNORMAL,
+        };
+        auto process = wil::unique_process_information{};
+        if (!CreateProcessW(application.c_str(), command.data(), nullptr,
+                nullptr, FALSE, flags, nullptr, nullptr, &startup, &process)) {
+            return std::unexpected{
+                ProcessStartupError{.win_error = GetLastError()}};
+        }
+        return CheckProcessStartup(process.hProcess);
     };
+    if (terminal) {
+        const auto command =
+            WindowsTerminalCommandLine(*terminal, executable);
+        const auto status = try_console(*terminal, command, CREATE_NO_WINDOW);
+        if (status) {
+            return 0;
+        }
+        devicefs::WriteToStream(devicefs::stderr,
+            L"backup-supervisor: Windows Terminal could not be started "
+            L"with this command line:\n{}\n", std::wstring_view{command});
+        WriteProcessStartupError(status.error());
+        devicefs::WriteToStream(devicefs::stderr,
+            "Trying Windows Console Host instead.\n");
+    }
+    const auto command =
+        wil::ArgvToCommandLine(std::array{executable.native()});
+    if (const auto status =
+            try_console(executable, command, CREATE_NEW_CONSOLE); !status) {
+        if (status.error().exit_code != 0) {
+            return status.error().exit_code;
+        }
+        WinError("failed to launch the backup supervisor with command '{}'",
+            std::wstring_view{command},
+            ExplicitWin32Error{status.error().win_error});
+    }
+    return 0;
+}
+
+export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) -> int {
     const auto try_shell = [username](
         const std::filesystem::path &shell,
-        std::wstring command = {}) -> std::expected<void, ShellError> {
+        std::wstring command = {})
+        -> std::expected<void, ProcessStartupError> {
         auto startup = STARTUPINFOW{.cb = sizeof(STARTUPINFOW)};
         auto process = wil::unique_process_information{};
         // With zero creation flags, `CreateProcessWithLogonW` creates a new
@@ -339,17 +465,10 @@ export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) ->
                 LOGON_WITH_PROFILE, shell.c_str(),
                 command.empty() ? nullptr : command.data(), 0,
                 nullptr, nullptr, &startup, &process)) {
-            return std::unexpected{ShellError{.win_error = GetLastError()}};
+            return std::unexpected{
+                ProcessStartupError{.win_error = GetLastError()}};
         }
-        constexpr auto kProcessStartWait = std::chrono::milliseconds{300};
-        std::this_thread::sleep_for(kProcessStartWait);
-        auto exit_code = DWORD{};
-        if (!GetExitCodeProcess(process.hProcess, &exit_code)) {
-            return std::unexpected{ShellError{.win_error = GetLastError()}};
-        } else if ((exit_code != STILL_ACTIVE) && (exit_code != 0)) {
-            return std::unexpected{ShellError{.exit_code = exit_code}};
-        }
-        return {};
+        return CheckProcessStartup(process.hProcess);
     };
     // Package discovery and registration can overlap. `ResetBackupAccountPassword`
     // serializes each password reset with the logon that uses it.
@@ -364,21 +483,8 @@ export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) ->
     profile_preparation.get();
     if (powershell) {
         if (const auto terminal = terminal_preparation.get()) {
-            // Supplying the PowerShell executable explicitly keeps Terminal's
-            // profile selection from substituting another shell. The new-window
-            // option also overrides its preference for reusing a window.
-            // Terminal splits commands at semicolons even within quoted
-            // arguments, so escape any semicolons in a custom PowerShell path
-            // before applying ordinary Windows command-line quoting. See
-            // <https://github.com/microsoft/terminal/blob/main/src/cascadia/TerminalApp/AppCommandlineArgs.cpp>.
-            const auto terminal_shell = Transcode<std::string>(powershell->native()) |
-                std::views::split(';') | std::views::join_with("\\;"sv) |
-                std::ranges::to<std::string>();
-            const auto arguments = std::array{
-                Transcode<std::string>(terminal->native()), "-w"s, "new"s, "new-tab"s, "--"s, terminal_shell,
-            };
             const auto command =
-                Transcode<std::wstring>(wil::ArgvToCommandLine(arguments));
+                WindowsTerminalCommandLine(*terminal, *powershell);
             const auto status = try_shell(*terminal, command);
             if (status) {
                 return 0;
@@ -387,14 +493,7 @@ export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) ->
                 L"backup-supervisor: Windows Terminal for user '{}' could not "
                 L"be started with this command line:\n{}\n",
                 std::wstring_view{username}, std::wstring_view{command});
-            if (status.error().win_error != 0) {
-                devicefs::WriteToStream(devicefs::stderr, "{}\n",
-                    TryConstructWinError("",
-                        ExplicitWin32Error{status.error().win_error}));
-            } else {
-                devicefs::WriteToStream(devicefs::stderr,
-                    "Exit code: 0x{:08x}\n", status.error().exit_code);
-            }
+            WriteProcessStartupError(status.error());
             devicefs::WriteToStream(devicefs::stderr,
                 "Trying Windows Console Host instead.\n");
         }

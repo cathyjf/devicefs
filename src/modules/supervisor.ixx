@@ -1032,12 +1032,14 @@ auto InvokeSelfAsAdministrator() {
             ExplicitHresult{com_result});
     }
     const auto executable = CurrentExecutablePath();
+    const auto parameters = Transcode<std::wstring>(kRunInWindowsTerminalOption);
     auto launch = SHELLEXECUTEINFOW{
         .cbSize = sizeof(SHELLEXECUTEINFOW),
         .fMask = SEE_MASK_NOASYNC,
         .lpVerb = L"runas",
         .lpFile = executable.c_str(),
-        .nShow = SW_SHOWNORMAL,
+        .lpParameters = parameters.c_str(),
+        .nShow = SW_HIDE,
     };
     if (!ShellExecuteExW(&launch)) {
         WinError("failed to relaunch backup supervisor '{}' as an administrator",
@@ -1142,6 +1144,9 @@ export auto BackupSupervisorMain(
         if (option == "--help") {
             PrintHelp();
             return 0;
+        }
+        if (option == kRunInWindowsTerminalOption) {
+            return LaunchSupervisorConsole();
         }
         if (option == kVerifyOpenPgpDetachedSignatureOption) {
             return RunOciSignatureWorker(arguments.subspan(1));

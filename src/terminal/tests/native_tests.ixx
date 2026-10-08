@@ -11,6 +11,7 @@ module;
     #include <cerrno>
     #include <csignal>
     #include <cstdio>
+    #include <cstdlib>
     #include <string.h>
     #include <sys/ioctl.h>
     #include <sys/wait.h>
@@ -155,7 +156,11 @@ public:
     }
 
     [[nodiscard]] auto DevicePath() const -> std::span<const char> {
-        const auto path = ttyname(descriptors_[1]);
+        // The replica pathname is needed to open test consoles. On macOS,
+        // `ttyname` searches `/dev`, where other concurrent fixtures create
+        // and delete PTY entries. `ptsname` queries our primary directly instead.
+        // https://github.com/apple-oss-distributions/Libc/blob/71bbe350ab79eef58113991d817ccc6165061a64/gen/devname.c
+        const auto path = ptsname(descriptors_[0]);
         if (path == nullptr) {
             throw std::system_error(errno, std::generic_category(),
                 "could not identify the test pseudoterminal's device path");
@@ -177,7 +182,7 @@ public:
     auto Disconnect() -> void {
         if (close(std::exchange(descriptors_[0], -1)) < 0) {
             throw std::system_error(errno, std::generic_category(),
-                "could not close the test pseudoterminal's master descriptor");
+                "could not close the test pseudoterminal's primary descriptor");
         }
     }
 
@@ -210,7 +215,7 @@ public:
         Require(count == std::ssize(text), "could not supply the complete test input"sv);
     }
 
-    // Read the expected output from the pseudoterminal's master, including
+    // Read the expected output from the pseudoterminal's primary, including
     // restoration commands that bypass `TestConsole::Write`. A short read keeps
     // collecting bytes until the complete expected output can be compared.
     [[nodiscard]] auto ReadOutput(const std::size_t length) const -> std::string {
@@ -1420,11 +1425,11 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
 
 #ifndef _WIN32
 auto WithNativeInput(const auto &operation) -> void {
-    // Closing the controlling terminal's master sends `SIGHUP` to this session
+    // Closing the controlling terminal's primary sends `SIGHUP` to this session
     // leader. Ignoring it until after `NativeInput` is destroyed lets setup
     // exceptions reach `Test` instead of terminating during cleanup.
     const auto hangup = SetSignalHandlerScoped(SIGHUP, SIG_IGN);
-    // Creating the pseudoterminal after `fork` keeps its master descriptor out
+    // Creating the pseudoterminal after `fork` keeps its primary descriptor out
     // of the parent, whose copy would otherwise prevent disconnection.
     // Standard output and error remain connected to CTest rather than the
     // controlling terminal, keeping drawing codes out of results.

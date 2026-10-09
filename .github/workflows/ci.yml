@@ -49,7 +49,7 @@ jobs:
         background: true
         id: checkout
 
-      - uses: cathyjf/github-disable-ipv6@6d58ece49a7ce5790a9a9c1fe1baa6410bb57201
+      - uses: cathyjf/github-disable-ipv6@2026378964fe8479a001a02fdf043abe10a11846
 
       - name: Acquire toolchains
         run: |

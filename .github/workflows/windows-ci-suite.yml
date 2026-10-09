@@ -32,7 +32,7 @@ jobs:
           submodules: recursive
         background: true
 
-      - uses: cathyjf/github-disable-ipv6@6d58ece49a7ce5790a9a9c1fe1baa6410bb57201
+      - uses: cathyjf/github-disable-ipv6@2026378964fe8479a001a02fdf043abe10a11846
 
       - name: Acquire DISM SDK files
         background: true
@@ -149,7 +149,7 @@ jobs:
           [IO.File]::Open([IO.Path]::Combine($credentials_dir, `
             'pbs-vss-backup.lock'), [IO.FileMode]::OpenOrCreate).Dispose()
 
-      - uses: cathyjf/github-disable-ipv6@6d58ece49a7ce5790a9a9c1fe1baa6410bb57201
+      - uses: cathyjf/github-disable-ipv6@2026378964fe8479a001a02fdf043abe10a11846
 
       - name: Install WinFsp
         if: matrix.test_group != 'install'
@@ -222,7 +222,7 @@ jobs:
           - name: Set up artifact streaming
             uses: cathyjf/github-artifact-stream@77085ed8136f2d60636d1b2e76eae4485fd575e4
 
-          - uses: cathyjf/github-disable-ipv6@6d58ece49a7ce5790a9a9c1fe1baa6410bb57201
+          - uses: cathyjf/github-disable-ipv6@2026378964fe8479a001a02fdf043abe10a11846
 
       - name: Build and upload the WSL1 test rootfs
         # Specifying `bash` as the shell enables `pipefail`.
@@ -249,7 +249,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         background: true
 
-      - uses: cathyjf/github-disable-ipv6@6d58ece49a7ce5790a9a9c1fe1baa6410bb57201
+      - uses: cathyjf/github-disable-ipv6@2026378964fe8479a001a02fdf043abe10a11846
 
       # The `windows-2025-vs2026` runner includes WSL.
       # The `windows-11-vs2026-arm` runner does not include WSL.

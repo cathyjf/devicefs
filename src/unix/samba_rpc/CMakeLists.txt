@@ -227,7 +227,6 @@ if(BUILD_TESTING)
         REQUIRED
     )
     if(APPLE)
-        find_program(HDIUTIL_EXECUTABLE NAMES hdiutil REQUIRED)
         find_program(DISKUTIL_EXECUTABLE NAMES diskutil REQUIRED)
     elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         find_program(LOSETUP_EXECUTABLE NAMES losetup

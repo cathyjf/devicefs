@@ -73,7 +73,6 @@ $GrpcServerPath = [IO.Path]::Combine(
     $build_directory, 'rpcd_devicefs_grpc_test_server')
 if (-not $GrpcBacking) {
     if ($IsMacOS) {
-        $HdiutilPath = Get-CachedPath 'HDIUTIL_EXECUTABLE'
         $DiskutilPath = Get-CachedPath 'DISKUTIL_EXECUTABLE'
     } else {
         $LosetupPath = Get-CachedPath 'LOSETUP_EXECUTABLE'
@@ -230,10 +229,10 @@ try {
         $helper_backing = $socket
     } else {
         if ($IsMacOS) {
-            $attachment = @(& $HdiutilPath attach -nomount -readonly `
-                -imagekey diskimage-class=CRawDiskImage $backing)
+            $attachment = @(& $DiskutilPath image attach --noMount --readOnly `
+                $backing)
             if ($LASTEXITCODE -ne 0) {
-                throw "hdiutil attach failed:`n$($attachment | Out-String)"
+                throw "diskutil image attach failed:`n$($attachment | Out-String)"
             }
             $device =
                 ([string]($attachment | Select-Object -First 1)).Split()[0]

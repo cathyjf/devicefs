@@ -48,7 +48,7 @@ export [[nodiscard]] auto WaitForProcess(
 export [[nodiscard]] auto ProcessExitCode(const HANDLE process) {
     auto result = DWORD{};
     if (!GetExitCodeProcess(process, &result)) {
-        WinError("could not obtain a backup process exit code");
+        WinError("failed to obtain the child process exit code");
     }
     return result;
 }

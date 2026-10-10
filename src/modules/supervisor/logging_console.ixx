@@ -231,8 +231,13 @@ private:
     bool at_line_start_ = true;
 };
 
+template <typename Output>
+concept ConsoleOutputWriter = std::is_nothrow_invocable_r_v<
+    DWORD, const Output &, std::u8string_view>;
+
 [[nodiscard]] auto CopyConsoleOutput(
-    wil::unique_handle output, Log &log) noexcept {
+    wil::unique_handle output,
+    const ConsoleOutputWriter auto &write_output) noexcept {
     constexpr auto kBufferSize = DWORD{4096};
     auto buffer = std::array<char8_t, kBufferSize>{};
     auto first_error = DWORD{ERROR_SUCCESS};
@@ -250,7 +255,7 @@ private:
             return first_error;
         }
         if (first_error == ERROR_SUCCESS) {
-            first_error = log.WriteStream(
+            first_error = write_output(
                 filter.Remove(std::span{buffer}.first(read)));
         }
     }
@@ -258,49 +263,60 @@ private:
 
 export class LoggingConsole {
 public:
-    explicit LoggingConsole(Log &log) {
+    explicit LoggingConsole(ConsoleOutputWriter auto write_output) {
         if (!CreatePipe(input_read_.addressof(),
                 input_write_.addressof(), nullptr, 0)) {
-            WinError("could not create the pseudoconsole input channel");
+            WinError("failed to create the console input pipe");
         }
         auto output_read = wil::unique_handle{};
         if (!CreatePipe(output_read.addressof(),
                 output_write_.addressof(), nullptr, 0)) {
-            WinError("could not create the pseudoconsole output channel");
+            WinError("failed to create the console output pipe");
         }
         const auto result = CreatePseudoConsole(
             COORD{1000, 30}, input_read_.get(), output_write_.get(),
             0, console_.put());
         if (FAILED(result)) {
-            WinError("could not create the backup pseudoconsole",
+            WinError("failed to create a console for the program",
                 ExplicitHresult{result});
         }
         output_task_ = std::async(
-            std::launch::async, CopyConsoleOutput,
-            std::move(output_read), std::ref(log));
+            std::launch::async, CopyConsoleOutput<decltype(write_output)>,
+            std::move(output_read), std::move(write_output));
     }
 
+    // Start the fully qualified executable specified by `argv[0]`.
     [[nodiscard]] auto StartProcess(
-        HANDLE job,
-        const wil::zstring_view application,
-        std::string &command) {
+        const auto &argv,
+        const DWORD flags = 0,
+        auto &&...additional_attributes) {
         const auto attributes = ProcessAttributeList{
             std::tuple{PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-                console_.get(), sizeof(HPCON)},
-            std::tuple{PROC_THREAD_ATTRIBUTE_JOB_LIST,
-                &job, sizeof(job)}};
+                console_.get(), sizeof(console_.get())},
+            std::forward<decltype(additional_attributes)>(
+                additional_attributes)...};
+        // When the parent's standard streams are redirected, Windows can give
+        // those same streams to the child even with handle inheritance disabled.
+        // Setting `STARTF_USESTDHANDLES` while leaving the three handle fields
+        // null makes Windows connect the child's standard streams to the
+        // pseudoconsole.
+        // This workaround was suggested and reported to work in:
+        // https://github.com/microsoft/terminal/discussions/15814
         auto startup = STARTUPINFOEXA{
-            .StartupInfo = {.cb = sizeof(STARTUPINFOEXA)},
+            .StartupInfo = {
+                .cb = sizeof(STARTUPINFOEXA),
+                .dwFlags = STARTF_USESTDHANDLES,
+            },
             .lpAttributeList = attributes.get(),
         };
+        auto command = wil::ArgvToCommandLine(argv);
         auto process = wil::unique_process_information{};
-        if (!CreateProcessA(application.c_str(), command.data(),
+        if (!CreateProcessA(argv.front().c_str(), command.data(),
                 nullptr, nullptr, FALSE,
-                CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
+                flags | EXTENDED_STARTUPINFO_PRESENT,
                 nullptr, nullptr,
                 &startup.StartupInfo, &process)) {
-            WinError("could not start backup orchestrator '{}'",
-                std::string_view{application});
+            WinError("failed to start program '{}'", argv.front());
         }
         input_read_.reset();
         output_write_.reset();
@@ -312,7 +328,7 @@ public:
         console_.reset();
         const auto error = output_task_.get();
         if (error != ERROR_SUCCESS) {
-            WinError("could not capture the backup pseudoconsole output",
+            WinError("failed to record the program's console output",
                 ExplicitWin32Error{error});
         }
     }

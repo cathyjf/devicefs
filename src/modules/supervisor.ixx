@@ -54,7 +54,8 @@ using namespace wil::literals;
 
 constexpr auto kCancellationEventName =
     "Local\\devicefs-backup-stop"_zv;
-constexpr auto kOrchestrateOption = "--orchestrate"sv;
+constexpr auto kOrchestrateOption = "--orchestrate"_zv;
+constexpr auto kRunInConsoleOption = "--internal-run-in-console"sv;
 
 [[nodiscard]] auto CreateCancellationEvent(
     _In_opt_z_ const char *const name) {
@@ -161,14 +162,17 @@ struct BackupProcess {
 };
 
 [[nodiscard]] auto StartOrchestrator(Log &log) {
-    auto console = LoggingConsole(log);
+    auto console = LoggingConsole([&log](const std::u8string_view output) noexcept {
+        return log.WriteStream(output);
+    });
     auto job = CreateChildJob();
     const auto supervisor = Transcode<std::string>(CurrentExecutablePath().native());
     const auto arguments = std::array{
-        std::string_view{supervisor}, kOrchestrateOption};
-    auto command = wil::ArgvToCommandLine(arguments);
+        wil::zstring_view{supervisor}, kOrchestrateOption};
     auto process = console.StartProcess(
-        job.get(), wil::zstring_view(supervisor), command);
+        arguments, CREATE_SUSPENDED,
+        std::tuple{PROC_THREAD_ATTRIBUTE_JOB_LIST,
+            job.addressof(), sizeof(job.get())});
     return BackupProcess{
         .console = std::move(console),
         .process = std::move(process),
@@ -725,6 +729,36 @@ struct SelectiveViewOptions {
         });
 }
 
+[[nodiscard]] auto RunInConsoleMode(
+    const std::span<const std::string_view> arguments) {
+    if ((arguments.size() < 2) || (arguments.front() != "--")) {
+        throw std::invalid_argument(std::format(
+            "{} requires -- COMMAND [ARGUMENT ...]", kRunInConsoleOption));
+    }
+    auto console = LoggingConsole([](const std::u8string_view output) noexcept {
+        devicefs::WriteToStream(devicefs::stdout, output);
+        return ERROR_SUCCESS;
+    });
+    const auto process = console.StartProcess(
+        std::to_array<std::span<const std::string_view>>({
+            std::views::single(std::string_view{[command = arguments[1]] {
+                auto path = std::wstring{};
+                if (const auto status = wil::SearchPathW(nullptr,
+                        Transcode<wchar_t>(command).data(), L".exe", path);
+                    FAILED(status)) {
+                    WinError("failed to find executable '{}'",
+                        command, ExplicitHresult{status});
+                }
+                return Transcode<char>(path);
+            }()}),
+            arguments.subspan(2),
+        }) | std::views::join | std::ranges::to<std::vector<std::string>>());
+    if (WaitForSingleObject(process.hProcess, INFINITE) == WAIT_FAILED) {
+        WinError("failed to wait for '{}' to finish", arguments[1]);
+    }
+    return ProcessExitCode(process.hProcess);
+}
+
 [[nodiscard]] auto RunFishProgramMode(
     const std::span<const std::string_view> arguments) {
     if (arguments.empty() ||
@@ -1144,6 +1178,9 @@ export auto BackupSupervisorMain(
         if (option == "--help") {
             PrintHelp();
             return 0;
+        }
+        if (option == kRunInConsoleOption) {
+            return RunInConsoleMode(arguments.subspan(1));
         }
         if (option == kRunInWindowsTerminalOption) {
             return LaunchSupervisorConsole();

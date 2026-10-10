@@ -339,6 +339,10 @@ export auto VerifyOciLayerSignature(const std::string_view digest,
     }
 }
 
+// Verify the SHA-256 digest of the bytes read from `file`'s current position
+// through EOF. The caller remains responsible for closing the synchronous
+// read handle.
+//
 // The OCI layer descriptor identifies the stored blob, which may be compressed.
 // That digest is used for both version checks and signatures, so the file is
 // hashed before decompression; hashing the uncompressed tar stream would
@@ -346,26 +350,17 @@ export auto VerifyOciLayerSignature(const std::string_view digest,
 // https://github.com/opencontainers/image-spec/blob/v1.1.1/config.md#layer-diffid
 // `MaterializeOci` calls this after acquiring a replacement layer and before
 // importing it into WSL. A read failure or digest mismatch stops the import.
-export auto VerifyOciLayerFile(const std::filesystem::path &path,
+export auto VerifyOciLayerFile(
+    _Pre_satisfies_(file != INVALID_HANDLE_VALUE) const HANDLE file,
     const std::string_view digest) -> void {
     RequireSha256Digest(digest);
-    // Materialization retains a delete-on-close handle until WSL finishes
-    // importing the layer, so this reader must permit delete sharing.
-    const auto file = wil::unique_hfile{CreateFileW(path.c_str(), GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-        FILE_FLAG_SEQUENTIAL_SCAN, nullptr)};
-    if (!file) {
-        WinError("could not open OCI layer '{}' for hash verification",
-            std::wstring_view{path.native()});
-    }
     const auto hash = CreateHash(BCRYPT_SHA256_ALG_HANDLE, digest);
     auto buffer = std::vector<UCHAR>(64 * 1024);
     while (true) {
         auto received = DWORD{};
-        if (!ReadFile(file.get(), buffer.data(),
+        if (!ReadFile(file, buffer.data(),
                 wil::safe_cast_failfast<DWORD>(buffer.size()), &received, nullptr)) {
-            WinError("could not read OCI layer '{}' for hash verification",
-                std::wstring_view{path.native()});
+            WinError("failed to read the OCI layer for hash verification");
         }
         if (received == 0) {
             break;
@@ -379,7 +374,7 @@ export auto VerifyOciLayerFile(const std::filesystem::path &path,
     }
     if (actual != digest) {
         throw std::runtime_error(std::format(
-            "OCI layer '{}' has digest '{}'; expected '{}'",
-            path.string(), actual, digest));
+            "OCI layer digest mismatch: expected '{}'; computed '{}'",
+            digest, actual));
     }
 }

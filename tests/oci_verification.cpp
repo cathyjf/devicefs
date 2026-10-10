@@ -351,17 +351,29 @@ auto main(_Pre_satisfies_(argc > 0) const int argc,
             throw std::runtime_error("could not write the test layer");
         }
     };
+    const auto verify = [&file](const std::string_view digest) {
+        const auto input = wil::unique_hfile{CreateFileW(file.c_str(),
+            GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+            FILE_FLAG_SEQUENTIAL_SCAN, nullptr)};
+        if (!input) {
+            WinError("failed to open the test OCI layer '{}'",
+                std::wstring_view{file.native()});
+        }
+        VerifyOciLayerFile(input.get(), digest);
+    };
     write("");
-    VerifyOciLayerFile(file, "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    verify("sha256:"
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     write("abc");
     constexpr auto abc_digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-    VerifyOciLayerFile(file, abc_digest);
+    verify(abc_digest);
     write("abd");
-    RequireFailure([&] { VerifyOciLayerFile(file, abc_digest); });
+    RequireFailure([&] { verify(abc_digest); });
     write("ab");
-    RequireFailure([&] { VerifyOciLayerFile(file, abc_digest); });
+    RequireFailure([&] { verify(abc_digest); });
     write(std::string(128 * 1024 + 17, 'X'));
-    VerifyOciLayerFile(file, "sha256:7e7ec2f56ff62147f68ebf5a1739ba6229e72ebca4824500acb364a087a3ca15");
+    verify("sha256:"
+        "7e7ec2f56ff62147f68ebf5a1739ba6229e72ebca4824500acb364a087a3ca15");
     std::println("OCI signature, malformed-packet, and streamed layer-hash checks passed.");
     return 0;
 } catch (const std::exception &error) {

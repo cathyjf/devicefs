@@ -245,7 +245,8 @@ auto ExtractArchiveMemberToHandle(
     auto file = wil::unique_hfile{CreateFileW(path.c_str(),
         GENERIC_READ | DELETE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, CREATE_NEW, FILE_FLAG_DELETE_ON_CLOSE, nullptr)};
+        nullptr, CREATE_NEW,
+        FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_SEQUENTIAL_SCAN, nullptr)};
     if (!file) {
         WinError("failed to create temporary file '{}'",
             std::wstring_view{path.native()});
@@ -625,7 +626,7 @@ export [[nodiscard]] auto MaterializeOci(
             distribution, *digest);
         return true;
     }
-    VerifyOciLayerFile(rootfs, *digest);
+    VerifyOciLayerFile(rootfs_file.get(), *digest);
     if (!oci) {
         devicefs::WriteToStream(devicefs::stdout,
             "backup-supervisor: verified that root filesystem '{}' has "

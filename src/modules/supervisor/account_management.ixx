@@ -193,7 +193,7 @@ constexpr auto kWslRegistration =
         return false;
     }
     if (error != NERR_Success) {
-        WinError("could not create internal Windows account '{}'",
+        WinError("failed to create internal Windows account '{}'",
             std::wstring_view{username.c_str(), username.size()},
             ExplicitWin32Error{error});
     }
@@ -216,24 +216,28 @@ auto HideAccountFromLogonScreen(const wil::zwstring_view username) noexcept {
     }
 }
 
-auto EnsureWslDistributionDirectory(
-    const wil::zwstring_view username,
-    const std::filesystem::path &directory) {
+[[nodiscard]] auto GetInternalWindowsAccountSid(
+    const wil::zwstring_view username) {
     auto information = std::unique_ptr<USER_INFO_23,
         wil::function_deleter<decltype(&NetApiBufferFree), NetApiBufferFree>>{};
     const auto error = NetUserGetInfo(
         nullptr, username.c_str(), 23, wil::out_param_ptr<BYTE **>(information));
     if (error != NERR_Success) {
-        WinError("could not query the SID for internal Windows account '{}'",
+        WinError("failed to query the SID for internal Windows account '{}'",
             std::wstring_view{username.c_str(), username.size()},
             ExplicitWin32Error{error});
     }
     auto sid = wil::unique_hlocal_ansistring{};
     if (!ConvertSidToStringSidA(information->usri23_user_sid, sid.addressof())) {
-        WinError("could not format the SID for internal Windows account '{}'",
+        WinError("failed to format the SID for internal Windows account '{}'",
             std::wstring_view{username.c_str(), username.size()});
     }
+    return sid;
+}
 
+auto EnsureWslDistributionDirectory(
+    const std::string_view sid,
+    const std::filesystem::path &directory) {
     // A newly created directory is owned by the built-in Administrators group.
     // SYSTEM and that group have full control; the internal backup account can
     // read and write the directory. It does not inherit permissions from
@@ -244,9 +248,9 @@ auto EnsureWslDistributionDirectory(
     auto descriptor = wil::unique_hlocal_security_descriptor{};
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
             std::format("O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGW;;;{})",
-                sid.get()).c_str(),
+                sid).c_str(),
             SDDL_REVISION_1, descriptor.addressof(), nullptr)) {
-        WinError("could not create the security descriptor for WSL directory '{}'",
+        WinError("failed to create the security descriptor for WSL directory '{}'",
             std::wstring_view{directory.native()});
     }
     auto attributes = SECURITY_ATTRIBUTES{
@@ -258,7 +262,7 @@ auto EnsureWslDistributionDirectory(
     }
     const auto directory_error = GetLastError();
     if (directory_error != ERROR_ALREADY_EXISTS) {
-        WinError("could not create WSL directory '{}'",
+        WinError("failed to create WSL directory '{}'",
             std::wstring_view{directory.native()},
             ExplicitWin32Error{directory_error});
     }
@@ -272,7 +276,7 @@ auto EnsureWslDistributionDirectory(
     if (!GetSecurityDescriptorDacl(
             descriptor.get(), &present, &dacl, &defaulted)) {
         WinError(
-            "could not extract the DACL from the new security descriptor for "
+            "failed to extract the DACL from the new security descriptor for "
             "WSL directory '{}'",
             std::wstring_view{directory.native()});
     }
@@ -282,7 +286,7 @@ auto EnsureWslDistributionDirectory(
         DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
         nullptr, nullptr, dacl, nullptr);
     if (update_error != ERROR_SUCCESS) {
-        WinError("could not update the access grants for WSL directory '{}'",
+        WinError("failed to update the access grants for WSL directory '{}'",
             std::wstring_view{directory.native()},
             ExplicitWin32Error{update_error});
     }
@@ -604,14 +608,40 @@ export auto EnsureInternalWindowsAccountAndEnvironment(
     const std::filesystem::path &installed_executable,
     const std::filesystem::path &wsl_directory) {
     auto account_preparation = std::async(std::launch::async, [username, &wsl_directory] {
-        if (CreateAccountIfMissing(username)) {
+        const auto created = CreateAccountIfMissing(username);
+        const auto sid = GetInternalWindowsAccountSid(username);
+        if (created) {
             devicefs::WriteToStream(
                 devicefs::stdout,
                 L"backup-supervisor: created internal Windows account '{}'\n",
                 std::wstring_view{username.c_str(), username.size()});
+            // Create the user's profile while WSL preparation is running.
+            //
+            // A failed attempt is informative rather than fatal because
+            // profile creation will be attempted again when starting a process
+            // under the internal Windows account.
+            //
+            // We do not use the profile path returned by `CreateProfile`.
+            // Supplying a one-character array causes the function to fail with
+            // an insufficient buffer error, but only after already creating
+            // the profile. Therefore, we ignore this error. As mentioned, if
+            // profile creation truly fails, it will be attempted again later.
+            auto profile_path = std::array<wchar_t, 1>{};
+            if (const auto result = CreateProfile(
+                    Transcode<wchar_t>(sid.get()).data(),
+                    username.c_str(), profile_path.data(),
+                    CompileTimeCast<DWORD, profile_path.size()>());
+                FAILED(result) &&
+                    (result != HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER))) {
+                devicefs::WriteToStream(devicefs::stderr,
+                    L"backup-supervisor: failed to create the profile for "
+                    L"internal Windows account '{}'; continuing anyway: {}\n",
+                    std::wstring_view{username.c_str(), username.size()},
+                    TryConstructWinError("", ExplicitHresult{result}));
+            }
             HideAccountFromLogonScreen(username);
         }
-        EnsureWslDistributionDirectory(username, wsl_directory);
+        EnsureWslDistributionDirectory(sid.get(), wsl_directory);
     });
     auto winfsp_preparation = std::async(std::launch::async, EnsureWinFsp);
     auto package_preparation = std::async(std::launch::async, [] {

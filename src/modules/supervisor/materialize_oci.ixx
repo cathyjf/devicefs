@@ -197,23 +197,19 @@ auto RunCommand(
     }
 }
 
-auto ExtractArchiveMember(
+auto ExtractArchiveMemberToHandle(
     const std::filesystem::path &tar,
     const std::filesystem::path &archive,
     const std::string_view member,
-    const std::filesystem::path &destination) {
-    const auto file = wil::unique_hfile{CreateFileW(destination.c_str(),
-        GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)};
-    if (!file) {
-        WinError("could not create OCI extraction file '{}'",
-            std::wstring_view{destination.native()});
-    }
-    // OCI members are emitted to the handle above rather than restored at
-    // their archive paths. The layer therefore remains a tar archive for WSL
-    // to unpack with Linux filesystem semantics.
+    wil::unique_hfile destination) {
+    // OCI members are emitted to the handle rather than restored at their
+    // archive paths. The layer remains a tar archive for WSL to unpack with
+    // GNU/Linux filesystem semantics.
     RunCommand(std::array{
-        Transcode<std::string>(tar.native()), "-xOf"s, Transcode<std::string>(archive.native()), "--"s, std::string{member},
-    }, file.get());
+        Transcode<std::string>(tar.native()), "-xOf"s,
+        Transcode<std::string>(archive.native()), "--"s, std::string{member}
+    }, destination.get());
+    return destination;
 }
 
 [[nodiscard]] auto BlobMember(std::string digest) {
@@ -237,29 +233,62 @@ auto ExtractArchiveMember(
     return Transcode<std::string>(layers.GetObjectAt(0).GetNamedString(L"digest"));
 }
 
+// Create a delete-on-close temporary file, and return a read/delete handle
+// followed by a write handle.
+//
+// Separate handles allow the write handle to be closed without deleting the
+// file. The written file can then be consumed by another read operation while
+// the read/delete handle remains open.
+[[nodiscard]] auto CreateTemporaryFileWithSeparateHandles(
+    const std::filesystem::path &path)
+    -> std::pair<wil::unique_hfile, wil::unique_hfile> {
+    auto file = wil::unique_hfile{CreateFileW(path.c_str(),
+        GENERIC_READ | DELETE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, CREATE_NEW, FILE_FLAG_DELETE_ON_CLOSE, nullptr)};
+    if (!file) {
+        WinError("failed to create temporary file '{}'",
+            std::wstring_view{path.native()});
+    }
+    auto writer = wil::unique_hfile{ReOpenFile(file.get(), GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_DELETE, 0)};
+    if (!writer) {
+        WinError("failed to open temporary file '{}' for writing",
+            std::wstring_view{path.native()});
+    }
+    return {std::move(file), std::move(writer)};
+}
+
 [[nodiscard]] auto ReadOciLayerDigest(
     const std::filesystem::path &tar,
     const std::filesystem::path &archive,
     const std::filesystem::path &directory) -> std::optional<std::string> {
     const auto apartment = WinrtApartment{
         "could not initialize WinRT to read the OCI image metadata"};
-    const auto read_metadata = [&](const std::string_view member) {
+    const auto read_metadata = [&tar, &archive, &directory](
+        const std::string_view member) {
         const auto path = directory / "metadata.json";
-        ExtractArchiveMember(tar, archive, member, path);
-        const auto source = ReadEntireFile(path);
-        if (!source) {
-            WinError("failed to open or read the OCI metadata: {}",
-                std::wstring_view{path.native()}, source.error());
-        }
-        return winrt::Windows::Data::Json::JsonObject::Parse(Transcode<std::wstring>(*source));
+        auto [file, writer] = CreateTemporaryFileWithSeparateHandles(path);
+        ExtractArchiveMemberToHandle(tar, archive, member, std::move(writer));
+        return winrt::Windows::Data::Json::JsonObject::Parse(
+            Transcode<std::wstring>([&path] {
+                auto source = ReadEntireFile(path, true);
+                if (!source) {
+                    WinError("failed to open or read the OCI metadata: {}",
+                        std::wstring_view{path.native()}, source.error());
+                }
+                return std::move(*source);
+            }()));
     };
     try {
         const auto manifests = read_metadata("index.json").GetNamedArray(L"manifests");
         return OciLayerDigest(read_metadata(BlobMember(Transcode<std::string>(
-            manifests.GetObjectAt(0).GetNamedString(L"digest")))), Transcode<std::string>(archive.native()));
+            manifests.GetObjectAt(0).GetNamedString(L"digest")))),
+            Transcode<std::string>(archive.native()));
     } catch (const winrt::hresult_error &error) {
         WinError("could not read OCI image metadata from '{}': {}",
-            std::wstring_view{archive.native()}, std::wstring_view{error.message()},
+            std::wstring_view{archive.native()},
+            std::wstring_view{error.message()},
             ExplicitHresult{error.code()});
     }
 }
@@ -281,7 +310,8 @@ auto ExtractArchiveMember(
 
 [[nodiscard]] auto DownloadGhcrRootfsIfChanged(
     const std::filesystem::path &rootfs,
-    const std::optional<std::string> &previous_digest) -> std::optional<std::string> {
+    const std::optional<std::string> &previous_digest)
+    -> std::pair<std::optional<std::string>, wil::unique_hfile> {
     using namespace winrt::Windows::Foundation;
     using namespace winrt::Windows::Web::Http::Headers;
 
@@ -356,11 +386,11 @@ auto ExtractArchiveMember(
         }
     }();
     if (!layer) {
-        return std::nullopt;
+        return {};
     }
     const auto &[layer_url, digest, descriptor] = *layer;
     if (previous_digest && (digest == *previous_digest)) {
-        return digest;
+        return {digest, wil::unique_hfile{}};
     }
     const auto signature = [&] {
         try {
@@ -379,11 +409,13 @@ auto ExtractArchiveMember(
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: downloading the linux/{} root filesystem from '{}'\n",
         Transcode<std::string>(architecture), image);
-    const auto bytes = DownloadFile(client, layer_url, rootfs);
+    auto [file, writer] = CreateTemporaryFileWithSeparateHandles(rootfs);
+    const auto bytes = DownloadFileIntoHandle(
+        client, layer_url, rootfs, writer.get());
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: downloaded the root filesystem from '{}' ({:.2f} MiB)\n",
         image, bytes / (1024.0 * 1024.0));
-    return digest;
+    return {digest, std::move(file)};
 }
 
 auto ReplaceDistribution(
@@ -554,7 +586,9 @@ export [[nodiscard]] auto MaterializeOci(
         std::filesystem::temp_directory_path() /
             std::format("devicefs-oci-{}", UniqueName())};
     const auto rootfs = temporary.Path() / "rootfs.tar";
-    const auto digest = [&]() -> std::optional<std::string> {
+    const auto [digest, rootfs_file] =
+        [&oci, &rootfs, &previous_digest, &temporary, distribution]()
+        -> std::pair<std::optional<std::string>, wil::unique_hfile> {
         if (!oci) {
             return DownloadGhcrRootfsIfChanged(rootfs, previous_digest);
         }
@@ -572,13 +606,15 @@ export [[nodiscard]] auto MaterializeOci(
             Transcode<std::string>(archive.native()), distribution);
         const auto layer = ReadOciLayerDigest(tar, archive, temporary.Path());
         if (!layer) {
-            return std::nullopt;
+            return {};
         }
         devicefs::WriteToStream(devicefs::stdout,
             "backup-supervisor: extracting the root filesystem from '{}'\n",
             Transcode<std::string>(archive.native()));
-        ExtractArchiveMember(tar, archive, BlobMember(*layer), rootfs);
-        return layer;
+        auto [file, writer] = CreateTemporaryFileWithSeparateHandles(rootfs);
+        ExtractArchiveMemberToHandle(tar, archive, BlobMember(*layer),
+            std::move(writer));
+        return {layer, std::move(file)};
     }();
     if (!digest) {
         return false;

@@ -233,7 +233,7 @@ auto EnsureWinFsp() -> bool {
         name, url);
     try {
         const auto client = MakeUncachedHttpClient();
-        const auto bytes = DownloadFile(client,
+        const auto bytes = DownloadFileIntoPath(client,
             winrt::Windows::Foundation::Uri{Transcode<std::wstring>(url)}, destination);
         devicefs::WriteToStream(devicefs::stdout,
             "backup-supervisor: downloaded '{}' ({:.2f} MiB)\n",
@@ -307,7 +307,7 @@ auto InstallWslPackage() -> bool {
             std::wstring_view{release.GetNamedString(L"tag_name")},
             std::wstring_view{name}, std::wstring_view{download_url.AbsoluteUri()});
         const auto destination = directory.Path() / "wsl.msi";
-        const auto bytes = DownloadFile(client, download_url, destination);
+        const auto bytes = DownloadFileIntoPath(client, download_url, destination);
         devicefs::WriteToStream(devicefs::stdout,
             L"backup-supervisor: downloaded '{}' ({:.2f} MiB)\n",
             std::wstring_view{name}, bytes / (1024.0 * 1024.0));

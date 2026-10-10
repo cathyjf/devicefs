@@ -23,13 +23,15 @@ import <devicefs/common.h>;
 
 // Read an entire file as bytes, or return the captured CRT I/O error from opening or
 // reading it. Other readers are permitted, but writers are excluded while the
-// file is open. `String` can select a secure allocator for sensitive contents.
+// file is open. If `temporary` is true, use delete-on-close mode with delete
+// sharing. `String` can select a secure allocator for sensitive contents.
 export template <class String = std::string>
-[[nodiscard]] auto ReadEntireFile(const std::filesystem::path &path)
+[[nodiscard]] auto ReadEntireFile(
+    const std::filesystem::path &path, const bool temporary = false)
     -> std::expected<String, ExplicitCrtIoError> {
     ClearCrtIoError();
     const auto file = wil::unique_file{
-        _wfsopen(path.c_str(), L"rb", _SH_DENYWR)};
+        _wfsopen(path.c_str(), temporary ? L"rbD" : L"rb", _SH_DENYWR)};
     if (!file) {
         return std::unexpected{ExplicitCrtIoError{}};
     }

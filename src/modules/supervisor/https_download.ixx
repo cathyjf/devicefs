@@ -29,11 +29,50 @@ export module devicefs.supervisor.https_download;
 
 import std;
 import <devicefs/common.h>;
+import <devicefs/windows_imports.h>;
 import <devicefs/winrt_imports.h>;
 import devicefs.stream_writer;
 import devicefs.terminal.transcoding;
 
 using devicefs::terminal::Transcode;
+
+namespace {
+
+using namespace winrt::Windows::Foundation;
+using namespace winrt::Windows::Storage::Streams;
+
+// Adapt a borrowed synchronous file handle for WinRT stream-copy operations.
+// The caller keeps the handle alive until the copy completes. Closing this
+// adapter detaches it from the file without closing the caller's handle.
+class NativeFileOutputStream
+    : public winrt::implements<NativeFileOutputStream, IOutputStream, IClosable> {
+public:
+    explicit NativeFileOutputStream(
+        _Pre_satisfies_(file != INVALID_HANDLE_VALUE) const HANDLE file)
+        : file_{file} {}
+
+    auto WriteAsync(const IBuffer &buffer)
+        -> IAsyncOperationWithProgress<std::uint32_t, std::uint32_t> {
+        auto written = DWORD{};
+        winrt::check_bool(WriteFile(file_, buffer.data(), buffer.Length(),
+            &written, nullptr));
+        co_return written;
+    }
+
+    auto FlushAsync() -> IAsyncOperation<bool> {
+        winrt::check_bool(FlushFileBuffers(file_));
+        co_return true;
+    }
+
+    auto Close() noexcept -> void {
+        file_ = INVALID_HANDLE_VALUE;
+    }
+
+private:
+    HANDLE file_;
+};
+
+} // namespace
 
 // Return an HTTP client with caching disabled.
 //
@@ -51,19 +90,18 @@ export [[nodiscard]] auto MakeUncachedHttpClient() {
 // HTTP and storage operations wait synchronously, which C++/WinRT permits
 // only in a multithreaded apartment. The caller owns that apartment so it
 // also outlives the supplied HTTP client.
-export [[nodiscard]] auto DownloadFile(
+// The caller keeps the synchronous write handle `output` alive until return.
+// The path `destination` is used only for progress messages and diagnostics.
+export [[nodiscard]] auto DownloadFileIntoHandle(
     const winrt::Windows::Web::Http::HttpClient &client,
     const winrt::Windows::Foundation::Uri &url,
-    const std::filesystem::path &destination) -> std::uint64_t {
+    const std::filesystem::path &destination,
+    const HANDLE output) -> std::uint64_t {
     using namespace winrt::Windows::Foundation;
-    using namespace winrt::Windows::Storage;
     using namespace winrt::Windows::Storage::Streams;
     using namespace winrt::Windows::Web::Http;
 
     try {
-        const auto folder = StorageFolder::GetFolderFromPathAsync(
-            destination.parent_path().native()).get();
-        const auto file = folder.CreateFileAsync(destination.filename().native()).get();
         const auto response = client.GetAsync(
             url, HttpCompletionOption::ResponseHeadersRead).get();
         response.EnsureSuccessStatusCode();
@@ -78,23 +116,24 @@ export [[nodiscard]] auto DownloadFile(
                     ? (received / (16 * 1024 * 1024) >= step)
                     : ((step < 10) &&
                         (received >= (total / 10) * step + (total % 10) * step / 10))) {
-                    if (next->compare_exchange_weak(step, step + 1)) {
-                        if (total == 0) {
-                            devicefs::WriteToStream(devicefs::stdout,
-                                "backup-supervisor: download '{}' received {} MiB\n",
-                                name, step * 16);
-                        } else {
-                            devicefs::WriteToStream(devicefs::stdout,
-                                "backup-supervisor: download '{}' {}% complete\n",
-                                name, step * 10);
-                        }
-                        ++step;
+                    if (!next->compare_exchange_weak(step, step + 1)) {
+                        continue;
                     }
+                    if (total == 0) {
+                        devicefs::WriteToStream(devicefs::stdout,
+                            "backup-supervisor: download '{}' received {} MiB\n",
+                            name, step * 16);
+                    } else {
+                        devicefs::WriteToStream(devicefs::stdout,
+                            "backup-supervisor: download '{}' {}% complete\n",
+                            name, step * 10);
+                    }
+                    ++step;
                 }
             }};
         const auto copy = RandomAccessStream::CopyAndCloseAsync(
             response.Content().ReadAsInputStreamAsync().get(),
-            file.OpenAsync(FileAccessMode::ReadWrite).get());
+            winrt::make<NativeFileOutputStream>(output));
         try {
             copy.Progress(progress);
         } catch (const winrt::hresult_error &error) {
@@ -109,10 +148,25 @@ export [[nodiscard]] auto DownloadFile(
             "backup-supervisor: download '{}' 100% complete\n", name);
         return bytes;
     } catch (const winrt::hresult_error &error) {
-        WinError("could not download '{}' to '{}': {}",
+        WinError("failed to download '{}' to '{}': {}",
             std::wstring_view{url.AbsoluteUri()},
             std::wstring_view{destination.native()},
             std::wstring_view{error.message()},
             ExplicitHresult{error.code()});
     }
+}
+
+// Create or replace `destination` and download into it.
+export [[nodiscard]] auto DownloadFileIntoPath(
+    const winrt::Windows::Web::Http::HttpClient &client,
+    const winrt::Windows::Foundation::Uri &url,
+    const std::filesystem::path &destination) -> std::uint64_t {
+    const auto file = wil::unique_hfile{CreateFileW(destination.c_str(),
+        GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, nullptr)};
+    if (!file) {
+        WinError("failed to create download destination '{}'",
+            std::wstring_view{destination.native()});
+    }
+    return DownloadFileIntoHandle(client, url, destination, file.get());
 }

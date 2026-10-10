@@ -349,8 +349,11 @@ export auto VerifyOciLayerSignature(const std::string_view digest,
 export auto VerifyOciLayerFile(const std::filesystem::path &path,
     const std::string_view digest) -> void {
     RequireSha256Digest(digest);
+    // Materialization retains a delete-on-close handle until WSL finishes
+    // importing the layer, so this reader must permit delete sharing.
     const auto file = wil::unique_hfile{CreateFileW(path.c_str(), GENERIC_READ,
-        FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr)};
+        FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_SEQUENTIAL_SCAN, nullptr)};
     if (!file) {
         WinError("could not open OCI layer '{}' for hash verification",
             std::wstring_view{path.native()});

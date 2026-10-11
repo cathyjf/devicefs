@@ -141,14 +141,15 @@ namespace internal {
         return kCancelledExitCode;
     }
 
-    // WinFsp creates and removes the mount directory itself. An empty directory
-    // left behind by an interrupted backup would prevent the next mount, so
-    // remove it before starting the new DeviceFs child.
+    // WinFsp creates and removes the mount directory itself. Interrupted
+    // backups can leave an empty directory or a junction whose volume is gone.
+    // `symlink_status` sees that junction even when its target no longer exists.
     const auto mount_target = std::filesystem::path{DeviceFsProcess::kMountTarget};
-    if (const auto status = std::filesystem::status(mount_target);
-        std::filesystem::exists(status)) {
-        if (!std::filesystem::is_directory(status) ||
-            !std::filesystem::is_empty(mount_target)) {
+    if (std::filesystem::exists(std::filesystem::symlink_status(mount_target))) {
+        const auto status = std::filesystem::status(mount_target);
+        if (std::filesystem::exists(status) &&
+            (!std::filesystem::is_directory(status) ||
+                !std::filesystem::is_empty(mount_target))) {
             throw std::runtime_error(std::format(
                 "cannot start the backup because its mount path '{}' already "
                 "exists and is not an empty directory.\n"

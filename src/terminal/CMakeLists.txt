@@ -151,7 +151,14 @@ if(DEVICEFS_TERMINAL_BUILD_TESTS)
         add_test(NAME devicefs_terminal_${index}
             COMMAND devicefs-terminal-test --self-test "${index}"
         )
-        if(WIN32)
+        if(WIN32 AND DEVICEFS_TERMINAL_USE_SUPERVISOR_FOR_NATIVE_TESTS)
+            add_test(NAME devicefs_terminal_native_${index}
+                COMMAND backup-supervisor --internal-run-in-console --
+                    "${POWERSHELL_EXECUTABLE}" -NoProfile -NonInteractive
+                    -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/native_windows.ps1"
+                    -Executable "$<TARGET_FILE:devicefs-terminal-test>"
+                    -Index "${index}")
+        elseif(WIN32)
             add_test(NAME devicefs_terminal_native_${index}
                 COMMAND "${CMAKE_COMMAND}"
                     "-DPOWERSHELL_EXECUTABLE=${POWERSHELL_EXECUTABLE}"

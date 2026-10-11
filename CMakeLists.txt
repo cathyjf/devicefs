@@ -318,7 +318,6 @@ add_executable(backup-supervisor
     src/modules/supervisor/native_backup/incremental_diagnostics.cpp
     src/modules/filesystem_allocation_changes.cpp
 )
-add_dependencies(devicefs-oci-verification-test backup-supervisor)
 devicefs_version_info(backup-supervisor "DeviceFs Backup Supervisor" 0.1)
 target_link_libraries(backup-supervisor PRIVATE
     ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-rpc-block-device

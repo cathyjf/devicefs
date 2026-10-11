@@ -1168,45 +1168,58 @@ auto PrintHelp() noexcept {
 
 } // namespace
 
+namespace supervisor_detail::hashing {
+
+// Compute a 64-bit FNV-1a hash.
+[[nodiscard]] constexpr auto Hash(
+    const std::string_view text) noexcept -> std::uint64_t {
+    return std::ranges::fold_left(text, std::uint64_t{0xcbf29ce484222325},
+        [](const auto result, const char character) noexcept {
+            return (result ^ std::bit_cast<unsigned char>(character)) *
+                0x100000001b3;
+        });
+}
+
+[[nodiscard]] consteval auto operator""_h(
+    _In_ const char *const text, const std::size_t size) noexcept {
+    return Hash(std::string_view{text, size});
+}
+
+} // namespace supervisor_detail::hashing
+
 export auto BackupSupervisorMain(
     const std::span<const std::string_view> arguments) -> int {
+    using namespace supervisor_detail::hashing;
+
     if (arguments.empty()) {
         return RunMainMenu();
     }
     const auto option = arguments.front();
-    if (option == "--help") {
+    switch (Hash(option)) {
+    case "--help"_h:
         PrintHelp();
         return 0;
-    }
-    if (option == kRunInConsoleOption) {
+    case Hash(kRunInConsoleOption):
         return RunInConsoleMode(arguments.subspan(1));
-    }
-    if (option == kRunInWindowsTerminalOption) {
+    case Hash(kRunInWindowsTerminalOption):
         return LaunchSupervisorConsole();
-    }
-    if (option == kVerifyOpenPgpDetachedSignatureOption) {
+    case Hash(kVerifyOpenPgpDetachedSignatureOption):
         return RunOciSignatureWorker(arguments.subspan(1));
-    }
-    if (option == "--devicefs") {
+    case "--devicefs"_h:
         return devicefs::Main(arguments);
-    }
-    if (option == "--vss-descriptor-dump") {
+    case "--vss-descriptor-dump"_h:
         return VssDescriptorDumpMain(arguments.subspan(1));
-    }
-    if (option == "--backup-console") {
+    case "--backup-console"_h:
         return RunBackupConsole();
-    }
-    if (option == "--run-fish-program") {
+    case "--run-fish-program"_h:
         return RunFishProgramMode(arguments.subspan(1));
-    }
-    if (option == kRunServiceOption) {
+    case Hash(kRunServiceOption):
         if (arguments.size() != 1) {
             throw std::invalid_argument(
                 "--run-service does not accept arguments");
         }
         return RunServiceDispatcher();
-    }
-    if (option == kOrchestrateOption) {
+    case Hash(kOrchestrateOption): {
         if (arguments.size() != 1) {
             throw std::invalid_argument(
                 "--orchestrate does not accept arguments");
@@ -1218,55 +1231,46 @@ export auto BackupSupervisorMain(
         return RunNativeBackup(
             cancellation_event.get(), false, {}, std::nullopt);
     }
-    if (option == "--view") {
+    case "--view"_h:
         return RunSelectiveViewMode(
             ParseSelectiveViewOptions(
                 std::span{arguments}.subspan(1)));
-    }
-    if (option == "--list-backups") {
+    case "--list-backups"_h:
         return RunListBackups(
             ParseNamespaceOverride(
                 std::span{arguments}.subspan(1), "--list-backups"));
-    }
-    if (option == "--browse") {
+    case "--browse"_h:
         return RunBrowseMode(ParseNamespaceOverride(
             std::span{arguments}.subspan(1), "--browse"));
-    }
-    if (option == "--query-manifest") {
+    case "--query-manifest"_h:
         return RunQueryManifest(
             ParseNamespaceOverride(
                 std::span{arguments}.subspan(1), "--query-manifest"));
-    }
-    if (option == "--inventory-vhdx") {
+    case "--inventory-vhdx"_h:
         if (arguments.size() != 2) {
             throw std::invalid_argument(
                 "--inventory-vhdx requires exactly one DEVICE");
         }
         return RunInventoryVhdx(std::string{arguments[1]});
-    }
-    if (option == "--verify-filesystems") {
+    case "--verify-filesystems"_h:
         return RunVerifyFilesystems(arguments);
-    }
-    if ((option == "--incremental-stats") ||
-        (option == "--incremental-verify") ||
-        (option == "--expose-synthetic-backup") ||
-        (option == "--verify-synthetic-backup")) {
+    case "--incremental-stats"_h:
+    case "--incremental-verify"_h:
+    case "--expose-synthetic-backup"_h:
+    case "--verify-synthetic-backup"_h:
         return RunIncrementalDiagnosticMode(
             ParseIncrementalDiagnosticOptions(arguments));
-    }
-    if (option == "--install") {
+    case "--install"_h:
         if (arguments.size() != 1) {
             throw std::invalid_argument(
                 "--install does not accept arguments");
         }
         InstallService(ServiceContext::kMinimumPreshutdownTimeout);
         return 0;
-    }
-    if (option == kPreparePowerShellProfileOption) {
+    case Hash(kPreparePowerShellProfileOption):
         EnsurePowerShellProfile();
         return 0;
-    }
-    if (option == kRegisterMsixOption) {
+    case Hash(kRegisterMsixOption):
         if (arguments.size() != 2) {
             throw std::invalid_argument(std::format(
                 "{} requires exactly one PACKAGE_FULL_NAME", kRegisterMsixOption));
@@ -1274,8 +1278,7 @@ export auto BackupSupervisorMain(
         EnsureConsoleMsixRegistration(
             Transcode<std::wstring>(arguments[1]));
         return 0;
-    }
-    if (option == kMaterializeOciOption) {
+    case Hash(kMaterializeOciOption): {
         if (arguments.size() < 2) {
             throw std::invalid_argument(std::format(
                 "{} requires DISTRIBUTION", kMaterializeOciOption));
@@ -1289,10 +1292,11 @@ export auto BackupSupervisorMain(
             std::optional{std::filesystem::path{arguments[3]}} : std::nullopt;
         return MaterializeOci(arguments[1], oci) ? 0 : 1;
     }
-    if (option == "--foreground") {
+    case "--foreground"_h:
         return RunForeground(
             ParseForegroundOptions(std::span{arguments}.subspan(1)));
+    default:
+        throw std::invalid_argument(std::format(
+            "unknown backup-supervisor argument: {}", option));
     }
-    throw std::invalid_argument(std::format(
-        "unknown backup-supervisor argument: {}", option));
 }

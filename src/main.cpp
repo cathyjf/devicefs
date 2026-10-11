@@ -51,9 +51,12 @@ auto main(
             std::span{argv, argv + argc} |
             std::ranges::to<std::vector<std::string_view>>();
         return BackupSupervisorMain(std::span{arguments}.subspan(1));
-    } catch (const std::runtime_error &error) {
+    } catch (const std::exception &error) {
         devicefs::WriteToStream(
             devicefs::stderr, "{}: {}\n", argv[0], error.what());
+        if (dynamic_cast<const std::invalid_argument *>(&error)) {
+            return 2;
+        }
         return 1;
     }
 }

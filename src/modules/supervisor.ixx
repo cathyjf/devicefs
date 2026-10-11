@@ -1170,135 +1170,129 @@ auto PrintHelp() noexcept {
 
 export auto BackupSupervisorMain(
     const std::span<const std::string_view> arguments) -> int {
-    try {
-        if (arguments.empty()) {
-            return RunMainMenu();
-        }
-        const auto option = arguments.front();
-        if (option == "--help") {
-            PrintHelp();
-            return 0;
-        }
-        if (option == kRunInConsoleOption) {
-            return RunInConsoleMode(arguments.subspan(1));
-        }
-        if (option == kRunInWindowsTerminalOption) {
-            return LaunchSupervisorConsole();
-        }
-        if (option == kVerifyOpenPgpDetachedSignatureOption) {
-            return RunOciSignatureWorker(arguments.subspan(1));
-        }
-        if (option == "--devicefs") {
-            return devicefs::Main(arguments);
-        }
-        if (option == "--vss-descriptor-dump") {
-            return VssDescriptorDumpMain(arguments.subspan(1));
-        }
-        if (option == "--backup-console") {
-            return RunBackupConsole();
-        }
-        if (option == "--run-fish-program") {
-            return RunFishProgramMode(arguments.subspan(1));
-        }
-        if (option == kRunServiceOption) {
-            if (arguments.size() != 1) {
-                throw std::invalid_argument(
-                    "--run-service does not accept arguments");
-            }
-            return RunServiceDispatcher();
-        }
-        if (option == kOrchestrateOption) {
-            if (arguments.size() != 1) {
-                throw std::invalid_argument(
-                    "--orchestrate does not accept arguments");
-            }
-            const auto persistent = ResolvePersistentPaths();
-            const auto backup_lock = AcquireBackupLock(
-                persistent.backup_lock);
-            const auto cancellation_event = OpenCancellationEvent();
-            return RunNativeBackup(
-                cancellation_event.get(), false, {}, std::nullopt);
-        }
-        if (option == "--view") {
-            return RunSelectiveViewMode(
-                ParseSelectiveViewOptions(
-                    std::span{arguments}.subspan(1)));
-        }
-        if (option == "--list-backups") {
-            return RunListBackups(
-                ParseNamespaceOverride(
-                    std::span{arguments}.subspan(1), "--list-backups"));
-        }
-        if (option == "--browse") {
-            return RunBrowseMode(ParseNamespaceOverride(
-                std::span{arguments}.subspan(1), "--browse"));
-        }
-        if (option == "--query-manifest") {
-            return RunQueryManifest(
-                ParseNamespaceOverride(
-                    std::span{arguments}.subspan(1), "--query-manifest"));
-        }
-        if (option == "--inventory-vhdx") {
-            if (arguments.size() != 2) {
-                throw std::invalid_argument(
-                    "--inventory-vhdx requires exactly one DEVICE");
-            }
-            return RunInventoryVhdx(std::string{arguments[1]});
-        }
-        if (option == "--verify-filesystems") {
-            return RunVerifyFilesystems(arguments);
-        }
-        if ((option == "--incremental-stats") ||
-            (option == "--incremental-verify") ||
-            (option == "--expose-synthetic-backup") ||
-            (option == "--verify-synthetic-backup")) {
-            return RunIncrementalDiagnosticMode(
-                ParseIncrementalDiagnosticOptions(arguments));
-        }
-        if (option == "--install") {
-            if (arguments.size() != 1) {
-                throw std::invalid_argument(
-                    "--install does not accept arguments");
-            }
-            InstallService(ServiceContext::kMinimumPreshutdownTimeout);
-            return 0;
-        }
-        if (option == kPreparePowerShellProfileOption) {
-            EnsurePowerShellProfile();
-            return 0;
-        }
-        if (option == kRegisterMsixOption) {
-            if (arguments.size() != 2) {
-                throw std::invalid_argument(std::format(
-                    "{} requires exactly one PACKAGE_FULL_NAME", kRegisterMsixOption));
-            }
-            EnsureConsoleMsixRegistration(
-                Transcode<std::wstring>(arguments[1]));
-            return 0;
-        }
-        if (option == kMaterializeOciOption) {
-            if (arguments.size() < 2) {
-                throw std::invalid_argument(std::format(
-                    "{} requires DISTRIBUTION", kMaterializeOciOption));
-            }
-            if ((arguments.size() != 2) &&
-                ((arguments.size() != 4) || (arguments[2] != "--oci"))) {
-                throw std::invalid_argument(std::format(
-                    "expected {} DISTRIBUTION [--oci FILENAME]", kMaterializeOciOption));
-            }
-            const auto oci = (arguments.size() == 4) ?
-                std::optional{std::filesystem::path{arguments[3]}} : std::nullopt;
-            return MaterializeOci(arguments[1], oci) ? 0 : 1;
-        }
-        if (option == "--foreground") {
-            return RunForeground(
-                ParseForegroundOptions(std::span{arguments}.subspan(1)));
-        }
-        throw std::invalid_argument(std::format(
-            "unknown backup-supervisor argument: {}", option));
-    } catch (const std::invalid_argument &error) {
-        devicefs::WriteToStream(
-            devicefs::stderr, "backup-supervisor: {}\n", error.what());
-        return 2;
+    if (arguments.empty()) {
+        return RunMainMenu();
     }
+    const auto option = arguments.front();
+    if (option == "--help") {
+        PrintHelp();
+        return 0;
+    }
+    if (option == kRunInConsoleOption) {
+        return RunInConsoleMode(arguments.subspan(1));
+    }
+    if (option == kRunInWindowsTerminalOption) {
+        return LaunchSupervisorConsole();
+    }
+    if (option == kVerifyOpenPgpDetachedSignatureOption) {
+        return RunOciSignatureWorker(arguments.subspan(1));
+    }
+    if (option == "--devicefs") {
+        return devicefs::Main(arguments);
+    }
+    if (option == "--vss-descriptor-dump") {
+        return VssDescriptorDumpMain(arguments.subspan(1));
+    }
+    if (option == "--backup-console") {
+        return RunBackupConsole();
+    }
+    if (option == "--run-fish-program") {
+        return RunFishProgramMode(arguments.subspan(1));
+    }
+    if (option == kRunServiceOption) {
+        if (arguments.size() != 1) {
+            throw std::invalid_argument(
+                "--run-service does not accept arguments");
+        }
+        return RunServiceDispatcher();
+    }
+    if (option == kOrchestrateOption) {
+        if (arguments.size() != 1) {
+            throw std::invalid_argument(
+                "--orchestrate does not accept arguments");
+        }
+        const auto persistent = ResolvePersistentPaths();
+        const auto backup_lock = AcquireBackupLock(
+            persistent.backup_lock);
+        const auto cancellation_event = OpenCancellationEvent();
+        return RunNativeBackup(
+            cancellation_event.get(), false, {}, std::nullopt);
+    }
+    if (option == "--view") {
+        return RunSelectiveViewMode(
+            ParseSelectiveViewOptions(
+                std::span{arguments}.subspan(1)));
+    }
+    if (option == "--list-backups") {
+        return RunListBackups(
+            ParseNamespaceOverride(
+                std::span{arguments}.subspan(1), "--list-backups"));
+    }
+    if (option == "--browse") {
+        return RunBrowseMode(ParseNamespaceOverride(
+            std::span{arguments}.subspan(1), "--browse"));
+    }
+    if (option == "--query-manifest") {
+        return RunQueryManifest(
+            ParseNamespaceOverride(
+                std::span{arguments}.subspan(1), "--query-manifest"));
+    }
+    if (option == "--inventory-vhdx") {
+        if (arguments.size() != 2) {
+            throw std::invalid_argument(
+                "--inventory-vhdx requires exactly one DEVICE");
+        }
+        return RunInventoryVhdx(std::string{arguments[1]});
+    }
+    if (option == "--verify-filesystems") {
+        return RunVerifyFilesystems(arguments);
+    }
+    if ((option == "--incremental-stats") ||
+        (option == "--incremental-verify") ||
+        (option == "--expose-synthetic-backup") ||
+        (option == "--verify-synthetic-backup")) {
+        return RunIncrementalDiagnosticMode(
+            ParseIncrementalDiagnosticOptions(arguments));
+    }
+    if (option == "--install") {
+        if (arguments.size() != 1) {
+            throw std::invalid_argument(
+                "--install does not accept arguments");
+        }
+        InstallService(ServiceContext::kMinimumPreshutdownTimeout);
+        return 0;
+    }
+    if (option == kPreparePowerShellProfileOption) {
+        EnsurePowerShellProfile();
+        return 0;
+    }
+    if (option == kRegisterMsixOption) {
+        if (arguments.size() != 2) {
+            throw std::invalid_argument(std::format(
+                "{} requires exactly one PACKAGE_FULL_NAME", kRegisterMsixOption));
+        }
+        EnsureConsoleMsixRegistration(
+            Transcode<std::wstring>(arguments[1]));
+        return 0;
+    }
+    if (option == kMaterializeOciOption) {
+        if (arguments.size() < 2) {
+            throw std::invalid_argument(std::format(
+                "{} requires DISTRIBUTION", kMaterializeOciOption));
+        }
+        if ((arguments.size() != 2) &&
+            ((arguments.size() != 4) || (arguments[2] != "--oci"))) {
+            throw std::invalid_argument(std::format(
+                "expected {} DISTRIBUTION [--oci FILENAME]", kMaterializeOciOption));
+        }
+        const auto oci = (arguments.size() == 4) ?
+            std::optional{std::filesystem::path{arguments[3]}} : std::nullopt;
+        return MaterializeOci(arguments[1], oci) ? 0 : 1;
+    }
+    if (option == "--foreground") {
+        return RunForeground(
+            ParseForegroundOptions(std::span{arguments}.subspan(1)));
+    }
+    throw std::invalid_argument(std::format(
+        "unknown backup-supervisor argument: {}", option));
 }

@@ -910,7 +910,6 @@ struct SelectiveViewOptions {
     const auto [input, console_mode] = GetForegroundConsoleInput(
         "--browse requires an attached console");
     auto catalog = std::optional<std::u8string>{};
-    devicefs::WriteToStream(devicefs::stdout, "Loading the backup catalog...\n");
     const auto result = RunForegroundOperation(input, console_mode,
         [&catalog, &namespace_override](const HANDLE cancellation_event) {
             catalog = RetrieveBackupCatalog(cancellation_event, namespace_override);
@@ -1122,24 +1121,25 @@ auto InvokeSelfAsAdministrator() {
             [&terminal, &screen] {
             RunInstallerInScrollingView(terminal, screen);
         }},
+        {"Browse backups"sv, [&terminal] {
+            std::ignore = RunBrowseMode(std::nullopt);
+            terminal->InvalidateFrame();
+        }},
         {"Close"sv, nullptr}
     });
     const auto keys = entries | std::views::keys |
         std::ranges::to<std::vector<std::string_view>>();
-    while (true) {
-        const auto selection = devicefs::terminal::SelectMenuItem(*terminal,
-            [](auto &frame) {
-                frame.Write("DeviceFs Backup Supervisor\nMain menu\n\n");
-            }, keys);
-        if (!selection.has_value()) {
-            return 0;
-        }
+    while (const auto selection =
+        devicefs::terminal::SelectMenuItem(*terminal, [](auto &frame) {
+            frame.Write("DeviceFs Backup Supervisor\nMain menu\n\n");
+        }, keys)) {
         const auto operation = entries.at(*selection).second;
         if (!operation) {
-            return 0;
+            break;
         }
         std::invoke(operation);
     }
+    return 0;
 }
 
 auto PrintHelp() noexcept {
@@ -1258,6 +1258,8 @@ export auto BackupSupervisorMain(
             ParseNamespaceOverride(
                 std::span{arguments}.subspan(1), "--list-backups"));
     case "--browse"_h:
+        devicefs::WriteToStream(devicefs::stdout,
+            "Loading the backup catalog...\n");
         return RunBrowseMode(ParseNamespaceOverride(
             std::span{arguments}.subspan(1), "--browse"));
     case "--query-manifest"_h:

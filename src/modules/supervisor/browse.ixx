@@ -348,7 +348,9 @@ export template <class RetrieveManifest>
         std::ranges::to<std::vector<std::string_view>>();
     auto group_index = 0uz;
     while (const auto group = Choose(terminal,
-            groups.empty() ? "No backups were found in this namespace or its descendants." : "Choose a backup group",
+            groups.empty() ?
+                "No backups were found in this namespace or its descendants." :
+                "Choose a backup group",
             group_names, group_index)) {
         group_index = *group;
         const auto name = group_names.at(*group);

@@ -841,11 +841,14 @@ struct SelectiveViewOptions {
     const auto &account = (view_user.shell_user && *view_user.shell_user)
         ? **view_user.shell_user : view_user.invoking_user;
     return RunOperationWithOutput(terminal,
-        [&options, &view_user, &account, cancellation_event = cancellation_event.get()] {
+        [&options, &view_user, &account,
+        cancellation_event = cancellation_event.get()] {
             if (!view_user.shell_user) {
                 devicefs::WriteToStream(devicefs::stdout,
-                    "Information: Backup viewing will continue with inspection permission for the invoking user.\n"
-                    "The optional account lookup for the desktop process could not be completed. Details: {}\n",
+                    "Information: Backup viewing will continue with inspection "
+                    "permission for the invoking user.\n"
+                    "The optional account lookup for the desktop process could "
+                    "not be completed. Details: {}\n",
                     view_user.shell_user.error());
             }
             const auto snapshot_override = options.snapshot_override
@@ -925,7 +928,8 @@ struct SelectiveViewOptions {
             const auto menu_input_mode = [input] {
                 auto mode = DWORD{};
                 if (!GetConsoleMode(input, &mode)) {
-                    WinError("could not read the menu's console input mode before downloading the manifest");
+                    WinError("could not read the menu's console input mode "
+                        "before downloading the manifest");
                 }
                 return mode;
             }();
@@ -1021,7 +1025,9 @@ auto WINAPI ServiceMain(
 
 auto RunServiceDispatcher() {
     [[gsl::suppress("type.3",
-        justification: "The SCM retains a mutable historical parameter for an input-only service name.")]]
+        justification:
+            "The SCM retains a mutable historical parameter for an input-only "
+            "service name.")]]
     auto *const service_name = const_cast<PSTR>(kServiceName.data());
     auto entries = std::array{
         SERVICE_TABLE_ENTRYA{
@@ -1110,18 +1116,30 @@ auto InvokeSelfAsAdministrator() {
     if (!BackupServiceExists()) {
         return RunInstallerInScrollingView(terminal, screen);
     }
-    const auto entries = std::array{
-        "Install or update backup environment"sv,
-        "Close"sv,
-    };
-    const auto selection = devicefs::terminal::SelectMenuItem(*terminal,
-        [](auto &frame) {
-            frame.Write("DeviceFs Backup Supervisor\nMain menu\n\n");
-        }, entries);
-    if (selection == 0) {
-        return RunInstallerInScrollingView(terminal, screen);
+    const auto entries = std::to_array<std::pair<
+        std::string_view, std::function<auto () -> void>>>({
+        {"Install or update backup environment"sv,
+            [&terminal, &screen] {
+            RunInstallerInScrollingView(terminal, screen);
+        }},
+        {"Close"sv, nullptr}
+    });
+    const auto keys = entries | std::views::keys |
+        std::ranges::to<std::vector<std::string_view>>();
+    while (true) {
+        const auto selection = devicefs::terminal::SelectMenuItem(*terminal,
+            [](auto &frame) {
+                frame.Write("DeviceFs Backup Supervisor\nMain menu\n\n");
+            }, keys);
+        if (!selection.has_value()) {
+            return 0;
+        }
+        const auto operation = entries.at(*selection).second;
+        if (!operation) {
+            return 0;
+        }
+        std::invoke(operation);
     }
-    return 0;
 }
 
 auto PrintHelp() noexcept {

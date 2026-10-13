@@ -1112,11 +1112,13 @@ auto InvokeSelfAsAdministrator() {
     });
     const auto keys = entries | std::views::keys |
         std::ranges::to<std::vector<std::string_view>>();
-    while (const auto selection =
+    auto selection = std::size_t{};
+    while (const auto maybe_selection =
         devicefs::terminal::SelectMenuItem(*terminal, [](auto &frame) {
             frame.Write("DeviceFs Backup Supervisor\nMain menu\n\n");
-        }, keys)) {
-        const auto operation = entries.at(*selection).second;
+        }, keys, {}, selection)) {
+        selection = *maybe_selection;
+        const auto operation = entries.at(selection).second;
         if (!operation) {
             break;
         }

@@ -834,11 +834,11 @@ struct SelectiveViewOptions {
         });
 }
 
-[[nodiscard]] auto RunSelectiveViewMode(
+[[nodiscard]] auto RunBackupViewInScrollingScreen(
     devicefs::terminal::WindowsConsole &terminal,
-    SelectiveViewOptions options, const BackupViewUser &view_user) {
+    SelectiveViewOptions options, BackupViewUser view_user) {
     const auto cancellation_event = CreateCancellationEvent(nullptr);
-    const auto &account = (view_user.shell_user && *view_user.shell_user)
+    auto &account = (view_user.shell_user && *view_user.shell_user)
         ? **view_user.shell_user : view_user.invoking_user;
     return RunOperationWithOutput(terminal,
         [&options, &view_user, &account,
@@ -851,20 +851,13 @@ struct SelectiveViewOptions {
                     "not be completed. Details: {}\n",
                     view_user.shell_user.error());
             }
-            const auto snapshot_override = options.snapshot_override
-                ? std::optional<std::string_view>{
-                    *options.snapshot_override}
-                : std::optional<std::string_view>{};
-            const auto timestamp = options.timestamp
-                ? std::optional<std::string_view>{*options.timestamp}
-                : std::optional<std::string_view>{};
             return RunSelectiveView(
                 cancellation_event,
-                account.information->User.Sid,
+                std::move(account.information),
                 account.account_name,
                 options.archive,
-                snapshot_override,
-                timestamp,
+                options.snapshot_override,
+                options.timestamp,
                 options.address,
                 options.namespace_override);
         }, [&options](auto &frame) {
@@ -886,24 +879,14 @@ struct SelectiveViewOptions {
 }
 
 [[nodiscard]] auto RunSelectiveViewMode(SelectiveViewOptions options) {
-    std::ignore = GetForegroundConsoleInput("--view requires an attached console");
-    auto terminal = devicefs::terminal::WindowsConsole{};
-    const auto screen = terminal.EnterScreen();
-    const auto view_user = [&options, &terminal] {
-        const auto namespace_name = options.namespace_override
-            ? (options.namespace_override->empty() ? std::string{"(root)"} :
-                Transcode<std::string>(*options.namespace_override))
-            : std::string{"(configured namespace)"};
-        const auto backup = options.snapshot_override.value_or("(default backup group)");
-        return SelectBackupViewUser(terminal, namespace_name,
-            options.timestamp ? std::format("{}/{}", backup, *options.timestamp) : backup,
-            options.archive);
-    }();
-    if (!view_user) {
-        return kCancelledExitCode;
-    }
-    return RunSelectiveViewMode(terminal, std::move(options),
-        *view_user);
+    const auto [input, console_mode] = GetForegroundConsoleInput(
+        "--view requires an attached console");
+    return RunForegroundOperation(input, console_mode,
+        [options = std::move(options)](const HANDLE cancellation_event) {
+            return RunSelectiveView(cancellation_event, {}, {},
+                options.archive, options.snapshot_override, options.timestamp,
+                options.address, options.namespace_override);
+        });
 }
 
 [[nodiscard]] auto RunBrowseMode(std::optional<std::u8string> namespace_override) {
@@ -920,7 +903,7 @@ struct SelectiveViewOptions {
     }
     auto terminal = devicefs::terminal::WindowsConsole{};
     const auto screen = terminal.EnterScreen();
-    const auto selection = SelectBackup(terminal, *catalog,
+    auto selection = SelectBackup(terminal, *catalog,
         [input](const std::u8string_view namespace_name, const std::string_view snapshot)
             -> std::optional<std::u8string> {
             auto manifest = std::u8string{};
@@ -952,11 +935,11 @@ struct SelectiveViewOptions {
     if (!selection) {
         return 0;
     }
-    return RunSelectiveViewMode(terminal, SelectiveViewOptions{
+    return RunBackupViewInScrollingScreen(terminal, SelectiveViewOptions{
         .archive = selection->archive,
         .snapshot_override = selection->snapshot,
         .namespace_override = selection->namespace_name,
-    }, selection->view_user);
+    }, std::move(selection->view_user));
 }
 
 [[nodiscard]] auto RunIncrementalDiagnosticMode(

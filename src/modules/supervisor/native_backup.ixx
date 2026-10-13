@@ -115,9 +115,11 @@ export [[nodiscard]] auto RetrieveBackupCatalog(
     return std::move(result->standard_output);
 }
 
+// An empty `view_user` selects the invoking user for the view-directory grants.
+// An empty `read_user` uses DeviceFs's default invoking-user access.
 export [[nodiscard]] auto RunSelectiveView(
     const HANDLE cancellation_event,
-    const PSID view_user,
+    wil::unique_tokeninfo_ptr<TOKEN_USER> view_user,
     const std::string_view read_user,
     const std::string_view archive,
     const std::optional<std::string_view> snapshot_override,

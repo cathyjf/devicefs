@@ -195,7 +195,7 @@ auto WaitForViewSession(
 
 [[nodiscard]] auto RunSelectiveView(
     const HANDLE cancellation_event,
-    const PSID view_user,
+    wil::unique_tokeninfo_ptr<TOKEN_USER> view_user,
     const std::string_view read_user,
     const std::string_view archive,
     const std::optional<std::string_view> snapshot_override,
@@ -206,14 +206,24 @@ auto WaitForViewSession(
         return internal::kCancelledExitCode;
     }
 
+    const auto user = view_user ? std::move(view_user) : [] {
+        auto information = wil::unique_tokeninfo_ptr<TOKEN_USER>{};
+        if (const auto result = wil::get_token_information_nothrow(
+                information, GetCurrentProcessToken()); FAILED(result)) {
+            WinError("could not identify the invoking user",
+                ExplicitHresult{result});
+        }
+        return information;
+    }();
     const auto port = std::to_string(
         internal::SelectTcpPortCandidate());
     auto devicefs_directory = internal::ViewDirectory{
-        "devicefs-view", view_user};
+        "devicefs-view", user->User.Sid};
     const auto devicefs_mount = devicefs_directory.Path() / "view";
-    const auto projected_vhdx = devicefs_mount / "view.vhdx";
+    constexpr auto vhdx_filename = "view.vhdx"sv;
+    const auto projected_vhdx = devicefs_mount / vhdx_filename;
     auto volume_directory = internal::ViewDirectory{
-        "devicefs-view-volume", view_user};
+        "devicefs-view-volume", user->User.Sid};
 
     devicefs::WriteToStream(
         devicefs::stdout,
@@ -249,7 +259,7 @@ auto WaitForViewSession(
 
     const auto source = std::array{
         internal::DeviceFsSource{
-            .name = "view.vhdx",
+            .name = std::string{vhdx_filename},
             .source = std::format(R"(\\\tcp:{}:{})", address, port),
         },
     };
@@ -278,7 +288,7 @@ auto WaitForViewSession(
     if (WaitForProcess(
             fish.Process(), std::chrono::milliseconds{0})) {
         throw std::runtime_error(std::format(
-            "the Linux view operation exited before the VHDX could be "
+            "the GNU/Linux view operation exited before the VHDX could be "
             "attached with code {}",
             ProcessExitCode(fish.Process())));
     }

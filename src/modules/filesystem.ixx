@@ -102,6 +102,7 @@ struct Options {
     bool cache = false;
     bool extended_dasd = true;
     bool synthetic_free_clusters = false;
+    [[msvc::no_unique_address]]
     std::optional<std::uint64_t> known_data_map_cluster_size;
     bool vhdx = false;
     bool help = false;

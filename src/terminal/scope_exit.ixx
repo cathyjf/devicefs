@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+module;
+
+#include "compat/attribute_compat.h"
+
 export module devicefs.terminal.scope_exit;
 
 import std;
@@ -38,7 +42,7 @@ public:
     }
 
 private:
-    Cleanup cleanup_;
+    ATTRIBUTE_NO_UNIQUE_ADDRESS Cleanup cleanup_;
     bool active_ = true;
 };
 

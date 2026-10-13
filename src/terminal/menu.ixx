@@ -3,7 +3,7 @@
 
 module;
 
-#include "compat/gsl_suppress.h"
+#include "compat/attribute_compat.h"
 
 export module devicefs.terminal.menu;
 
@@ -453,6 +453,7 @@ private:
 template <typename T, WidthPolicy Policy>
 struct MenuPresentation {
     std::optional<TerminalSize> terminal_size;
+    ATTRIBUTE_NO_UNIQUE_ADDRESS
     std::optional<Frame<T, Policy>> header;
     std::optional<MenuViewport> viewport;
 };

@@ -3,7 +3,7 @@
 
 module;
 
-#include "../compat/gsl_suppress.h"
+#include "../compat/attribute_compat.h"
 
 #ifdef _WIN32
     #include <devicefs/strsafe_compat.h>

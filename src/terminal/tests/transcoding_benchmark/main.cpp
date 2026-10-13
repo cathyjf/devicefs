@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include "../../compat/forceinline_compat.h"
-#include "../../compat/gsl_suppress.h"
+#include "../../compat/attribute_compat.h"
 
 #ifdef __GNUC__
     #define ATTRIBUTE_FLATTEN_FUNCTION __attribute__((flatten))

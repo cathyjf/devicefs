@@ -3,6 +3,8 @@
 
 module;
 
+#include "compat/attribute_compat.h"
+
 #include <cerrno>
 #include <fcntl.h>
 #include <sys/select.h>
@@ -380,6 +382,7 @@ private:
     const int descriptor_;
     decltype(unix_detail::CloseTerminalScoped(0)) connection_ =
         unix_detail::CloseTerminalScoped(descriptor_);
+    ATTRIBUTE_NO_UNIQUE_ADDRESS
     decltype(unix_detail::SetTerminalModeScoped(0)) modes_ =
         unix_detail::SetTerminalModeScoped(descriptor_);
     TerminalSize window_size_ = ReadWindowSize();

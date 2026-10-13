@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include "forceinline_compat.h"
+#include "attribute_compat.h"
 #include <cstdint>
 
 #ifndef _MSC_VER
@@ -18,8 +18,10 @@
 
     #if __has_builtin(__builtin_assume)
         #define __assume(condition) __builtin_assume(condition)
-    #elif __has_cpp_attribute(assume)
+    #elif __has_cpp_attribute(assume) >= 202207L
         #define __assume(condition) [[assume(condition)]]
+    #else
+        #define __assume(condition)
     #endif
 #endif
 

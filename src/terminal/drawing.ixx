@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+module;
+
+#include "compat/attribute_compat.h"
+
 export module devicefs.terminal.drawing;
 
 import std;
@@ -298,7 +302,7 @@ private:
 
     std::reference_wrapper<T> terminal_;
     int row_ = 1;
-    std::optional<int> column_ = 1;
+    ATTRIBUTE_NO_UNIQUE_ADDRESS std::optional<int> column_ = 1;
     bool ready_ = true;
 };
 

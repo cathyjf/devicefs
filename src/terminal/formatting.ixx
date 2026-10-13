@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+module;
+
+#include "compat/attribute_compat.h"
+
 export module devicefs.terminal.formatting;
 
 import std;
@@ -96,7 +100,7 @@ using TerminalFormatStringWithOptions = typename formatting_detail::FormatPrefix
 template <typename Options>
 struct FormattedTerminalText {
     std::string text;
-    Options options;
+    ATTRIBUTE_NO_UNIQUE_ADDRESS Options options;
 };
 
 // `FormatTerminalText` separates application-authored formatting from supplied

@@ -793,7 +793,7 @@ private:
           gpt_suffix_{std::move(layout.gpt_suffix)},
           ntfs_identity_{std::move(ntfs_identity)} {}
 
-    DeviceType source_;
+    [[msvc::no_unique_address]] DeviceType source_;
     std::vector<std::byte> prefix_;
     std::vector<std::byte> gpt_prefix_;
     std::vector<std::byte> gpt_suffix_;

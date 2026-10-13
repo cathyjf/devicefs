@@ -3,7 +3,7 @@
 
 module;
 
-#include "compat/forceinline_compat.h"
+#include "compat/attribute_compat.h"
 
 #ifndef _MSC_VER
     #include <terminal/src/types/inc/CodepointWidthDetector.hpp>

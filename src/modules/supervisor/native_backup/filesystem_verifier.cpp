@@ -1983,6 +1983,7 @@ private:
     VerificationState &state_;
     std::vector<unsigned char> synthetic_buffer_;
     std::vector<unsigned char> real_buffer_;
+    [[msvc::no_unique_address]]
     std::optional<std::array<std::size_t, 4>> current_stream_;
     bool current_stream_readable_ = false;
     bool current_stream_open_failure_accepted_ = false;

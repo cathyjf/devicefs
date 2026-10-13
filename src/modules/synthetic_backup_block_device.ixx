@@ -118,8 +118,8 @@ private:
           block_size_{block_size},
           payload_block_offsets_{std::move(payload_block_offsets)} {}
 
-    DeviceType baseline_;
-    DeviceType payload_;
+    [[msvc::no_unique_address]] DeviceType baseline_;
+    [[msvc::no_unique_address]] DeviceType payload_;
     std::uint64_t block_size_;
     std::set<std::uint64_t> payload_block_offsets_;
 };

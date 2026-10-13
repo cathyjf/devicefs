@@ -3,7 +3,7 @@
 
 module;
 
-#include "../compat/gsl_suppress.h"
+#include "../compat/attribute_compat.h"
 
 export module devicefs.terminal.transcoding_tests;
 

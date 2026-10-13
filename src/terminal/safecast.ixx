@@ -3,8 +3,7 @@
 
 module;
 
-#include "compat/forceinline_compat.h"
-#include "compat/gsl_suppress.h"
+#include "compat/attribute_compat.h"
 
 export module devicefs.terminal.safecast;
 

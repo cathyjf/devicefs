@@ -3,8 +3,7 @@
 
 module;
 
-#include "compat/gsl_suppress.h"
-#include "compat/forceinline_compat.h"
+#include "compat/attribute_compat.h"
 
 #ifndef _MSC_VER
     // MSBuild provides automatic support for header units, so the simdutf code

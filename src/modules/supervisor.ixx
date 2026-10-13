@@ -24,6 +24,7 @@ import std;
 import <devicefs/windows_imports.h>;
 import <sal.h>;
 import <devicefs/common.h>;
+import devicefs.coherent_vector;
 import devicefs.filesystem;
 import devicefs.guid_formatter;
 import devicefs.stream_writer;
@@ -385,12 +386,62 @@ auto TryWriteFailure(
     return result;
 }
 
+struct ForegroundContext {
+    wil::unique_event_nothrow cancellation_event = CreateCancellationEvent(nullptr);
+    wil::unique_event_nothrow completed_event = CreateCancellationEvent(nullptr);
+};
+
+// Each invocation has its own events. A handler's snapshot keeps those events
+// alive even if the invocation returns while the handler is still using them.
+auto foreground_contexts = std::optional<
+    CoherentVector<std::shared_ptr<const ForegroundContext>>>{};
+auto foreground_contexts_once = std::once_flag{};
+
+auto WINAPI ForegroundControlHandler(const DWORD) noexcept -> BOOL {
+    const auto contexts = [&contexts_ = std::as_const(*foreground_contexts)]
+        noexcept -> std::optional<decltype(foreground_contexts->Read())> {
+        try {
+            return contexts_.Read();
+        } catch (...) {
+            return std::nullopt;
+        }
+    }();
+    if (!contexts || contexts->empty()) {
+        return FALSE;
+    }
+    // Windows terminates the process when a closure handler returns. Waiting
+    // for the operations here lets them finish their cleanup first.
+    // https://learn.microsoft.com/en-us/windows/console/handlerroutine
+    //
+    // Signal every operation before waiting, because one operation's cleanup
+    // may depend on another operation finishing.
+    for (const auto &context : *contexts) {
+        if (!SetEvent(context->cancellation_event.get())) {
+            return FALSE;
+        }
+    }
+    for (const auto &context : *contexts) {
+        if (WaitForSingleObject(context->completed_event.get(), INFINITE)
+            == WAIT_FAILED) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 template <typename Operation>
 [[nodiscard]] auto RunForegroundOperation(
     const HANDLE input,
     const DWORD console_mode,
     Operation operation) {
-    const auto cancellation_event = CreateCancellationEvent(nullptr);
+    std::call_once(foreground_contexts_once, [] {
+        foreground_contexts.emplace();
+        if (!SetConsoleCtrlHandler(ForegroundControlHandler, TRUE)) {
+            WinError("failed to register the foreground console control handler");
+        }
+    });
+    const auto context = std::make_shared<const ForegroundContext>();
+    const auto completed_on_exit = context->completed_event.SetEvent_scope_exit();
     if (!SetConsoleMode(
             input, console_mode & ~DWORD{ENABLE_PROCESSED_INPUT})) {
         WinError("could not enable foreground cancellation input");
@@ -399,11 +450,17 @@ template <typename Operation>
         static_cast<void>(SetConsoleMode(input, console_mode));
     });
 
-    auto result = std::async(
-        std::launch::async, std::move(operation), cancellation_event.get());
-    auto cancel_on_monitor_failure = wil::scope_exit([&] {
-        static_cast<void>(SetEvent(cancellation_event.get()));
+    foreground_contexts->PushBack(context);
+    const auto remove_context = wil::scope_exit([&context] {
+        foreground_contexts->Erase(context);
     });
+    auto result = std::async(
+        std::launch::async, [operation = std::move(operation), context]() mutable {
+            const auto completed = context->completed_event.SetEvent_scope_exit();
+            return std::invoke(std::move(operation), context->cancellation_event.get());
+        });
+    auto cancel_on_monitor_failure =
+        context->cancellation_event.SetEvent_scope_exit();
     constexpr auto kPollInterval = std::chrono::milliseconds{100};
     constexpr auto kInputBatchSize = 16uz;
     while (result.wait_for(kPollInterval) !=
@@ -433,11 +490,11 @@ template <typename Operation>
                                 (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) == 0)))) {
                     continue;
                 }
-                if (cancellation_event.is_signaled()) {
+                if (context->cancellation_event.is_signaled()) {
                     continue;
                 }
-                if (!SetEvent(cancellation_event.get())) {
-                    WinError("could not request cancellation");
+                if (!SetEvent(context->cancellation_event.get())) {
+                    WinError("failed to request cancellation");
                 }
                 devicefs::WriteToStream(
                     devicefs::stdout,
@@ -452,11 +509,11 @@ template <typename Operation>
     const auto operation_result = [&] {
         try {
             const auto completed_result = result.get();
-            return cancellation_event.is_signaled()
+            return context->cancellation_event.is_signaled()
                 ? kCancelledExitCode
                 : completed_result;
         } catch (...) {
-            if (cancellation_event.is_signaled()) {
+            if (context->cancellation_event.is_signaled()) {
                 return kCancelledExitCode;
             }
             throw;

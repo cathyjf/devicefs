@@ -93,7 +93,8 @@ public:
 
     [[nodiscard]] auto Modes() const {
         auto modes = std::array<DWORD, 2>{};
-        if (!GetConsoleMode(input_.get(), &modes[0]) || !GetConsoleMode(output_.get(), &modes[1])) {
+        if (!GetConsoleMode(input_.get(), &std::get<0>(modes)) ||
+            !GetConsoleMode(output_.get(), &std::get<1>(modes))) {
             throw std::system_error(GetLastError(), std::system_category(),
                 "could not read the test console's input and output modes");
         }
@@ -137,7 +138,7 @@ public:
     auto operator=(const NativeInput &) -> NativeInput & = delete;
 
     auto DiscardQueuedInput() const -> void {
-        if (tcflush(descriptors_[1], TCIFLUSH) < 0) {
+        if (tcflush(std::get<1>(descriptors_), TCIFLUSH) < 0) {
             throw std::system_error(errno, std::generic_category(),
                 "could not discard input left by an earlier native test");
         }
@@ -151,7 +152,7 @@ public:
         // so the child would wait forever while the parent waits in `waitpid`.
         // Discard the unused output after all test consoles have been destroyed.
         // https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_exit.c#L2286-L2332
-        std::ignore = tcflush(descriptors_[1], TCOFLUSH);
+        std::ignore = tcflush(std::get<1>(descriptors_), TCOFLUSH);
         for (const auto descriptor : descriptors_) {
             if (descriptor >= 0) {
                 std::ignore = close(descriptor);
@@ -164,7 +165,7 @@ public:
         // `ttyname` searches `/dev`, where other concurrent fixtures create
         // and delete PTY entries. `ptsname` queries our primary directly instead.
         // https://github.com/apple-oss-distributions/Libc/blob/71bbe350ab79eef58113991d817ccc6165061a64/gen/devname.c
-        const auto path = ptsname(descriptors_[0]);
+        const auto path = ptsname(std::get<0>(descriptors_));
         if (path == nullptr) {
             throw std::system_error(errno, std::generic_category(),
                 "could not identify the test pseudoterminal's device path");
@@ -177,14 +178,14 @@ public:
             throw std::system_error(errno, std::generic_category(),
                 "could not create the test terminal session");
         }
-        if (ioctl(descriptors_[1], TIOCSCTTY, 0) < 0) {
+        if (ioctl(std::get<1>(descriptors_), TIOCSCTTY, 0) < 0) {
             throw std::system_error(errno, std::generic_category(),
                 "could not attach the test controlling terminal");
         }
     }
 
     auto Disconnect() -> void {
-        if (close(std::exchange(descriptors_[0], -1)) < 0) {
+        if (close(std::exchange(std::get<0>(descriptors_), -1)) < 0) {
             throw std::system_error(errno, std::generic_category(),
                 "could not close the test pseudoterminal's primary descriptor");
         }
@@ -192,7 +193,7 @@ public:
 
     [[nodiscard]] auto Modes() const {
         auto modes = termios{};
-        if (tcgetattr(descriptors_[1], &modes) < 0) {
+        if (tcgetattr(std::get<1>(descriptors_), &modes) < 0) {
             throw std::system_error(errno, std::generic_category(), "could not read test terminal modes");
         }
 #ifdef __APPLE__
@@ -212,7 +213,7 @@ public:
     }
 
     auto Feed(const std::string_view text) const -> void {
-        const auto count = write(descriptors_[0], text.data(), text.size());
+        const auto count = write(std::get<0>(descriptors_), text.data(), text.size());
         if (count < 0) {
             throw std::system_error(errno, std::generic_category(), "could not supply test terminal input");
         }
@@ -226,7 +227,7 @@ public:
         auto output = std::string{};
         auto bytes = std::array<char, 4096>{};
         while (!output.ends_with('\0')) {
-            const auto count = read(descriptors_[0], bytes.data(), bytes.size());
+            const auto count = read(std::get<0>(descriptors_), bytes.data(), bytes.size());
             if (count < 0) {
                 if (errno == EINTR) {
                     continue;
@@ -245,7 +246,8 @@ private:
     std::array<int, 2> descriptors_ = [] {
         auto descriptors = std::array<int, 2>{};
         auto size = winsize{.ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0};
-        if (openpty(&descriptors[0], &descriptors[1], nullptr, nullptr, &size) < 0) {
+        if (openpty(&std::get<0>(descriptors), &std::get<1>(descriptors),
+                nullptr, nullptr, &size) < 0) {
             throw std::system_error(errno, std::generic_category(),
                 "could not create the test pseudoterminal");
         }
@@ -508,9 +510,9 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
                 MenuInput{.key = MenuKey::Back},
                 MenuInput{.key = MenuKey::Timeout}};
             const auto events = std::array{
-                MenuInput{.key = MenuKey::Resize}, expected[0],
-                MenuInput{.key = MenuKey::Resize}, expected[1],
-                expected[2], MenuInput{.key = MenuKey::Resize}, expected[3]};
+                MenuInput{.key = MenuKey::Resize}, std::get<0>(expected),
+                MenuInput{.key = MenuKey::Resize}, std::get<1>(expected),
+                std::get<2>(expected), MenuInput{.key = MenuKey::Resize}, std::get<3>(expected)};
             const auto deadline = TestClock::now() + 1s;
             auto position = 0uz;
             for (const auto event : expected) {
@@ -708,7 +710,7 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
             RequireInput(console.ReadTextInput(),
                 {.key = MenuKey::Text, .character = U'a'},
                 "ordinary text during keyboard detection"sv);
-            Require((input.Modes()[0] & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0,
+            Require((std::get<0>(input.Modes()) & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0,
                 "Console Host's reply prematurely disabled VT input"sv);
             input.Feed(std::format("{}日{}z", test.replies, test.shift_enter));
             RequireInput(console.ReadTextInput(),
@@ -720,7 +722,7 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
             RequireInput(console.ReadTextInput(),
                 {.key = MenuKey::Text, .character = U'z'},
                 "text following Shift+Enter"sv);
-            Require((input.Modes()[0] & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0,
+            Require((std::get<0>(input.Modes()) & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0,
                 "a supported keyboard extension lost VT input"sv);
         });
     }
@@ -741,13 +743,13 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
         auto console = make_console();
         console.on_keyboard_query = [] {};
         const auto screen = console.EnterScreen();
-        Require((input.Modes()[0] & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0,
+        Require((std::get<0>(input.Modes()) & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0,
             "VT input was disabled before the keyboard-reply deadline"sv);
         TestClock::current += 5s;
         input.Feed("\t"sv);
         RequireInput(console.ReadTextInput(),
             {.key = MenuKey::SwitchArea}, "input after the keyboard-detection deadline"sv);
-        Require((input.Modes()[0] & ENABLE_VIRTUAL_TERMINAL_INPUT) == 0,
+        Require((std::get<0>(input.Modes()) & ENABLE_VIRTUAL_TERMINAL_INPUT) == 0,
             "a terminal without replies retained VT input after the deadline"sv);
         for (const auto test : std::array{
                 std::pair{0, MenuKey::Accept},

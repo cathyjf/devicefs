@@ -216,10 +216,10 @@ auto VerifyAllocationForms(const auto... alignment) -> std::size_t {
         std::ranges::fill(std::span{static_cast<std::byte *>(pointer), bytes}, std::byte{0x5a});
         Observe(pointer, bytes);
     }
-    ::operator delete(pointers[0], alignment...);
-    ::operator delete[](pointers[1], alignment...);
-    ::operator delete(pointers[2], alignment..., std::nothrow);
-    ::operator delete[](pointers[3], alignment..., std::nothrow);
+    ::operator delete(std::get<0>(pointers), alignment...);
+    ::operator delete[](std::get<1>(pointers), alignment...);
+    ::operator delete(std::get<2>(pointers), alignment..., std::nothrow);
+    ::operator delete[](std::get<3>(pointers), alignment..., std::nothrow);
 #ifdef __cpp_sized_deallocation
     ::operator delete(::operator new(bytes, alignment...), bytes, alignment...);
     ::operator delete[](::operator new[](bytes, alignment...), bytes, alignment...);
@@ -451,7 +451,7 @@ auto RunCase(const std::string_view direction, const std::string_view pattern,
             BENCHMARK_COMPILER, BENCHMARK_ARCHITECTURE, BENCHMARK_CONFIGURATION,
             BenchmarkImplementation(), processor, options.seed, direction, pattern,
             input.size(), exact, bound, names.at(operation), iterations.at(operation),
-            sorted[3], sorted[1], sorted[5],
+            std::get<3>(sorted), std::get<1>(sorted), std::get<5>(sorted),
             kDeallocationPolicy, batch_sizes.at(operation));
     }
 }

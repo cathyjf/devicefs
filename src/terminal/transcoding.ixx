@@ -195,7 +195,7 @@ public:
         if (!heap_) {
             std::copy_n(other.inline_.begin(), size_ + 1, inline_.begin());
         }
-        other.inline_[0] = Character{};
+        std::get<0>(other.inline_) = Character{};
     }
 
     [[nodiscard]] auto data() const noexcept -> const Character * {

@@ -88,10 +88,10 @@ public:
 
     [[nodiscard]] auto QueryCursor(this auto &self) -> std::optional<CursorPosition> {
         const auto reply = self.Query(detail::TerminalReport::Cursor);
-        if (!reply || ((*reply)[0] < 1) || ((*reply)[1] < 1)) {
+        if (!reply || (std::get<0>(*reply) < 1) || (std::get<1>(*reply) < 1)) {
             return std::nullopt;
         }
-        return CursorPosition{.row = (*reply)[0], .column = (*reply)[1]};
+        return CursorPosition{.row = std::get<0>(*reply), .column = std::get<1>(*reply)};
     }
 
     // Ask the terminal whether its cursor is visible. Return an empty optional
@@ -109,7 +109,7 @@ public:
         if (!reply) {
             return std::nullopt;
         }
-        switch ((*reply)[0]) {
+        switch (std::get<0>(*reply)) {
         case 1:
         case 3:
             return true;
@@ -123,10 +123,11 @@ public:
 
     [[nodiscard]] auto QuerySize(this auto &self) -> std::optional<TerminalSize> {
         const auto reply = self.Query(detail::TerminalReport::Size);
-        if (!reply || ((*reply)[0] != 8) || ((*reply)[1] < 1) || ((*reply)[2] < 1)) {
+        if (!reply || (std::get<0>(*reply) != 8) ||
+            (std::get<1>(*reply) < 1) || (std::get<2>(*reply) < 1)) {
             return std::nullopt;
         }
-        return TerminalSize{.rows = (*reply)[1], .columns = (*reply)[2]};
+        return TerminalSize{.rows = std::get<1>(*reply), .columns = std::get<2>(*reply)};
     }
 
     // Read navigation through the same decoder used for text entry. Ordinary

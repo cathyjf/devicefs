@@ -197,7 +197,7 @@ private:
     // so successive menus in one session use the same keyboard mode.
     // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#progressive-enhancement
     static constexpr auto kEnterScreen = vt::Concatenate<
-        vt::kEnterAlternateScreen, vt::kEnableModifiedKeys, vt::kPushDisambiguatedKeys,
+        vt::kEnableModifiedKeys, vt::kPushDisambiguatedKeys,
         vt::kHideCursor>();
 
 protected:
@@ -213,19 +213,21 @@ private:
     // that also ignore XTRESTORE. Restore a queried value after leaving the
     // alternate screen so the previously active screen receives that setting.
     // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-    [[nodiscard]] auto RestoreScreenOnExit(this auto &self) {
-        const auto previous_cursor = self.QueryCursorVisibility();
+    [[nodiscard]] auto RestoreScreenOnExit(this auto &self, const bool already_alternate) {
+        const auto previous_cursor = self.QueryMode(TerminalMode::CursorVisibility);
         if (!previous_cursor) {
             self.Write(vt::kSaveCursorVisibility);
         }
-        return ScopeExit{[&self, previous_cursor] {
+        return ScopeExit{[&self, previous_cursor, already_alternate] {
             self.WriteControlSequenceNoThrow(vt::Concatenate<
                 vt::kPopKeyboardMode, vt::kResetModifiedKeys, vt::kResetAttributes>());
             if (!previous_cursor) {
                 self.WriteControlSequenceNoThrow(vt::Concatenate<
                     vt::kShowCursor, vt::kRestoreCursorVisibility>());
             }
-            self.WriteControlSequenceNoThrow(vt::kLeaveAlternateScreen);
+            if (!already_alternate) {
+                self.WriteControlSequenceNoThrow(vt::kLeaveAlternateScreen);
+            }
             if (previous_cursor) {
                 self.WriteControlSequenceNoThrow(*previous_cursor
                     ? vt::kShowCursor : vt::kHideCursor);

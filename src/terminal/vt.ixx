@@ -116,6 +116,12 @@ constexpr auto kEnterAlternateScreen = "\x1b[?1049h"sv;
 // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-The-Alternate-Screen-Buffer
 constexpr auto kLeaveAlternateScreen = "\x1b[?1049l"sv;
 
+// DECRQM 1049 asks whether the alternate screen is active. Its DECRPM reply
+// identifies mode 1049 before reporting the mode's state.
+// https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+constexpr auto kRequestAlternateScreen = "\x1b[?1049$p"sv;
+constexpr auto kAlternateScreenReplyPrefix = "\x1b[?1049;"sv;
+
 // Kitty keyboard protocol: `CSI > 1 u` saves the current keyboard mode and
 // selects flag 1, "Disambiguate escape codes". Escape and modified keys then
 // arrive as complete key reports, allowing Escape to be recognized without a

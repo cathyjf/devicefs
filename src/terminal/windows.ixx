@@ -231,8 +231,7 @@ public:
 private:
     friend class BasicBaseConsole<Clock>;
 
-    static constexpr auto kEnterScreen =
-        vt::Concatenate<vt::kEnterAlternateScreen, vt::kHideCursor>();
+    static constexpr auto kEnterScreen = vt::kHideCursor;
 
 protected:
     // These control sequences contain only ASCII, so WriteConsoleA can send
@@ -245,7 +244,7 @@ protected:
     }
 
 private:
-    [[nodiscard]] auto RestoreScreenOnExit(this auto &self) {
+    [[nodiscard]] auto RestoreScreenOnExit(this auto &self, const bool already_alternate) {
         // `GetConsoleCursorInfo` reads visibility from the handle's screen
         // buffer, even when an alternate screen buffer is active. A cursor
         // hidden by a VT command in the alternate buffer can therefore still
@@ -260,18 +259,20 @@ private:
         // https://github.com/microsoft/terminal/blob/main/src/terminal/adapter/adaptDispatch.cpp#L1852-L1854
         // https://github.com/microsoft/terminal/pull/14444
         const auto previous_cursor = [&self] {
-            if (const auto visible = self.QueryCursorVisibility()) {
+            if (const auto visible = self.QueryMode(TerminalMode::CursorVisibility)) {
                 return *visible;
             }
             auto cursor = CONSOLE_CURSOR_INFO{};
             return !GetConsoleCursorInfo(self.output_.get(), &cursor) ||
                 (cursor.bVisible != FALSE);
         }();
-        return wil::scope_exit([&self, previous_cursor] {
+        return wil::scope_exit([&self, previous_cursor, already_alternate] {
             self.keyboard_detection_deadline_.reset();
             self.WriteControlSequenceNoThrow(self.keyboard_restore_);
             self.keyboard_restore_ = {};
-            self.WriteControlSequenceNoThrow(vt::kLeaveAlternateScreen);
+            if (!already_alternate) {
+                self.WriteControlSequenceNoThrow(vt::kLeaveAlternateScreen);
+            }
             self.WriteControlSequenceNoThrow(previous_cursor
                 ? vt::kShowCursor : vt::kHideCursor);
         });

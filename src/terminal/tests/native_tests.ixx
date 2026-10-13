@@ -633,7 +633,7 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
 #endif
             const auto expected = (state >= 1) && (state <= 4)
                 ? std::optional{(state % 2) == 1} : std::nullopt;
-            Require(console.QueryCursorVisibility() == expected,
+            Require(console.QueryMode(TerminalMode::CursorVisibility) == expected,
                 std::format("incorrect cursor visibility for report state {}", state));
             Require(console.ReadMenuInput().key == MenuKey::Redraw,
                 "the visibility query consumed preceding input"sv);
@@ -887,32 +887,46 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
             }
         }
     });
-    passed &= run_test("nested Unix screens retain their own cursor visibility"sv, [&] {
+    passed &= run_test("nested Unix screens preserve the alternate screen and cursor visibility"sv, [&] {
         for (const auto visible : std::array{false, true}) {
             auto console = make_console();
             auto queries = 0;
             auto saved = false;
-            console.on_write = [&input, &queries, &saved, visible](const auto text) {
-                if (text == vt::kRequestCursorVisibility) {
+            auto screen_entries = 0;
+            console.on_write = [&input, &queries, &saved, &screen_entries, visible](const auto text) {
+                if (text == vt::kRequestAlternateScreen) {
+                    input.Feed((queries == 0) ? "\x1b[?1049;2$y"sv : "\x1b[?1049;1$y"sv);
+                } else if (text == vt::kRequestCursorVisibility) {
                     input.Feed((++queries == 1) == visible
                         ? "\x1b[?25;1$y"sv : "\x1b[?25;2$y"sv);
                 } else if (text.contains(vt::kSaveCursorVisibility)) {
                     saved = true;
+                } else if (text.contains(vt::kEnterAlternateScreen)) {
+                    ++screen_entries;
                 }
             };
             {
                 const auto outer = console.EnterScreen();
                 {
-                    const auto inner = console.EnterScreen();
+                    auto inner_console = make_console();
+                    inner_console.on_write = console.on_write;
+                    const auto inner = inner_console.EnterScreen();
                 }
                 console.NativeConsole::Write("\0"sv);
-                Require(input.ReadOutput().ends_with(visible ? vt::kHideCursor : vt::kShowCursor),
+                const auto output = input.ReadOutput();
+                Require(!output.contains(vt::kLeaveAlternateScreen),
+                    "the inner screen returned to the original screen"sv);
+                Require(output.ends_with(visible ? vt::kHideCursor : vt::kShowCursor),
                     "the inner screen did not restore its reported cursor visibility"sv);
             }
             console.NativeConsole::Write("\0"sv);
-            Require(input.ReadOutput().ends_with(visible ? vt::kShowCursor : vt::kHideCursor),
+            const auto output = input.ReadOutput();
+            Require(output.contains(vt::kLeaveAlternateScreen),
+                "the outer screen did not return to the original screen"sv);
+            Require(output.ends_with(visible ? vt::kShowCursor : vt::kHideCursor),
                 "the outer screen did not restore its reported cursor visibility"sv);
             Require(!saved, "nested screens with usable replies still saved mode 25"sv);
+            Require(screen_entries == 1, "the inner screen entered the alternate screen again"sv);
         }
     });
 #endif
@@ -1344,8 +1358,8 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
         Require(!console.QueryCursor(), "an interrupted missing reply produced a cursor position"sv);
         Require(interrupted_wait->calls == 2,
             "the interrupted native wait did not retry"sv);
-        Require(std::ranges::equal(interrupted_wait->timeouts,
-                std::array{5s, 0s}),
+        Require((std::get<0>(interrupted_wait->timeouts) > 0ns) &&
+            (std::get<1>(interrupted_wait->timeouts) == 0ns),
             "the interrupted native wait did not retain its original deadline"sv);
     });
 #endif

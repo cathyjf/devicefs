@@ -17,6 +17,8 @@ using namespace std::string_view_literals;
 
 export namespace devicefs::terminal {
 
+enum class TerminalMode { CursorVisibility, AlternateScreen };
+
 // BaseConsole owns the terminal protocol used for drawing frames and measuring
 // their layout. Native consoles inherit these operations and supply terminal
 // I/O, input queues, and restoration of the caller's screen and cursor.
@@ -78,7 +80,16 @@ public:
     // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#alternate-screen-buffer
     [[nodiscard]] auto EnterScreen(this auto &self) {
         self.presenter_ = DeltaFramePresenter{};
-        auto restore = self.RestoreScreenOnExit();
+        // DEC mode 1049 selects one alternate screen, not a stack of screens.
+        // A nested guard must neither enter it again (which can clear it) nor
+        // leave it while the enclosing guard is still using it.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-The-Alternate-Screen-Buffer
+        const auto already_alternate = self.QueryMode(
+            TerminalMode::AlternateScreen).value_or(false);
+        auto restore = self.RestoreScreenOnExit(already_alternate);
+        if (!already_alternate) {
+            self.Write(vt::kEnterAlternateScreen);
+        }
         self.Write(self.kEnterScreen);
         if constexpr (requires { self.ConfigureKeyboard(); }) {
             self.ConfigureKeyboard();
@@ -94,18 +105,20 @@ public:
         return CursorPosition{.row = std::get<0>(*reply), .column = std::get<1>(*reply)};
     }
 
-    // Ask the terminal whether its cursor is visible. Return an empty optional
-    // if the terminal does not provide a reply that establishes visibility.
+    // Ask whether the selected terminal mode is set. Return an empty optional
+    // if the terminal does not provide a reply that establishes its state.
     //
-    // The DECRPM reply for cursor mode 25 uses 1 for visible and 2 for hidden.
-    // States 3 and 4 mean permanently visible and permanently hidden: the
-    // terminal does not allow show/hide commands to change those settings.
-    // They therefore have the same visibility as 1 and 2, and require no
-    // different restoration command. State 0 means the mode is not recognized;
-    // it and any undefined state cannot establish the cursor's visibility.
+    // DECRPM uses 1 for set and 2 for reset. States 3 and 4 mean permanently
+    // set and permanently reset: the terminal does not allow commands to
+    // change those settings. They therefore have the same state as 1 and 2.
+    // State 0 means the mode is not recognized; it and any undefined state
+    // cannot establish whether the mode is set.
     // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-    [[nodiscard]] auto QueryCursorVisibility(this auto &self) -> std::optional<bool> {
-        const auto reply = self.Query(detail::TerminalReport::CursorVisibility);
+    [[nodiscard]] auto QueryMode(this auto &self, const TerminalMode mode)
+        -> std::optional<bool> {
+        const auto reply = self.Query((mode == TerminalMode::CursorVisibility)
+            ? detail::TerminalReport::CursorVisibility : detail::TerminalReport::AlternateScreen,
+            500ms);
         if (!reply) {
             return std::nullopt;
         }
@@ -435,11 +448,11 @@ private:
     // the input's original representation and remove only the matching report.
     // Ctrl+C raises InputCancelled so the caller can end the operation before
     // the reply arrives or the deadline expires.
-    [[nodiscard]] auto Query(this auto &self, const detail::TerminalReport report)
+    [[nodiscard]] auto Query(this auto &self, const detail::TerminalReport report,
+        const std::chrono::milliseconds timeout = 5s)
         -> std::optional<std::array<int, 3>> {
-        constexpr auto kReplyTimeout = 5s;
         const auto deadline = Clock::now() +
-            std::chrono::ceil<typename Clock::duration>(kReplyTimeout);
+            std::chrono::ceil<typename Clock::duration>(timeout);
         self.Write(detail::ReportRequest(report));
         return self.ReceiveReport(report, deadline);
     }

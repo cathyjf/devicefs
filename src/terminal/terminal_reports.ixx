@@ -12,7 +12,7 @@ using namespace std::string_view_literals;
 export namespace devicefs::terminal::detail {
 
 enum class TerminalReport {
-    Cursor, Size, CursorVisibility, AlternateScreen, KeyboardFlags, ModifiedKeys
+    Cursor, Size, KeyboardFlags, ModifiedKeys
 };
 enum class KeyboardProtocol { Legacy, Kitty, Xterm };
 
@@ -27,8 +27,6 @@ constexpr auto kMaximumReportLength = 37uz;
     switch (report) {
     case TerminalReport::Cursor: return vt::kRequestCursorPosition;
     case TerminalReport::Size: return vt::kRequestTextAreaSize;
-    case TerminalReport::CursorVisibility: return vt::kRequestCursorVisibility;
-    case TerminalReport::AlternateScreen: return vt::kRequestAlternateScreen;
     case TerminalReport::KeyboardFlags: return vt::kRequestKeyboardFlags;
     case TerminalReport::ModifiedKeys: return vt::kRequestModifiedKeys;
     }
@@ -37,8 +35,6 @@ constexpr auto kMaximumReportLength = 37uz;
 
 [[nodiscard]] constexpr auto ReportPrefix(const TerminalReport report) noexcept {
     switch (report) {
-    case TerminalReport::CursorVisibility: return vt::kCursorVisibilityReplyPrefix;
-    case TerminalReport::AlternateScreen: return vt::kAlternateScreenReplyPrefix;
     case TerminalReport::KeyboardFlags: return vt::kKeyboardFlagsReplyPrefix;
     case TerminalReport::ModifiedKeys: return vt::kModifiedKeysReplyPrefix;
     default: return kReportPrefix;
@@ -46,16 +42,9 @@ constexpr auto kMaximumReportLength = 37uz;
 }
 
 [[nodiscard]] constexpr auto ReportSuffix(const TerminalReport report) noexcept {
-    // A DEC mode reply ends in `$y`; the other supported replies end
-    // in a single character. The complete suffix is framing, not a numeric
-    // field, and must be excluded before parsing the reported values.
-    // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
     switch (report) {
     case TerminalReport::Cursor: return "R"sv;
     case TerminalReport::Size: return "t"sv;
-    case TerminalReport::CursorVisibility:
-    case TerminalReport::AlternateScreen:
-        return "$y"sv;
     case TerminalReport::KeyboardFlags: return "u"sv;
     case TerminalReport::ModifiedKeys: return "m"sv;
     }

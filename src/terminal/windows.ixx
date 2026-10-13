@@ -244,35 +244,25 @@ protected:
     }
 
 private:
-    [[nodiscard]] auto RestoreScreenOnExit(this auto &self, const bool already_alternate) {
-        // `GetConsoleCursorInfo` reads visibility from the handle's screen
-        // buffer, even when an alternate screen buffer is active. A cursor
-        // hidden by a VT command in the alternate buffer can therefore still
-        // be reported as visible. Saving that value would show the cursor on
-        // exit instead of preserving the caller's hidden cursor.
-        // https://github.com/microsoft/terminal/blob/main/src/host/getset.cpp#L153-L164
-        //
-        // Query visibility before entering the screen. The terminal answers
-        // from its active cursor. Older local console hosts without DECRQM
-        // use the native API as a fallback; if that query also fails, leave
-        // the cursor visible on exit rather than failing screen entry.
-        // https://github.com/microsoft/terminal/blob/main/src/terminal/adapter/adaptDispatch.cpp#L1852-L1854
-        // https://github.com/microsoft/terminal/pull/14444
-        const auto previous_cursor = [&self] {
-            if (const auto visible = self.QueryMode(TerminalMode::CursorVisibility)) {
-                return *visible;
-            }
-            auto cursor = CONSOLE_CURSOR_INFO{};
-            return !GetConsoleCursorInfo(self.output_.get(), &cursor) ||
-                (cursor.bVisible != FALSE);
-        }();
+    [[nodiscard]] auto RestoreScreenOnExit(this auto &self,
+        const bool outermost, const auto decrement) {
         // Keyboard replies update `keyboard_restore_` and
         // `keyboard_detection_deadline_` while a screen is active. Each guard
         // saves the preceding values and gives its screen fresh state, so its
         // cleanup cannot execute or erase an enclosing guard's command.
         // A preceding screen may have selected native key records, so this
         // screen's temporary VT input must restore that console mode too.
-        return wil::scope_exit([&self, previous_cursor, already_alternate,
+        return wil::scope_exit([&self, decrement,
+            previous_cursor = !outermost || [&self] {
+                // Save cursor visibility before entering the screen. Nested
+                // guards leave the hidden cursor alone on exit.
+                // If the native query fails, show the cursor on exit rather
+                // than failing screen entry.
+                // https://learn.microsoft.com/en-us/windows/console/getconsolecursorinfo
+                auto cursor = CONSOLE_CURSOR_INFO{};
+                return !GetConsoleCursorInfo(self.output_.get(), &cursor) ||
+                    (cursor.bVisible != FALSE);
+            }(),
             input_mode = detail::SetConsoleModeScoped(
                 self.input_.get(), ENABLE_VIRTUAL_TERMINAL_INPUT, 0),
             previous_keyboard_restore = std::exchange(self.keyboard_restore_, {}),
@@ -281,9 +271,10 @@ private:
             self.WriteControlSequenceNoThrow(std::exchange(
                 self.keyboard_restore_, std::move(previous_keyboard_restore)));
             self.keyboard_detection_deadline_ = previous_detection_deadline;
-            if (!already_alternate) {
-                self.WriteControlSequenceNoThrow(vt::kLeaveAlternateScreen);
+            if (decrement() != 0) {
+                return;
             }
+            self.WriteControlSequenceNoThrow(vt::kLeaveAlternateScreen);
             self.WriteControlSequenceNoThrow(previous_cursor
                 ? vt::kShowCursor : vt::kHideCursor);
         });

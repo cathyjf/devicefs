@@ -790,13 +790,6 @@ constexpr auto EXIT_FAILURE = 1;
         ReportCase{"size reply following an arrow key"sv,
             U"\x1b[B\x1b[8;24;80t"sv, detail::TerminalReport::Size,
             std::array{8, 24, 80}, U"\x1b[B"sv},
-        // DECRPM identifies the queried mode before its state. Mode 25 is
-        // cursor visibility; only the reply for alternate-screen mode 1049
-        // belongs to this query, which must preserve the surrounding input.
-        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-        ReportCase{"alternate-screen reply following a different mode reply"sv,
-            U"a\x1b[?25;2$y\x1b[?1049;1$yb"sv, detail::TerminalReport::AlternateScreen,
-            std::array{1, 0, 0}, U"a\x1b[?25;2$yb"sv},
         // An incomplete CPR is followed by `CSI 3;4 R`, a complete cursor report.
         // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#query-state
         ReportCase{"a new escape replacing an incomplete reply"sv,

@@ -339,15 +339,6 @@ public:
         "the replies supplied by the test.")
     auto Write(const std::string_view text) -> void {
 #ifdef _WIN32
-        if (text == vt::kRequestCursorVisibility) {
-            // The fixture supplies cursor reports instead of asking Console
-            // Host. Its callback queues the reply before the query starts
-            // reading, allowing the report to disagree with the API value.
-            if (on_cursor_visibility_query) {
-                on_cursor_visibility_query();
-            }
-            return;
-        }
         if (text == vt::kRequestKeyboardSupport) {
             if (on_keyboard_query) {
                 on_keyboard_query();
@@ -362,7 +353,6 @@ public:
         }
     }
 
-#ifdef _WIN32
     GSL_SUPPRESS("26434",
         "Screen guards dispatch cleanup through their explicit object "
         "parameter. This test adapter records those commands while preserving "
@@ -371,12 +361,10 @@ public:
         restoration.append(sequence);
         BasicNativeConsole<Clock>::WriteControlSequenceNoThrow(sequence);
     }
-#endif
 
     std::function<void(std::string_view)> on_write;
-#ifdef _WIN32
     std::string restoration;
-    std::function<void()> on_cursor_visibility_query;
+#ifdef _WIN32
     std::function<void()> on_keyboard_query;
 #endif
 };
@@ -623,44 +611,8 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
                 }
             }
         });
-    passed &= run_test("cursor visibility replies preserving surrounding input"sv, [&] {
-        // DECRPM defines states 0 through 4. Also supply 5 to check that an
-        // undefined state does not become a visible/hidden answer.
-        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-        for (const auto state : std::views::iota(0, 6)) {
-            auto console = make_console();
-            const auto reply = [&input, state] {
-                // Ctrl+L precedes the report and the `1` shortcut follows it.
-                // Removing the report must leave both keys available.
-                input.Feed(std::format("\x0c\x1b[?25;{}$y1", state));
-            };
 #ifdef _WIN32
-            console.on_cursor_visibility_query = reply;
-#else
-            console.on_write = [reply](const auto text) {
-                Require(text == vt::kRequestCursorVisibility,
-                    "unexpected cursor-visibility query"sv);
-                reply();
-            };
-#endif
-            const auto expected = (state >= 1) && (state <= 4)
-                ? std::optional{(state % 2) == 1} : std::nullopt;
-            Require(console.QueryMode(TerminalMode::CursorVisibility) == expected,
-                std::format("incorrect cursor visibility for report state {}", state));
-            Require(console.ReadMenuInput().key == MenuKey::Redraw,
-                "the visibility query consumed preceding input"sv);
-            Require(console.ReadMenuInput().key == MenuKey::Details,
-                "the visibility query consumed following input"sv);
-        }
-    });
-#ifdef _WIN32
-    passed &= run_test("Windows screen exit restores the reported cursor visibility"sv, [&] {
-        // Keep the native API value visible, then supply a chosen terminal
-        // reply through `TestConsole`. A hidden reply reproduces the conflict
-        // between the original buffer and the active main menu. Checking the
-        // cursor after guard destruction verifies which value was restored;
-        // this test does not verify a terminal emulator's support for DECRQM.
-        // https://github.com/microsoft/terminal/blob/main/src/host/getset.cpp#L153-L164
+    passed &= run_test("Windows outermost screen exit restores native cursor visibility"sv, [&] {
         const auto cursor_info = [output = input.OutputHandle()] {
             auto cursor = CONSOLE_CURSOR_INFO{};
             if (!GetConsoleCursorInfo(output, &cursor)) {
@@ -672,20 +624,17 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
         for (const auto visible : std::array{false, true}) {
             for (const auto unwind : std::array{false, true}) {
                 auto console = make_console();
-                console.NativeConsole::Write(vt::kShowCursor);
-                console.on_cursor_visibility_query = [&input, visible] {
-                    input.Feed(visible ? "\x1b[?25;1$y"sv : "\x1b[?25;2$y"sv);
-                };
+                console.NativeConsole::Write(visible ? vt::kShowCursor : vt::kHideCursor);
                 try {
                     const auto screen = console.EnterScreen();
-                    console.NativeConsole::Write(vt::kShowCursor);
+                    console.NativeConsole::Write(visible ? vt::kHideCursor : vt::kShowCursor);
                     if (unwind) {
                         throw InjectedFailure{"leave the screen through exception unwinding"};
                     }
                 } catch (const InjectedFailure &) {
                 }
                 Require((cursor_info().bVisible != FALSE) == visible,
-                    "screen exit restored the API visibility instead of the terminal reply"sv);
+                    "screen exit did not restore the preceding native cursor visibility"sv);
             }
         }
     });
@@ -751,14 +700,6 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
             for (const auto same_console : std::array{false, true}) {
                 for (const auto inner_detected : std::array{false, true}) {
                     auto console = make_console();
-                    auto screen_queries = 0;
-                    console.on_write = [&input, &screen_queries](const auto text) {
-                        if (text == vt::kRequestAlternateScreen) {
-                            input.Feed(++screen_queries == 1
-                                ? "\x1b[?1049;2$y"sv : "\x1b[?1049;1$y"sv);
-                        }
-                    };
-                    console.on_cursor_visibility_query = [&input] { input.Feed("\x1b[?25;2$y"sv); };
                     {
                         const auto outer = console.EnterScreen();
                         input.Feed(std::format("{}a", reply));
@@ -769,8 +710,6 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
                                 ? std::optional<decltype(console)>{}
                                 : std::optional<decltype(console)>{std::in_place, console_arguments...};
                             auto &active = same_console ? console : *inner_console;
-                            active.on_write = console.on_write;
-                            active.on_cursor_visibility_query = console.on_cursor_visibility_query;
                             {
                                 const auto inner = active.EnterScreen();
                                 if (inner_detected) {
@@ -799,14 +738,6 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
     passed &= run_test("Windows screen guards preserve pending detection and native input mode"sv, [&] {
         for (const auto legacy : std::array{false, true}) {
             auto console = make_console();
-            auto screen_queries = 0;
-            console.on_write = [&input, &screen_queries](const auto text) {
-                if (text == vt::kRequestAlternateScreen) {
-                    input.Feed(++screen_queries == 1
-                        ? "\x1b[?1049;2$y"sv : "\x1b[?1049;1$y"sv);
-                }
-            };
-            console.on_cursor_visibility_query = [&input] { input.Feed("\x1b[?25;2$y"sv); };
             {
                 const auto outer = console.EnterScreen();
                 if (legacy) {
@@ -959,90 +890,56 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
         Require(console.ReadTextInput().character == U'日',
             "Escape consumed the following Unicode character"sv);
     });
-#ifndef _WIN32
-    passed &= run_test("Unix screen exit restores cursor visibility"sv, [&] {
-        // Supply mode replies before the query reads input. State 0 exercises
-        // the existing saved-mode fallback; 1 and 2 must restore the reported
-        // visibility instead of relying on that terminal-owned saved value.
-        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-        for (const auto state : std::array{0, 1, 2}) {
+    passed &= run_test("nested screens leave the outer screen and cursor unchanged"sv, [&] {
+        for (const auto same_console : std::array{false, true}) {
             for (const auto unwind : std::array{false, true}) {
                 auto console = make_console();
-                auto saved = false;
-                console.on_write = [&input, &saved, state](const auto text) {
-                    if (text == vt::kRequestCursorVisibility) {
-                        input.Feed(std::format("\x1b[?25;{}$y", state));
-                    } else if (text.contains(vt::kSaveCursorVisibility)) {
-                        saved = true;
-                    }
-                };
-                try {
-                    const auto screen = console.EnterScreen();
-                    if (unwind) {
-                        throw InjectedFailure{"leave the screen through exception unwinding"};
-                    }
-                } catch (const InjectedFailure &) {
-                }
-                console.NativeConsole::Write("\0"sv);
-                const auto output = input.ReadOutput();
-                if (state == 0) {
-                    Require(saved, "an unavailable visibility query did not save mode 25"sv);
-                    const auto restored = output.find(vt::kRestoreCursorVisibility);
-                    Require((restored != std::string::npos) &&
-                        (output.find(vt::kShowCursor) < restored),
-                        "the cursor fallback did not show the cursor before restoring mode 25"sv);
-                    continue;
-                }
-                Require(!saved && !output.contains(vt::kRestoreCursorVisibility),
-                    "a usable visibility reply still used the saved-mode fallback"sv);
-                Require(output.ends_with((state == 1) ? vt::kShowCursor : vt::kHideCursor),
-                    "screen exit did not restore the reported cursor visibility"sv);
-            }
-        }
-    });
-    passed &= run_test("nested Unix screens preserve the alternate screen and cursor visibility"sv, [&] {
-        for (const auto visible : std::array{false, true}) {
-            auto console = make_console();
-            auto queries = 0;
-            auto saved = false;
-            auto screen_entries = 0;
-            console.on_write = [&input, &queries, &saved, &screen_entries, visible](const auto text) {
-                if (text == vt::kRequestAlternateScreen) {
-                    input.Feed((queries == 0) ? "\x1b[?1049;2$y"sv : "\x1b[?1049;1$y"sv);
-                } else if (text == vt::kRequestCursorVisibility) {
-                    input.Feed((++queries == 1) == visible
-                        ? "\x1b[?25;1$y"sv : "\x1b[?25;2$y"sv);
-                } else if (text.contains(vt::kSaveCursorVisibility)) {
-                    saved = true;
-                } else if (text.contains(vt::kEnterAlternateScreen)) {
-                    ++screen_entries;
-                }
-            };
-            {
-                const auto outer = console.EnterScreen();
+                console.NativeConsole::Write(vt::kShowCursor);
+                auto entry = std::string{};
+                console.on_write = [&entry](const auto text) { entry.append(text); };
                 {
-                    auto inner_console = make_console();
-                    inner_console.on_write = console.on_write;
-                    const auto inner = inner_console.EnterScreen();
+                    const auto outer = console.EnterScreen();
+                    Require(entry.contains(vt::kEnterAlternateScreen),
+                        "the outermost screen did not enter the alternate screen"sv);
+                    Require(entry.contains(vt::kHideCursor),
+                        "the outermost screen did not hide the cursor"sv);
+#ifndef _WIN32
+                    Require(entry.contains(vt::kSaveCursorVisibility),
+                        "the outermost screen did not save cursor visibility"sv);
+#endif
+                    entry.clear();
+                    auto inner_console = same_console
+                        ? std::optional<decltype(console)>{}
+                        : std::optional<decltype(console)>{std::in_place, console_arguments...};
+                    auto &active = same_console ? console : *inner_console;
+                    active.on_write = console.on_write;
+                    try {
+                        auto inner = active.EnterScreen();
+                        const auto moved_inner = std::move(inner);
+                        Require(entry.empty(), "nested entry changed the screen or cursor"sv);
+                        if (unwind) {
+                            throw InjectedFailure{"leave the nested screen through exception unwinding"};
+                        }
+                    } catch (const InjectedFailure &) {
+                    }
+                    Require(active.restoration.empty(),
+                        "nested exit changed the screen or cursor"sv);
                 }
+                Require(console.restoration.contains(vt::kLeaveAlternateScreen),
+                    "the outermost screen did not leave the alternate screen"sv);
+                Require(console.restoration.contains(vt::kShowCursor),
+                    "the outermost screen did not show the cursor"sv);
+#ifndef _WIN32
+                const auto restored = console.restoration.find(vt::kRestoreCursorVisibility);
+                Require((restored != std::string::npos) &&
+                    (console.restoration.find(vt::kShowCursor) < restored),
+                    "screen exit did not show the cursor before restoring its saved visibility"sv);
                 console.NativeConsole::Write("\0"sv);
-                const auto output = input.ReadOutput();
-                Require(!output.contains(vt::kLeaveAlternateScreen),
-                    "the inner screen returned to the original screen"sv);
-                Require(output.ends_with(visible ? vt::kHideCursor : vt::kShowCursor),
-                    "the inner screen did not restore its reported cursor visibility"sv);
+                std::ignore = input.ReadOutput();
+#endif
             }
-            console.NativeConsole::Write("\0"sv);
-            const auto output = input.ReadOutput();
-            Require(output.contains(vt::kLeaveAlternateScreen),
-                "the outer screen did not return to the original screen"sv);
-            Require(output.ends_with(visible ? vt::kShowCursor : vt::kHideCursor),
-                "the outer screen did not restore its reported cursor visibility"sv);
-            Require(!saved, "nested screens with usable replies still saved mode 25"sv);
-            Require(screen_entries == 1, "the inner screen entered the alternate screen again"sv);
         }
     });
-#endif
     passed &= run_test("native update measurements counting begin, presentation, and guard output"sv, [&] {
         // BSU (`CSI ? 2026 h`) begins a synchronized update. ESU (`CSI ? 2026 l`)
         // ends it, once for presentation and once more when the guard is destroyed.

@@ -15,9 +15,22 @@ import devicefs.terminal.vt;
 using namespace std::chrono_literals;
 using namespace std::string_view_literals;
 
-export namespace devicefs::terminal {
+namespace devicefs::terminal::detail {
 
-enum class TerminalMode { CursorVisibility, AlternateScreen };
+// When entering and exiting the outermost screen, certain steps are taken to
+// enable the alternate screen and to configure keyboard input settings. Some
+// of these steps are skipped when entering or exiting a nested screen. This
+// variable tracks the nesting level so that we know what steps to take when
+// entering or exiting a screen.
+//
+// If multiple screens are attached to the same underlying operating system
+// console object, callers must ensure that entrances to, and exits from, such
+// screens are serialized across all processes attached to the console.
+auto screen_nesting_level = unsigned{};
+
+}
+
+export namespace devicefs::terminal {
 
 // BaseConsole owns the terminal protocol used for drawing frames and measuring
 // their layout. Native consoles inherit these operations and supply terminal
@@ -78,19 +91,20 @@ public:
     // through that console. Each native adapter supplies the guard that restores
     // the screen and the saved cursor settings, including when a menu throws.
     // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#alternate-screen-buffer
-    [[nodiscard]] auto EnterScreen(this auto &self) {
+    template <class NestingLevelType = decltype(detail::screen_nesting_level)>
+    [[nodiscard]] auto EnterScreen(this auto &self,
+        NestingLevelType &nesting_level = detail::screen_nesting_level) {
         self.presenter_ = DeltaFramePresenter{};
         // DEC mode 1049 selects one alternate screen, not a stack of screens.
         // A nested guard must neither enter it again (which can clear it) nor
         // leave it while the enclosing guard is still using it.
         // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-The-Alternate-Screen-Buffer
-        const auto already_alternate = self.QueryMode(
-            TerminalMode::AlternateScreen).value_or(false);
-        auto restore = self.RestoreScreenOnExit(already_alternate);
-        if (!already_alternate) {
+        auto restore = self.RestoreScreenOnExit(nesting_level == 0,
+            [&nesting_level] { return --nesting_level; });
+        if (++nesting_level == 1) {
             self.Write(vt::kEnterAlternateScreen);
+            self.Write(self.kEnterScreen);
         }
-        self.Write(self.kEnterScreen);
         if constexpr (requires { self.ConfigureKeyboard(); }) {
             self.ConfigureKeyboard();
         }
@@ -103,35 +117,6 @@ public:
             return std::nullopt;
         }
         return CursorPosition{.row = std::get<0>(*reply), .column = std::get<1>(*reply)};
-    }
-
-    // Ask whether the selected terminal mode is set. Return an empty optional
-    // if the terminal does not provide a reply that establishes its state.
-    //
-    // DECRPM uses 1 for set and 2 for reset. States 3 and 4 mean permanently
-    // set and permanently reset: the terminal does not allow commands to
-    // change those settings. They therefore have the same state as 1 and 2.
-    // State 0 means the mode is not recognized; it and any undefined state
-    // cannot establish whether the mode is set.
-    // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-    [[nodiscard]] auto QueryMode(this auto &self, const TerminalMode mode)
-        -> std::optional<bool> {
-        const auto reply = self.Query((mode == TerminalMode::CursorVisibility)
-            ? detail::TerminalReport::CursorVisibility : detail::TerminalReport::AlternateScreen,
-            500ms);
-        if (!reply) {
-            return std::nullopt;
-        }
-        switch (std::get<0>(*reply)) {
-        case 1:
-        case 3:
-            return true;
-        case 2:
-        case 4:
-            return false;
-        default:
-            return std::nullopt;
-        }
     }
 
     [[nodiscard]] auto QuerySize(this auto &self) -> std::optional<TerminalSize> {

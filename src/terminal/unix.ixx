@@ -198,7 +198,7 @@ private:
     // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#progressive-enhancement
     static constexpr auto kEnterScreen = vt::Concatenate<
         vt::kEnableModifiedKeys, vt::kPushDisambiguatedKeys,
-        vt::kHideCursor>();
+        vt::kSaveCursorVisibility, vt::kHideCursor>();
 
 protected:
     auto WriteControlSequenceNoThrow(const std::string_view sequence) const noexcept -> void {
@@ -206,32 +206,20 @@ protected:
     }
 
 private:
-    // Save the queried visibility in this screen's guard so a nested screen
-    // cannot overwrite it. `XTSAVE`/`XTRESTORE` have only one saved value per
-    // mode, but remain a fallback for terminals that do not answer DECRQM.
-    // Showing the cursor before that fallback leaves it visible on terminals
-    // that also ignore XTRESTORE. Restore a queried value after leaving the
-    // alternate screen so the previously active screen receives that setting.
+    // `XTSAVE`/`XTRESTORE` have only one saved value per mode. Only the
+    // outermost guard saves cursor visibility, so nested guards cannot
+    // overwrite that value. Showing the cursor before restoring the saved
+    // setting leaves it visible on terminals that ignore these extensions.
     // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-    [[nodiscard]] auto RestoreScreenOnExit(this auto &self, const bool already_alternate) {
-        const auto previous_cursor = self.QueryMode(TerminalMode::CursorVisibility);
-        if (!previous_cursor) {
-            self.Write(vt::kSaveCursorVisibility);
-        }
-        return ScopeExit{[&self, previous_cursor, already_alternate] {
+    [[nodiscard]] auto RestoreScreenOnExit(this auto &self,
+        const bool, const auto decrement) {
+        return ScopeExit{[&self, decrement] {
+            if (decrement() != 0) {
+                return;
+            }
             self.WriteControlSequenceNoThrow(vt::Concatenate<
-                vt::kPopKeyboardMode, vt::kResetModifiedKeys, vt::kResetAttributes>());
-            if (!previous_cursor) {
-                self.WriteControlSequenceNoThrow(vt::Concatenate<
-                    vt::kShowCursor, vt::kRestoreCursorVisibility>());
-            }
-            if (!already_alternate) {
-                self.WriteControlSequenceNoThrow(vt::kLeaveAlternateScreen);
-            }
-            if (previous_cursor) {
-                self.WriteControlSequenceNoThrow(*previous_cursor
-                    ? vt::kShowCursor : vt::kHideCursor);
-            }
+                vt::kPopKeyboardMode, vt::kResetModifiedKeys, vt::kResetAttributes,
+                vt::kShowCursor, vt::kRestoreCursorVisibility, vt::kLeaveAlternateScreen>());
         }};
     }
 

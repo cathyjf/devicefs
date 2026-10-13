@@ -116,12 +116,6 @@ constexpr auto kEnterAlternateScreen = "\x1b[?1049h"sv;
 // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-The-Alternate-Screen-Buffer
 constexpr auto kLeaveAlternateScreen = "\x1b[?1049l"sv;
 
-// DECRQM 1049 asks whether the alternate screen is active. Its DECRPM reply
-// identifies mode 1049 before reporting the mode's state.
-// https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-constexpr auto kRequestAlternateScreen = "\x1b[?1049$p"sv;
-constexpr auto kAlternateScreenReplyPrefix = "\x1b[?1049;"sv;
-
 // Kitty keyboard protocol: `CSI > 1 u` saves the current keyboard mode and
 // selects flag 1, "Disambiguate escape codes". Escape and modified keys then
 // arrive as complete key reports, allowing Escape to be recognized without a
@@ -164,13 +158,6 @@ constexpr auto kHideCursor = "\x1b[?25l"sv;
 // DECSET 25 (DECTCEM) shows the cursor.
 // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-visibility
 constexpr auto kShowCursor = "\x1b[?25h"sv;
-
-// Query cursor visibility with DECRQM for mode 25 (DECTCEM). The DECRPM reply
-// is `CSI ? 25 ; state $ y`. Including mode 25 in the reply prefix prevents a
-// reply about another mode from being interpreted as cursor visibility.
-// https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-constexpr auto kRequestCursorVisibility = "\x1b[?25$p"sv;
-constexpr auto kCursorVisibilityReplyPrefix = "\x1b[?25;"sv;
 
 // XTSAVE (`CSI ? 25 s`) saves the cursor-visibility setting for restoration.
 // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html

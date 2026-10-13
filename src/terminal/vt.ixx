@@ -159,6 +159,13 @@ constexpr auto kHideCursor = "\x1b[?25l"sv;
 // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-visibility
 constexpr auto kShowCursor = "\x1b[?25h"sv;
 
+// Query cursor visibility with DECRQM for mode 25 (DECTCEM). The DECRPM reply
+// is `CSI ? 25 ; state $ y`. Including mode 25 in the reply prefix prevents a
+// reply about another mode from being interpreted as cursor visibility.
+// https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+constexpr auto kRequestCursorVisibility = "\x1b[?25$p"sv;
+constexpr auto kCursorVisibilityReplyPrefix = "\x1b[?25;"sv;
+
 // XTSAVE (`CSI ? 25 s`) saves the cursor-visibility setting for restoration.
 // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
 constexpr auto kSaveCursorVisibility = "\x1b[?25s"sv;

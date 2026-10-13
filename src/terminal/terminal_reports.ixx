@@ -11,7 +11,7 @@ using namespace std::string_view_literals;
 
 export namespace devicefs::terminal::detail {
 
-enum class TerminalReport { Cursor, Size, KeyboardFlags, ModifiedKeys };
+enum class TerminalReport { Cursor, Size, CursorVisibility, KeyboardFlags, ModifiedKeys };
 enum class KeyboardProtocol { Legacy, Kitty, Xterm };
 
 // ESC followed by `[` is the seven-bit Control Sequence Introducer (CSI),
@@ -25,6 +25,7 @@ constexpr auto kMaximumReportLength = 37uz;
     switch (report) {
     case TerminalReport::Cursor: return vt::kRequestCursorPosition;
     case TerminalReport::Size: return vt::kRequestTextAreaSize;
+    case TerminalReport::CursorVisibility: return vt::kRequestCursorVisibility;
     case TerminalReport::KeyboardFlags: return vt::kRequestKeyboardFlags;
     case TerminalReport::ModifiedKeys: return vt::kRequestModifiedKeys;
     }
@@ -33,6 +34,7 @@ constexpr auto kMaximumReportLength = 37uz;
 
 [[nodiscard]] constexpr auto ReportPrefix(const TerminalReport report) noexcept {
     switch (report) {
+    case TerminalReport::CursorVisibility: return vt::kCursorVisibilityReplyPrefix;
     case TerminalReport::KeyboardFlags: return vt::kKeyboardFlagsReplyPrefix;
     case TerminalReport::ModifiedKeys: return vt::kModifiedKeysReplyPrefix;
     default: return kReportPrefix;
@@ -40,11 +42,14 @@ constexpr auto kMaximumReportLength = 37uz;
 }
 
 [[nodiscard]] constexpr auto ReportSuffix(const TerminalReport report) noexcept {
-    // The final character identifies each report within its CSI family.
+    // A cursor visibility reply ends in `$y`; the other supported replies end
+    // in a single character. The complete suffix is framing, not a numeric
+    // field, and must be excluded before parsing the reported values.
     // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
     switch (report) {
     case TerminalReport::Cursor: return "R"sv;
     case TerminalReport::Size: return "t"sv;
+    case TerminalReport::CursorVisibility: return "$y"sv;
     case TerminalReport::KeyboardFlags: return "u"sv;
     case TerminalReport::ModifiedKeys: return "m"sv;
     }
@@ -55,17 +60,19 @@ constexpr auto kMaximumReportLength = 37uz;
 // Both native adapters use this parser so that a report has the same meaning
 // whether the input arrives as Windows key events or Unix bytes. Recognition
 // requires the entire sequence; unrelated keyboard input is left to the adapter.
-// The report syntax is documented under DSR and window operations in XTerm:
+// Xterm documents these replies under cursor-position queries, mode queries,
+// and window operations:
 // https://invisible-mirror.net/xterm/ctlseqs/ctlseqs.html
 [[nodiscard]] auto ParseTerminalReport(const std::string_view text,
     const TerminalReport report) -> std::optional<std::array<int, 3>> {
     const auto prefix = ReportPrefix(report);
+    const auto suffix = ReportSuffix(report);
     if (!text.starts_with(prefix) ||
-        !text.ends_with(ReportSuffix(report)) ||
+        !text.ends_with(suffix) ||
         (text.size() > kMaximumReportLength)) {
         return std::nullopt;
     }
-    auto body = text.substr(prefix.size(), text.size() - prefix.size() - 1);
+    auto body = text.substr(prefix.size(), text.size() - prefix.size() - suffix.size());
     auto values = std::array<int, 3>{};
     const auto fields = (report == TerminalReport::Cursor) ? 2uz :
         ((report == TerminalReport::Size) ? 3uz : 1uz);
@@ -133,12 +140,18 @@ public:
             }
             return std::nullopt;
         }
-        if (text_.ends_with(ReportSuffix(report_))) {
+        const auto suffix = ReportSuffix(report_);
+        if (text_.ends_with(suffix)) {
             const auto values = ParseTerminalReport(text_, report_);
             text_.clear();
             return values;
         }
-        if (!((character >= U'0') && (character <= U'9')) && (character != U';')) {
+        // A cursor visibility reply is not complete at `$`: retain that byte
+        // until `y` arrives. The complete reply still passes through
+        // `ParseTerminalReport`, which rejects extra bytes in numeric fields.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+        if (!((character >= U'0') && (character <= U'9')) &&
+            (character != U';') && !suffix.starts_with(text_.back())) {
             text_.clear();
         }
         return std::nullopt;

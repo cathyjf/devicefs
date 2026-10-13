@@ -198,10 +198,7 @@ private:
     // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#progressive-enhancement
     static constexpr auto kEnterScreen = vt::Concatenate<
         vt::kEnterAlternateScreen, vt::kEnableModifiedKeys, vt::kPushDisambiguatedKeys,
-        vt::kSaveCursorVisibility, vt::kHideCursor>();
-    static constexpr auto kLeaveScreen = vt::Concatenate<vt::kPopKeyboardMode,
-        vt::kResetModifiedKeys, vt::kResetAttributes,
-        vt::kShowCursor, vt::kRestoreCursorVisibility, vt::kLeaveAlternateScreen>();
+        vt::kHideCursor>();
 
 protected:
     auto WriteControlSequenceNoThrow(const std::string_view sequence) const noexcept -> void {
@@ -209,14 +206,31 @@ protected:
     }
 
 private:
-    // Saving private mode 25 on entry preserves cursor visibility on terminals
-    // supporting `XTSAVE`/`XTRESTORE`. Restoration first shows the cursor, then
-    // restores the saved setting; terminals that ignore those extensions are
-    // therefore left with a visible cursor when the interactive session ends.
-    // https://invisible-mirror.net/xterm/ctlseqs/ctlseqs.html
-    [[nodiscard]] auto RestoreScreenOnExit() {
-        return ScopeExit{std::bind(
-            &BasicUnixConsole::WriteControlSequenceNoThrow, this, kLeaveScreen)};
+    // Save the queried visibility in this screen's guard so a nested screen
+    // cannot overwrite it. `XTSAVE`/`XTRESTORE` have only one saved value per
+    // mode, but remain a fallback for terminals that do not answer DECRQM.
+    // Showing the cursor before that fallback leaves it visible on terminals
+    // that also ignore XTRESTORE. Restore a queried value after leaving the
+    // alternate screen so the previously active screen receives that setting.
+    // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+    [[nodiscard]] auto RestoreScreenOnExit(this auto &self) {
+        const auto previous_cursor = self.QueryCursorVisibility();
+        if (!previous_cursor) {
+            self.Write(vt::kSaveCursorVisibility);
+        }
+        return ScopeExit{[&self, previous_cursor] {
+            self.WriteControlSequenceNoThrow(vt::Concatenate<
+                vt::kPopKeyboardMode, vt::kResetModifiedKeys, vt::kResetAttributes>());
+            if (!previous_cursor) {
+                self.WriteControlSequenceNoThrow(vt::Concatenate<
+                    vt::kShowCursor, vt::kRestoreCursorVisibility>());
+            }
+            self.WriteControlSequenceNoThrow(vt::kLeaveAlternateScreen);
+            if (previous_cursor) {
+                self.WriteControlSequenceNoThrow(*previous_cursor
+                    ? vt::kShowCursor : vt::kHideCursor);
+            }
+        }};
     }
 
     [[nodiscard]] auto ReadWindowSize() const -> TerminalSize {

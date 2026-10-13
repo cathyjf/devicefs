@@ -245,18 +245,35 @@ protected:
     }
 
 private:
-    [[nodiscard]] auto RestoreScreenOnExit() {
-        auto previous_cursor = CONSOLE_CURSOR_INFO{};
-        if (!GetConsoleCursorInfo(output_.get(), &previous_cursor)) {
-            throw std::system_error(GetLastError(),
-                std::system_category(), "could not read the console cursor visibility");
-        }
-        return wil::scope_exit([this, previous_cursor] {
-            keyboard_detection_deadline_.reset();
-            WriteControlSequenceNoThrow(keyboard_restore_);
-            keyboard_restore_ = {};
-            WriteControlSequenceNoThrow(vt::kLeaveAlternateScreen);
-            std::ignore = SetConsoleCursorInfo(output_.get(), &previous_cursor);
+    [[nodiscard]] auto RestoreScreenOnExit(this auto &self) {
+        // `GetConsoleCursorInfo` reads visibility from the handle's screen
+        // buffer, even when an alternate screen buffer is active. A cursor
+        // hidden by a VT command in the alternate buffer can therefore still
+        // be reported as visible. Saving that value would show the cursor on
+        // exit instead of preserving the caller's hidden cursor.
+        // https://github.com/microsoft/terminal/blob/main/src/host/getset.cpp#L153-L164
+        //
+        // Query visibility before entering the screen. The terminal answers
+        // from its active cursor. Older local console hosts without DECRQM
+        // use the native API as a fallback; if that query also fails, leave
+        // the cursor visible on exit rather than failing screen entry.
+        // https://github.com/microsoft/terminal/blob/main/src/terminal/adapter/adaptDispatch.cpp#L1852-L1854
+        // https://github.com/microsoft/terminal/pull/14444
+        const auto previous_cursor = [&self] {
+            if (const auto visible = self.QueryCursorVisibility()) {
+                return *visible;
+            }
+            auto cursor = CONSOLE_CURSOR_INFO{};
+            return !GetConsoleCursorInfo(self.output_.get(), &cursor) ||
+                (cursor.bVisible != FALSE);
+        }();
+        return wil::scope_exit([&self, previous_cursor] {
+            self.keyboard_detection_deadline_.reset();
+            self.WriteControlSequenceNoThrow(self.keyboard_restore_);
+            self.keyboard_restore_ = {};
+            self.WriteControlSequenceNoThrow(vt::kLeaveAlternateScreen);
+            self.WriteControlSequenceNoThrow(previous_cursor
+                ? vt::kShowCursor : vt::kHideCursor);
         });
     }
 

@@ -72,10 +72,9 @@ public:
     // preserving the invoking shell's screen and cursor until the owner is
     // destroyed. Keep this owner alive across menu calls so each new frame is
     // compared with the previous menu and can reuse its measured text widths.
-    // The owner must be destroyed before the console; exception unwinding then
-    // restores the screen through the same live connection. Windows preserves
-    // cursor shape and visibility through its console API, while Unix preserves
-    // cursor visibility through VT. The native adapter supplies that guard.
+    // The owner must be destroyed before the console because restoration writes
+    // through that console. Each native adapter supplies the guard that restores
+    // the screen and the saved cursor settings, including when a menu throws.
     // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#alternate-screen-buffer
     [[nodiscard]] auto EnterScreen(this auto &self) {
         self.presenter_ = DeltaFramePresenter{};
@@ -93,6 +92,33 @@ public:
             return std::nullopt;
         }
         return CursorPosition{.row = (*reply)[0], .column = (*reply)[1]};
+    }
+
+    // Ask the terminal whether its cursor is visible. Return an empty optional
+    // if the terminal does not provide a reply that establishes visibility.
+    //
+    // The DECRPM reply for cursor mode 25 uses 1 for visible and 2 for hidden.
+    // States 3 and 4 mean permanently visible and permanently hidden: the
+    // terminal does not allow show/hide commands to change those settings.
+    // They therefore have the same visibility as 1 and 2, and require no
+    // different restoration command. State 0 means the mode is not recognized;
+    // it and any undefined state cannot establish the cursor's visibility.
+    // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+    [[nodiscard]] auto QueryCursorVisibility(this auto &self) -> std::optional<bool> {
+        const auto reply = self.Query(detail::TerminalReport::CursorVisibility);
+        if (!reply) {
+            return std::nullopt;
+        }
+        switch ((*reply)[0]) {
+        case 1:
+        case 3:
+            return true;
+        case 2:
+        case 4:
+            return false;
+        default:
+            return std::nullopt;
+        }
     }
 
     [[nodiscard]] auto QuerySize(this auto &self) -> std::optional<TerminalSize> {

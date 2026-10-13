@@ -362,8 +362,20 @@ public:
         }
     }
 
+#ifdef _WIN32
+    GSL_SUPPRESS("26434",
+        "Screen guards dispatch cleanup through their explicit object "
+        "parameter. This test adapter records those commands while preserving "
+        "their native output for the existing cursor-restoration tests.")
+    auto WriteControlSequenceNoThrow(const std::string_view sequence) noexcept -> void {
+        restoration.append(sequence);
+        BasicNativeConsole<Clock>::WriteControlSequenceNoThrow(sequence);
+    }
+#endif
+
     std::function<void(std::string_view)> on_write;
 #ifdef _WIN32
+    std::string restoration;
     std::function<void()> on_cursor_visibility_query;
     std::function<void()> on_keyboard_query;
 #endif
@@ -726,6 +738,107 @@ auto RequireInput(const MenuInput received, const MenuInput expected,
                 "a supported keyboard extension lost VT input"sv);
         });
     }
+    passed &= run_test("Windows screen guards retain their keyboard restoration commands"sv, [&] {
+        // These replies select Kitty or xterm without involving a terminal
+        // emulator. Leaving the inner guard before or after its reply tests
+        // whether cleanup belongs to that screen rather than the outer one.
+        // XTQMODKEYS replies are also commands that restore the reported value.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+        for (const auto reply : std::array{kKittyAvailable, "\x1b[>4;1m"sv}) {
+            const auto outer_restore = (reply == kKittyAvailable) ? vt::kPopKeyboardMode : reply;
+            const auto inner_reply = (reply == kKittyAvailable) ? "\x1b[?1u"sv : "\x1b[>4;2m"sv;
+            const auto inner_restore = (reply == kKittyAvailable) ? vt::kPopKeyboardMode : inner_reply;
+            for (const auto same_console : std::array{false, true}) {
+                for (const auto inner_detected : std::array{false, true}) {
+                    auto console = make_console();
+                    auto screen_queries = 0;
+                    console.on_write = [&input, &screen_queries](const auto text) {
+                        if (text == vt::kRequestAlternateScreen) {
+                            input.Feed(++screen_queries == 1
+                                ? "\x1b[?1049;2$y"sv : "\x1b[?1049;1$y"sv);
+                        }
+                    };
+                    console.on_cursor_visibility_query = [&input] { input.Feed("\x1b[?25;2$y"sv); };
+                    {
+                        const auto outer = console.EnterScreen();
+                        input.Feed(std::format("{}a", reply));
+                        Require(console.ReadTextInput().character == U'a',
+                            "the outer keyboard reply consumed following text"sv);
+                        {
+                            auto inner_console = same_console
+                                ? std::optional<decltype(console)>{}
+                                : std::optional<decltype(console)>{std::in_place, console_arguments...};
+                            auto &active = same_console ? console : *inner_console;
+                            active.on_write = console.on_write;
+                            active.on_cursor_visibility_query = console.on_cursor_visibility_query;
+                            {
+                                const auto inner = active.EnterScreen();
+                                if (inner_detected) {
+                                    input.Feed(std::format("{}b", inner_reply));
+                                    Require(active.ReadTextInput().character == U'b',
+                                        "the inner keyboard reply consumed following text"sv);
+                                }
+                            }
+                            if (inner_detected) {
+                                Require(active.restoration.contains(inner_restore),
+                                    "the inner screen did not restore its own keyboard mode"sv);
+                            } else {
+                                Require(!active.restoration.contains(vt::kPopKeyboardMode) &&
+                                    !active.restoration.contains(vt::kModifiedKeysReplyPrefix),
+                                    "an undetected inner screen restored the outer keyboard mode"sv);
+                            }
+                        }
+                        console.restoration.clear();
+                    }
+                    Require(console.restoration.contains(outer_restore),
+                        "the inner screen erased the outer keyboard restoration command"sv);
+                }
+            }
+        }
+    });
+    passed &= run_test("Windows screen guards preserve pending detection and native input mode"sv, [&] {
+        for (const auto legacy : std::array{false, true}) {
+            auto console = make_console();
+            auto screen_queries = 0;
+            console.on_write = [&input, &screen_queries](const auto text) {
+                if (text == vt::kRequestAlternateScreen) {
+                    input.Feed(++screen_queries == 1
+                        ? "\x1b[?1049;2$y"sv : "\x1b[?1049;1$y"sv);
+                }
+            };
+            console.on_cursor_visibility_query = [&input] { input.Feed("\x1b[?25;2$y"sv); };
+            {
+                const auto outer = console.EnterScreen();
+                if (legacy) {
+                    // Simulated idle time expires detection without relying
+                    // on its configured duration or a real-time wait.
+                    Require(console.ReadTextInput(TestClock::now() + 1h).key == MenuKey::Timeout,
+                        "idle input did not return at the supplied deadline"sv);
+                    Require((std::get<0>(input.Modes()) & ENABLE_VIRTUAL_TERMINAL_INPUT) == 0,
+                        "unanswered detection did not select native input"sv);
+                }
+                const auto prior_modes = input.Modes();
+                {
+                    const auto inner = console.EnterScreen();
+                    input.Feed(std::format("{}b", kKittyAvailable));
+                    Require(console.ReadTextInput().character == U'b',
+                        "the inner keyboard reply consumed following text"sv);
+                    Require((std::get<0>(input.Modes()) & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0,
+                        "VT input was disabled while the inner screen was active"sv);
+                }
+                Require(input.Modes() == prior_modes,
+                    "the inner screen did not restore the preceding native input mode"sv);
+                console.restoration.clear();
+                if (!legacy) {
+                    input.Feed(std::format("{}a", kKittyAvailable));
+                    Require(console.ReadTextInput().character == U'a',
+                        "resuming outer detection consumed following text"sv);
+                }
+            }
+            Require(console.restoration.contains(vt::kPopKeyboardMode) == !legacy,
+                "the inner screen changed whether outer keyboard detection was pending"sv);
+        }
+    });
     passed &= run_test("Windows keyboard detection does not delay cancellation"sv, [&] {
         {
             auto console = make_console();

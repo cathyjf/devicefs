@@ -266,10 +266,21 @@ private:
             return !GetConsoleCursorInfo(self.output_.get(), &cursor) ||
                 (cursor.bVisible != FALSE);
         }();
-        return wil::scope_exit([&self, previous_cursor, already_alternate] {
-            self.keyboard_detection_deadline_.reset();
-            self.WriteControlSequenceNoThrow(self.keyboard_restore_);
-            self.keyboard_restore_ = {};
+        // Keyboard replies update `keyboard_restore_` and
+        // `keyboard_detection_deadline_` while a screen is active. Each guard
+        // saves the preceding values and gives its screen fresh state, so its
+        // cleanup cannot execute or erase an enclosing guard's command.
+        // A preceding screen may have selected native key records, so this
+        // screen's temporary VT input must restore that console mode too.
+        return wil::scope_exit([&self, previous_cursor, already_alternate,
+            input_mode = detail::SetConsoleModeScoped(
+                self.input_.get(), ENABLE_VIRTUAL_TERMINAL_INPUT, 0),
+            previous_keyboard_restore = std::exchange(self.keyboard_restore_, {}),
+            previous_detection_deadline = std::exchange(
+                self.keyboard_detection_deadline_, std::nullopt)]() mutable {
+            self.WriteControlSequenceNoThrow(std::exchange(
+                self.keyboard_restore_, std::move(previous_keyboard_restore)));
+            self.keyboard_detection_deadline_ = previous_detection_deadline;
             if (!already_alternate) {
                 self.WriteControlSequenceNoThrow(vt::kLeaveAlternateScreen);
             }
@@ -291,12 +302,6 @@ private:
     // are unsupported. Only the timeout permits fallback to native input.
     auto ConfigureKeyboard(this auto &self) -> void {
         constexpr auto kDetectionTimeout = 5s;
-        auto mode = DWORD{};
-        if (!GetConsoleMode(self.input_.get(), &mode) ||
-            !SetConsoleMode(self.input_.get(), mode | ENABLE_VIRTUAL_TERMINAL_INPUT)) {
-            throw std::system_error(GetLastError(), std::system_category(),
-                "could not enable VT input for keyboard detection");
-        }
         self.keyboard_detection_deadline_ = Clock::now() +
             std::chrono::ceil<typename Clock::duration>(kDetectionTimeout);
         self.Write(vt::kRequestKeyboardSupport);
@@ -310,22 +315,26 @@ private:
             return;
         }
         if (detail::ParseTerminalReport(sequence, detail::TerminalReport::KeyboardFlags)) {
-            SelectKeyboardProtocol(detail::KeyboardProtocol::Kitty);
+            SelectKeyboardProtocol(detail::KeyboardProtocol::Kitty, vt::kPopKeyboardMode);
         } else if (detail::ParseTerminalReport(sequence, detail::TerminalReport::ModifiedKeys)) {
-            SelectKeyboardProtocol(detail::KeyboardProtocol::Xterm);
+            // XTQMODKEYS replies are set commands, so retaining the reply
+            // restores the actual preceding value rather than the terminal's
+            // initial configuration when this screen exits.
+            // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+            SelectKeyboardProtocol(detail::KeyboardProtocol::Xterm, sequence);
         }
     }
 
-    auto SelectKeyboardProtocol(const detail::KeyboardProtocol protocol) -> void {
+    auto SelectKeyboardProtocol(const detail::KeyboardProtocol protocol,
+        const std::string_view restore = {}) -> void {
         using enum detail::KeyboardProtocol;
+        keyboard_restore_ = restore;
         keyboard_detection_deadline_.reset();
         switch (protocol) {
         case Kitty:
-            keyboard_restore_ = vt::kPopKeyboardMode;
             Write(vt::kPushDisambiguatedKeys);
             break;
         case Xterm:
-            keyboard_restore_ = vt::kResetModifiedKeys;
             Write(vt::kEnableModifiedKeys);
             break;
         case Legacy: {
@@ -492,7 +501,7 @@ private:
             0);
     std::list<INPUT_RECORD> pending_;
     std::optional<wchar_t> high_surrogate_;
-    std::string_view keyboard_restore_;
+    std::string keyboard_restore_;
     std::optional<typename Clock::time_point> keyboard_detection_deadline_;
 };
 

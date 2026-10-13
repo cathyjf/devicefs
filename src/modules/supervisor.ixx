@@ -446,8 +446,13 @@ template <typename Operation>
             input, console_mode & ~DWORD{ENABLE_PROCESSED_INPUT})) {
         WinError("could not enable foreground cancellation input");
     }
-    auto restore_console_mode = wil::scope_exit([&] {
-        static_cast<void>(SetConsoleMode(input, console_mode));
+    auto restore_console_mode = wil::scope_exit([input, console_mode] {
+        if (SetConsoleMode(input, console_mode)) {
+            return;
+        }
+        devicefs::WriteToStream(devicefs::stderr, "backup-supervisor: {}.\n",
+            TryConstructWinError(
+                "failed to restore the foreground console input mode"));
     });
 
     foreground_contexts->PushBack(context);
@@ -461,69 +466,62 @@ template <typename Operation>
         });
     auto cancel_on_monitor_failure =
         context->cancellation_event.SetEvent_scope_exit();
-    constexpr auto kPollInterval = std::chrono::milliseconds{100};
+    // The first signaled handle wins, giving completion priority over input.
+    // https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitformultipleobjects
+    const auto waits = std::array{context->completed_event.get(), input};
     constexpr auto kInputBatchSize = 16uz;
-    while (result.wait_for(kPollInterval) !=
-        std::future_status::ready) {
-        auto available = DWORD{};
-        if (!GetNumberOfConsoleInputEvents(input, &available)) {
-            WinError("could not inspect foreground console input");
+    while (true) {
+        const auto wait = WaitForMultipleObjects(
+            CompileTimeCast<DWORD, waits.size()>(),
+            waits.data(), FALSE, INFINITE);
+        if (wait == WAIT_FAILED) {
+            WinError("failed to wait for foreground operation completion or console input");
         }
-        while (available != 0) {
-            auto records = std::array<INPUT_RECORD, kInputBatchSize>{};
-            auto read = DWORD{};
-            const auto count = std::min<DWORD>(
-                available, DWORD{records.size()});
-            if (!ReadConsoleInputW(input, records.data(), count, &read)) {
-                WinError("could not read foreground console input");
+        if (wait == WAIT_OBJECT_0) {
+            break;
+        }
+        auto records = std::array<INPUT_RECORD, kInputBatchSize>{};
+        auto read = DWORD{};
+        if (!ReadConsoleInputW(input, records.data(),
+                DWORD{records.size()}, &read)) {
+            WinError("could not read foreground console input");
+        }
+        for (const auto &record : std::span{records}.first(read)) {
+            // With VT input enabled, Ctrl+C can arrive as the ETX character
+            // (`0x03`) without a virtual key code or Ctrl modifier. This was
+            // observed when running through CTest. Both representations
+            // request cancellation, allowing callers to retain VT input.
+            if ((record.EventType != KEY_EVENT) ||
+                !record.Event.KeyEvent.bKeyDown ||
+                ((record.Event.KeyEvent.uChar.UnicodeChar != L'\x03') &&
+                    ((record.Event.KeyEvent.wVirtualKeyCode != L'C') ||
+                        ((record.Event.KeyEvent.dwControlKeyState &
+                            (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) == 0)))) {
+                continue;
             }
-            for (const auto &record : std::span{records}.first(read)) {
-                // With VT input enabled, Ctrl+C can arrive as the ETX character
-                // (`0x03`) without a virtual key code or Ctrl modifier. This was
-                // observed when running through CTest. Both representations
-                // request cancellation, allowing callers to retain VT input.
-                if ((record.EventType != KEY_EVENT) ||
-                    !record.Event.KeyEvent.bKeyDown ||
-                    ((record.Event.KeyEvent.uChar.UnicodeChar != L'\x03') &&
-                        ((record.Event.KeyEvent.wVirtualKeyCode != L'C') ||
-                            ((record.Event.KeyEvent.dwControlKeyState &
-                                (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) == 0)))) {
-                    continue;
-                }
-                if (context->cancellation_event.is_signaled()) {
-                    continue;
-                }
-                if (!SetEvent(context->cancellation_event.get())) {
-                    WinError("failed to request cancellation");
-                }
-                devicefs::WriteToStream(
-                    devicefs::stdout,
-                    "Cancellation requested; waiting for cleanup.\n");
+            if (context->cancellation_event.is_signaled()) {
+                continue;
             }
-            if (!GetNumberOfConsoleInputEvents(input, &available)) {
-                WinError("could not inspect foreground console input");
+            if (!SetEvent(context->cancellation_event.get())) {
+                WinError("failed to request cancellation");
             }
+            devicefs::WriteToStream(
+                devicefs::stdout,
+                "Cancellation requested; waiting for cleanup.\n");
         }
     }
     cancel_on_monitor_failure.release();
-    const auto operation_result = [&] {
-        try {
-            const auto completed_result = result.get();
-            return context->cancellation_event.is_signaled()
-                ? kCancelledExitCode
-                : completed_result;
-        } catch (...) {
-            if (context->cancellation_event.is_signaled()) {
-                return kCancelledExitCode;
-            }
-            throw;
+    try {
+        const auto completed_result = result.get();
+        return context->cancellation_event.is_signaled()
+            ? kCancelledExitCode
+            : completed_result;
+    } catch (...) {
+        if (context->cancellation_event.is_signaled()) {
+            return kCancelledExitCode;
         }
-    }();
-    if (!SetConsoleMode(input, console_mode)) {
-        WinError("could not restore the foreground console input mode");
+        throw;
     }
-    restore_console_mode.release();
-    return operation_result;
 }
 
 struct ForegroundOptions {

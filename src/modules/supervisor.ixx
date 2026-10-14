@@ -851,9 +851,24 @@ struct SelectiveViewOptions {
         });
 }
 
-[[nodiscard]] auto RunBrowseMode(std::optional<std::u8string> namespace_override) {
+[[nodiscard]] auto RunFastOperation(
+    devicefs::terminal::WindowsConsole &terminal,
+    const std::string_view title, auto operation) {
+    const auto context = std::make_shared<const ForegroundContext>();
+    return RunOperationWithOutput(terminal,
+        MakeForegroundOperation(context, std::move(operation)),
+        [title](auto &frame) {
+            frame.Write("DeviceFs Backup Supervisor\n{}\n\n", title);
+        }, [context] {
+            context->cancellation_event.SetEvent();
+        }, OperationOutput::OnFailure).value_or(kCancelledExitCode);
+}
+
+[[nodiscard]] auto RunBrowseMode(
+    std::optional<std::u8string> namespace_override) {
+    auto terminal = devicefs::terminal::WindowsConsole{};
     auto catalog = std::optional<std::u8string>{};
-    const auto result = RunForegroundOperation("--browse requires an attached console",
+    const auto result = RunFastOperation(terminal, "Load backup catalog",
         [&catalog, &namespace_override](const HANDLE cancellation_event) {
             catalog = RetrieveBackupCatalog(cancellation_event, namespace_override);
             return catalog ? 0 : kCancelledExitCode;
@@ -861,28 +876,28 @@ struct SelectiveViewOptions {
     if (result != 0) {
         return result;
     }
-    auto terminal = devicefs::terminal::WindowsConsole{};
     const auto screen = terminal.EnterScreen();
     auto selection = SelectBackup(terminal, *catalog,
-        [](const std::u8string_view namespace_name, const std::string_view snapshot)
-            -> std::optional<std::u8string> {
+        [&terminal](const std::u8string_view namespace_name,
+            const std::string_view snapshot) -> std::optional<std::u8string> {
             auto manifest = std::u8string{};
-            const auto retrieved = RunForegroundOperation(
-                "--browse requires an attached console",
-                [snapshot, namespace_name, &manifest](const HANDLE cancellation_event) {
+            std::ignore = RunFastOperation(
+                terminal, "Load backup manifest",
+                [snapshot, namespace_name, &manifest](
+                    const HANDLE cancellation_event) {
                     auto response = RetrieveBackupManifest(
-                        cancellation_event, std::u8string{namespace_name}, snapshot);
+                        cancellation_event, std::u8string{namespace_name},
+                        snapshot);
                     if (!response) {
                         return kCancelledExitCode;
                     }
                     if (response->exit_code == 0) {
                         manifest = std::move(response->manifest);
                     }
-                    return 0;
+                    return response->exit_code;
                 });
-            if (retrieved != 0) {
-                return std::nullopt;
-            }
+            // The manifest enriches labels. An empty result retains the
+            // image names supplied by the catalog.
             return manifest;
         });
     if (!selection) {

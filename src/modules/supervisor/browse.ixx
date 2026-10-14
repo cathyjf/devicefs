@@ -375,7 +375,7 @@ export template <class RetrieveManifest>
                     identifier, selected.archives, retrieve_manifest);
             }();
             if (!labels) {
-                return std::nullopt;
+                continue;
             }
             const auto choices = [&labels_ = *labels, &archives = selected.archives] {
                 auto choices = std::views::zip_transform(

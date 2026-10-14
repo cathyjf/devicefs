@@ -92,19 +92,27 @@ private:
 
 } // namespace view_output_detail
 
-// The scrolling menu displays standard output and standard error from
-// `operation()`, which runs on a worker thread. Close becomes available after
-// the worker finishes, and the output remains visible until the menu closes.
+export enum class OperationOutput { Stream, OnFailure };
+
+// The operation runs on a worker thread with captured stdout and stderr.
+// Stream displays the output while the worker runs, then offers Close.
+// OnFailure waits without displaying output or entering a screen. Success
+// discards the output; failure or cancellation displays it with Continue.
 // The return value is the operation's exit code.
 //
-// Escape or Ctrl+C while the operation is running invokes `cancel()`. If the
-// callback returns, this function waits for the worker and returns an empty
-// optional. A presentation failure also invokes `cancel()` during stack
-// unwinding, before waiting for a running worker.
-// The caller keeps `terminal` and its `EnterScreen` owner alive for this call.
+// Escape or Ctrl+C invokes cancel() while the worker runs.
+// If the callback returns, this function waits and returns an empty optional.
+// A presentation failure also invokes cancel() during stack unwinding before
+// waiting for a running worker.
+// A caught operation exception is displayed. OnFailure returns exit code 1
+// after Continue; Stream rethrows the exception after the view closes.
+// The caller keeps terminal alive and, for Stream, retains its EnterScreen
+// owner. OnFailure owns screen entry only while failure output is displayed.
 export template <typename Operation, typename Header, typename Cancellation>
 [[nodiscard]] auto RunOperationWithOutput(devicefs::terminal::WindowsConsole &terminal,
-    Operation operation, const Header draw_header, Cancellation cancel) -> std::optional<int> {
+    Operation operation, const Header draw_header, Cancellation cancel,
+    const OperationOutput visibility = OperationOutput::Stream)
+    -> std::optional<int> {
     using namespace std::chrono_literals;
     const auto path = TemporarySystemDirectoryPath("devicefs-view-output");
     // Declaring `remove_file` before `output` makes deletion happen after
@@ -115,6 +123,8 @@ export template <typename Operation, typename Header, typename Cancellation>
     });
     auto output = view_output_detail::ViewOutput{path};
     auto view = devicefs::terminal::OutputMenu{};
+    view.SetVisible(visibility == OperationOutput::Stream);
+    auto screen = std::optional<decltype(terminal.EnterScreen())>{};
     auto task = std::async(std::launch::async, std::move(operation));
     // The destructor of `task` waits for its worker. This guard is destroyed
     // first, giving `cancel()` a chance to stop the worker before that wait.
@@ -131,25 +141,48 @@ export template <typename Operation, typename Header, typename Cancellation>
     auto finished = false;
     auto result = std::optional<int>{};
     auto failure = std::exception_ptr{};
-    std::ignore = view.Select(terminal, draw_header,
-        [&output, &task, &finished, &result, &failure](auto &menu) {
+    const auto show_failure = [&terminal, &screen, &view] {
+        screen.emplace(terminal.EnterScreen());
+        view.SetVisible(true);
+        view.SetCommands(std::array{
+            devicefs::terminal::OutputCommand{0, "Continue"}});
+    };
+    const auto update =
+        [&output, &task, &finished, &result, &failure, &show_failure,
+            visibility](auto &menu) {
             if (finished) {
                 return;
             }
             if (task.wait_for(0ms) != std::future_status::ready) {
-                output.ReadOutput(menu);
+                if (visibility == OperationOutput::Stream) {
+                    output.ReadOutput(menu);
+                }
                 return;
             }
-            output.ReadOutput(menu);
+            auto diagnostic = std::string{};
             try {
                 result = task.get();
             } catch (const std::exception &error) {
                 failure = std::current_exception();
-                menu.AppendLine(error.what());
+                diagnostic = error.what();
             }
             finished = true;
-            menu.SetCommands(std::array{devicefs::terminal::OutputCommand{0, "Close"}});
-        });
+            if ((visibility == OperationOutput::OnFailure) && (result == 0)) {
+                menu.Close();
+                return;
+            }
+            output.ReadOutput(menu);
+            if (failure) {
+                menu.AppendLine(diagnostic);
+            }
+            if (visibility == OperationOutput::OnFailure) {
+                show_failure();
+            } else {
+                menu.SetCommands(std::array{
+                    devicefs::terminal::OutputCommand{0, "Close"}});
+            }
+        };
+    std::ignore = view.Select(terminal, draw_header, update);
     cancel_on_failure.release();
     if (!finished) {
         cancel();
@@ -159,10 +192,16 @@ export template <typename Operation, typename Header, typename Cancellation>
             // The result remains cancellation even if the worker fails
             // while shutting down.
         }
+        if (visibility == OperationOutput::OnFailure) {
+            output.ReadOutput(view);
+            view.AppendLine("Operation cancelled.");
+            show_failure();
+            std::ignore = view.Select(terminal, draw_header, [](auto &) {});
+        }
     }
-    if (failure) {
+    if (failure && (visibility == OperationOutput::Stream)) {
         std::rethrow_exception(failure);
     }
     output.Restore();
-    return result;
+    return failure ? std::optional{1} : result;
 }

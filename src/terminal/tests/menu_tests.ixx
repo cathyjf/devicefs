@@ -411,6 +411,46 @@ export [[nodiscard]] auto TestMenu() -> bool {
         Require(!EditText(terminal, [](auto &) {}, "unchanged"),
             "an unusable text area accepted an edit"sv);
     });
+    passed &= Test("hidden output waiting without drawing and completing without input"sv, [] {
+        constexpr auto input = std::array{MenuInput{MenuKey::Timeout}};
+        auto terminal = MenuConsole{input};
+        const auto screen = terminal.EnterScreen();
+        auto view = OutputMenu{};
+        view.SetVisible(false);
+        auto updates = 0;
+        Require(!view.Select(terminal, [](auto &) {
+            throw std::runtime_error("a hidden menu drew its header");
+        }, [&updates](auto &menu) {
+            if (++updates == 2) {
+                menu.Close();
+            }
+        }), "completion selected a command"sv);
+        Require((updates == 2) && (terminal.frames.size() == 1),
+            "completion waited for another key"sv);
+        Require((terminal.write_calls == 0) && (terminal.size_query_calls == 0) &&
+            (terminal.cursor_query_calls == 0),
+            "hidden output touched the displayed screen"sv);
+    });
+    passed &= Test("hidden output becoming visible with an explicit Continue command"sv, [] {
+        constexpr auto input = std::array{
+            MenuInput{MenuKey::Timeout}, MenuInput{MenuKey::Accept}};
+        auto terminal = MenuConsole{input, {.rows = 16, .columns = 80}};
+        const auto screen = terminal.EnterScreen();
+        auto view = OutputMenu{};
+        view.SetVisible(false);
+        Require(view.Select(terminal, [](auto &) {},
+            [&terminal](auto &menu) {
+                if (terminal.frames.size() == 1) {
+                    menu.AppendLine("retrieval failed");
+                    menu.SetCommands(std::array{OutputCommand{7, "Continue"}});
+                    menu.SetVisible(true);
+                }
+            }) == 7, "failure output did not wait for Continue"sv);
+        Require((terminal.presentations.front() == 0) &&
+            terminal.frames.at(1).contains("retrieval failed") &&
+            terminal.frames.at(1).contains("Continue"),
+            "failure output was shown before failure or lost afterward"sv);
+    });
     passed &= Test("output displaying unfinished lines and continuing them on later updates"sv, [] {
         constexpr auto input = std::array{MenuInput{MenuKey::Timeout},
             MenuInput{MenuKey::Timeout}, MenuInput{MenuKey::Back}};

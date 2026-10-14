@@ -592,6 +592,20 @@ public:
     OutputMenu(const OutputMenu &) = delete;
     auto operator=(const OutputMenu &) -> OutputMenu & = delete;
 
+    // A hidden menu still receives input and invokes its update callback, but
+    // performs no drawing or layout queries. Showing it presents its contents.
+    auto SetVisible(const bool visible) noexcept -> void {
+        if (visible_ != visible) {
+            visible_ = visible;
+            dirty_ = true;
+        }
+    }
+
+    // Calling Close during an update ends Select without choosing a command.
+    auto Close() noexcept -> void {
+        close_requested_ = true;
+    }
+
     // Place commands above or below the output, with a blank row between the
     // two areas. The default is BelowOutput. Changing the position retains
     // keyboard focus, command selection, and the passage being read.
@@ -715,12 +729,16 @@ public:
         auto usable = false;
         auto retry = true;
         dirty_ = true;
+        close_requested_ = false;
         if (!list_) {
             list_.emplace(command_labels_, 0);
         }
         for (;;) {
             std::invoke(update, *this);
-            if (retry || (usable && dirty_)) {
+            if (close_requested_) {
+                return std::nullopt;
+            }
+            if (visible_ && (retry || (usable && dirty_))) {
                 const auto guard = terminal.BeginUpdate();
                 if (!size) {
                     size = terminal.QuerySize();
@@ -746,7 +764,7 @@ public:
                     list_->InvalidateLayout();
                     layout_width_ = 0;
                 }
-            } else if (usable) {
+            } else if (visible_ && usable) {
                 if (input.key == MenuKey::SwitchArea) {
                     if ((input.repeat % 2) != 0) {
                         commands_focused_ = !commands_focused_;
@@ -949,6 +967,8 @@ private:
     bool history_lost_ = false;
     bool commands_focused_ = true;
     bool dirty_ = true;
+    bool visible_ = true;
+    bool close_requested_ = false;
     OutputCommandPosition command_position_ = OutputCommandPosition::BelowOutput;
     std::optional<int> command_rows_;
     std::vector<std::size_t> command_ids_;

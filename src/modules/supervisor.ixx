@@ -62,11 +62,12 @@ constexpr auto kRunInConsoleOption = "--internal-run-in-console"sv;
     _In_opt_z_ const char *const name) {
     auto event = wil::unique_event_nothrow{CreateEventExA(
         nullptr, name, CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS)};
-    if (!event) {
-        WinError("could not create the cancellation event");
-    }
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        throw std::runtime_error("the cancellation event already exists");
+    if (!event || (GetLastError() == ERROR_ALREADY_EXISTS)) {
+        WinError("failed to create cancellation event{}",
+            [name] {
+                const auto last_error = wil::last_error_context{};
+                return name ? std::format(": '{}'", name) : std::string{};
+            }());
     }
     return event;
 }

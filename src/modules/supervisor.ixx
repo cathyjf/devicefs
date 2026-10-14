@@ -398,14 +398,7 @@ auto foreground_contexts = std::optional<
 auto foreground_contexts_once = std::once_flag{};
 
 auto WINAPI ForegroundControlHandler(const DWORD) noexcept -> BOOL {
-    const auto contexts = [&contexts_ = std::as_const(*foreground_contexts)]
-        noexcept -> std::optional<decltype(foreground_contexts->Read())> {
-        try {
-            return contexts_.Read();
-        } catch (...) {
-            return std::nullopt;
-        }
-    }();
+    const auto contexts = foreground_contexts->Read();
     if (!contexts || contexts->empty()) {
         return FALSE;
     }

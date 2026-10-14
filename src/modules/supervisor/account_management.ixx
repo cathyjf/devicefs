@@ -556,11 +556,7 @@ export [[nodiscard]] auto RunInternalWindowsAccountProcess(
     auto forward = ForwardPipeOutput{GetStdHandle(STD_OUTPUT_HANDLE)};
     const auto output_result = ReadPipeOutput(output_read.get(), forward);
     output_read.reset();
-    if (WaitForSingleObject(process.hProcess, INFINITE) == WAIT_FAILED) {
-        WinError("could not wait for '{}' running as internal Windows account '{}'",
-            std::wstring_view{executable.native()},
-            std::wstring_view{username.c_str(), username.size()});
-    }
+    wil::handle_wait(process.hProcess);
     auto exit_code = DWORD{};
     if (!GetExitCodeProcess(process.hProcess, &exit_code)) {
         WinError("could not obtain the exit code for '{}' running as internal Windows account '{}'",

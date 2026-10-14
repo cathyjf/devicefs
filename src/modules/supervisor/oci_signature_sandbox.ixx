@@ -124,10 +124,7 @@ export auto VerifyOciLayerSignatureInSandbox(const std::filesystem::path &superv
         WinError("could not read the OCI signature worker's diagnostic for "
             "layer '{}'", digest, ExplicitWin32Error{result});
     }
-    if (WaitForSingleObject(process.hProcess, INFINITE) == WAIT_FAILED) {
-        WinError("could not wait for the OCI signature worker for layer '{}'",
-            digest);
-    }
+    wil::handle_wait(process.hProcess);
     if (const auto result = ProcessExitCode(process.hProcess);
         result != ERROR_SUCCESS) {
         throw std::runtime_error(std::format(

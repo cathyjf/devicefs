@@ -115,17 +115,10 @@ struct Pipe {
             std::ignore = GetOverlappedResult(
                 endpoint.pipe.get(), &pending, &ignored, TRUE);
         }};
-        const auto events = std::array{
-            endpoint.cancellation.get(), endpoint.completion.get()};
-        const auto result = WaitForMultipleObjects(
-            wil::safe_cast_failfast<DWORD>(events.size()),
-            events.data(), FALSE, INFINITE);
+        const auto result = wil::wait_any_failfast(
+            endpoint.cancellation, endpoint.completion).status();
         if (result == WAIT_OBJECT_0) {
             return std::nullopt;
-        }
-        if (result == WAIT_FAILED) {
-            throw std::system_error(GetLastError(), std::system_category(),
-                "could not wait for child-pipe I/O or cancellation");
         }
         error = GetOverlappedResult(
             endpoint.pipe.get(), &pending, &count, FALSE) ?
@@ -239,7 +232,7 @@ public:
     ~WindowsProcess() {
         Terminate();
         JoinIo();
-        std::ignore = WaitForSingleObject(process_.hProcess, INFINITE);
+        wil::handle_wait(process_.hProcess);
     }
 
 private:
@@ -267,10 +260,7 @@ private:
     }
 
     [[nodiscard]] auto WaitForExit() const -> int {
-        if (WaitForSingleObject(process_.hProcess, INFINITE) == WAIT_FAILED) {
-            throw std::system_error(GetLastError(), std::system_category(),
-                "could not wait for the child process");
-        }
+        wil::handle_wait(process_.hProcess);
         auto code = DWORD{};
         if (!GetExitCodeProcess(process_.hProcess, &code)) {
             throw std::system_error(GetLastError(), std::system_category(),

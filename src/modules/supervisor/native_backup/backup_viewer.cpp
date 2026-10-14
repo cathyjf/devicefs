@@ -163,27 +163,19 @@ auto WaitForViewSession(
     const DeviceFsChild &devicefs,
     const PbsFishOperation &fish,
     const HANDLE cancellation_event) -> void {
-    const auto handles = std::array{
+    const auto result = wil::wait_any_failfast(
         devicefs.Process().process.hProcess,
-        fish.Process(),
-        cancellation_event,
-    };
-    const auto result = WaitForMultipleObjects(
-        wil::safe_cast_failfast<DWORD>(handles.size()),
-        handles.data(), FALSE, INFINITE);
-    if (result == WAIT_FAILED) {
-        WinError("could not wait for the selective-view session");
-    }
+        fish.Process(), cancellation_event).status();
     if (result == WAIT_OBJECT_0) {
         throw std::runtime_error(std::format(
             "devicefs exited while the backup view was mounted with code {}",
-            ProcessExitCode(handles[0])));
+            ProcessExitCode(devicefs.Process().process.hProcess)));
     }
     if (result == (WAIT_OBJECT_0 + 1)) {
         throw std::runtime_error(std::format(
             "the Linux view operation exited while the view was mounted "
             "with code {}",
-            ProcessExitCode(handles[1])));
+            ProcessExitCode(fish.Process())));
     }
     if (result == (WAIT_OBJECT_0 + 2)) {
         return;
@@ -202,7 +194,7 @@ auto WaitForViewSession(
     const std::optional<std::string_view> timestamp,
     const std::string_view address,
     const std::optional<std::u8string> &namespace_override) -> int {
-    if (internal::CancellationRequested(cancellation_event)) {
+    if (wil::event_is_signaled(cancellation_event)) {
         return internal::kCancelledExitCode;
     }
 

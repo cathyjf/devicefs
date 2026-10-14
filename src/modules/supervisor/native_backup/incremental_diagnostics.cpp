@@ -283,7 +283,7 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
         cancellation_event, false, successor_volumes,
         [&](const devicefs::vshadow::SnapshotSet &) {
             for (const auto &interval : intervals) {
-                if (internal::CancellationRequested(cancellation_event)) {
+                if (wil::event_is_signaled(cancellation_event)) {
                     return internal::kCancelledExitCode;
                 }
                 reports.push_back(VolumeReport{
@@ -876,7 +876,7 @@ auto VerifySnapshotRange(
     const std::uint64_t range_end) -> void {
     try {
         if (state.Failed() ||
-            internal::CancellationRequested(cancellation_event)) {
+            wil::event_is_signaled(cancellation_event)) {
             return;
         }
         auto baseline = OpenVerificationSnapshot(
@@ -904,7 +904,7 @@ auto VerifySnapshotRange(
         for (auto offset = range_start; offset < range_end;
             offset += kComparisonChunkSize) {
             if (state.Failed() ||
-                internal::CancellationRequested(cancellation_event)) {
+                wil::event_is_signaled(cancellation_event)) {
                 return;
             }
             const auto size = wil::safe_cast_failfast<std::size_t>(
@@ -990,7 +990,7 @@ auto StartVerificationWorkers(
     for (auto worker = 0uz;
         worker < kVerificationWorkerCount; ++worker) {
         if (job.state->Failed() ||
-            internal::CancellationRequested(cancellation_event)) {
+            wil::event_is_signaled(cancellation_event)) {
             return;
         }
         const auto range = VerificationWorkerRange(
@@ -1493,7 +1493,7 @@ auto PrintVerificationResult(
     const std::size_t unavailable_snapshots) -> int {
     auto jobs = std::vector<VerificationJob>{};
     for (const auto &volume : volumes) {
-        if (internal::CancellationRequested(cancellation_event)) {
+        if (wil::event_is_signaled(cancellation_event)) {
             break;
         }
         auto state = std::make_unique<VerificationState>();
@@ -1552,7 +1552,7 @@ auto PrintVerificationResult(
         jobs,
         unprocessed_volumes + volumes.size() - jobs.size(),
         unavailable_snapshots,
-        internal::CancellationRequested(cancellation_event));
+        wil::event_is_signaled(cancellation_event));
 }
 
 [[nodiscard]] auto RunPayloadDiagnostics(
@@ -1586,7 +1586,7 @@ auto PrintVerificationResult(
     }
     if (options.expose_synthetic_backup &&
         (result.map_exit_code == 0) &&
-        !internal::CancellationRequested(cancellation_event)) {
+        !wil::event_is_signaled(cancellation_event)) {
         static_cast<void>(RunBackupViewDiagnostics(
             cancellation_event, result.reports,
             options.backup_view_mount_root, std::nullopt,
@@ -1594,7 +1594,7 @@ auto PrintVerificationResult(
     }
     if (options.verify_synthetic_backup &&
         (result.map_exit_code == 0) &&
-        !internal::CancellationRequested(cancellation_event)) {
+        !wil::event_is_signaled(cancellation_event)) {
         result.filesystem_verification_exit_code =
             RunBackupViewDiagnostics(
                 cancellation_event, result.reports,
@@ -1694,7 +1694,7 @@ auto PrintVerificationResult(
         return baseline_result.error();
     }
     const auto &baselines = *baseline_result;
-    if (internal::CancellationRequested(cancellation_event)) {
+    if (wil::event_is_signaled(cancellation_event)) {
         return internal::kCancelledExitCode;
     }
 

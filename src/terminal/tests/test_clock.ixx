@@ -76,7 +76,8 @@ namespace {
 }
 
 #ifdef _WIN32
-auto WINAPI ControlledWindowsWait(const HANDLE handle, const DWORD timeout)
+auto WINAPI ControlledWindowsWait(const HANDLE handle, const DWORD timeout,
+    const BOOL alertable)
     noexcept -> DWORD {
     static const auto original = [] {
         const auto module = GetModuleHandleW(L"kernel32.dll");
@@ -86,8 +87,8 @@ auto WINAPI ControlledWindowsWait(const HANDLE handle, const DWORD timeout)
         [[gsl::suppress("26490", justification:
             "`GetProcAddress` returns the address of the requested function "
             "but with an incorrect return type.")]]
-        const auto function = reinterpret_cast<decltype(&WaitForSingleObject)>(
-            GetProcAddress(module, "WaitForSingleObject"));
+        const auto function = reinterpret_cast<decltype(&WaitForSingleObjectEx)>(
+            GetProcAddress(module, "WaitForSingleObjectEx"));
         if (!function) {
             std::abort();
         }
@@ -98,13 +99,13 @@ auto WINAPI ControlledWindowsWait(const HANDLE handle, const DWORD timeout)
             std::chrono::milliseconds{timeout}}};
     return SimulateWait(remaining,
         devicefs::terminal::CompileTimeCast<DWORD, WAIT_TIMEOUT>(),
-        [handle](const std::optional<std::chrono::nanoseconds> duration) {
+        [handle, alertable](const std::optional<std::chrono::nanoseconds> duration) {
             const auto milliseconds = duration ?
                 devicefs::terminal::FailFastCast<DWORD>(
                     std::chrono::ceil<std::chrono::milliseconds>(
                         *duration).count()) :
                 INFINITE;
-            return original(handle, milliseconds);
+            return original(handle, milliseconds, alertable);
         });
 }
 #else
@@ -161,15 +162,15 @@ auto WINAPI ControlledWindowsWait(const HANDLE handle, const DWORD timeout)
 }
 
 #ifdef _WIN32
-// MSVC's `dllimport` calls use `__imp_WaitForSingleObject` on both supported
+// MSVC's `dllimport` calls use `__imp_WaitForSingleObjectEx` on both supported
 // Windows architectures. Supplying that import pointer in the test executable
 // redirects those calls without modifying the production console or the DLL.
 // The replacement obtains the real function directly from `kernel32.dll`.
 // https://learn.microsoft.com/cpp/build/importing-function-calls-using-declspec-dllimport
 // Retain the replacement import pointer during whole-program optimization.
-#pragma comment(linker, "/include:__imp_WaitForSingleObject")
+#pragma comment(linker, "/include:__imp_WaitForSingleObjectEx")
 extern "C" {
-    decltype(&WaitForSingleObject) __imp_WaitForSingleObject =
+    decltype(&WaitForSingleObjectEx) __imp_WaitForSingleObjectEx =
         &ControlledWindowsWait;
 }
 #else

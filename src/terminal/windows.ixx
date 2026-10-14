@@ -360,13 +360,8 @@ private:
         const auto timeout = (deadline == Clock::time_point::max()) ?
             INFINITE : FailFastCast<DWORD>(std::min<std::int64_t>(INFINITE - 1,
                 std::chrono::ceil<std::chrono::milliseconds>(remaining).count()));
-        const auto wait = WaitForSingleObject(input_.get(), timeout);
-        if (wait == WAIT_TIMEOUT) {
+        if (!wil::handle_wait(input_.get(), timeout)) {
             return false;
-        }
-        if (wait == WAIT_FAILED) {
-            throw std::system_error(GetLastError(), std::system_category(),
-                "could not wait for terminal input");
         }
         pending_.push_back(ReadConsoleRecord());
         return true;

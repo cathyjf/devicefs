@@ -31,15 +31,6 @@ namespace internal {
 
 inline constexpr auto kCancelledExitCode = 130;
 
-[[nodiscard]] auto CancellationRequested(
-    const HANDLE cancellation_event) {
-    const auto result = WaitForSingleObject(cancellation_event, 0);
-    if (result == WAIT_FAILED) {
-        WinError("could not inspect the backup cancellation event");
-    }
-    return result == WAIT_OBJECT_0;
-}
-
 template <typename Operation>
 [[nodiscard]] auto RunVssOperation(
     const HANDLE cancellation_event,
@@ -48,7 +39,7 @@ template <typename Operation>
         return std::invoke(std::forward<Operation>(operation));
     } catch (const std::system_error &error) {
         const auto cancellation_requested =
-            CancellationRequested(cancellation_event);
+            wil::event_is_signaled(cancellation_event);
         const auto cancelled = std::error_code(
             ERROR_CANCELLED, std::system_category());
         if (cancellation_requested && (error.code() == cancelled)) {

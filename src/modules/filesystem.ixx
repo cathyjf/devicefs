@@ -741,7 +741,7 @@ auto WINAPI ControlHandler(const DWORD event) noexcept -> BOOL {
         if (!SetEvent(g_stop_event)) {
             return FALSE;
         }
-        WaitForSingleObject(g_stopped_event, INFINITE);
+        wil::handle_wait(g_stopped_event);
         return TRUE;
     default:
         return FALSE;
@@ -767,7 +767,6 @@ auto RunWithDevices(
         WinError("could not create shutdown-complete event");
     }
 
-    auto wait_error = DWORD{};
     {
         if constexpr (WindowsBlockDevice::kMeasureFreeClusterData) {
             if (options.synthetic_free_clusters) {
@@ -794,18 +793,13 @@ auto RunWithDevices(
             options.mappings.size(),
             Transcode<std::string>(options.mount.value),
             options.read_user, options.stop_event);
-        if (WaitForSingleObject(stop_event.get(), INFINITE) == WAIT_FAILED) {
-            wait_error = GetLastError();
-        }
+        stop_event.wait();
         filesystem.WaitForOpenFilesToClose();
     }
-    SetEvent(stopped_event.get());
+    stopped_event.SetEvent();
     // The registered handler lives until process exit, so its handles must as well.
     stop_event.release();
     stopped_event.release();
-    if (wait_error != ERROR_SUCCESS) {
-        WinError("shutdown wait failed", ExplicitWin32Error{wait_error});
-    }
     if (g_dispatcher_stopped_unexpectedly) {
         throw std::runtime_error("WinFsp dispatcher stopped unexpectedly");
     }

@@ -183,9 +183,7 @@ auto RunCommand(
                 EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
                 nullptr, nullptr, startup, information);
         }, wil::zstring_view{operation});
-    if (WaitForSingleObject(process.hProcess, INFINITE) == WAIT_FAILED) {
-        WinError("could not wait for command '{}'", command);
-    }
+    wil::handle_wait(process.hProcess);
     auto exit_code = DWORD{};
     if (!GetExitCodeProcess(process.hProcess, &exit_code)) {
         WinError("could not obtain the exit code for command '{}'", command);

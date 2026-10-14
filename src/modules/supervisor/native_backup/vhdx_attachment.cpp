@@ -111,15 +111,9 @@ constexpr auto kShareMode =
                 WinError("could not open attached VHDX Partition1 root {}",
                     std::wstring_view{partition_root});
             }
-            const auto wait = WaitForSingleObject(
-                cancellation_event,
-                wil::safe_cast_failfast<DWORD>(
-                    retry_interval.count()));
-            if (wait == WAIT_FAILED) {
-                WinError("could not wait for attached filesystem root '{}'",
-                    std::wstring_view{partition_root});
-            }
-            if (wait == WAIT_OBJECT_0) {
+            if (wil::handle_wait(
+                    cancellation_event,
+                    CompileTimeCast<DWORD, retry_interval.count()>())) {
                 WinError("waiting for the attached filesystem was cancelled",
                     ExplicitWin32Error{ERROR_CANCELLED});
             }
@@ -200,15 +194,8 @@ namespace internal {
         return status;
     }
 
-    const auto events = std::array{
-        completion_event.get(), cancellation_event,
-    };
-    const auto wait = WaitForMultipleObjects(
-        wil::safe_cast_failfast<DWORD>(events.size()),
-        events.data(), FALSE, INFINITE);
-    if (wait == WAIT_FAILED) {
-        WinError("could not wait for VHDX attachment");
-    }
+    const auto wait = wil::wait_any_failfast(
+        completion_event, cancellation_event).status();
     const auto cancelled = wait == (WAIT_OBJECT_0 + 1);
     if (cancelled) {
         devicefs::WriteToStream(
@@ -224,10 +211,7 @@ namespace internal {
                     TryConstructWinError("", ExplicitWin32Error{error}));
             }
         }
-        if (WaitForSingleObject(completion_event.get(), INFINITE) ==
-            WAIT_FAILED) {
-            WinError("could not wait for VHDX attachment cancellation");
-        }
+        completion_event.wait();
     }
 
     auto progress = VIRTUAL_DISK_PROGRESS{};
@@ -285,7 +269,7 @@ public:
         BeforeFailedAttachmentCleanup &&before_failed_attachment_cleanup) {
         static_assert(std::is_nothrow_invocable_v<
             BeforeFailedAttachmentCleanup>);
-        if (CancellationRequested(cancellation_event)) {
+        if (wil::event_is_signaled(cancellation_event)) {
             WinError("VHDX attachment was cancelled",
                 ExplicitWin32Error{ERROR_CANCELLED});
         }
@@ -302,7 +286,7 @@ public:
         }
         devicefs::WriteToStream(
             devicefs::stdout, "  VHDX opened.\n  Attaching the VHDX.\n");
-        if (CancellationRequested(cancellation_event)) {
+        if (wil::event_is_signaled(cancellation_event)) {
             WinError("VHDX attachment was cancelled",
                 ExplicitWin32Error{ERROR_CANCELLED});
         }
@@ -324,7 +308,7 @@ public:
             }
             disk->reset();
         });
-        if (CancellationRequested(cancellation_event)) {
+        if (wil::event_is_signaled(cancellation_event)) {
             WinError("VHDX attachment was cancelled",
                 ExplicitWin32Error{ERROR_CANCELLED});
         }

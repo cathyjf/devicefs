@@ -228,9 +228,8 @@ constexpr auto kVssIdentifier = std::array{
     if (value.size() < prefix.size()) {
         return false;
     }
-    const auto length = wil::safe_cast_failfast<int>(prefix.size());
-    return CompareStringOrdinal(
-        value.data(), length, prefix.data(), length, TRUE) == CSTR_EQUAL;
+    return wil::compare_string_ordinal(
+        value.substr(0, prefix.size()), prefix, true) == 0;
 }
 
 class RawSource {

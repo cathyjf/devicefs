@@ -135,11 +135,7 @@ namespace internal {
     const std::string_view read_user,
     const bool use_known_data_map,
     const std::optional<std::u8string> &namespace_override) {
-    const auto cancelled = WaitForSingleObject(cancellation_event, 0);
-    if (cancelled == WAIT_FAILED) {
-        WinError("could not inspect the backup cancellation event");
-    }
-    if (cancelled == WAIT_OBJECT_0) {
+    if (wil::event_is_signaled(cancellation_event)) {
         return kCancelledExitCode;
     }
 
@@ -210,11 +206,7 @@ export [[nodiscard]] auto RunNativeBackup(
     const bool no_writers,
     const std::span<const std::string> volume_override,
     const std::optional<std::u8string> &namespace_override) -> int {
-    const auto cancelled = WaitForSingleObject(cancellation_event, 0);
-    if (cancelled == WAIT_FAILED) {
-        WinError("could not inspect the backup cancellation event");
-    }
-    if (cancelled == WAIT_OBJECT_0) {
+    if (wil::event_is_signaled(cancellation_event)) {
         return kCancelledExitCode;
     }
 

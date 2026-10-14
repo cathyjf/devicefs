@@ -236,9 +236,7 @@ auto WINAPI ServiceControlHandler(
         return ERROR_CALL_NOT_IMPLEMENTED;
     }
 
-    if (!SetEvent(context.cancellation_event.get())) {
-        return GetLastError();
-    }
+    context.cancellation_event.SetEvent();
     return ERROR_SUCCESS;
 }
 
@@ -266,15 +264,8 @@ struct ServiceOutcome {
         WinError("could not resume the backup orchestrator");
     }
 
-    const auto waits = std::array{
-        backup.process.hProcess, context.cancellation_event.get(),
-    };
-    const auto wait = WaitForMultipleObjects(
-        wil::safe_cast_failfast<DWORD>(waits.size()),
-        waits.data(), FALSE, INFINITE);
-    if (wait == WAIT_FAILED) {
-        WinError("could not wait for the backup orchestrator");
-    }
+    std::ignore = wil::wait_any_failfast(
+        backup.process.hProcess, context.cancellation_event);
     SetServiceState(context, SERVICE_STOP_PENDING,
         ERROR_SUCCESS, 0, ServiceContext::kInitialPendingCheckpoint,
         ServiceContext::kStopWaitHint);
@@ -778,9 +769,7 @@ struct SelectiveViewOptions {
             }()}),
             arguments.subspan(2),
         }) | std::views::join | std::ranges::to<std::vector<std::string>>());
-    if (WaitForSingleObject(process.hProcess, INFINITE) == WAIT_FAILED) {
-        WinError("failed to wait for '{}' to finish", arguments[1]);
-    }
+    wil::handle_wait(process.hProcess);
     return ProcessExitCode(process.hProcess);
 }
 
@@ -896,10 +885,8 @@ struct SelectiveViewOptions {
                 namespace_name,
                 options.timestamp ? std::format("{}/{}", backup, *options.timestamp) : backup,
                 options.archive);
-        }, [cancellation_event = cancellation_event.get()] {
-            if (!SetEvent(cancellation_event)) {
-                WinError("failed to request closing the backup view");
-            }
+        }, [&cancellation_event] {
+            cancellation_event.SetEvent();
         }).value_or(kCancelledExitCode);
 }
 

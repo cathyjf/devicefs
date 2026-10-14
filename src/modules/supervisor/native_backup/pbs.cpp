@@ -210,7 +210,7 @@ public:
                 wil::EventOptions::ManualReset, nullptr)) {
             WinError("could not create the Samba-readiness event");
         }
-        auto completion_signal = wil::unique_handle{};
+        auto completion_signal = wil::unique_event_nothrow{};
         if (!DuplicateHandle(
                 GetCurrentProcess(), completion_.get(),
                 GetCurrentProcess(), completion_signal.addressof(),
@@ -229,7 +229,7 @@ public:
                     return read == 1
                         ? DWORD{ERROR_SUCCESS} : DWORD{ERROR_BROKEN_PIPE};
                 }();
-                static_cast<void>(SetEvent(completion_signal.get()));
+                completion_signal.SetEvent();
                 return result;
             });
         result_ = task.get_future();
@@ -285,7 +285,7 @@ struct WslProcess {
 
     ~WslProcess() {
         if (profile && (process.hProcess != nullptr) &&
-            (WaitForSingleObject(process.hProcess, 0) != WAIT_OBJECT_0)) {
+            !wil::handle_wait(process.hProcess, 0)) {
             // UnloadUserProfile must not run until the child has exited. An
             // abandoned WSL process therefore retains the loaded profile and
             // its associated token until this process exits.
@@ -613,14 +613,8 @@ struct PbsFishOperation {
     PbsFishOperation &operation,
     const HANDLE cancellation_event) {
     auto &readiness = *operation.process.samba_readiness;
-    const auto handles = std::array{
-        readiness.Event(), operation.Process(), cancellation_event};
-    const auto result = WaitForMultipleObjects(
-        wil::safe_cast_failfast<DWORD>(handles.size()),
-        handles.data(), FALSE, INFINITE);
-    if (result == WAIT_FAILED) {
-        WinError("could not wait for Samba readiness");
-    }
+    const auto result = wil::wait_any_failfast(
+        readiness.Event(), operation.Process(), cancellation_event).status();
     if (result == WAIT_OBJECT_0) {
         const auto error = readiness.Finish();
         operation.process.samba_readiness.reset();
@@ -811,11 +805,7 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
                 operation.Process(), kPollInterval)) {
             return FinishWsl(operation.process);
         }
-        const auto cancelled = WaitForSingleObject(cancellation_event, 0);
-        if (cancelled == WAIT_FAILED) {
-            WinError("could not inspect the backup cancellation event");
-        }
-        if (cancelled == WAIT_OBJECT_0) {
+        if (wil::event_is_signaled(cancellation_event)) {
             break;
         }
     }

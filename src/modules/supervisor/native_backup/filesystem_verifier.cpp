@@ -723,7 +723,7 @@ public:
         SynchronousIoCancellation &io_cancellation) {
         try {
             const auto lock = virtual_disk_lock.lock_exclusive();
-            if (internal::CancellationRequested(cancellation_event)) {
+            if (wil::event_is_signaled(cancellation_event)) {
                 WinError("VHDX attachment was cancelled",
                     ExplicitWin32Error{ERROR_CANCELLED});
             }
@@ -954,7 +954,7 @@ auto DetachView(
     const auto registration = io_cancellation.RegisterCurrentThread();
     const auto query_once = [&]()
         -> std::expected<std::uint64_t, DWORD> {
-        if (internal::CancellationRequested(cancellation_event)) {
+        if (wil::event_is_signaled(cancellation_event)) {
             return std::unexpected{DWORD{ERROR_CANCELLED}};
         }
         auto volume = wil::unique_hfile{CreateFileW(
@@ -971,7 +971,7 @@ auto DetachView(
         };
         auto count = std::uint64_t{};
         while (true) {
-            if (internal::CancellationRequested(cancellation_event)) {
+            if (wil::event_is_signaled(cancellation_event)) {
                 return std::unexpected{DWORD{ERROR_CANCELLED}};
             }
             auto returned = DWORD{};
@@ -1006,7 +1006,7 @@ auto DetachView(
                 endpoint_name, volume_identifier, *estimate);
             return *estimate;
         }
-        if (internal::CancellationRequested(cancellation_event)) {
+        if (wil::event_is_signaled(cancellation_event)) {
             return std::nullopt;
         }
 
@@ -1032,14 +1032,9 @@ auto DetachView(
         }
 
         constexpr auto retry_interval = 100ms;
-        const auto wait = WaitForSingleObject(
-            cancellation_event,
-            wil::safe_cast_failfast<DWORD>(retry_interval.count()));
-        if (wait == WAIT_FAILED) {
-            WinError(
-                "could not wait before retrying the optional layout count");
-        }
-        if (wait == WAIT_OBJECT_0) {
+        if (wil::handle_wait(
+                cancellation_event,
+                CompileTimeCast<DWORD, retry_interval.count()>())) {
             return std::nullopt;
         }
     }
@@ -1057,7 +1052,7 @@ auto PublishTraversalLayoutEstimate(
             real_root, "real-B", volume_identifier,
             cancellation_event, io_cancellation);
         if (!estimate &&
-            !internal::CancellationRequested(cancellation_event)) {
+            !wil::event_is_signaled(cancellation_event)) {
             devicefs::WriteToStream(devicefs::stdout,
                 "Trying the synthetic view for volume {} because the "
                 "real-B view supplied no complete layout count.\n",
@@ -1068,7 +1063,7 @@ auto PublishTraversalLayoutEstimate(
         }
         if (estimate) {
             state.SetTraversalEstimate(*estimate);
-        } else if (!internal::CancellationRequested(cancellation_event)) {
+        } else if (!wil::event_is_signaled(cancellation_event)) {
             devicefs::WriteToStream(devicefs::stdout,
                 "No complete layout count is available for volume {}; "
                 "ordinary traversal will continue without a percentage "
@@ -1122,7 +1117,7 @@ public:
         if (failure_) {
             std::rethrow_exception(failure_);
         }
-        if (internal::CancellationRequested(cancellation_event_)) {
+        if (wil::event_is_signaled(cancellation_event_)) {
             return std::nullopt;
         }
 
@@ -1134,8 +1129,8 @@ public:
     }
 
 private:
-    [[nodiscard]] auto Cancelled() const {
-        return internal::CancellationRequested(cancellation_event_);
+    [[nodiscard]] auto Cancelled() const noexcept {
+        return wil::event_is_signaled(cancellation_event_);
     }
 
     auto Queue(std::vector<TraversalTask> tasks) -> void {
@@ -1559,7 +1554,7 @@ auto AppendStreamTasks(
     auto real_stream = 0uz;
     while ((synthetic_stream < synthetic_streams.size()) ||
         (real_stream < real_streams.size())) {
-        if (internal::CancellationRequested(cancellation_event)) {
+        if (wil::event_is_signaled(cancellation_event)) {
             return false;
         }
         if (synthetic_stream == synthetic_streams.size()) {
@@ -1597,7 +1592,7 @@ auto AppendStreamTasks(
         } else if (compare_contents) {
             for (auto offset = std::int64_t{};
                 offset < synthetic_entry.length;) {
-                if (internal::CancellationRequested(
+                if (wil::event_is_signaled(
                         cancellation_event)) {
                     return false;
                 }
@@ -1667,7 +1662,7 @@ auto AppendStreamTasks(
     auto real_issue = 0uz;
     while ((synthetic_object < synthetic.objects.size()) ||
         (real_object < real.objects.size())) {
-        if (internal::CancellationRequested(cancellation_event)) {
+        if (wil::event_is_signaled(cancellation_event)) {
             return std::optional<ComparisonPlan>{};
         }
         if (synthetic_object == synthetic.objects.size()) {
@@ -1814,7 +1809,7 @@ public:
           real_buffer_(kReadChunkSize) {}
 
     [[nodiscard]] auto Compare(const ReadTask &task) -> bool {
-        if (internal::CancellationRequested(cancellation_event_)) {
+        if (wil::event_is_signaled(cancellation_event_)) {
             return false;
         }
         const auto key = std::array{
@@ -1824,7 +1819,7 @@ public:
             current_stream_ = key;
             current_stream_readable_ = OpenStream(task);
         }
-        if (internal::CancellationRequested(cancellation_event_)) {
+        if (wil::event_is_signaled(cancellation_event_)) {
             return false;
         }
         if (!current_stream_readable_) {
@@ -1837,12 +1832,12 @@ public:
             synthetic_object.streams[task.synthetic_stream];
         const auto synthetic_seek = TrySeekStream(
             synthetic_handle_.get(), task.offset);
-        if (internal::CancellationRequested(cancellation_event_)) {
+        if (wil::event_is_signaled(cancellation_event_)) {
             return false;
         }
         const auto real_seek = TrySeekStream(
             real_handle_.get(), task.offset);
-        if (internal::CancellationRequested(cancellation_event_)) {
+        if (wil::event_is_signaled(cancellation_event_)) {
             return false;
         }
         if (synthetic_seek || real_seek) {
@@ -1858,12 +1853,12 @@ public:
             std::span{real_buffer_}.first(task.length);
         const auto synthetic_read = TryReadStreamChunk(
             synthetic_handle_.get(), synthetic_chunk);
-        if (internal::CancellationRequested(cancellation_event_)) {
+        if (wil::event_is_signaled(cancellation_event_)) {
             return false;
         }
         const auto real_read = TryReadStreamChunk(
             real_handle_.get(), real_chunk);
-        if (internal::CancellationRequested(cancellation_event_) &&
+        if (wil::event_is_signaled(cancellation_event_) &&
             ((synthetic_read &&
                 IsCancellationError(synthetic_read->error)) ||
                 (real_read &&
@@ -1923,12 +1918,12 @@ private:
             real_object.streams[task.real_stream];
         auto synthetic_handle = TryOpenFilesystemObject(
             StreamPath(synthetic_, synthetic_object, synthetic_stream));
-        if (internal::CancellationRequested(cancellation_event_)) {
+        if (wil::event_is_signaled(cancellation_event_)) {
             return false;
         }
         auto real_handle = TryOpenFilesystemObject(
             StreamPath(real_, real_object, real_stream));
-        if (internal::CancellationRequested(cancellation_event_) &&
+        if (wil::event_is_signaled(cancellation_event_) &&
             ((!synthetic_handle &&
                 IsCancellationError(synthetic_handle.error().error)) ||
                 (!real_handle &&
@@ -2006,7 +2001,7 @@ auto RunComparisonWorkers(
         auto worker = ComparisonWorker{
             synthetic, real, cancellation_event, state};
         while (!state.Failed() &&
-            !internal::CancellationRequested(cancellation_event)) {
+            !wil::event_is_signaled(cancellation_event)) {
             const auto index = next_task.fetch_add(
                 1, std::memory_order_relaxed);
             if (index >= plan.tasks.size()) {
@@ -2037,7 +2032,7 @@ auto RunComparisonWorkers(
         worker.get();
     }
     return !state.Failed() &&
-        !internal::CancellationRequested(cancellation_event) &&
+        !wil::event_is_signaled(cancellation_event) &&
         std::ranges::none_of(
             state.OperationComparisonsAfterJoin(),
             IsContentOperationMismatch) &&
@@ -2054,7 +2049,7 @@ auto CompareFilesystems(
     const double percentage,
     SynchronousIoCancellation &io_cancellation,
     VerificationState &state) -> void {
-    if (internal::CancellationRequested(cancellation_event)) {
+    if (wil::event_is_signaled(cancellation_event)) {
         return;
     }
     const auto volume_identifier = FormatGuid(volume_id);
@@ -2111,7 +2106,7 @@ auto CompareFilesystems(
     auto synthetic = synthetic_operation.get();
     auto real = real_operation.get();
     if (synthetic && real && !state.Failed() &&
-        !internal::CancellationRequested(cancellation_event)) {
+        !wil::event_is_signaled(cancellation_event)) {
         state.CompleteTraversal();
         const auto observation = state.Observe();
         devicefs::WriteToStream(devicefs::stdout,
@@ -2156,7 +2151,7 @@ auto CompareFilesystems(
             state.SetPlan(*plan);
         }
         if (plan &&
-            !internal::CancellationRequested(cancellation_event)) {
+            !wil::event_is_signaled(cancellation_event)) {
             state.BeginComparison();
             if (RunComparisonWorkers(
                     *plan, *synthetic, *real,
@@ -2186,14 +2181,14 @@ auto VerifyVolume(
     wil::srwlock &virtual_disk_lock,
     SynchronousIoCancellation &io_cancellation,
     VerificationState &state) -> void {
-    if (internal::CancellationRequested(cancellation_event)) {
+    if (wil::event_is_signaled(cancellation_event)) {
         return;
     }
     state.SetPhase(VerificationPhase::AttachingSynthetic);
     auto synthetic_attachment = AttachedVhdx::Attach(
         synthetic_vhdx, "synthetic", cancellation_event,
         virtual_disk_lock, io_cancellation);
-    if (internal::CancellationRequested(cancellation_event)) {
+    if (wil::event_is_signaled(cancellation_event)) {
         state.SetPhase(VerificationPhase::Detaching);
         DetachView(synthetic_attachment, "synthetic", state);
         state.SetPhase(VerificationPhase::Complete);
@@ -2258,7 +2253,7 @@ template <typename Operation>
                         borrowed_state.SetPhase(VerificationPhase::Complete);
                     } catch (const std::system_error &error) {
                         if (!(IsCancellationError(error) &&
-                            internal::CancellationRequested(cancellation_event))) {
+                            wil::event_is_signaled(cancellation_event))) {
                             borrowed_state.Fail(error.what());
                         }
                         borrowed_state.SetPhase(VerificationPhase::Complete);
@@ -2815,7 +2810,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
         std::chrono::steady_clock::now() + kProgressReportInterval;
     auto cancellation_failure = DWORD{ERROR_SUCCESS};
     while (!JobsReady(jobs)) {
-        if (internal::CancellationRequested(cancellation_event)) {
+        if (wil::event_is_signaled(cancellation_event)) {
             RequestPendingIoCancellation(io_cancellation, cancellation_failure);
         }
         const auto now = std::chrono::steady_clock::now();
@@ -2858,7 +2853,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     const std::filesystem::path &synthetic_mount,
     const std::filesystem::path &real_mount,
     const double percentage) -> int {
-    if (internal::CancellationRequested(cancellation_event)) {
+    if (wil::event_is_signaled(cancellation_event)) {
         return internal::kCancelledExitCode;
     }
     const auto synthetic_root = MountedVolumeRoot(synthetic_mount);
@@ -2998,7 +2993,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                     return inventory.has_value();
                 } catch (const std::system_error &error) {
                     if (IsCancellationError(error) &&
-                        internal::CancellationRequested(
+                        wil::event_is_signaled(
                             cancellation_event)) {
                         state.SetPhase(VerificationPhase::Complete);
                         return false;
@@ -3012,7 +3007,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
         auto cancellation_failure = DWORD{ERROR_SUCCESS};
         while (operation.wait_for(0s) !=
             std::future_status::ready) {
-            if (internal::CancellationRequested(
+            if (wil::event_is_signaled(
                     cancellation_event)) {
                 RequestPendingIoCancellation(
                     io_cancellation, cancellation_failure);
@@ -3086,7 +3081,7 @@ export [[nodiscard]] auto VerifyFilesystemViews(
         return PrintFinalResults(
             jobs, optimization_unavailable, preparation_failures);
     }
-    if (internal::CancellationRequested(cancellation_event)) {
+    if (wil::event_is_signaled(cancellation_event)) {
         auto jobs = std::vector<VolumeJob>{};
         jobs.reserve(volumes.size());
         for (const auto &volume : volumes) {

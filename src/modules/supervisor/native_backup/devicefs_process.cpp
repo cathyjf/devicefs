@@ -214,11 +214,7 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
                 ProcessExitCode(devicefs.process.hProcess),
                 Transcode<std::string>(devicefs.readiness_path.native())));
         }
-        const auto cancelled = WaitForSingleObject(cancellation_event, 0);
-        if (cancelled == WAIT_FAILED) {
-            WinError("could not inspect the backup cancellation event");
-        }
-        if (cancelled == WAIT_OBJECT_0) {
+        if (wil::event_is_signaled(cancellation_event)) {
             return false;
         }
         auto exists_error = std::error_code{};
@@ -280,10 +276,7 @@ auto StopDeviceFs(
                 EVENT_MODIFY_STATE, FALSE,
                 devicefs.stop_event_name.c_str())};
             if (stop_event) {
-                if (!SetEvent(stop_event.get())) {
-                    WinError("could not signal devicefs shutdown event '{}'",
-                        devicefs.stop_event_name);
-                }
+                stop_event.SetEvent();
                 stop_requested = true;
             } else {
                 const auto error = GetLastError();

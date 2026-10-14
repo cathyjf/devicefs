@@ -28,7 +28,7 @@ import devicefs.supervisor.process_attribute_list;
 export [[nodiscard]] auto WaitForProcess(
     const HANDLE process,
     const std::chrono::milliseconds timeout) -> bool {
-    const auto result = WaitForSingleObject(
+    return wil::handle_wait(
         process, [count = timeout.count()] {
             auto converted = DWORD{};
             if (FAILED(wil::safe_cast_nothrow(count, &converted))) {
@@ -39,10 +39,6 @@ export [[nodiscard]] auto WaitForProcess(
             }
             return converted;
         }());
-    if (result == WAIT_FAILED) {
-        WinError("could not wait for a backup process");
-    }
-    return result == WAIT_OBJECT_0;
 }
 
 export [[nodiscard]] auto ProcessExitCode(const HANDLE process) {

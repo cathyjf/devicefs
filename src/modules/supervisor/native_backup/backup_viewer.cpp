@@ -316,5 +316,5 @@ auto WaitForViewSession(
         devicefs, fish, cancellation_event);
     devicefs::WriteToStream(
         devicefs::stdout, "Closing the selective-view operation.\n");
-    return internal::kCancelledExitCode;
+    return EXIT_SUCCESS;
 }

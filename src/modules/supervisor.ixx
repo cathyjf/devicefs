@@ -839,7 +839,7 @@ struct SelectiveViewOptions {
                 options.archive);
         }, [context] {
             context->cancellation_event.SetEvent();
-        }).value_or(kCancelledExitCode);
+        });
 }
 
 [[nodiscard]] auto RunSelectiveViewMode(SelectiveViewOptions options) {
@@ -861,7 +861,7 @@ struct SelectiveViewOptions {
             frame.Write("DeviceFs Backup Supervisor\n{}\n\n", title);
         }, [context] {
             context->cancellation_event.SetEvent();
-        }, OperationOutput::OnFailure).value_or(kCancelledExitCode);
+        }, OperationOutput::OnFailure);
 }
 
 [[nodiscard]] auto RunBrowseMode(
@@ -871,9 +871,9 @@ struct SelectiveViewOptions {
     const auto result = RunFastOperation(terminal, "Load backup catalog",
         [&catalog, &namespace_override](const HANDLE cancellation_event) {
             catalog = RetrieveBackupCatalog(cancellation_event, namespace_override);
-            return catalog ? 0 : kCancelledExitCode;
+            return catalog ? EXIT_SUCCESS : kCancelledExitCode;
         });
-    if (result != 0) {
+    if (result != EXIT_SUCCESS) {
         return result;
     }
     const auto screen = terminal.EnterScreen();
@@ -891,7 +891,7 @@ struct SelectiveViewOptions {
                     if (!response) {
                         return kCancelledExitCode;
                     }
-                    if (response->exit_code == 0) {
+                    if (response->exit_code == EXIT_SUCCESS) {
                         manifest = std::move(response->manifest);
                     }
                     return response->exit_code;
@@ -901,7 +901,7 @@ struct SelectiveViewOptions {
             return manifest;
         });
     if (!selection) {
-        return 0;
+        return EXIT_SUCCESS;
     }
     return RunBackupViewInScrollingScreen(terminal, SelectiveViewOptions{
         .archive = selection->archive,
@@ -989,7 +989,7 @@ auto RunServiceDispatcher() {
 auto RunInstallerInScrollingView(auto &&terminal, auto &&screen) {
     return RunOperationWithOutput(*terminal, [] {
         InstallService(ServiceContext::kMinimumPreshutdownTimeout);
-        return 0;
+        return EXIT_SUCCESS;
     }, [](auto &frame) {
         frame.Write("DeviceFs Backup Supervisor\n"
             "Install or update backup environment\n\n");
@@ -1003,7 +1003,7 @@ auto RunInstallerInScrollingView(auto &&terminal, auto &&screen) {
         screen.reset();
         terminal.reset();
         ExitProcess(ERROR_CANCELLED);
-    }).value_or(kCancelledExitCode);
+    });
 }
 
 auto InvokeSelfAsAdministrator() {
@@ -1230,7 +1230,7 @@ export auto BackupSupervisorMain(
                 "--install does not accept arguments");
         }
         InstallService(ServiceContext::kMinimumPreshutdownTimeout);
-        return 0;
+        return EXIT_SUCCESS;
     case Hash(kPreparePowerShellProfileOption):
         EnsurePowerShellProfile();
         return 0;

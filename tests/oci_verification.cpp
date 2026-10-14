@@ -172,19 +172,8 @@ auto RequireFailure(const auto &operation) -> void {
     return result;
 }
 
-} // namespace
-
-// Run without arguments. The file-hashing tests create and remove their own
-// directory under the invoking user's temporary directory.
-[[gsl::suppress("26429",
-    justification: "C++ [basic.start.main] guarantees that `argv` is not null.")]]
-auto main(_Pre_satisfies_(argc > 0) const int argc,
-    _In_reads_(argc) char **const argv) -> int try {
-    const auto arguments = std::span{argv, argv + argc} |
-        std::ranges::to<std::vector<std::string_view>>();
-    const auto supervisor =
-        ResolveSupervisorPath(std::span{arguments}.subspan(1));
-    const auto run_sandbox = CanRunSupervisorInAppContainer(supervisor);
+auto VerifySignatures(const std::filesystem::path &supervisor,
+    const bool run_sandbox) -> void {
     const auto null_output = [] {
         auto file = wil::unique_file{};
         ClearCrtIoError();
@@ -330,8 +319,22 @@ auto main(_Pre_satisfies_(argc > 0) const int argc,
     for (auto &task : tasks) {
         task.get_future().get();
     }
-    standard_error.Restore();
-    standard_output.Restore();
+}
+
+} // namespace
+
+// Run without arguments. The file-hashing tests create and remove their own
+// directory under the invoking user's temporary directory.
+[[gsl::suppress("26429",
+    justification: "C++ [basic.start.main] guarantees that `argv` is not null.")]]
+auto main(_Pre_satisfies_(argc > 0) const int argc,
+    _In_reads_(argc) char **const argv) -> int try {
+    const auto arguments = std::span{argv, argv + argc} |
+        std::ranges::to<std::vector<std::string_view>>();
+    const auto supervisor =
+        ResolveSupervisorPath(std::span{arguments}.subspan(1));
+    const auto run_sandbox = CanRunSupervisorInAppContainer(supervisor);
+    VerifySignatures(supervisor, run_sandbox);
 
     const auto directory = std::filesystem::temp_directory_path() /
         std::format("devicefs-oci-verification-{}", GetCurrentProcessId());

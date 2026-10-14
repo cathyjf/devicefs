@@ -18,9 +18,9 @@ using FileDescriptor = wil::unique_any<int, decltype(&_close), &_close,
 
 } // namespace stream_redirector_detail
 
-// Redirect one standard stream until `Restore` or destruction. `Restore`
-// reports failures; the destructor attempts restoration without throwing so
-// that cleanup does not replace an exception already being propagated.
+// Redirect one standard stream until destruction. Destruction reports
+// restoration failures unless a new exception is already being unwound,
+// so cleanup does not replace the exception that caused unwinding.
 export class RedirectedStream {
 public:
     RedirectedStream(const int input_fd, const int output_fd,
@@ -46,13 +46,10 @@ public:
     RedirectedStream(RedirectedStream &&) = delete;
     auto operator=(RedirectedStream &&) -> RedirectedStream & = delete;
 
-    ~RedirectedStream() {
-        TryRestore();
-    }
-
-    auto Restore() -> void {
+    ~RedirectedStream() noexcept(false) {
         ClearCrtIoError();
-        if (!TryRestore()) {
+        if (!TryRestore() ||
+            (initial_exceptions_ != std::uncaught_exceptions())) {
             return;
         }
         WinError("failed to restore {} after redirection", input_filename_,
@@ -74,4 +71,5 @@ private:
     const int input_fd_;
     const std::string_view input_filename_;
     stream_redirector_detail::FileDescriptor original_input_fd_;
+    const int initial_exceptions_ = std::uncaught_exceptions();
 };

@@ -409,15 +409,10 @@ auto WINAPI ForegroundControlHandler(const DWORD) noexcept -> BOOL {
     // Signal every operation before waiting, because one operation's cleanup
     // may depend on another operation finishing.
     for (const auto &context : *contexts) {
-        if (!SetEvent(context->cancellation_event.get())) {
-            return FALSE;
-        }
+        context->cancellation_event.SetEvent();
     }
     for (const auto &context : *contexts) {
-        if (WaitForSingleObject(context->completed_event.get(), INFINITE)
-            == WAIT_FAILED) {
-            return FALSE;
-        }
+        context->completed_event.wait();
     }
     return TRUE;
 }
@@ -461,23 +456,17 @@ template <typename Operation>
         context->cancellation_event.SetEvent_scope_exit();
     // The first signaled handle wins, giving completion priority over input.
     // https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitformultipleobjects
-    const auto waits = std::array{context->completed_event.get(), input};
     constexpr auto kInputBatchSize = 16uz;
     while (true) {
-        const auto wait = WaitForMultipleObjects(
-            CompileTimeCast<DWORD, waits.size()>(),
-            waits.data(), FALSE, INFINITE);
-        if (wait == WAIT_FAILED) {
-            WinError("failed to wait for foreground operation completion or console input");
-        }
-        if (wait == WAIT_OBJECT_0) {
+        if (wil::wait_any_failfast(
+                context->completed_event, input).status() == WAIT_OBJECT_0) {
             break;
         }
         auto records = std::array<INPUT_RECORD, kInputBatchSize>{};
         auto read = DWORD{};
         if (!ReadConsoleInputW(input, records.data(),
                 DWORD{records.size()}, &read)) {
-            WinError("could not read foreground console input");
+            WinError("failed to read foreground console input");
         }
         for (const auto &record : std::span{records}.first(read)) {
             // With VT input enabled, Ctrl+C can arrive as the ETX character
@@ -492,29 +481,17 @@ template <typename Operation>
                             (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) == 0)))) {
                 continue;
             }
-            if (context->cancellation_event.is_signaled()) {
-                continue;
-            }
-            if (!SetEvent(context->cancellation_event.get())) {
-                WinError("failed to request cancellation");
-            }
-            devicefs::WriteToStream(
-                devicefs::stdout,
+            context->cancellation_event.SetEvent();
+            devicefs::WriteToStream(devicefs::stdout,
                 "Cancellation requested; waiting for cleanup.\n");
         }
     }
     cancel_on_monitor_failure.release();
-    try {
-        const auto completed_result = result.get();
-        return context->cancellation_event.is_signaled()
-            ? kCancelledExitCode
-            : completed_result;
-    } catch (...) {
-        if (context->cancellation_event.is_signaled()) {
-            return kCancelledExitCode;
-        }
-        throw;
+    result.wait();
+    if (context->cancellation_event.is_signaled()) {
+        return kCancelledExitCode;
     }
+    return result.get();
 }
 
 struct ForegroundOptions {

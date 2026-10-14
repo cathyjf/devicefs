@@ -47,6 +47,26 @@ export constexpr auto kServiceName =
 export constexpr auto kRunServiceOption =
     "--run-service"sv;
 
+export [[nodiscard]] auto AcquireBackupLock(
+    const std::filesystem::path &path,
+    const DWORD creation_disposition = OPEN_EXISTING,
+    std::optional<SECURITY_ATTRIBUTES> security = std::nullopt) {
+    auto lock = wil::unique_hfile{CreateFileW(
+        path.c_str(), GENERIC_READ, 0, security ? &*security : nullptr,
+        creation_disposition, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    if (!lock) {
+        const auto error = GetLastError();
+        if (error == ERROR_SHARING_VIOLATION) {
+            throw std::runtime_error(std::format(
+                "a backup is already running; lock file: '{}'",
+                Transcode<std::string>(path.native())));
+        }
+        WinError("failed to acquire the backup lock file '{}'",
+            std::wstring_view{path.native()}, ExplicitWin32Error{error});
+    }
+    return lock;
+}
+
 namespace {
 
 constexpr auto kProductDirectoryName = "devicefs"sv;
@@ -149,26 +169,6 @@ auto EnsureDirectory(
     WinError("could not create the {} '{}'", description,
         std::wstring_view{path.native()},
         ExplicitWin32Error{error});
-}
-
-[[nodiscard]] auto OpenBackupLock(
-    const std::filesystem::path &path,
-    const SecurityDescriptor &security) {
-    auto attributes = security.Attributes();
-    auto file = wil::unique_hfile(CreateFileW(
-        path.c_str(), GENERIC_READ, 0,
-        &attributes, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
-    if (!file) {
-        const auto error = GetLastError();
-        if (error == ERROR_SHARING_VIOLATION) {
-            throw std::runtime_error(std::format(
-                "a backup is already running; lock file: '{}'", Transcode<std::string>(path.native())));
-        }
-        WinError("could not open or create the backup lock file '{}'",
-            std::wstring_view{path.native()},
-            ExplicitWin32Error{error});
-    }
-    return file;
 }
 
 auto CreateConfigurationTemplate(
@@ -387,8 +387,8 @@ export auto InstallService(
     // The backup orchestrator holds the same file without sharing for the full
     // backup. This open therefore fails instead of stopping an active backup,
     // and prevents another backup from starting while installation is active.
-    auto backup_lock = OpenBackupLock(
-        persistent.backup_lock, private_file);
+    const auto backup_lock = AcquireBackupLock(
+        persistent.backup_lock, OPEN_ALWAYS, private_file.Attributes());
 
     CreateConfigurationTemplate(
         persistent.configuration, private_file);

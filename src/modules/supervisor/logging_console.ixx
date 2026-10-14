@@ -113,8 +113,8 @@ public:
         } catch (const std::exception &) {
             return ERROR_INVALID_DATA;
         } catch (...) {
-            // The result reaches LoggingConsole::Finish. The reader must keep
-            // draining after any failure so a full ConPTY pipe cannot deadlock.
+            // The reader keeps draining after a sink failure so a full ConPTY
+            // pipe cannot block the child.
             return ERROR_UNHANDLED_EXCEPTION;
         }
     }

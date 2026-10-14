@@ -76,41 +76,23 @@ constexpr auto kRunInConsoleOption = "--internal-run-in-console"sv;
     auto event = wil::unique_event_nothrow{OpenEventA(
         SYNCHRONIZE, FALSE, kCancellationEventName.c_str())};
     if (!event) {
-        WinError("could not open backup cancellation event '{}'",
+        WinError("failed to open backup cancellation event '{}'",
             std::string_view{kCancellationEventName});
     }
     return event;
 }
 
-[[nodiscard]] auto AcquireBackupLock(
-    const std::filesystem::path &path) {
-    auto lock = wil::unique_hfile(CreateFileW(
-        path.c_str(), GENERIC_READ, 0, nullptr,
-        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-    if (!lock) {
-        const auto error = GetLastError();
-        if (error == ERROR_SHARING_VIOLATION) {
-            throw std::runtime_error(std::format(
-                "a backup is already running; lock file: '{}'", Transcode<std::string>(path.native())));
-        }
-        WinError("could not open the backup lock file '{}'",
-            std::wstring_view{path.native()},
-            ExplicitWin32Error{error});
-    }
-    return lock;
-}
-
 [[nodiscard]] auto CreateChildJob() {
     auto job = wil::unique_handle(CreateJobObjectW(nullptr, nullptr));
     if (!job) {
-        WinError("could not create the backup process job");
+        WinError("failed to create the backup process job");
     }
     auto limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION{};
     limits.BasicLimitInformation.LimitFlags =
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
     if (!SetInformationJobObject(job.get(), JobObjectExtendedLimitInformation,
             &limits, sizeof(limits))) {
-        WinError("could not configure the backup process job");
+        WinError("failed to configure the backup process job");
     }
     return job;
 }
@@ -119,7 +101,7 @@ struct BackupProcess {
     static constexpr auto kJobPollInterval = 100ms;
     static constexpr auto kForcedTerminationTimeout = 30s;
 
-    LoggingConsole console;
+    std::optional<LoggingConsole> console;
     wil::unique_process_information process;
     wil::unique_handle job;
 
@@ -140,7 +122,7 @@ struct BackupProcess {
             if (!QueryInformationJobObject(job.get(),
                     JobObjectBasicAccountingInformation,
                     &accounting, sizeof(accounting), nullptr)) {
-                WinError("could not query the backup process job");
+                WinError("failed to query the backup process job");
             }
             if (accounting.ActiveProcesses == 0) {
                 return true;
@@ -154,7 +136,7 @@ struct BackupProcess {
 
     auto TerminateAndWait(const DWORD exit_code) const {
         if (!TerminateJobObject(job.get(), exit_code)) {
-            WinError("could not terminate the backup process job");
+            WinError("failed to terminate the backup process job");
         }
         if (!WaitForAll(kForcedTerminationTimeout)) {
             throw std::runtime_error(
@@ -163,9 +145,12 @@ struct BackupProcess {
     }
 };
 
-[[nodiscard]] auto StartOrchestrator(Log &log) {
+[[nodiscard]] auto StartOrchestrator(std::optional<Log> &log) {
     auto console = LoggingConsole([&log](const std::u8string_view output) noexcept {
-        return log.WriteStream(output);
+        if (log) {
+            std::ignore = log->WriteStream(output);
+        }
+        return ERROR_SUCCESS;
     });
     auto job = CreateChildJob();
     const auto supervisor = Transcode<std::string>(CurrentExecutablePath().native());
@@ -248,21 +233,23 @@ struct ServiceOutcome {
 
 [[nodiscard]] auto RunBackup(
     ServiceContext &context,
-    Log &log) {
+    std::optional<Log> &log) {
     auto backup = StartOrchestrator(log);
-    log.Write("backup-supervisor: running version '{}'",
-        CurrentProductVersion().value_or("unknown"));
-    log.Write("backup-supervisor: backup starting");
-    if (!SetServiceState(context, SERVICE_RUNNING)) {
-        WinError("could not report that the backup service is running");
+    if (log) {
+        log->TryWrite("backup-supervisor: running version '{}'",
+            CurrentProductVersion().value_or("unknown"));
+        log->TryWrite("backup-supervisor: backup starting");
     }
-    auto report_stopping = wil::scope_exit([&] {
+    if (!SetServiceState(context, SERVICE_RUNNING)) {
+        WinError("failed to report that the backup service is running");
+    }
+    auto report_stopping = wil::scope_exit([&context] {
         SetServiceState(context, SERVICE_STOP_PENDING,
             ERROR_SUCCESS, 0, ServiceContext::kInitialPendingCheckpoint,
             ServiceContext::kStopWaitHint);
     });
     if (ResumeThread(backup.process.hThread) == MAXDWORD) {
-        WinError("could not resume the backup orchestrator");
+        WinError("failed to resume the backup orchestrator");
     }
 
     std::ignore = wil::wait_any_failfast(
@@ -275,51 +262,53 @@ struct ServiceOutcome {
         context.cancellation_event.is_signaled();
 
     auto forced = false;
-    if (cancellation_signaled && !backup.Wait(
-            ServiceContext::kGracefulStopTimeout)) {
-        log.Write(
-            "backup-supervisor: graceful stop timed out; terminating the process job");
-        LogJobProcesses(log, backup.job.get());
+    const auto force_cleanup = [&log, &backup, &context, &forced](
+        const std::string_view reason, const DWORD exit_code) {
+        if (log) {
+            log->TryWrite("{}", reason);
+            LogJobProcesses(*log, backup.job.get());
+        }
         SetServiceState(context, SERVICE_STOP_PENDING,
             ERROR_SUCCESS, 0, ServiceContext::kForcedCleanupCheckpoint,
             BackupProcess::kForcedTerminationTimeout);
-        backup.TerminateAndWait(ERROR_CANCELLED);
+        backup.TerminateAndWait(exit_code);
         forced = true;
+    };
+    if (cancellation_signaled && !backup.Wait(
+            ServiceContext::kGracefulStopTimeout)) {
+        force_cleanup(
+            "backup-supervisor: graceful stop timed out; terminating the process job",
+            ERROR_CANCELLED);
     }
 
     const auto child_exit_code = backup.ExitCode();
     if (!backup.WaitForAll(ServiceContext::kStrayProcessTimeout)) {
-        log.Write(
-            "backup-supervisor: terminating child processes left behind by the orchestrator");
-        LogJobProcesses(log, backup.job.get());
-        SetServiceState(context, SERVICE_STOP_PENDING,
-            ERROR_SUCCESS, 0, ServiceContext::kForcedCleanupCheckpoint,
-            BackupProcess::kForcedTerminationTimeout);
-        backup.TerminateAndWait(ERROR_PROCESS_ABORTED);
-        forced = true;
+        force_cleanup(
+            "backup-supervisor: terminating child processes left behind by the orchestrator",
+            ERROR_PROCESS_ABORTED);
     }
-    backup.console.Finish();
-
-    if (forced) {
-        log.Write(
-            "backup-supervisor: backup failed after forced process termination; "
-            "orchestrator exit code {}",
-            child_exit_code);
-    } else if ((child_exit_code == 0) && cancellation_signaled) {
-        log.Write(
-            "backup-supervisor: backup completed before cancellation took effect");
-    } else if (child_exit_code == 0) {
-        log.Write("backup-supervisor: backup completed successfully");
-    } else if (cancellation_signaled) {
-        log.Write(
-            "backup-supervisor: backup cancelled; orchestrator exit code {}",
-            child_exit_code);
-    } else {
-        log.Write(
-            "backup-supervisor: backup failed; orchestrator exit code {}",
-            child_exit_code);
+    backup.console.reset();
+    if (log) {
+        if (forced) {
+            log->TryWrite(
+                "backup-supervisor: backup failed after forced process termination; "
+                "orchestrator exit code {}",
+                child_exit_code);
+        } else if ((child_exit_code == 0) && cancellation_signaled) {
+            log->TryWrite(
+                "backup-supervisor: backup completed before cancellation took effect");
+        } else if (child_exit_code == 0) {
+            log->TryWrite("backup-supervisor: backup completed successfully");
+        } else if (cancellation_signaled) {
+            log->TryWrite(
+                "backup-supervisor: backup cancelled; orchestrator exit code {}",
+                child_exit_code);
+        } else {
+            log->TryWrite(
+                "backup-supervisor: backup failed; orchestrator exit code {}",
+                child_exit_code);
+        }
     }
-    log.Flush();
     if (forced) {
         return ServiceOutcome{.win32_error = ERROR_TIMEOUT};
     }
@@ -332,44 +321,41 @@ struct ServiceOutcome {
     };
 }
 
-auto TryWriteFailure(
-    Log *const log, const std::exception &error) noexcept {
-    try {
-        if (log != nullptr) {
-            log->Write("backup-supervisor: {}", error.what());
-        }
-    } catch (...) {}
-}
-
-[[nodiscard]] auto RunService(
-    ServiceContext &context, const DWORD argc) noexcept {
+[[gsl::suppress("26447",
+    justification:
+        "MSVC incorrectly reports that calls in the catch handlers can throw. "
+        "`std::exception::what()` and `Log::TryWrite` are declared `noexcept`. "
+        "The literal `std::format_string` arguments use the `consteval` "
+        "constructor of `std::basic_format_string`, so their construction "
+        "cannot throw at runtime. Exceptions from the remaining operations "
+        "are caught within `RunService`, so no exception can escape it.")]]
+[[nodiscard]] auto RunService(ServiceContext &context) noexcept {
     constexpr auto kInternalFailure = DWORD{1};
-    auto result = ServiceOutcome{};
     auto log = std::optional<Log>{};
     try {
-        if (argc != 1) {
-            throw std::system_error(
-                ERROR_INVALID_PARAMETER, std::system_category(),
-                "service start arguments are not supported");
-        }
-        const auto persistent = ResolvePersistentPaths();
-        log.emplace(persistent.logs);
+        log.emplace(ResolvePersistentPaths().logs);
+    } catch (...) {}
+
+    auto result = ServiceOutcome{};
+    try {
         context.cancellation_event = CreateCancellationEvent(
             kCancellationEventName.c_str());
-        result = RunBackup(context, *log);
+        result = RunBackup(context, log);
     } catch (const std::system_error &error) {
         result.win32_error = std::bit_cast<DWORD>(error.code().value());
-        TryWriteFailure(log ? &*log : nullptr, error);
+        if (log) {
+            log->TryWrite("backup-supervisor: {}", error.what());
+        }
     } catch (const std::runtime_error &error) {
         result = {
             .win32_error = ERROR_SERVICE_SPECIFIC_ERROR,
             .service_error = kInternalFailure,
         };
-        TryWriteFailure(log ? &*log : nullptr, error);
+        if (log) {
+            log->TryWrite("backup-supervisor: {}", error.what());
+        }
     } catch (...) {
-        result = {
-            .win32_error = ERROR_UNHANDLED_EXCEPTION,
-        };
+        result = {.win32_error = ERROR_UNHANDLED_EXCEPTION};
     }
 
     if (log) {
@@ -409,22 +395,39 @@ auto WINAPI ForegroundControlHandler(const DWORD) noexcept -> BOOL {
     return TRUE;
 }
 
+// Return a worker callback whose cancellation and completion events are
+// registered only while the operation is running.
+[[nodiscard]] auto MakeForegroundOperation(
+    const std::shared_ptr<const ForegroundContext> &context, auto operation) {
+    return [context, operation = std::move(operation)]() mutable {
+        const auto completed = context->completed_event.SetEvent_scope_exit();
+        std::call_once(foreground_contexts_once, [] {
+            foreground_contexts.emplace();
+            if (!SetConsoleCtrlHandler(ForegroundControlHandler, TRUE)) {
+                WinError("failed to register the foreground console control handler");
+            }
+        });
+        foreground_contexts->PushBack(context);
+        const auto remove_context = wil::scope_exit([&context] {
+            foreground_contexts->Erase(context);
+        });
+        return std::invoke(std::move(operation), context->cancellation_event.get());
+    };
+}
+
 template <typename Operation>
 [[nodiscard]] auto RunForegroundOperation(
-    const HANDLE input,
-    const DWORD console_mode,
+    const std::string_view unavailable_message,
     Operation operation) {
-    std::call_once(foreground_contexts_once, [] {
-        foreground_contexts.emplace();
-        if (!SetConsoleCtrlHandler(ForegroundControlHandler, TRUE)) {
-            WinError("failed to register the foreground console control handler");
-        }
-    });
+    const auto input = GetStdHandle(STD_INPUT_HANDLE);
+    auto console_mode = DWORD{};
+    if (!GetConsoleMode(input, &console_mode)) {
+        WinError("{}", unavailable_message);
+    }
     const auto context = std::make_shared<const ForegroundContext>();
-    const auto completed_on_exit = context->completed_event.SetEvent_scope_exit();
     if (!SetConsoleMode(
             input, console_mode & ~DWORD{ENABLE_PROCESSED_INPUT})) {
-        WinError("could not enable foreground cancellation input");
+        WinError("failed to enable foreground cancellation input");
     }
     auto restore_console_mode = wil::scope_exit([input, console_mode] {
         if (SetConsoleMode(input, console_mode)) {
@@ -435,15 +438,8 @@ template <typename Operation>
                 "failed to restore the foreground console input mode"));
     });
 
-    foreground_contexts->PushBack(context);
-    const auto remove_context = wil::scope_exit([&context] {
-        foreground_contexts->Erase(context);
-    });
     auto result = std::async(
-        std::launch::async, [operation = std::move(operation), context]() mutable {
-            const auto completed = context->completed_event.SetEvent_scope_exit();
-            return std::invoke(std::move(operation), context->cancellation_event.get());
-        });
+        std::launch::async, MakeForegroundOperation(context, std::move(operation)));
     auto cancel_on_monitor_failure =
         context->cancellation_event.SetEvent_scope_exit();
     // The first signaled handle wins, giving completion priority over input.
@@ -520,38 +516,41 @@ struct SelectiveViewOptions {
     }
 }
 
+[[nodiscard]] auto ParseBackupOverride(
+    const std::span<const std::string_view> arguments,
+    std::size_t &index, auto &options) {
+    const auto argument = arguments[index];
+    if ((argument != "--namespace") && (argument != "--volume") &&
+        (argument != "--volumes")) {
+        return false;
+    }
+    if (++index == arguments.size()) {
+        throw std::invalid_argument(std::format("{} requires a value",
+            argument == "--namespace" ? argument : "--volume/--volumes"sv));
+    }
+    if (argument == "--namespace") {
+        options.namespace_override.emplace(
+            arguments[index].begin(), arguments[index].end());
+    } else {
+        options.volume_override = ParseVolumeList(arguments[index]);
+    }
+    return true;
+}
+
 [[nodiscard]] auto ParseForegroundOptions(
     const std::span<const std::string_view> arguments) {
     auto result = ForegroundOptions{};
-    auto raw_namespace_override = std::optional<std::string_view>{};
-    auto raw_volume_override = std::optional<std::string_view>{};
     for (auto index = 0uz; index < arguments.size(); ++index) {
         const auto argument = arguments[index];
+        if (ParseBackupOverride(arguments, index, result)) {
+            continue;
+        }
         if (argument == "--no-writers") {
             result.no_writers = true;
-        } else if (argument == "--namespace") {
-            if (++index == arguments.size()) {
-                throw std::invalid_argument("--namespace requires a value");
-            }
-            raw_namespace_override = arguments[index];
-        } else if ((argument == "--volume") ||
-            (argument == "--volumes")) {
-            if (++index == arguments.size()) {
-                throw std::invalid_argument(
-                    "--volume/--volumes requires a value");
-            }
-            raw_volume_override = arguments[index];
         } else {
             throw std::invalid_argument(std::format(
                 "--foreground received an unknown argument: {}", argument));
         }
-    }
-    if (raw_namespace_override) {
-        result.namespace_override = std::u8string{
-            raw_namespace_override->begin(), raw_namespace_override->end()};
-    }
-    if (raw_volume_override) {
-        result.volume_override = ParseVolumeList(*raw_volume_override);
     }
     return result;
 }
@@ -593,25 +592,14 @@ struct SelectiveViewOptions {
 }
 
 [[nodiscard]] auto ParseVerificationPercentage(const std::string_view value) {
-    const auto text = std::string{value};
-    const auto invalid = [&text] {
-        return std::invalid_argument(std::format(
+    auto percentage = double{};
+    const auto [end, error] = std::from_chars(
+        value.data(), value.data() + value.size(), percentage);
+    if ((error != std::errc{}) || (end != value.data() + value.size()) ||
+        !std::isfinite(percentage) || (percentage <= 0.0) || (percentage > 100.0)) {
+        throw std::invalid_argument(std::format(
             "--verify-percentage requires a number greater than "
-            "zero and no greater than 100; received '{}'", text));
-    };
-    auto consumed = std::size_t{};
-    const auto percentage = [&text, &consumed, &invalid] {
-        try {
-            return std::stod(text, &consumed);
-        } catch (const std::invalid_argument &) {
-            throw invalid();
-        } catch (const std::out_of_range &) {
-            throw invalid();
-        }
-    }();
-    if ((consumed != text.size()) || !std::isfinite(percentage) ||
-        (percentage <= 0.0) || (percentage > 100.0)) {
-        throw invalid();
+            "zero and no greater than 100; received '{}'", value));
     }
     return percentage;
 }
@@ -619,11 +607,12 @@ struct SelectiveViewOptions {
 [[nodiscard]] auto ParseIncrementalDiagnosticOptions(
     const std::span<const std::string_view> arguments) {
     auto result = IncrementalDiagnosticOptions{};
-    auto raw_namespace_override = std::optional<std::string_view>{};
-    auto raw_volume_override = std::optional<std::string_view>{};
     auto verification_percentage_supplied = false;
     for (auto index = 0uz; index < arguments.size(); ++index) {
         const auto argument = arguments[index];
+        if (ParseBackupOverride(arguments, index, result)) {
+            continue;
+        }
         if (argument == "--incremental-stats") {
             result.print_statistics = true;
         } else if (argument == "--incremental-verify") {
@@ -650,19 +639,6 @@ struct SelectiveViewOptions {
             result.filesystem_verification_percentage =
                 ParseVerificationPercentage(arguments[index]);
             verification_percentage_supplied = true;
-        } else if (argument == "--namespace") {
-            if (++index == arguments.size()) {
-                throw std::invalid_argument(
-                    "--namespace requires a value");
-            }
-            raw_namespace_override = arguments[index];
-        } else if ((argument == "--volume") ||
-            (argument == "--volumes")) {
-            if (++index == arguments.size()) {
-                throw std::invalid_argument(
-                    "--volume/--volumes requires a value");
-            }
-            raw_volume_override = arguments[index];
         } else if ((argument == "--baseline") || (argument == "--payload")) {
             if (++index == arguments.size()) {
                 throw std::invalid_argument(
@@ -683,13 +659,6 @@ struct SelectiveViewOptions {
                 "incremental diagnostics received an unknown argument: {}",
                 argument));
         }
-    }
-    if (raw_namespace_override) {
-        result.namespace_override = std::u8string{
-            raw_namespace_override->begin(), raw_namespace_override->end()};
-    }
-    if (raw_volume_override) {
-        result.volume_override = ParseVolumeList(*raw_volume_override);
     }
     if (result.expose_synthetic_backup &&
         result.verify_synthetic_backup) {
@@ -720,23 +689,11 @@ struct SelectiveViewOptions {
     return std::u8string{arguments[1].begin(), arguments[1].end()};
 }
 
-[[nodiscard]] auto GetForegroundConsoleInput(
-    const std::string_view unavailable_message) {
-    const auto input = GetStdHandle(STD_INPUT_HANDLE);
-    auto console_mode = DWORD{};
-    if (!GetConsoleMode(input, &console_mode)) {
-        WinError("{}", unavailable_message);
-    }
-    return std::pair{input, console_mode};
-}
-
 [[nodiscard]] auto RunForeground(ForegroundOptions options) {
-    const auto [input, console_mode] = GetForegroundConsoleInput(
-        "--foreground requires an attached console");
     const auto persistent = ResolvePersistentPaths();
     const auto backup_lock = AcquireBackupLock(persistent.backup_lock);
     return RunForegroundOperation(
-        input, console_mode,
+        "--foreground requires an attached console",
         [options = std::move(options)](const HANDLE cancellation_event) {
             return RunNativeBackup(
                 cancellation_event,
@@ -781,9 +738,7 @@ struct SelectiveViewOptions {
         throw std::invalid_argument(
             "--run-fish-program requires FILE [-- PROGRAM-ARGUMENTS...]");
     }
-    const auto [input, console_mode] = GetForegroundConsoleInput(
-        "--run-fish-program requires an attached console");
-    return RunForegroundOperation(input, console_mode,
+    return RunForegroundOperation("--run-fish-program requires an attached console",
         [arguments](const HANDLE cancellation_event) {
             return RunFishProgram(cancellation_event,
                 std::filesystem::path{arguments.front()},
@@ -793,10 +748,8 @@ struct SelectiveViewOptions {
 
 [[nodiscard]] auto RunListBackups(
     std::optional<std::u8string> namespace_override) {
-    const auto [input, console_mode] = GetForegroundConsoleInput(
-        "--list-backups requires an attached console");
     return RunForegroundOperation(
-        input, console_mode,
+        "--list-backups requires an attached console",
         [namespace_override = std::move(namespace_override)](
             const HANDLE cancellation_event) {
             const auto catalog = RetrieveBackupCatalog(
@@ -810,10 +763,8 @@ struct SelectiveViewOptions {
 
 [[nodiscard]] auto RunQueryManifest(
     std::optional<std::u8string> namespace_override) {
-    const auto [input, console_mode] = GetForegroundConsoleInput(
-        "--query-manifest requires an attached console");
     return RunForegroundOperation(
-        input, console_mode,
+        "--query-manifest requires an attached console",
         [namespace_override = std::move(namespace_override)](
             const HANDLE cancellation_event) {
             const auto result = RetrieveBackupManifest(
@@ -852,12 +803,12 @@ struct SelectiveViewOptions {
 [[nodiscard]] auto RunBackupViewInScrollingScreen(
     devicefs::terminal::WindowsConsole &terminal,
     SelectiveViewOptions options, BackupViewUser view_user) {
-    const auto cancellation_event = CreateCancellationEvent(nullptr);
+    const auto context = std::make_shared<const ForegroundContext>();
     auto &account = (view_user.shell_user && *view_user.shell_user)
         ? **view_user.shell_user : view_user.invoking_user;
     return RunOperationWithOutput(terminal,
-        [&options, &view_user, &account,
-        cancellation_event = cancellation_event.get()] {
+        MakeForegroundOperation(context, [&options, &view_user, &account](
+            const HANDLE cancellation_event) {
             if (!view_user.shell_user) {
                 devicefs::WriteToStream(devicefs::stdout,
                     "Information: Backup viewing will continue with inspection "
@@ -875,7 +826,7 @@ struct SelectiveViewOptions {
                 options.timestamp,
                 options.address,
                 options.namespace_override);
-        }, [&options](auto &frame) {
+        }), [&options](auto &frame) {
             const auto namespace_name = options.namespace_override
                 ? (options.namespace_override->empty() ? std::string{"(root)"} :
                     Transcode<std::string>(*options.namespace_override))
@@ -886,15 +837,13 @@ struct SelectiveViewOptions {
                 namespace_name,
                 options.timestamp ? std::format("{}/{}", backup, *options.timestamp) : backup,
                 options.archive);
-        }, [&cancellation_event] {
-            cancellation_event.SetEvent();
+        }, [context] {
+            context->cancellation_event.SetEvent();
         }).value_or(kCancelledExitCode);
 }
 
 [[nodiscard]] auto RunSelectiveViewMode(SelectiveViewOptions options) {
-    const auto [input, console_mode] = GetForegroundConsoleInput(
-        "--view requires an attached console");
-    return RunForegroundOperation(input, console_mode,
+    return RunForegroundOperation("--view requires an attached console",
         [options = std::move(options)](const HANDLE cancellation_event) {
             return RunSelectiveView(cancellation_event, {}, {},
                 options.archive, options.snapshot_override, options.timestamp,
@@ -903,10 +852,8 @@ struct SelectiveViewOptions {
 }
 
 [[nodiscard]] auto RunBrowseMode(std::optional<std::u8string> namespace_override) {
-    const auto [input, console_mode] = GetForegroundConsoleInput(
-        "--browse requires an attached console");
     auto catalog = std::optional<std::u8string>{};
-    const auto result = RunForegroundOperation(input, console_mode,
+    const auto result = RunForegroundOperation("--browse requires an attached console",
         [&catalog, &namespace_override](const HANDLE cancellation_event) {
             catalog = RetrieveBackupCatalog(cancellation_event, namespace_override);
             return catalog ? 0 : kCancelledExitCode;
@@ -917,18 +864,11 @@ struct SelectiveViewOptions {
     auto terminal = devicefs::terminal::WindowsConsole{};
     const auto screen = terminal.EnterScreen();
     auto selection = SelectBackup(terminal, *catalog,
-        [input](const std::u8string_view namespace_name, const std::string_view snapshot)
+        [](const std::u8string_view namespace_name, const std::string_view snapshot)
             -> std::optional<std::u8string> {
             auto manifest = std::u8string{};
-            const auto menu_input_mode = [input] {
-                auto mode = DWORD{};
-                if (!GetConsoleMode(input, &mode)) {
-                    WinError("could not read the menu's console input mode "
-                        "before downloading the manifest");
-                }
-                return mode;
-            }();
-            const auto retrieved = RunForegroundOperation(input, menu_input_mode,
+            const auto retrieved = RunForegroundOperation(
+                "--browse requires an attached console",
                 [snapshot, namespace_name, &manifest](const HANDLE cancellation_event) {
                     auto response = RetrieveBackupManifest(
                         cancellation_event, std::u8string{namespace_name}, snapshot);
@@ -957,12 +897,10 @@ struct SelectiveViewOptions {
 
 [[nodiscard]] auto RunIncrementalDiagnosticMode(
     IncrementalDiagnosticOptions options) {
-    const auto [input, console_mode] = GetForegroundConsoleInput(
-        "incremental diagnostics require an attached console");
     const auto persistent = ResolvePersistentPaths();
     const auto backup_lock = AcquireBackupLock(persistent.backup_lock);
     return RunForegroundOperation(
-        input, console_mode,
+        "incremental diagnostics require an attached console",
         [options = std::move(options)](
             const HANDLE cancellation_event) {
             return RunIncrementalDiagnostics(
@@ -971,10 +909,8 @@ struct SelectiveViewOptions {
 }
 
 [[nodiscard]] auto RunInventoryVhdx(std::string device) {
-    const auto [input, console_mode] = GetForegroundConsoleInput(
-        "--inventory-vhdx requires an attached console");
     return RunForegroundOperation(
-        input, console_mode,
+        "--inventory-vhdx requires an attached console",
         [device = std::move(device)](
             const HANDLE cancellation_event) {
             return InventoryVhdx(cancellation_event, device);
@@ -991,9 +927,7 @@ struct SelectiveViewOptions {
     }
     const auto percentage = arguments.size() == 5
         ? ParseVerificationPercentage(arguments[4]) : 100.0;
-    const auto [input, console_mode] = GetForegroundConsoleInput(
-        "--verify-filesystems requires an attached console");
-    return RunForegroundOperation(input, console_mode,
+    return RunForegroundOperation("--verify-filesystems requires an attached console",
         [synthetic = std::filesystem::path{arguments[1]},
             real = std::filesystem::path{arguments[2]}, percentage](
             const HANDLE cancellation_event) {
@@ -1002,8 +936,7 @@ struct SelectiveViewOptions {
         });
 }
 
-auto WINAPI ServiceMain(
-    const DWORD argc, char **) noexcept -> void {
+auto WINAPI ServiceMain(DWORD, char **) noexcept -> void {
     static auto context = ServiceContext{};
     context.status_handle = RegisterServiceCtrlHandlerExA(
         kServiceName.data(), ServiceControlHandler, &context);
@@ -1013,7 +946,7 @@ auto WINAPI ServiceMain(
     SetServiceState(context, SERVICE_START_PENDING,
         ERROR_SUCCESS, 0, ServiceContext::kInitialPendingCheckpoint,
         ServiceContext::kStartWaitHint);
-    const auto result = RunService(context, argc);
+    const auto result = RunService(context);
     SetServiceState(context, SERVICE_STOPPED,
         result.win32_error, result.service_error);
 }
@@ -1032,7 +965,7 @@ auto RunServiceDispatcher() {
         SERVICE_TABLE_ENTRYA{},
     };
     if (!StartServiceCtrlDispatcherA(entries.data())) {
-        WinError("could not connect service '{}' to the Service Control Manager",
+        WinError("failed to connect service '{}' to the Service Control Manager",
             kServiceName);
     }
     return 0;
@@ -1104,8 +1037,6 @@ auto InvokeSelfAsAdministrator() {
         return 0;
     }
 
-    std::ignore = GetForegroundConsoleInput(
-        "the main menu requires an attached console");
     auto terminal = std::optional<devicefs::terminal::WindowsConsole>{std::in_place};
     auto screen = terminal->EnterScreen();
     if (!BackupServiceExists()) {

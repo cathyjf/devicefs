@@ -86,7 +86,7 @@ auto LogJobProcesses(Log &log, const HANDLE job) noexcept {
             }
 
             const auto command_line = ProcessCommandLine(process.get());
-            log.Write(
+            log.TryWrite(
                 "backup-supervisor: terminating '{}' "
                 "(PID {}, command line '{}')",
                 Transcode<std::string>(entry.szExeFile), entry.th32ProcessID,

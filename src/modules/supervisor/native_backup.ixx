@@ -62,14 +62,13 @@ export [[nodiscard]] auto RunFishProgram(
             std::array{std::string_view{"--run-fish-program"}}},
         arguments,
     } | std::views::join | std::ranges::to<std::vector>();
-    const auto result = internal::RunPbsFish(
+    return internal::RunPbsFish(
         cancellation_event, std::nullopt,
         internal::PbsFishRequest{
             .additional_arguments = fish_arguments,
             .additional_program = *program,
             .send_encryption_key = true,
-        });
-    return result ? result->exit_code : kCancelledExitCode;
+        }).exit_code;
 }
 
 export [[nodiscard]] auto InventoryVhdx(
@@ -91,12 +90,12 @@ export [[nodiscard]] auto VerifyMountedFilesystems(
 // Retrieve the PBS snapshot catalog as UTF-8 JSON for all groups in the
 // configured namespace, or the supplied override, and its descendants. The
 // object contains the starting namespace and a snapshots array; each snapshot
-// includes its full namespace. Cancellation returns an empty optional.
+// includes its full namespace.
 // Retrieval failures throw, with PBS diagnostics forwarded to standard error.
 export [[nodiscard]] auto RetrieveBackupCatalog(
     const HANDLE cancellation_event,
     const std::optional<std::u8string> &namespace_override)
-    -> std::optional<std::u8string> {
+    -> std::u8string {
     constexpr auto arguments = std::to_array<std::string_view>({"--list-backups"});
     auto result = internal::RunPbsFish(
         cancellation_event, namespace_override,
@@ -104,15 +103,12 @@ export [[nodiscard]] auto RetrieveBackupCatalog(
             .additional_arguments = arguments,
             .standard_output = internal::PbsStandardOutput::Capture,
         });
-    if (!result) {
-        return std::nullopt;
-    }
-    if (result->exit_code != 0) {
+    if (result.exit_code != 0) {
         throw std::runtime_error(std::format(
             "the backup catalog query exited with code {}",
-            result->exit_code));
+            result.exit_code));
     }
-    return std::move(result->standard_output);
+    return std::move(result.standard_output.value());
 }
 
 // An empty `view_user` selects the invoking user for the view-directory grants.
@@ -174,7 +170,7 @@ namespace internal {
 
     auto result = kCancelledExitCode;
     if (WaitForDeviceFs(devicefs, cancellation_event)) {
-        const auto pbs_result = RunPbsFish(
+        result = RunPbsFish(
             cancellation_event,
             namespace_override,
             PbsFishRequest{
@@ -182,9 +178,7 @@ namespace internal {
                     return SerializeSnapshotManifest(snapshot_set, layer);
                 },
                 .send_encryption_key = true,
-            });
-        result = pbs_result
-            ? pbs_result->exit_code : kCancelledExitCode;
+            }).exit_code;
     }
 
     cleanup.release();

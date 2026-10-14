@@ -217,8 +217,8 @@ function Invoke-IntervalCase {
                 [DeviceFsTestNative]::SendCtrlC()
                 Assert-Condition ($process.WaitForExit(30000)) 'The backup exposure process did not stop within 30 seconds.'
             }
-            # The foreground supervisor returns 130 after Ctrl+C cancellation.
-            Assert-Condition ($process.ExitCode -eq 130) "The backup exposure process exited with code $($process.ExitCode)."
+            Assert-Condition ($process.ExitCode -eq 0) `
+                "The backup exposure process exited with code $($process.ExitCode); expected 0."
             foreach ($child in $exposure.Children) {
                 Assert-Condition $child.HasExited "DeviceFs child $($child.Id) remained alive after exposure stopped."
             }

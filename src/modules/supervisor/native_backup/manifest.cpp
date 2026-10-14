@@ -302,7 +302,7 @@ export [[nodiscard]] auto RetrieveBackupManifest(
     const HANDLE cancellation_event,
     const std::optional<std::u8string> &namespace_override,
     const std::optional<std::string_view> snapshot = std::nullopt)
-    -> std::optional<PreviousBackupManifestResult> {
+    -> PreviousBackupManifestResult {
     const auto arguments =
         std::array{"--print-manifest"sv, "--"sv, snapshot.value_or(""sv)};
     auto result = internal::RunPbsFish(
@@ -313,12 +313,9 @@ export [[nodiscard]] auto RetrieveBackupManifest(
             .send_encryption_key = true,
             .standard_output = internal::PbsStandardOutput::Capture,
         });
-    if (!result) {
-        return std::nullopt;
-    }
     return PreviousBackupManifestResult{
-        .exit_code = result->exit_code,
-        .manifest = std::move(result->standard_output.value()),
+        .exit_code = result.exit_code,
+        .manifest = std::move(result.standard_output.value()),
     };
 }
 

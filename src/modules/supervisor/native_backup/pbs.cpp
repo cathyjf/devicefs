@@ -789,7 +789,7 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
 [[nodiscard]] auto RunPbsFish(
     const HANDLE cancellation_event,
     const std::optional<std::u8string> &namespace_override,
-    const PbsFishRequest &request) -> std::optional<PbsFishResult> {
+    const PbsFishRequest &request) -> PbsFishResult {
     constexpr auto kPollInterval = 100ms;
     auto operation = [&] {
         const auto persistent = ResolvePersistentPaths();
@@ -810,14 +810,14 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
         }
     }
 
-    const auto result = StopPbsFish(operation);
+    auto result = StopPbsFish(operation);
     if (result.exit_code != 0) {
         devicefs::WriteToStream(
             devicefs::stdout,
             "The PBS operation exited with code {} during cancellation.\n",
             result.exit_code);
     }
-    return std::nullopt;
+    return result;
 }
 
 } // namespace internal

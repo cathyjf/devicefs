@@ -475,10 +475,6 @@ template <typename Operation>
         }
     }
     cancel_on_monitor_failure.release();
-    result.wait();
-    if (context->cancellation_event.is_signaled()) {
-        return kCancelledExitCode;
-    }
     return result.get();
 }
 
@@ -752,12 +748,9 @@ struct SelectiveViewOptions {
         "--list-backups requires an attached console",
         [namespace_override = std::move(namespace_override)](
             const HANDLE cancellation_event) {
-            const auto catalog = RetrieveBackupCatalog(
-                cancellation_event, namespace_override);
-            if (!catalog) {
-                return kCancelledExitCode;
-            }
-            return devicefs::WriteToStream(devicefs::stdout, *catalog) ? 0 : 1;
+            return devicefs::WriteToStream(devicefs::stdout,
+                RetrieveBackupCatalog(
+                    cancellation_event, namespace_override)) ? 0 : 1;
         });
 }
 
@@ -769,16 +762,13 @@ struct SelectiveViewOptions {
             const HANDLE cancellation_event) {
             const auto result = RetrieveBackupManifest(
                 cancellation_event, namespace_override);
-            if (!result) {
-                return kCancelledExitCode;
+            if (result.exit_code != 0) {
+                return result.exit_code;
             }
-            if (result->exit_code != 0) {
-                return result->exit_code;
-            }
-            devicefs::WriteToStream(devicefs::stdout, result->manifest);
+            devicefs::WriteToStream(devicefs::stdout, result.manifest);
 
             const auto snapshot_volumes =
-                result->ParseManifest().QuerySnapshotVolumes();
+                result.ParseManifest().QuerySnapshotVolumes();
             devicefs::WriteToStream(
                 devicefs::stdout,
                 "\n\nValidated snapshots still available:\n");
@@ -867,17 +857,17 @@ struct SelectiveViewOptions {
 [[nodiscard]] auto RunBrowseMode(
     std::optional<std::u8string> namespace_override) {
     auto terminal = devicefs::terminal::WindowsConsole{};
-    auto catalog = std::optional<std::u8string>{};
+    auto catalog = std::u8string{};
     const auto result = RunFastOperation(terminal, "Load backup catalog",
         [&catalog, &namespace_override](const HANDLE cancellation_event) {
             catalog = RetrieveBackupCatalog(cancellation_event, namespace_override);
-            return catalog ? EXIT_SUCCESS : kCancelledExitCode;
+            return EXIT_SUCCESS;
         });
     if (result != EXIT_SUCCESS) {
         return result;
     }
     const auto screen = terminal.EnterScreen();
-    auto selection = SelectBackup(terminal, *catalog,
+    auto selection = SelectBackup(terminal, catalog,
         [&terminal](const std::u8string_view namespace_name,
             const std::string_view snapshot) -> std::optional<std::u8string> {
             auto manifest = std::u8string{};
@@ -888,13 +878,10 @@ struct SelectiveViewOptions {
                     auto response = RetrieveBackupManifest(
                         cancellation_event, std::u8string{namespace_name},
                         snapshot);
-                    if (!response) {
-                        return kCancelledExitCode;
+                    if (response.exit_code == EXIT_SUCCESS) {
+                        manifest = std::move(response.manifest);
                     }
-                    if (response->exit_code == EXIT_SUCCESS) {
-                        manifest = std::move(response->manifest);
-                    }
-                    return response->exit_code;
+                    return response.exit_code;
                 });
             // The manifest enriches labels. An empty result retains the
             // image names supplied by the catalog.

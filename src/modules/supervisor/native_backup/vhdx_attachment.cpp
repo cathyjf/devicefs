@@ -194,10 +194,8 @@ namespace internal {
         return status;
     }
 
-    const auto wait = wil::wait_any_failfast(
-        completion_event, cancellation_event).status();
-    const auto cancelled = wait == (WAIT_OBJECT_0 + 1);
-    if (cancelled) {
+    if (wil::wait_any_failfast(
+            completion_event, cancellation_event).status() == (WAIT_OBJECT_0 + 1)) {
         devicefs::WriteToStream(
             devicefs::stdout,
             "Cancellation requested while VHDX attachment was pending; "
@@ -219,10 +217,6 @@ namespace internal {
         disk, &operation, &progress);
     if (progress_status != ERROR_SUCCESS) {
         return progress_status;
-    }
-    if (cancelled &&
-        (progress.OperationStatus != ERROR_SUCCESS)) {
-        return DWORD{ERROR_CANCELLED};
     }
     return progress.OperationStatus;
 }

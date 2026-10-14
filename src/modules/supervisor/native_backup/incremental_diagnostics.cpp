@@ -1478,9 +1478,6 @@ auto PrintVerificationResult(
             summary.compared_bytes, summary.volume_bytes),
         summary.differing_bytes, summary.differing_blocks,
         summary.uncovered_bytes, summary.uncovered_blocks);
-    if (cancelled) {
-        return internal::kCancelledExitCode;
-    }
     return ((summary.incomplete != 0) ||
         (summary.coverage_failures != 0) ||
         (unprocessed_volumes != 0)) ? 1 : 0;
@@ -1676,14 +1673,11 @@ auto PrintVerificationResult(
         }
         const auto previous = RetrieveBackupManifest(
             cancellation_event, options.namespace_override);
-        if (!previous) {
-            return std::unexpected{internal::kCancelledExitCode};
-        }
-        if (previous->exit_code != 0) {
-            return std::unexpected{previous->exit_code};
+        if (previous.exit_code != 0) {
+            return std::unexpected{previous.exit_code};
         }
         const auto snapshot_volumes =
-            previous->ParseManifest().QuerySnapshotVolumes();
+            previous.ParseManifest().QuerySnapshotVolumes();
         if (snapshot_volumes.empty()) {
             throw std::runtime_error(
                 "the previous backup has no snapshots still available");

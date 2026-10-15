@@ -26,8 +26,9 @@ public:
             // caching. `_SH_DENYNO` allows `reader_` to open the same file
             // while the redirected streams are writing to it.
             // `D` enables delete-on-close and delete sharing for both opens.
+            // `S` requests caching optimized for sequential access.
             ClearCrtIoError();
-            auto file = wil::unique_file{_wfsopen(path_.c_str(), L"wbTD", _SH_DENYNO)};
+            auto file = wil::unique_file{_wfsopen(path_.c_str(), L"wbTDS", _SH_DENYNO)};
             if (!file) {
                 WinError("failed to create view output file '{}'",
                     std::wstring_view{path_.native()}, ExplicitCrtIoError{});
@@ -35,7 +36,7 @@ public:
             return file;
         }()),
         reader_file_([this] {
-            auto file = wil::unique_file{_wfsopen(path_.c_str(), L"rbD", _SH_DENYNO)};
+            auto file = wil::unique_file{_wfsopen(path_.c_str(), L"rbDS", _SH_DENYNO)};
             if (!file) {
                 WinError("failed to open view output file '{}' for reading",
                     std::wstring_view{path_.native()}, ExplicitCrtIoError{});

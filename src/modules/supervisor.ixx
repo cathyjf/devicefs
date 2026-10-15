@@ -790,14 +790,54 @@ struct SelectiveViewOptions {
         });
 }
 
+template <typename Operation, typename Header, typename Cancellation,
+    devicefs::terminal::MenuTerminal Console>
+struct CancellableOutputOperation {
+    Operation operation;
+    Header draw_header;
+    Cancellation cancel;
+    Console &terminal;
+    const bool initially_visible = true;
+    std::optional<decltype(terminal.EnterScreen())> screen;
+    bool dismissal_requested = false;
+
+    auto notify_completion(devicefs::terminal::OutputMenu &menu,
+        const int exit_code, const auto &close) -> void {
+        if ((exit_code == EXIT_SUCCESS) &&
+            (!initially_visible || dismissal_requested)) {
+            close();
+            return;
+        }
+        if (!initially_visible) {
+            screen.emplace(terminal.EnterScreen());
+        }
+        menu.SetVisible(true);
+        if (dismissal_requested) {
+            menu.AppendLine("Operation failed after cancellation was requested.");
+        }
+        menu.SetCommands(std::array{devicefs::terminal::OutputCommand{
+            0, initially_visible ? "Close" : "Continue"}});
+    }
+
+    auto dispatch(devicefs::terminal::OutputMenu &,
+        auto &task, std::optional<std::size_t>, const auto &close) -> void {
+        if (*task || task.MaybeCompleteTask()) {
+            close();
+            return;
+        }
+        dismissal_requested = true;
+        cancel();
+    }
+};
+
 [[nodiscard]] auto RunBackupViewInScrollingScreen(
     devicefs::terminal::WindowsConsole &terminal,
     SelectiveViewOptions options, BackupViewUser view_user) {
     const auto context = std::make_shared<const ForegroundContext>();
     auto &account = (view_user.shell_user && *view_user.shell_user)
         ? **view_user.shell_user : view_user.invoking_user;
-    return RunOperationWithOutput(terminal,
-        MakeForegroundOperation(context, [&options, &view_user, &account](
+    return RunOperationWithOutput(CancellableOutputOperation{
+        .operation = MakeForegroundOperation(context, [&options, &view_user, &account](
             const HANDLE cancellation_event) {
             if (!view_user.shell_user) {
                 devicefs::WriteToStream(devicefs::stdout,
@@ -816,7 +856,8 @@ struct SelectiveViewOptions {
                 options.timestamp,
                 options.address,
                 options.namespace_override);
-        }), [&options](auto &frame) {
+        }),
+        .draw_header = [&options](auto &frame) {
             const auto namespace_name = options.namespace_override
                 ? (options.namespace_override->empty() ? std::string{"(root)"} :
                     Transcode<std::string>(*options.namespace_override))
@@ -827,9 +868,12 @@ struct SelectiveViewOptions {
                 namespace_name,
                 options.timestamp ? std::format("{}/{}", backup, *options.timestamp) : backup,
                 options.archive);
-        }, [context] {
+        },
+        .cancel = [context] {
             context->cancellation_event.SetEvent();
-        });
+        },
+        .terminal = terminal,
+    });
 }
 
 [[nodiscard]] auto RunSelectiveViewMode(SelectiveViewOptions options) {
@@ -845,13 +889,17 @@ struct SelectiveViewOptions {
     devicefs::terminal::WindowsConsole &terminal,
     const std::string_view title, auto operation) {
     const auto context = std::make_shared<const ForegroundContext>();
-    return RunOperationWithOutput(terminal,
-        MakeForegroundOperation(context, std::move(operation)),
-        [title](auto &frame) {
+    return RunOperationWithOutput(CancellableOutputOperation{
+        .operation = MakeForegroundOperation(context, std::move(operation)),
+        .draw_header = [title](auto &frame) {
             frame.Write("DeviceFs Backup Supervisor\n{}\n\n", title);
-        }, [context] {
+        },
+        .cancel = [context] {
             context->cancellation_event.SetEvent();
-        }, OperationOutput::OnFailure);
+        },
+        .terminal = terminal,
+        .initially_visible = false,
+    });
 }
 
 [[nodiscard]] auto RunBrowseMode(
@@ -974,22 +1022,27 @@ auto RunServiceDispatcher() {
 }
 
 auto RunInstallerInScrollingView(auto &&terminal, auto &&screen) {
-    return RunOperationWithOutput(*terminal, [] {
-        InstallService(ServiceContext::kMinimumPreshutdownTimeout);
-        return EXIT_SUCCESS;
-    }, [](auto &frame) {
-        frame.Write("DeviceFs Backup Supervisor\n"
-            "Install or update backup environment\n\n");
-    }, [&screen, &terminal] {
-        // A presentation failure is already propagating during unwinding.
-        // Returning allows the future's destructor to wait for installation,
-        // after which the original error reaches the caller.
-        if (std::uncaught_exceptions() != 0) {
-            return;
-        }
-        screen.reset();
-        terminal.reset();
-        ExitProcess(ERROR_CANCELLED);
+    return RunOperationWithOutput(CancellableOutputOperation{
+        .operation = [] {
+            InstallService(ServiceContext::kMinimumPreshutdownTimeout);
+            return EXIT_SUCCESS;
+        },
+        .draw_header = [](auto &frame) {
+            frame.Write("DeviceFs Backup Supervisor\n"
+                "Install or update backup environment\n\n");
+        },
+        .cancel = [&screen, &terminal] {
+            // A presentation failure is already propagating during unwinding.
+            // Returning allows the future's destructor to wait for installation,
+            // after which the original error reaches the caller.
+            if (std::uncaught_exceptions() != 0) {
+                return;
+            }
+            screen.reset();
+            terminal.reset();
+            ExitProcess(ERROR_CANCELLED);
+        },
+        .terminal = *terminal,
     });
 }
 

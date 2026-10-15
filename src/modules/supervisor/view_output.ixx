@@ -10,9 +10,10 @@ import <cstdio>;
 import <io.h>;
 import <share.h>;
 import devicefs.stream_redirector;
+import devicefs.stream_writer;
 import devicefs.supervisor.temporary_paths;
+import devicefs.terminal.drawing;
 import devicefs.terminal.menu;
-import devicefs.terminal.windows;
 
 namespace view_output_detail {
 
@@ -88,86 +89,121 @@ private:
 
 } // namespace view_output_detail
 
-export enum class OperationOutput { Stream, OnFailure };
+template <class T>
+class FutureWithSavedResult {
+    using ResultType = decltype(T{}.get());
 
-// The operation runs on a worker thread with captured stdout and stderr.
-// Stream displays output while the worker runs, then offers Close on automatic
-// completion. Success after cancellation returns without another selection.
-// OnFailure waits without displaying output or entering a screen. Success
-// discards the output; failure displays it with Continue.
-// The return value is the operation's exit code.
-//
-// Escape or Ctrl+C invokes cancel() while the worker runs.
-// If the callback returns, this function waits and preserves the operation's
-// exit code.
-// A presentation failure also invokes cancel() during stack unwinding before
-// waiting for a running worker.
-// Worker exceptions are displayed and return EXIT_FAILURE after the view closes.
-// The caller keeps terminal alive and, for Stream, retains its EnterScreen
-// owner. OnFailure owns screen entry only while failure output is displayed.
-export template <typename Operation, typename Header, typename Cancellation>
-[[nodiscard]] auto RunOperationWithOutput(devicefs::terminal::WindowsConsole &terminal,
-    Operation operation, const Header draw_header, Cancellation cancel,
-    const OperationOutput visibility = OperationOutput::Stream) -> int {
-    using namespace std::chrono_literals;
+public:
+    FutureWithSavedResult(T &&future) noexcept : future_(std::move(future)) {}
+
+    auto Get() {
+        if (!result_) {
+            result_ = future_.get();
+        }
+        return *result_;
+    }
+
+    auto MaybeCompleteTask() {
+        using namespace std::chrono_literals;
+        if (result_ ||
+            (future_.wait_for(0ms) != std::future_status::ready)) {
+            return false;
+        }
+        result_ = future_.get();
+        return true;
+    }
+
+    auto operator*() const
+        noexcept(std::is_nothrow_copy_constructible_v<ResultType>) {
+        return result_;
+    }
+
+private:
+    std::optional<ResultType> result_;
+    T future_;
+};
+
+template <typename T>
+concept OutputOperation = requires(T &callbacks,
+    devicefs::terminal::Frame<
+        std::remove_reference_t<decltype(callbacks.terminal)>> &frame,
+    devicefs::terminal::OutputMenu &menu, int exit_code,
+    FutureWithSavedResult<std::future<int>> &task,
+    std::optional<std::size_t> command,
+    const decltype([] noexcept {}) &close) {
+    { callbacks.terminal } -> devicefs::terminal::MenuTerminal;
+    { callbacks.initially_visible } -> std::same_as<const bool &>;
+    { callbacks.operation() } -> std::same_as<int>;
+    callbacks.draw_header(frame);
+    { callbacks.notify_completion(menu, exit_code, close) } -> std::same_as<void>;
+    { callbacks.dispatch(menu, task, command, close) } -> std::same_as<void>;
+};
+
+#undef stderr
+#undef stdout
+
+export [[nodiscard]] auto RunOperationWithOutput(
+    OutputOperation auto &&callbacks) -> int {
+    auto view = devicefs::terminal::OutputMenu{};
+    auto closed = false;
+    const auto close = [&view, &closed] noexcept {
+        closed = true;
+        view.Close();
+    };
+    view.SetVisible(callbacks.initially_visible);
+
+    // While this `output` object is alive, standard output and standard error
+    // are redirected into temporary files.
     auto output = view_output_detail::ViewOutput{
         TemporarySystemDirectoryPath("devicefs-view-output")};
-    auto view = devicefs::terminal::OutputMenu{};
-    view.SetVisible(visibility == OperationOutput::Stream);
-    auto screen = std::optional<decltype(terminal.EnterScreen())>{};
-    auto task = std::async(std::launch::async, std::move(operation));
-    // The destructor of `task` waits for its worker. This guard is destroyed
-    // first, giving `cancel()` a chance to stop the worker before that wait.
-    auto cancel_on_failure = wil::scope_exit([&task, &cancel] noexcept {
-        if (task.valid() && (task.wait_for(0ms) != std::future_status::ready)) {
-            try {
-                cancel();
-            } catch (...) {
-                // The presentation failure remains the reported error even if
-                // requesting cancellation also fails.
-            }
-        }
-    });
-    std::ignore = view.Select(terminal, draw_header,
-        [&output, &task, visibility](auto &menu) {
-            if (visibility == OperationOutput::Stream) {
-                output.ReadOutput(menu);
-            }
-            if (task.wait_for(0ms) == std::future_status::ready) {
-                menu.Close();
-            }
-        });
-    const auto cancelled = task.wait_for(0ms) != std::future_status::ready;
-    if (cancelled) {
-        cancel();
-    }
-    const auto [result, failure_message] = [&task]
-        -> std::pair<int, std::optional<std::string>> {
+
+    // This menu does not allow exceptions to escape from the supervised
+    // asynchronous operation. Instead, exceptions are informationally printed
+    // and then translated into a nonzero exit status code.
+    auto task = FutureWithSavedResult{
+        std::async(std::launch::async, [&callbacks] noexcept {
         try {
-            return {task.get(), std::nullopt};
+            return callbacks.operation();
         } catch (const std::exception &error) {
-            return {EXIT_FAILURE, error.what()};
+            devicefs::WriteToStream(devicefs::stderr, "{}\n", error.what());
+            if (const auto system_error_ = dynamic_cast<
+                    const std::system_error *>(&error);
+                    system_error_ && system_error_->code()) {
+                return system_error_->code().value();
+            }
         } catch (...) {
-            return {EXIT_FAILURE, "Unknown exception from operation."};
+            devicefs::WriteToStream(devicefs::stderr,
+                "Unknown exception from operation.\n");
         }
-    }();
-    cancel_on_failure.release();
-    if ((result != EXIT_SUCCESS) ||
-        ((visibility == OperationOutput::Stream) && !cancelled)) {
-        output.ReadOutput(view);
-        if (failure_message) {
-            view.AppendLine(*failure_message);
+        return EXIT_FAILURE;
+    })};
+
+    auto dismiss_on_failure = wil::scope_exit(
+        [&callbacks, &view, &task, &close, &closed = std::as_const(closed)]
+        noexcept {
+            // An exception arising from the menu machinery (and not from the
+            // supervised asynchronous operation) is treated as a request to
+            // dismiss the menu. If the menu has already been closed, no action
+            // is taken.
+            if (closed) {
+                return;
+            }
+            try {
+                callbacks.dispatch(view, task, std::nullopt, close);
+            } catch (...) {}
+        });
+    while (!closed) {
+        const auto command = view.Select(callbacks.terminal,
+            [&callbacks](auto &frame) { callbacks.draw_header(frame); },
+            [&task, &output, &callbacks, &close](auto &menu) {
+                output.ReadOutput(menu);
+                if (task.MaybeCompleteTask()) {
+                    callbacks.notify_completion(menu, **task, close);
+                }
+            });
+        if (!closed) {
+            callbacks.dispatch(view, task, command, close);
         }
-        if (cancelled) {
-            view.AppendLine("Operation failed after cancellation was requested.");
-        }
-        if (visibility == OperationOutput::OnFailure) {
-            screen.emplace(terminal.EnterScreen());
-        }
-        view.SetVisible(true);
-        view.SetCommands(std::array{devicefs::terminal::OutputCommand{
-            0, visibility == OperationOutput::OnFailure ? "Continue" : "Close"}});
-        std::ignore = view.Select(terminal, draw_header, [](auto &) {});
     }
-    return result;
+    return task.Get();
 }

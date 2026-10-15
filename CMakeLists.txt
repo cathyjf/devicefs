@@ -394,6 +394,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/view_output.ixx
     src/modules/stream_redirector.ixx
     src/modules/supervisor/vshadow.ixx
+    src/modules/supervisor/windows_service.ixx
     src/modules/supervisor/winrt_apartment.ixx
 )
 

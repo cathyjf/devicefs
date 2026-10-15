@@ -15,17 +15,16 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import std;
-import <clocale>;
-import <sal.h>;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import devicefs.stream_writer;
-import devicefs.supervisor;
 import devicefs.terminal.transcoding;
 
 // Once MSVC++ implements P3618R0 ("Allow attaching main to the global module"),
-// the `main` function can move into the supervisor module file. Until then,
-// this separate `main.cpp` file remains necessary.
+// the `main` function can move into a supervisor module file. Until then, this
+// separate `main.cpp` file remains necessary.
+
+auto BackupSupervisorMain(const std::span<const std::string_view>) -> int;
 
 [[gsl::suppress("26429",
     justification:

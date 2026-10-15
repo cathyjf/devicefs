@@ -435,28 +435,28 @@ struct StartedWslFish {
     WslProcess process;
 };
 
+namespace {
+
+auto CreateUniquePipe() {
+    struct {
+        wil::unique_handle read;
+        wil::unique_handle write;
+    } pipe;
+    if (!CreatePipe(pipe.read.addressof(), pipe.write.addressof(),
+            nullptr, 0)) {
+        WinError("failed to create a pipe for a Fish program");
+    }
+    return pipe;
+}
+
+} // namespace
+
 [[nodiscard]] auto StartWslFishProcess(
     const BackupConfiguration &configuration,
     const std::span<const std::string_view> arguments) -> StartedWslFish {
-    auto input_read = wil::unique_handle{};
-    auto input_write = wil::unique_handle{};
-    if (!CreatePipe(input_read.addressof(), input_write.addressof(),
-            nullptr, 0)) {
-        WinError("failed to create the WSL input channel");
-    }
-    auto output_read = wil::unique_handle{};
-    auto output_write = wil::unique_handle{};
-    if (!CreatePipe(output_read.addressof(), output_write.addressof(),
-            nullptr, 0)) {
-        WinError("failed to create the WSL output channel");
-    }
-    auto error_read = wil::unique_handle{};
-    auto error_write = wil::unique_handle{};
-    if (!CreatePipe(error_read.addressof(), error_write.addressof(),
-            nullptr, 0)) {
-        WinError("failed to create the WSL error channel");
-    }
-
+    auto input = CreateUniquePipe();
+    auto output = CreateUniquePipe();
+    auto error = CreateUniquePipe();
     auto wsl_arguments = std::vector<std::string_view>{
         "--distribution", configuration.wsl.distribution,
     };
@@ -474,16 +474,16 @@ struct StartedWslFish {
     auto process = StartWslAsConfiguredUser(
         configuration,
         wsl_arguments,
-        input_read.get(),
-        output_write.get(),
-        error_write.get());
-    input_read.reset();
-    output_write.reset();
-    error_write.reset();
+        input.read.get(),
+        output.write.get(),
+        error.write.get());
+    input.read.reset();
+    output.write.reset();
+    error.write.reset();
     return StartedWslFish{
-        .standard_input = std::move(input_write),
-        .standard_output = std::move(output_read),
-        .standard_error = std::move(error_read),
+        .standard_input = std::move(input.write),
+        .standard_output = std::move(output.read),
+        .standard_error = std::move(error.read),
         .process = std::move(process),
     };
 }

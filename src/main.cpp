@@ -21,6 +21,7 @@ import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.supervisor;
+import devicefs.terminal.transcoding;
 
 // Once MSVC++ implements P3618R0 ("Allow attaching main to the global module"),
 // the `main` function can move into the supervisor module file. Until then,
@@ -40,8 +41,7 @@ auto main(
     std::ignore = SetConsoleCP(CP_UTF8);
     std::ignore = SetConsoleOutputCP(CP_UTF8);
     if (std::setlocale(LC_CTYPE, ".UTF8") == nullptr) {
-        devicefs::WriteToStream(
-            devicefs::stderr,
+        devicefs::WriteToStream(devicefs::stderr,
             "{}: could not set the CRT locale to UTF-8; continuing anyway",
             argv[0]);
     }
@@ -52,8 +52,18 @@ auto main(
             std::ranges::to<std::vector<std::string_view>>();
         return BackupSupervisorMain(std::span{arguments}.subspan(1));
     } catch (const std::exception &error) {
-        devicefs::WriteToStream(
-            devicefs::stderr, "{}: {}\n", argv[0], error.what());
+        const auto argv0_basename = [argv0 = argv[0]] noexcept
+            -> std::string {
+            try {
+                return devicefs::terminal::Transcode<std::string>(
+                    std::filesystem::path{argv0}.filename().native());
+            } catch (...) {
+                return {};
+            }
+        }();
+        devicefs::WriteToStream(devicefs::stderr, "{}: {}\n",
+            argv0_basename.empty() ? argv[0] : argv0_basename.c_str(),
+            error.what());
         if (dynamic_cast<const std::invalid_argument *>(&error)) {
             return ERROR_INVALID_COMMAND_LINE;
         }

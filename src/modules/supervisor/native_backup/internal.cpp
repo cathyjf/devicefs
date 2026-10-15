@@ -61,15 +61,10 @@ template <typename Operation>
     return VolumeImageName(snapshot.original_volume, ".img");
 }
 
-auto TryWriteError(
-    _In_z_ const char *const context,
+auto TryWriteError(const std::string_view context,
     const std::exception &error) noexcept {
-    [[gsl::suppress("26447",
-        justification:
-            "std::exception::what is noexcept. WriteToStream cannot "
-            "throw.")]]
     devicefs::WriteToStream(
-        devicefs::stderr, "backup-supervisor: {}: {}\n", context, error.what());
+        devicefs::stderr, "backup-supervisor: {}: {}\n", context, &error);
 }
 
 } // namespace internal

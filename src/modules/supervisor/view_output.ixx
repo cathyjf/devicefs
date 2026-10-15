@@ -47,7 +47,8 @@ public:
         standard_output_(_fileno(stdout), _fileno(file_.get()), "stdout"),
         standard_error_(_fileno(stderr), _fileno(file_.get()), "stderr") {}
 
-    auto ReadOutput(devicefs::terminal::OutputMenu &view) {
+    auto ReadOutput(auto &&view)
+        requires requires { view.AppendText(std::string_view{}); } {
         // Reaching the current end of the file does not mean output has
         // finished. Clearing that state allows newly written text to be read.
         reader_.clear();

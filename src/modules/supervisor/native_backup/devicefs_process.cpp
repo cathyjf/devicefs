@@ -72,11 +72,10 @@ struct DeviceFsStartRequest {
 
 [[nodiscard]] auto StartDeviceFs(
     const DeviceFsStartRequest &request) {
-    const auto supervisor = Transcode<std::string>(CurrentExecutablePath().native());
     auto stop_event_name = std::format(
         "Global\\devicefs-stop-{}", UniqueName());
     auto arguments = std::vector<std::string>{
-        supervisor,
+        Transcode<std::string>(CurrentExecutablePath().native()),
         "--devicefs",
         "--synthetic-free-clusters",
         "--cache",
@@ -113,7 +112,6 @@ struct DeviceFsStartRequest {
             ? std::format(R"(\\\{})", source.source)
             : source.source);
     }
-    auto command = wil::ArgvToCommandLine(arguments);
     if (request.rpc_endpoint &&
         !SetEnvironmentVariableA(
             devicefs::rpc::kEndpointEnvironmentVariable,
@@ -123,9 +121,8 @@ struct DeviceFsStartRequest {
             *request.rpc_endpoint);
     }
     devicefs::WriteToStream(
-        devicefs::stdout, "Setting up virtual filesystem: {}\n", command);
-    const auto creation_flags = EXTENDED_STARTUPINFO_PRESENT |
-        (request.rpc_endpoint ? CREATE_SUSPENDED : DWORD{});
+        devicefs::stdout, "Setting up virtual filesystem: {}\n",
+        wil::ArgvToCommandLine(arguments));
     auto password_input = wil::unique_handle{};
     auto password_output = wil::unique_handle{};
     if (request.rpc_password) {
@@ -154,20 +151,12 @@ struct DeviceFsStartRequest {
         write_password(std::span{newline});
         password_output.reset();
     }
-    auto process = StartProcessWithHandles(
-        password_input
+    auto process = StartProcessWithHandles(ProcessLaunchOptions{
+        .argv = arguments,
+        .flags = request.rpc_endpoint ? CREATE_SUSPENDED : DWORD{},
+        .standard_input = password_input
             ? password_input.get() : GetStdHandle(STD_INPUT_HANDLE),
-        GetStdHandle(STD_OUTPUT_HANDLE),
-        GetStdHandle(STD_ERROR_HANDLE),
-        [&](STARTUPINFOA *const startup, PROCESS_INFORMATION *const result) {
-            return CreateProcessA(
-                supervisor.c_str(), command.data(),
-                nullptr, nullptr, TRUE,
-                creation_flags,
-                nullptr,
-                nullptr, startup, result);
-        },
-        "could not start devicefs");
+    });
     return DeviceFsProcess{
         .process = std::move(process),
         .readiness_path = std::move(readiness_path),

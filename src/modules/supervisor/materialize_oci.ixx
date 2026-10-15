@@ -166,7 +166,6 @@ auto SetDefaultTokenAcl() {
 auto RunCommand(
     const std::span<const std::string> arguments,
     const HANDLE standard_output) {
-    const auto &executable = arguments.front();
     auto command = wil::ArgvToCommandLine(arguments);
     const auto input = wil::unique_hfile{CreateFileA(
         "NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -174,15 +173,12 @@ auto RunCommand(
     if (!input) {
         WinError("could not open NUL for command '{}'", command);
     }
-    const auto operation = std::format("could not launch '{}'", executable);
-    const auto process = StartProcessWithHandles(
-        input.get(), standard_output, GetStdHandle(STD_ERROR_HANDLE),
-        [&](STARTUPINFOA *const startup, PROCESS_INFORMATION *const information) {
-            return CreateProcessA(executable.c_str(), command.data(),
-                nullptr, nullptr, TRUE,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
-                nullptr, nullptr, startup, information);
-        }, wil::zstring_view{operation});
+    const auto process = StartProcessWithHandles(ProcessLaunchOptions{
+        .argv = arguments,
+        .flags = CREATE_NO_WINDOW,
+        .standard_input = input.get(),
+        .standard_output = standard_output,
+    });
     wil::handle_wait(process.hProcess);
     auto exit_code = DWORD{};
     if (!GetExitCodeProcess(process.hProcess, &exit_code)) {

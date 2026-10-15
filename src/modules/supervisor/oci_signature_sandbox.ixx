@@ -83,11 +83,6 @@ export auto VerifyOciLayerSignatureInSandbox(const std::filesystem::path &superv
     }();
     auto capabilities = SECURITY_CAPABILITIES{
         .AppContainerSid = app_container_sid.get()};
-    const auto executable = devicefs::terminal::Transcode<std::string>(
-        supervisor.native());
-    auto command = wil::ArgvToCommandLine(std::array{
-        std::string_view{executable}, std::string_view{kVerifyOpenPgpDetachedSignatureOption},
-        digest, signature});
     auto output_read = wil::unique_handle{};
     auto output_write = wil::unique_handle{};
     if (!CreatePipe(output_read.addressof(), output_write.addressof(), nullptr, 0)) {
@@ -104,15 +99,17 @@ export auto VerifyOciLayerSignatureInSandbox(const std::filesystem::path &superv
     // it can load the executable and Windows libraries, and write diagnostics.
     // https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer
     auto application_packages_policy = DWORD{PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT};
+    const auto executable = devicefs::terminal::Transcode<std::string>(
+        supervisor.native());
     const auto process = StartProcessWithHandles(
-        input.get(), output_write.get(), output_write.get(),
-        [&executable, &command](STARTUPINFOA *const startup,
-            PROCESS_INFORMATION *const information) {
-            return CreateProcessA(executable.c_str(), command.data(),
-                nullptr, nullptr, TRUE,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
-                nullptr, nullptr, startup, information);
-        }, wil::zstring_view{"could not launch the OCI signature AppContainer"},
+        ProcessLaunchOptions{
+            .argv = std::array{std::string_view{executable},
+                kVerifyOpenPgpDetachedSignatureOption, digest, signature},
+            .flags = CREATE_NO_WINDOW,
+            .standard_input = input.get(),
+            .standard_output = output_write.get(),
+            .standard_error = output_write.get(),
+        },
         std::tuple{PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
             &capabilities, sizeof(capabilities)},
         std::tuple{PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,

@@ -61,14 +61,12 @@ export [[nodiscard]] auto DuplicateInheritableHandle(const HANDLE source) {
     return duplicate;
 }
 
-export template <typename Start, typename... Attributes>
-[[nodiscard]] auto StartProcessWithHandles(
+export [[nodiscard]] auto StartProcessWithHandles(
     const HANDLE standard_input,
     const HANDLE standard_output,
     const HANDLE standard_error,
-    const Start &start,
-    const wil::zstring_view operation,
-    Attributes &&...additional_attributes) {
+    const auto &start,
+    auto &&...additional_attributes) {
     const auto child_handles = std::array{
         DuplicateInheritableHandle(standard_input),
         DuplicateInheritableHandle(standard_output),
@@ -80,7 +78,7 @@ export template <typename Start, typename... Attributes>
     const auto attributes = ProcessAttributeList{
         std::tuple{PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
             inherited_handles.data(), sizeof(inherited_handles)},
-        std::forward<Attributes>(additional_attributes)...};
+        std::forward<decltype(additional_attributes)>(additional_attributes)...};
 
     auto startup = STARTUPINFOEXA{
         .StartupInfo = {
@@ -93,11 +91,39 @@ export template <typename Start, typename... Attributes>
         },
         .lpAttributeList = attributes.get(),
     };
-    auto process = wil::unique_process_information{};
-    if (!start(&startup.StartupInfo, &process)) {
-        WinError("{}", operation);
-    }
-    return process;
+    return start(&startup.StartupInfo);
+}
+
+export template <typename Argv>
+struct ProcessLaunchOptions {
+    const Argv &argv;
+    DWORD flags = 0;
+    HANDLE standard_input = GetStdHandle(STD_INPUT_HANDLE);
+    HANDLE standard_output = GetStdHandle(STD_OUTPUT_HANDLE);
+    HANDLE standard_error = GetStdHandle(STD_ERROR_HANDLE);
+};
+
+// Start the fully qualified executable in `options.argv[0]`. The child
+// receives duplicates of the current standard handles unless replacements
+// are supplied.
+export template <typename Argv>
+[[nodiscard]] auto StartProcessWithHandles(
+    const ProcessLaunchOptions<Argv> &options,
+    auto &&...additional_attributes) {
+    auto command = wil::ArgvToCommandLine(options.argv);
+    return StartProcessWithHandles(
+        options.standard_input, options.standard_output, options.standard_error,
+        [executable = std::string{options.argv.front()}, &command,
+        flags = options.flags](STARTUPINFOA *const startup) {
+            auto process = wil::unique_process_information{};
+            if (!CreateProcessA(executable.c_str(),
+                    command.data(), nullptr, nullptr, TRUE,
+                    flags | EXTENDED_STARTUPINFO_PRESENT,
+                    nullptr, nullptr, startup, &process)) {
+                WinError("failed to start program '{}'", executable);
+            }
+            return process;
+        }, std::forward<decltype(additional_attributes)>(additional_attributes)...);
 }
 
 export using PipeOutputConsumption = std::expected<std::size_t, DWORD>;

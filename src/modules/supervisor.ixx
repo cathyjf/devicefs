@@ -57,6 +57,7 @@ constexpr auto kCancellationEventName =
     "Local\\devicefs-backup-stop"_zv;
 constexpr auto kOrchestrateOption = "--orchestrate"_zv;
 constexpr auto kRunInConsoleOption = "--internal-run-in-console"sv;
+constexpr auto kInstallOption = "--install"sv;
 
 [[nodiscard]] auto CreateCancellationEvent(
     _In_opt_z_ const char *const name) {
@@ -1021,28 +1022,39 @@ auto RunServiceDispatcher() {
     return 0;
 }
 
-auto RunInstallerInScrollingView(auto &&terminal, auto &&screen) {
+auto RunInstallerInScrollingView(auto &&terminal) {
+    const auto context = std::make_shared<const ForegroundContext>();
     return RunOperationWithOutput(CancellableOutputOperation{
-        .operation = [] {
-            InstallService(ServiceContext::kMinimumPreshutdownTimeout);
-            return EXIT_SUCCESS;
-        },
+        .operation = MakeForegroundOperation(context, [](
+            const HANDLE cancellation_event) -> int {
+            const auto executable = Transcode<std::string>(
+                CurrentExecutablePath().native());
+            const auto process = StartProcessWithHandles(ProcessLaunchOptions{
+                .argv = std::array{std::string_view{executable}, kInstallOption},
+                .flags = CREATE_NO_WINDOW,
+            });
+            if (wil::wait_any_failfast(process.hProcess,
+                    cancellation_event).status() != WAIT_OBJECT_0) {
+                // The child can exit between the wait and termination.
+                // `TerminateProcess` reports `ERROR_ACCESS_DENIED` for a
+                // process that has already terminated.
+                // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess
+                if (!TerminateProcess(process.hProcess, ERROR_CANCELLED) &&
+                    (GetLastError() != ERROR_ACCESS_DENIED)) {
+                    WinError("failed to terminate the installer process");
+                }
+                wil::handle_wait(process.hProcess);
+            }
+            return ProcessExitCode(process.hProcess);
+        }),
         .draw_header = [](auto &frame) {
             frame.Write("DeviceFs Backup Supervisor\n"
                 "Install or update backup environment\n\n");
         },
-        .cancel = [&screen, &terminal] {
-            // A presentation failure is already propagating during unwinding.
-            // Returning allows the future's destructor to wait for installation,
-            // after which the original error reaches the caller.
-            if (std::uncaught_exceptions() != 0) {
-                return;
-            }
-            screen.reset();
-            terminal.reset();
-            ExitProcess(ERROR_CANCELLED);
+        .cancel = [context] {
+            context->cancellation_event.SetEvent();
         },
-        .terminal = *terminal,
+        .terminal = terminal,
     });
 }
 
@@ -1092,20 +1104,20 @@ auto InvokeSelfAsAdministrator() {
         return 0;
     }
 
-    auto terminal = std::optional<devicefs::terminal::WindowsConsole>{std::in_place};
-    auto screen = terminal->EnterScreen();
+    auto terminal = devicefs::terminal::WindowsConsole{};
+    const auto screen = terminal.EnterScreen();
     if (!BackupServiceExists()) {
-        return RunInstallerInScrollingView(terminal, screen);
+        return RunInstallerInScrollingView(terminal);
     }
     const auto entries = std::to_array<std::pair<
         std::string_view, std::function<auto () -> void>>>({
         {"Install or update backup environment"sv,
-            [&terminal, &screen] {
-            RunInstallerInScrollingView(terminal, screen);
+            [&terminal] {
+            RunInstallerInScrollingView(terminal);
         }},
         {"Browse backups"sv, [&terminal] {
             std::ignore = RunBrowseMode(std::nullopt);
-            terminal->InvalidateFrame();
+            terminal.InvalidateFrame();
         }},
         {"Close"sv, nullptr}
     });
@@ -1113,7 +1125,7 @@ auto InvokeSelfAsAdministrator() {
         std::ranges::to<std::vector<std::string_view>>();
     auto selection = std::size_t{};
     while (const auto maybe_selection =
-        devicefs::terminal::SelectMenuItem(*terminal, [](auto &frame) {
+        devicefs::terminal::SelectMenuItem(terminal, [](auto &frame) {
             frame.Write("DeviceFs Backup Supervisor\nMain menu\n\n");
         }, keys, {}, selection)) {
         selection = *maybe_selection;
@@ -1264,7 +1276,7 @@ export auto BackupSupervisorMain(
     case "--verify-synthetic-backup"_h:
         return RunIncrementalDiagnosticMode(
             ParseIncrementalDiagnosticOptions(arguments));
-    case "--install"_h:
+    case Hash(kInstallOption):
         if (arguments.size() != 1) {
             throw std::invalid_argument(
                 "--install does not accept arguments");

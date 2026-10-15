@@ -336,9 +336,11 @@ struct WslProcess {
     const HANDLE standard_error) {
     const auto wsl_path = WslExecutablePath();
     const auto wsl_path_text = Transcode<std::string>(wsl_path.native());
-    auto argument_views = std::vector<std::string_view>{wsl_path_text};
-    argument_views.append_range(arguments);
-    auto command = wil::ArgvToCommandLine(argument_views);
+    auto command = wil::ArgvToCommandLine([&wsl_path_text, arguments] {
+        auto argv = std::vector<std::string_view>{wsl_path_text};
+        argv.append_range(arguments);
+        return argv;
+    }());
     const auto wsl_directory = wsl_path.parent_path();
     const auto windows_username =
         Transcode<std::wstring>(
@@ -355,60 +357,74 @@ struct WslProcess {
 
     auto result = WslProcess{};
     result.token = LogOnWindowsAccountWithS4u(windows_username);
-
-    [[gsl::suppress("type.3",
-        justification: "LoadUserProfileW retains a mutable historical parameter for an input-only username.")]]
-    auto *const profile_user =
-        const_cast<PWSTR>(windows_username.c_str());
-    auto profile = PROFILEINFOW{
-        .dwSize = sizeof(PROFILEINFOW),
-        .dwFlags = PI_NOUI,
-        .lpUserName = profile_user,
-    };
-    {
-        // LoadUserProfileW requires these privileges on its LocalSystem
-        // caller. They are not added to the user token used to start WSL.
+    result.profile = [&windows_username, token_ = result.token.get()] {
+        auto profile = PROFILEINFOW{
+            .dwSize = sizeof(PROFILEINFOW),
+            .dwFlags = PI_NOUI,
+            .lpUserName = [username_ = windows_username.c_str()] noexcept {
+                [[gsl::suppress("type.3",
+                    justification:
+                        "LoadUserProfileW retains a mutable historical parameter "
+                        "for an input-only username.")]]
+                return const_cast<PWSTR>(username_);
+            }()
+        };
         auto privileges = ProcessPrivilegeEnabler{
             GetCurrentProcess(),
             std::array{
                 wil::zwstring_view(SE_BACKUP_NAME),
                 wil::zwstring_view(SE_RESTORE_NAME),
             },
-            "the user-profile privileges"sv};
-        if (!LoadUserProfileW(result.token.get(), &profile)) {
-            WinError("could not load the profile for configured WSL account '{}'",
+            "the user profile privileges"sv};
+        if (!LoadUserProfileW(token_, &profile)) {
+            WinError("failed to load the profile for configured WSL account '{}'",
                 std::wstring_view{windows_username});
         }
-        result.profile = LoadedProfile{
-            profile.hProfile, ProfileCloser{result.token.get()}};
-        privileges.Restore();
-    }
+        return LoadedProfile{profile.hProfile, ProfileCloser{token_}};
+    }();
 
-    auto environment = wil::unique_environment_block{};
-    if (!CreateEnvironmentBlock(
-            environment.addressof(), result.token.get(), FALSE)) {
-        WinError("could not create the environment for configured WSL account '{}'",
-            std::wstring_view{windows_username});
-    }
+    // The default environment for a process created by `CreateProcessAsUser`
+    // is the environment of the calling process. That is undesirable here
+    // because the supervisor is running as a different, elevated user
+    // compared to the user that will execute the WSL process. Therefore, we
+    // create a new environment block to supply to `CreateProcessAsUser`.
+    auto environment = [token_ = result.token.get(), &windows_username] {
+        auto environment = wil::unique_environment_block{};
+        if (!CreateEnvironmentBlock(environment.addressof(), token_, FALSE)) {
+            WinError("failed to create an environment block for configured "
+                "WSL account '{}'", std::wstring_view{windows_username});
+        }
+        return environment;
+    }();
 
-    // CreateProcessWithTokenW has no bInheritHandles parameter, so it cannot
-    // satisfy PROC_THREAD_ATTRIBUTE_HANDLE_LIST's documented requirements.
-    // WSL manages its own infrastructure, so exclude it from the backup job.
+    // `CreateProcessAsUser` must be used instead of `CreateProcessWithTokenW`
+    // because `CreateProcessWithTokenW` has no `bInheritHandles` parameter,
+    // so it cannot satisfy the documented requirements for
+    // `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`.
+    //
+    // WSL is excluded from the job object because WSL manages its own runtime
+    // infrastructure, such as its `init` process. Forcibly attempting to close
+    // WSL's `init` process raises errors.
     result.process = StartProcessWithHandles(
         standard_input,
         standard_output,
         standard_error,
         [token = result.token.get(), environment_ = environment.get(),
-        &wsl_path_text, &command, &wsl_directory](
-            STARTUPINFOA *const startup, PROCESS_INFORMATION *const process) {
-            return CreateProcessAsUserA(
-                token, wsl_path_text.c_str(), command.data(),
-                nullptr, nullptr, TRUE,
-                kWslCreationFlags | CREATE_BREAKAWAY_FROM_JOB |
-                    EXTENDED_STARTUPINFO_PRESENT,
-                environment_, Transcode<std::string>(wsl_directory.native()).c_str(), startup, process);
-        },
-        "could not start WSL as the configured account");
+        &wsl_path_text, &command, &wsl_directory, &windows_username](
+            STARTUPINFOA *const startup) {
+            if (auto process = wil::unique_process_information{};
+                CreateProcessAsUserA(
+                    token, wsl_path_text.c_str(), command.data(),
+                    nullptr, nullptr, TRUE,
+                    kWslCreationFlags | CREATE_BREAKAWAY_FROM_JOB |
+                        EXTENDED_STARTUPINFO_PRESENT,
+                    environment_, Transcode<std::string>(
+                        wsl_directory.native()).c_str(), startup, &process)) {
+                return process;
+            }
+            WinError("failed to start WSL as the configured account ('{}')",
+                std::wstring_view{windows_username});
+        });
     return result;
 }
 
@@ -426,19 +442,19 @@ struct StartedWslFish {
     auto input_write = wil::unique_handle{};
     if (!CreatePipe(input_read.addressof(), input_write.addressof(),
             nullptr, 0)) {
-        WinError("could not create the WSL input channel");
+        WinError("failed to create the WSL input channel");
     }
     auto output_read = wil::unique_handle{};
     auto output_write = wil::unique_handle{};
     if (!CreatePipe(output_read.addressof(), output_write.addressof(),
             nullptr, 0)) {
-        WinError("could not create the WSL output channel");
+        WinError("failed to create the WSL output channel");
     }
     auto error_read = wil::unique_handle{};
     auto error_write = wil::unique_handle{};
     if (!CreatePipe(error_read.addressof(), error_write.addressof(),
             nullptr, 0)) {
-        WinError("could not create the WSL error channel");
+        WinError("failed to create the WSL error channel");
     }
 
     auto wsl_arguments = std::vector<std::string_view>{

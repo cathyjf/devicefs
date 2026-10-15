@@ -37,23 +37,33 @@ constexpr auto kShareMode =
     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 
 [[nodiscard]] auto QueryPhysicalDiskPath(const HANDLE disk) {
-    auto bytes = ULONG{};
-    const auto query = GetVirtualDiskPhysicalPath(
-        disk, &bytes, nullptr);
-    if (query != ERROR_INSUFFICIENT_BUFFER) {
-        WinError("could not size the VHDX physical path",
-            ExplicitWin32Error{query});
-    }
-    auto path = std::vector<wchar_t>(
-        (CompileTimeCast<std::size_t>(bytes) + sizeof(wchar_t) - 1) /
-            sizeof(wchar_t));
-    const auto status = GetVirtualDiskPhysicalPath(
-        disk, &bytes, path.data());
-    if (status != ERROR_SUCCESS) {
-        WinError("could not obtain the VHDX physical path",
+    auto bytes = [disk] -> ULONG {
+        auto bytes = ULONG{};
+        if (const auto status = GetVirtualDiskPhysicalPath(
+                disk, &bytes, nullptr); status != ERROR_INSUFFICIENT_BUFFER) {
+            WinError("failed to determine the buffer size required for the "
+                "VHDX physical path", ExplicitWin32Error{status});
+        }
+        // The documentation for `GetVirtualDiskPhysicalPath` does not
+        // specify that the `bytes` returned is divisible by `sizeof(wchar_t)`.
+        // For simplicity, if `bytes` is not so divisible, we round `bytes`
+        // up to the next-highest multiple of `sizeof(wchar_t)`.
+        constexpr auto wc_s = sizeof(wchar_t);
+        return bytes + (wc_s - bytes % wc_s) % wc_s;
+    }();
+    auto path = std::wstring(bytes / sizeof(wchar_t), L'\0');
+    if (const auto status = GetVirtualDiskPhysicalPath(
+            disk, &bytes, path.data()); status != ERROR_SUCCESS) {
+        WinError("failed to obtain the VHDX physical path",
             ExplicitWin32Error{status});
     }
-    return std::wstring{path.data()};
+    // The documentation for `GetVirtualDiskPhysicalPath` does not say whether
+    // it writes a null terminator into the output buffer. The following
+    // expression removes any suffix starting with the first null character.
+    // This allows us to support both null-terminated and non-null-terminated
+    // string outputs.
+    path.erase(std::ranges::find(path, L'\0'), path.end());
+    return path;
 }
 
 [[nodiscard]] auto OpenPhysicalDisk(const std::wstring &path) {

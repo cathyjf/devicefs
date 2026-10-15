@@ -803,7 +803,7 @@ auto RunWithDevices(
     if (g_dispatcher_stopped_unexpectedly) {
         throw std::runtime_error("WinFsp dispatcher stopped unexpectedly");
     }
-    return 0;
+    return EXIT_SUCCESS;
 }
 
 template <BlockDevice DeviceType>
@@ -919,30 +919,24 @@ auto Run(const Options &options) {
 export namespace devicefs {
 
 auto Main(const std::span<const std::string_view> arguments) -> int {
+    FurtherHardenProcess();
+    auto options = Options{};
     try {
-        FurtherHardenProcess();
-        auto options = Options{};
-        try {
-            options = ParseArgs(arguments);
-        } catch (const std::invalid_argument &error) {
-            devicefs::WriteToStream(
-                devicefs::stderr, "devicefs: {}\n\n", error.what());
-            Usage(devicefs::stderr);
-            return 2;
-        }
-        if (options.help) {
-            Usage(devicefs::stdout);
-            return 0;
-        }
-        if (options.read_user.empty()) {
-            options.read_user = CurrentUserName();
-        }
-        return Run(options);
-    } catch (const std::runtime_error &error) {
+        options = ParseArgs(arguments);
+    } catch (const std::invalid_argument &error) {
         devicefs::WriteToStream(
-            devicefs::stderr, "devicefs: {}\n", error.what());
-        return 1;
+            devicefs::stderr, "devicefs: {}\n\n", error.what());
+        Usage(devicefs::stderr);
+        return ERROR_INVALID_COMMAND_LINE;
     }
+    if (options.help) {
+        Usage(devicefs::stdout);
+        return EXIT_SUCCESS;
+    }
+    if (options.read_user.empty()) {
+        options.read_user = CurrentUserName();
+    }
+    return Run(options);
 }
 
 } // namespace devicefs

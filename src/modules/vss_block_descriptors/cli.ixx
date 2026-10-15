@@ -33,22 +33,25 @@ struct Options {
     bool help = false;
 };
 
+using namespace std::string_view_literals;
+
+constexpr auto kVssDescriptorDumpUsageString =
+    "Usage: vss-descriptor-dump --source SOURCE --snapshot-id GUID\n"
+    "       vss-descriptor-dump --source SOURCE --baseline-id A --snapshot-id B\n"
+    "       vss-descriptor-dump --source SNAPSHOT --svi-extents\n"
+    "       vss-descriptor-dump --source SOURCE --catalog\n\n"
+    "Read raw VSS descriptors for one store or an A-inclusive, B-exclusive\n"
+    "interval, inspect the catalog, or enumerate allocated SVI extents.\n\n"
+    "Options:\n"
+    "  --source SOURCE       Volume, snapshot device, or flat volume image\n"
+    "  --snapshot-id GUID    Shadow-copy identifier to select\n"
+    "  --baseline-id GUID    Read all stores from this copy up to --snapshot-id\n"
+    "  --svi-extents         Print allocated SVI block offsets\n"
+    "  --catalog             Print store IDs, creation FILETIMEs and offsets\n"
+    "  -h, --help            Show this help\n"sv;
+
 auto Usage(const auto output) noexcept {
-    devicefs::WriteToStream(
-        output,
-        "Usage: vss-descriptor-dump --source SOURCE --snapshot-id GUID\n"
-        "       vss-descriptor-dump --source SOURCE --baseline-id A --snapshot-id B\n"
-        "       vss-descriptor-dump --source SNAPSHOT --svi-extents\n"
-        "       vss-descriptor-dump --source SOURCE --catalog\n\n"
-        "Read raw VSS descriptors for one store or an A-inclusive, B-exclusive\n"
-        "interval, inspect the catalog, or enumerate allocated SVI extents.\n\n"
-        "Options:\n"
-        "  --source SOURCE       Volume, snapshot device, or flat volume image\n"
-        "  --snapshot-id GUID    Shadow-copy identifier to select\n"
-        "  --baseline-id GUID    Read all stores from this copy up to --snapshot-id\n"
-        "  --svi-extents         Print allocated SVI block offsets\n"
-        "  --catalog             Print store IDs, creation FILETIMEs and offsets\n"
-        "  -h, --help            Show this help\n");
+    devicefs::WriteToStream(output, kVssDescriptorDumpUsageString);
 }
 
 [[nodiscard]] auto ParseOptions(
@@ -238,9 +241,8 @@ export auto VssDescriptorDumpMain(
     try {
         return Run(arguments);
     } catch (const std::invalid_argument &error) {
-        devicefs::WriteToStream(
-            devicefs::stderr, "vss-descriptor-dump: {}\n\n", error.what());
-        Usage(devicefs::stderr);
-        return 2;
+        throw std::invalid_argument{std::format(
+            "vss-descriptor-dump: {}\n\n{}",
+            error.what(), kVssDescriptorDumpUsageString)};
     }
 }

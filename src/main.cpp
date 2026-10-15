@@ -55,8 +55,13 @@ auto main(
         devicefs::WriteToStream(
             devicefs::stderr, "{}: {}\n", argv[0], error.what());
         if (dynamic_cast<const std::invalid_argument *>(&error)) {
-            return 2;
+            return ERROR_INVALID_COMMAND_LINE;
         }
-        return 1;
+        if (const auto system_error_ = dynamic_cast<
+                const std::system_error *>(&error);
+                system_error_ && system_error_->code()) {
+            return system_error_->code().value();
+        }
+        return EXIT_FAILURE;
     }
 }

@@ -6,9 +6,9 @@
 import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
-import <cstdio>;
 import <io.h>;
 import devicefs.stream_redirector;
+import devicefs.stream_writer;
 import devicefs.supervisor.oci_verification;
 import devicefs.supervisor.oci_signature_sandbox;
 import devicefs.terminal.transcoding;
@@ -101,7 +101,7 @@ auto CALLBACK RunQueuedVerification(PTP_CALLBACK_INSTANCE,
         return machines;
     }();
     if (!machines) {
-        std::println(stderr,
+        std::println(devicefs::CrtStandardError(),
             "INFO: skipping OCI verification AppContainer checks: encountered "
             "error while attempting to determine the architecture of '{}'. "
             "In-process checks will still run. Error details: {}",
@@ -113,7 +113,7 @@ auto CALLBACK RunQueuedVerification(PTP_CALLBACK_INSTANCE,
         ((native_machine == IMAGE_FILE_MACHINE_ARM64) && machines->arm64)) {
         return true;
     }
-    std::println(stderr,
+    std::println(devicefs::CrtStandardError(),
         "INFO: skipping OCI verification AppContainer checks: executable '{}' "
         "is an {} binary, but the native machine architecture is {}. This "
         "test currently does not support emulated AppContainer execution. "
@@ -184,9 +184,11 @@ auto VerifySignatures(const std::filesystem::path &supervisor,
         return file;
     }();
     auto standard_output = RedirectedStream{
-        _fileno(stdout), _fileno(null_output.get()), "stdout"};
+        _fileno(devicefs::CrtStandardOut()),
+        _fileno(null_output.get()), "stdout"};
     auto standard_error = RedirectedStream{
-        _fileno(stderr), _fileno(null_output.get()), "stderr"};
+        _fileno(devicefs::CrtStandardError()),
+        _fileno(null_output.get()), "stderr"};
     const auto pool = wil::unique_any<
         PTP_POOL, decltype(&CloseThreadpool), &CloseThreadpool>{
             CreateThreadpool(nullptr)};

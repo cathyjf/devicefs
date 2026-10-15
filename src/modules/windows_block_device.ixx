@@ -22,7 +22,6 @@ export module devicefs.windows_block_device;
 
 import std;
 import <devicefs/windows_imports.h>;
-import <cstddef>;
 import devicefs.allocation;
 import <devicefs/common.h>;
 import devicefs.stream_writer;

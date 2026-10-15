@@ -121,6 +121,9 @@ using WFormatString = BasicFormatString<
 
 } // namespace stream_writer_detail
 
+[[nodiscard]] auto CrtStandardOut() noexcept -> std::FILE *;
+[[nodiscard]] auto CrtStandardError() noexcept -> std::FILE *;
+
 constexpr auto stdout = stream_writer_detail::Stdout{};
 constexpr auto stderr = stream_writer_detail::Stderr{};
 

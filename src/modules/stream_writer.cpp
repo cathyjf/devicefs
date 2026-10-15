@@ -19,6 +19,14 @@ module devicefs.stream_writer;
 import std;
 import <cstdio>;
 
+auto devicefs::CrtStandardOut() noexcept -> std::FILE * {
+    return stdout;
+}
+
+auto devicefs::CrtStandardError() noexcept -> std::FILE * {
+    return stderr;
+}
+
 namespace devicefs::stream_writer_detail {
 namespace {
 

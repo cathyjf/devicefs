@@ -6,9 +6,7 @@ export module devicefs.supervisor.view_output;
 import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
-import <cstdio>;
 import <io.h>;
-import <share.h>;
 import devicefs.stream_redirector;
 import devicefs.stream_writer;
 import devicefs.supervisor.temporary_paths;
@@ -44,8 +42,10 @@ public:
             return file;
         }()),
         reader_(reader_file_.get()),
-        standard_output_(_fileno(stdout), _fileno(file_.get()), "stdout"),
-        standard_error_(_fileno(stderr), _fileno(file_.get()), "stderr") {}
+        standard_output_(_fileno(devicefs::CrtStandardOut()),
+            _fileno(file_.get()), "stdout"),
+        standard_error_(_fileno(devicefs::CrtStandardError()),
+            _fileno(file_.get()), "stderr") {}
 
     auto ReadOutput(auto &&view)
         requires requires { view.AppendText(std::string_view{}); } {
@@ -140,9 +140,6 @@ concept OutputOperation = requires(T &callbacks,
     { callbacks.notify_completion(menu, exit_code, close) } -> std::same_as<void>;
     { callbacks.dispatch(menu, task, command, close) } -> std::same_as<void>;
 };
-
-#undef stderr
-#undef stdout
 
 export [[nodiscard]] auto RunOperationWithOutput(
     OutputOperation auto &&callbacks) -> int {

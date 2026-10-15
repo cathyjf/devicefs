@@ -17,7 +17,6 @@
 export module devicefs.file_reader;
 
 import std;
-import <share.h>;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 

@@ -41,7 +41,6 @@ import devicefs.terminal.vt;
 import devicefs.terminal.test_clock;
 
 #ifdef _WIN32
-    import <windows.h>;
     import <wil/resource.h>;
     import devicefs.terminal.windows;
 #else

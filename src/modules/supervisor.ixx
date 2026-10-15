@@ -22,7 +22,6 @@ export module devicefs.supervisor;
 
 import std;
 import <devicefs/windows_imports.h>;
-import <sal.h>;
 import <devicefs/common.h>;
 import devicefs.coherent_vector;
 import devicefs.filesystem;

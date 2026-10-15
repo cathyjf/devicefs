@@ -4,8 +4,6 @@
 export module devicefs.terminal.windows;
 
 import std;
-import <windows.h>;
-import <wil/resource.h>;
 import <wil/stl.h>;
 import devicefs.terminal;
 import devicefs.terminal.base_console;

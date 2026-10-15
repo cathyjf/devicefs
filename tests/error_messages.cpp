@@ -12,7 +12,6 @@
 import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
-import <share.h>;
 import devicefs.file_reader;
 
 namespace {

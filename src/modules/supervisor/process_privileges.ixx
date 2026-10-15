@@ -17,7 +17,6 @@
 export module devicefs.supervisor.process_privileges;
 
 import std;
-import <cstddef>;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 

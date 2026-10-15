@@ -6,7 +6,6 @@ export module devicefs.stream_redirector;
 import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
-import <cerrno>;
 import <io.h>;
 
 namespace stream_redirector_detail {

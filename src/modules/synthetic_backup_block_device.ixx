@@ -17,7 +17,6 @@
 export module devicefs.synthetic_backup_block_device;
 
 import std;
-import <sal.h>;
 import <devicefs/windows_imports.h>;
 import devicefs.filesystem;
 

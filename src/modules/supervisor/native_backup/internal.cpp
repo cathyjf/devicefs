@@ -22,7 +22,6 @@ module devicefs.supervisor.native_backup:internal;
 
 import std;
 import <devicefs/windows_imports.h>;
-import <sal.h>;
 import <devicefs/common.h>;
 import devicefs.stream_writer;
 import devicefs.supervisor.vshadow;

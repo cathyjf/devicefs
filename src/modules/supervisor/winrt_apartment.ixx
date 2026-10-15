@@ -24,7 +24,6 @@ import std;
 import <devicefs/common.h>;
 import <devicefs/windows_imports.h>;
 import <devicefs/winrt_imports.h>;
-import <sal.h>;
 
 export class WinrtApartment {
 public:

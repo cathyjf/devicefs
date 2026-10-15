@@ -268,12 +268,14 @@ target_link_libraries(devicefs-error-messages-test PRIVATE
 add_executable(devicefs-oci-verification-test tests/oci_verification.cpp)
 target_module_interfaces(devicefs-oci-verification-test PRIVATE
     src/modules/stream_redirector.ixx
+    src/modules/stream_writer.ixx
     src/modules/supervisor/math.ixx
     src/modules/supervisor/oci_verification.ixx
     src/modules/supervisor/oci_signature_sandbox.ixx
     src/modules/supervisor/process_attribute_list.ixx
     src/modules/supervisor/process_launch.ixx
 )
+target_sources(devicefs-oci-verification-test PRIVATE src/modules/stream_writer.cpp)
 target_link_libraries(devicefs-oci-verification-test PRIVATE
     ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-windows-imports advapi32 bcrypt crypt32 userenv
 )

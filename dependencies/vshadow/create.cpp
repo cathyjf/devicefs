@@ -39,13 +39,12 @@
 
 
 
-pair<VSS_ID, vector<VSS_ID>> VssClient::CreateSnapshotSet(
+auto VssClient::CreateSnapshotSet(
     vector<wstring> volumeList, 
     wstring outputXmlFile,     
     vector<wstring> excludedWriterList,
     vector<wstring> includedWriterList
-    )
-{
+    ) -> pair<VSS_ID, vector<SnapshotProperties>> {
     FunctionTracer ft(DBG_INFO);
 
     bool bSnapshotWithWriters = ((m_dwContext & VSS_VOLSNAP_ATTR_NO_WRITERS) == 0);
@@ -73,11 +72,28 @@ pair<VSS_ID, vector<VSS_ID>> VssClient::CreateSnapshotSet(
     // Creates the shadow set 
     DoSnapshotSet();
 
+    const auto synthetic_properties = [this] {
+        auto result = vector<SnapshotProperties>{};
+        result.reserve(m_latestSnapshotIdList.size());
+        std::ranges::transform(m_latestSnapshotIdList, m_latestVolumeList,
+            std::back_inserter(result),
+            [snapshotSetID = m_latestSnapshotSetID](
+                const auto &snapshotID, const auto &volume) {
+                return SnapshotProperties{
+                    .snapshotID = snapshotID,
+                    .snapshotSetID = snapshotSetID,
+                    .originalVolumeName = volume,
+                    .snapshotDeviceObject = {},
+                };
+            });
+        return result;
+    };
+
     // Do not attempt to continue with delayed snapshot ...
     if (m_dwContext & VSS_VOLSNAP_ATTR_DELAYED_POSTSNAPSHOT)
     {
         ft.WriteLine(L"\nFast snapshot created. Exiting... \n");
-        return {m_latestSnapshotSetID, m_latestSnapshotIdList};
+        return {m_latestSnapshotSetID, synthetic_properties()};
     }
 
     // Saves the backup components document, if needed
@@ -88,9 +104,9 @@ pair<VSS_ID, vector<VSS_ID>> VssClient::CreateSnapshotSet(
     if ((m_dwContext & VSS_VOLSNAP_ATTR_TRANSPORTABLE) == 0)
     {
         ft.WriteLine(L"\nList of created shadow copies: \n");
-        QuerySnapshotSet(m_latestSnapshotSetID);
+        return {m_latestSnapshotSetID, QuerySnapshotSet(m_latestSnapshotSetID)};
     }
-    return {m_latestSnapshotSetID, m_latestSnapshotIdList};
+    return {m_latestSnapshotSetID, synthetic_properties()};
 }
 
 
@@ -201,27 +217,6 @@ void VssClient::BackupComplete(bool succeeded)
     // Check selected writer status
     CheckSelectedWriterStatus(false);
 
-}
-
-
-// Return the devices for the snapshots in the latest set
-vector<wstring> VssClient::GetLatestSnapshotDevices()
-{
-    FunctionTracer ft(DBG_INFO);
-
-    vector<wstring> snapshotDevices;
-    for (unsigned i = 0; i < m_latestSnapshotIdList.size(); i++)
-    {
-        VSS_SNAPSHOT_PROP Snap = {};
-        CHECK_COM(m_pVssObject->GetSnapshotProperties(m_latestSnapshotIdList[i], &Snap));
-
-        // Automatically call VssFreeSnapshotProperties on this structure at the end of scope
-        CAutoSnapPointer snapAutoCleanup(&Snap);
-
-        snapshotDevices.push_back(Snap.m_pwszSnapshotDeviceObject);
-    }
-
-    return snapshotDevices;
 }
 
 

@@ -54,6 +54,13 @@ public:
     using StreamWriter =
         std::move_only_function<void(std::wstring_view) const noexcept>;
 
+    struct SnapshotProperties {
+        VSS_ID snapshotID;
+        VSS_ID snapshotSetID;
+        wstring originalVolumeName;
+        wstring snapshotDeviceObject;
+    };
+
     // Constructor
     VssClient(StreamWriter);
 
@@ -67,13 +74,14 @@ public:
     //  Shadow copy creation related methods
     //
 
-    // Method to create a shadow copy set with the given volumes
-    pair<VSS_ID, vector<VSS_ID>> CreateSnapshotSet(
+    // Create a shadow copy set and return its ID and member properties.
+    // Delayed and transportable modes leave `snapshotDeviceObject` empty.
+    auto CreateSnapshotSet(
         vector<wstring> volumeList, 
         wstring outputXmlFile,     
         vector<wstring> excludedWriterList,
         vector<wstring> includedWriterList
-        );
+        ) -> pair<VSS_ID, vector<SnapshotProperties>>;
 
     // Prepare the shadow copy for backup
     void PrepareForBackup();
@@ -99,9 +107,6 @@ public:
     // Marks all selected components as succeeded for backup
     void SetBackupSucceeded(bool succeeded);
 
-    // Return the devices for the snapshots in the latest set
-    vector<wstring> GetLatestSnapshotDevices();
-
     // Notify VSS that an in-progress backup did not complete
     void CompleteFailedBackup();
 
@@ -110,13 +115,6 @@ public:
     //
     //  Shadow copy query related methods
     //
-
-    struct SnapshotProperties {
-        VSS_ID snapshotID;
-        VSS_ID snapshotSetID;
-        wstring originalVolumeName;
-        wstring snapshotDeviceObject;
-    };
 
     // Return properties for the shadow copies in the given set.
     // `GUID_NULL` selects all shadow copies in the current context.

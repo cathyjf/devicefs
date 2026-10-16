@@ -264,7 +264,6 @@ struct SelectiveViewOptions {
     const auto persistent = ResolvePersistentPaths();
     const auto backup_lock = AcquireBackupLock(persistent.backup_lock);
     return RunForegroundOperation(
-        "--foreground requires an attached console",
         [options = std::move(options)](const HANDLE cancellation_event) {
             return RunNativeBackup(
                 cancellation_event,
@@ -309,7 +308,7 @@ struct SelectiveViewOptions {
         throw std::invalid_argument(
             "--run-fish-program requires FILE [-- PROGRAM-ARGUMENTS...]");
     }
-    return RunForegroundOperation("--run-fish-program requires an attached console",
+    return RunForegroundOperation(
         [arguments](const HANDLE cancellation_event) {
             return RunFishProgram(cancellation_event,
                 std::filesystem::path{arguments.front()},
@@ -320,7 +319,6 @@ struct SelectiveViewOptions {
 [[nodiscard]] auto RunListBackups(
     std::optional<std::u8string> namespace_override) {
     return RunForegroundOperation(
-        "--list-backups requires an attached console",
         [namespace_override = std::move(namespace_override)](
             const HANDLE cancellation_event) {
             return devicefs::WriteToStream(devicefs::stdout,
@@ -332,7 +330,6 @@ struct SelectiveViewOptions {
 [[nodiscard]] auto RunQueryManifest(
     std::optional<std::u8string> namespace_override) {
     return RunForegroundOperation(
-        "--query-manifest requires an attached console",
         [namespace_override = std::move(namespace_override)](
             const HANDLE cancellation_event) {
             const auto result = RetrieveBackupManifest(
@@ -452,7 +449,7 @@ struct CancellableOutputOperation {
 }
 
 [[nodiscard]] auto RunSelectiveViewMode(SelectiveViewOptions options) {
-    return RunForegroundOperation("--view requires an attached console",
+    return RunForegroundOperation(
         [options = std::move(options)](const HANDLE cancellation_event) {
             return RunSelectiveView(cancellation_event, {}, {},
                 options.archive, options.snapshot_override, options.timestamp,
@@ -525,7 +522,6 @@ struct CancellableOutputOperation {
     const auto persistent = ResolvePersistentPaths();
     const auto backup_lock = AcquireBackupLock(persistent.backup_lock);
     return RunForegroundOperation(
-        "incremental diagnostics require an attached console",
         [options = std::move(options)](
             const HANDLE cancellation_event) {
             return RunIncrementalDiagnostics(
@@ -535,7 +531,6 @@ struct CancellableOutputOperation {
 
 [[nodiscard]] auto RunInventoryVhdx(std::string device) {
     return RunForegroundOperation(
-        "--inventory-vhdx requires an attached console",
         [device = std::move(device)](
             const HANDLE cancellation_event) {
             return InventoryVhdx(cancellation_event, device);
@@ -552,7 +547,7 @@ struct CancellableOutputOperation {
     }
     const auto percentage = arguments.size() == 5
         ? ParseVerificationPercentage(arguments[4]) : 100.0;
-    return RunForegroundOperation("--verify-filesystems requires an attached console",
+    return RunForegroundOperation(
         [synthetic = std::filesystem::path{arguments[1]},
             real = std::filesystem::path{arguments[2]}, percentage](
             const HANDLE cancellation_event) {

@@ -61,8 +61,9 @@ auto WINAPI ForegroundControlHandler(const DWORD) noexcept -> BOOL {
 // Return a worker callback whose cancellation and completion events are
 // registered only while the operation is running.
 export [[nodiscard]] auto MakeForegroundOperation(
-    const std::shared_ptr<const ForegroundContext> &context, auto operation) {
-    return [context, operation = std::move(operation)]() mutable {
+    const std::shared_ptr<const ForegroundContext> &context, auto &&operation) {
+    return [context, operation = std::forward<decltype(operation)>(operation)]
+        mutable {
         const auto completed = context->completed_event.SetEvent_scope_exit();
         std::call_once(foreground_contexts_once, [] {
             foreground_contexts.emplace();
@@ -74,49 +75,56 @@ export [[nodiscard]] auto MakeForegroundOperation(
         const auto remove_context = wil::scope_exit([&context] {
             foreground_contexts->Erase(context);
         });
-        return std::invoke(std::move(operation), context->cancellation_event.get());
+        return std::invoke(operation, context->cancellation_event.get());
     };
 }
 
-export template <typename Operation>
-[[nodiscard]] auto RunForegroundOperation(
-    const std::string_view unavailable_message,
-    Operation operation) {
-    const auto input = GetStdHandle(STD_INPUT_HANDLE);
-    auto console_mode = DWORD{};
-    if (!GetConsoleMode(input, &console_mode)) {
-        WinError("{}", unavailable_message);
-    }
+export [[nodiscard]] auto RunForegroundOperation(auto &&operation) {
     const auto context = std::make_shared<const ForegroundContext>();
-    if (!SetConsoleMode(
-            input, console_mode & ~DWORD{ENABLE_PROCESSED_INPUT})) {
-        WinError("failed to enable foreground cancellation input");
+    auto foreground_task = MakeForegroundOperation(
+        context, std::forward<decltype(operation)>(operation));
+
+    // Disabling `ENABLE_PROCESSED_INPUT` prevents the operating system from
+    // processing Ctrl+C and instead allows our process to read it as keyboard
+    // input. When we receive it, we can coordinate orderly cancellation.
+    //
+    // A failure to disable `ENABLE_PROCESSED_INPUT` is not a fatal error
+    // condition. The only consequence is that cancellation may be slightly
+    // less coordinated, but it should still work correctly.
+    const auto input = wil::unique_hfile{CreateFileA("CONIN$",
+        GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_EXISTING, 0, nullptr)};
+    auto console_mode = DWORD{};
+    if (!input || !GetConsoleMode(input.get(), &console_mode) ||
+            !SetConsoleMode(input.get(),
+                console_mode & ~ENABLE_PROCESSED_INPUT)) {
+        return foreground_task();
     }
-    auto restore_console_mode = wil::scope_exit([input, console_mode] {
-        if (SetConsoleMode(input, console_mode)) {
+    auto restore_console_mode = wil::scope_exit(
+        [input_ = input.get(), console_mode] {
+        if (SetConsoleMode(input_, console_mode)) {
             return;
         }
         devicefs::WriteToStream(devicefs::stderr, "backup-supervisor: {}.\n",
-            TryConstructWinError(
-                "failed to restore the foreground console input mode"));
+            TryConstructWinError("failed to restore the previous foreground "
+                "console input mode"));
     });
 
-    auto result = std::async(
-        std::launch::async, MakeForegroundOperation(context, std::move(operation)));
+    auto result = std::async(std::launch::async, std::ref(foreground_task));
     auto cancel_on_monitor_failure =
         context->cancellation_event.SetEvent_scope_exit();
     // The first signaled handle wins, giving completion priority over input.
     // https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitformultipleobjects
     constexpr auto kInputBatchSize = 16uz;
     while (true) {
-        if (wil::wait_any_failfast(
-                context->completed_event, input).status() == WAIT_OBJECT_0) {
+        if (wil::wait_any_failfast(context->completed_event,
+                input.get()).status() == WAIT_OBJECT_0) {
             break;
         }
         auto records = std::array<INPUT_RECORD, kInputBatchSize>{};
         auto read = DWORD{};
-        if (!ReadConsoleInputW(input, records.data(),
-                DWORD{records.size()}, &read)) {
+        if (!ReadConsoleInputW(input.get(), records.data(),
+                CompileTimeCast<DWORD, records.size()>(), &read)) {
             WinError("failed to read foreground console input");
         }
         for (const auto &record : std::span{records}.first(read)) {

@@ -738,7 +738,7 @@ namespace supervisor_detail::hashing {
 
 } // namespace supervisor_detail::hashing
 
-export auto BackupSupervisorMain(
+export extern "C++" auto BackupSupervisorMain(
     const std::span<const std::string_view> arguments) -> int {
     using namespace supervisor_detail::hashing;
 

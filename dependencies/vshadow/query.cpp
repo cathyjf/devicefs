@@ -38,9 +38,9 @@
 #include "shadow.h"
 
 
-// Query all the shadow copies in the given set
-// If snapshotSetID is NULL, just query all shadow copies in the system
-void VssClient::QuerySnapshotSet(VSS_ID snapshotSetID)
+// Return properties for the shadow copies in the given set.
+// `GUID_NULL` selects all shadow copies in the current context.
+auto VssClient::QuerySnapshotSet(VSS_ID snapshotSetID) -> vector<SnapshotProperties>
 {
     FunctionTracer ft(DBG_INFO);
 
@@ -62,10 +62,11 @@ void VssClient::QuerySnapshotSet(VSS_ID snapshotSetID)
     if (hr == S_FALSE) {
         if (snapshotSetID == GUID_NULL)
             ft.WriteLine(L"\nThere are no shadow copies in the system\n");
-        return;
+        return {};
     } 
 
     // Enumerate all shadow copies. 
+    auto result = vector<SnapshotProperties>{};
     VSS_OBJECT_PROP Prop;
     VSS_SNAPSHOT_PROP& Snap = Prop.Obj.Snap;
     
@@ -83,10 +84,19 @@ void VssClient::QuerySnapshotSet(VSS_ID snapshotSetID)
         // Automatically call VssFreeSnapshotProperties on this structure at the end of scope
         CAutoSnapPointer snapAutoCleanup(&Snap);
 
-        // Print the shadow copy (if not filtered out)
-        if ((snapshotSetID == GUID_NULL) || (Snap.m_SnapshotSetId == snapshotSetID))
-            PrintSnapshotProperties(Snap);
+        if ((snapshotSetID != GUID_NULL) && (Snap.m_SnapshotSetId != snapshotSetID)) {
+            // Skip shadow copies not targeted by the caller's query.
+            continue;
+        }
+        result.push_back(SnapshotProperties{
+            .snapshotID = Snap.m_SnapshotId,
+            .snapshotSetID = Snap.m_SnapshotSetId,
+            .originalVolumeName = Snap.m_pwszOriginalVolumeName,
+            .snapshotDeviceObject = Snap.m_pwszSnapshotDeviceObject,
+        });
+        PrintSnapshotProperties(Snap);
     }
+    return result;
 }
 
 

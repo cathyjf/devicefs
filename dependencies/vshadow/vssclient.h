@@ -111,9 +111,16 @@ public:
     //  Shadow copy query related methods
     //
 
-    // Query all the shadow copies in the given set
-    // If snapshotSetID is NULL, just query all shadow copies in the system
-    void QuerySnapshotSet(VSS_ID snapshotSetID);
+    struct SnapshotProperties {
+        VSS_ID snapshotID;
+        VSS_ID snapshotSetID;
+        wstring originalVolumeName;
+        wstring snapshotDeviceObject;
+    };
+
+    // Return properties for the shadow copies in the given set.
+    // `GUID_NULL` selects all shadow copies in the current context.
+    auto QuerySnapshotSet(VSS_ID snapshotSetID) -> vector<SnapshotProperties>;
 
     // Query the properties of the given shadow copy
     void GetSnapshotProperties(

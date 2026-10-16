@@ -3,12 +3,7 @@
 
 #pragma once
 
-#ifdef __GNUC__
-    #define ATTRIBUTE_NOINLINE __attribute__((noinline))
-#else
-    #define ATTRIBUTE_NOINLINE __declspec(noinline)
-#endif
-
+#include "attribute_compat.h"
 #include "utf_code_units.h"
 
 using devicefs::terminal::utf16_code_unit;

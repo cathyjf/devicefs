@@ -17,6 +17,14 @@
     #define ATTRIBUTE_MSVC_FLATTEN
 #endif
 
+#ifdef __GNUC__
+    #define ATTRIBUTE_NOINLINE __attribute__((noinline))
+#elifdef _MSC_VER
+    #define ATTRIBUTE_NOINLINE [[msvc::noinline]]
+#else
+    #define ATTRIBUTE_NOINLINE
+#endif
+
 #if defined(_MSC_VER) && (_MSC_VER >= 1929)
     #define ATTRIBUTE_NO_UNIQUE_ADDRESS [[msvc::no_unique_address]]
 #elif __has_cpp_attribute(no_unique_address) >= 201803L

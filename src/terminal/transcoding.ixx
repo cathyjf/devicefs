@@ -76,9 +76,11 @@ template <UtfCharacter Output, std::size_t InlineCapacity = 0, UtfCharacter Inpu
         (((sizeof(Output) == 2) && (sizeof(Input) == 4)) ? 2uz : 1uz);
     if constexpr ((expansion > 1) && (InlineCapacity != 0)) {
         if (input.size() > (std::numeric_limits<std::size_t>::max() / expansion)) [[unlikely]] {
-            throw std::length_error(std::format(
-                "worst-case transcoded length exceeds the size limit of {}",
-                std::numeric_limits<std::size_t>::max()));
+            [] ATTRIBUTE_NOINLINE {
+                throw std::length_error(std::format(
+                    "worst-case transcoded length exceeds the size limit of {}",
+                    std::numeric_limits<std::size_t>::max()));
+            }();
         }
         const auto bound = input.size() * expansion;
         if ((bound < InlineCapacity) || (input.size() >= InlineCapacity)) {
@@ -96,6 +98,53 @@ template <UtfCharacter Output, std::size_t InlineCapacity = 0, UtfCharacter Inpu
     }
 }
 
+template <UtfCharacter Output, UtfCharacter Input>
+    requires std::same_as<Output, SimdUnit<Output>>
+[[nodiscard]]  auto ConvertTextWithoutRebinding(
+    const std::basic_string_view<Input> input,
+    const std::span<Output> output) noexcept -> simdutf::result {
+    if constexpr ((sizeof(Input) == 1) && (sizeof(Output) == 2)) {
+        return simdutf::convert_utf8_to_utf16_with_errors(input, output);
+    } else if constexpr ((sizeof(Input) == 1) && (sizeof(Output) == 4)) {
+        return simdutf::convert_utf8_to_utf32_with_errors(input, output);
+    } else if constexpr ((sizeof(Input) == 2) && (sizeof(Output) == 1)) {
+        return simdutf::convert_utf16_to_utf8_with_errors(input, output);
+    } else if constexpr ((sizeof(Input) == 2) && (sizeof(Output) == 4)) {
+        return simdutf::convert_utf16_to_utf32_with_errors(input, output);
+    } else if constexpr ((sizeof(Input) == 4) && (sizeof(Output) == 1)) {
+        return simdutf::convert_utf32_to_utf8_with_errors(input, output);
+    } else if constexpr ((sizeof(Input) == 4) && (sizeof(Output) == 2)) {
+        return simdutf::convert_utf32_to_utf16_with_errors(input, output);
+    } else {
+        const auto validated = [&] noexcept {
+            if constexpr (sizeof(Input) == 1) {
+                return simdutf::validate_utf8_with_errors(input);
+            } else if constexpr (sizeof(Input) == 2) {
+                return simdutf::validate_utf16_with_errors(input);
+            } else {
+                return simdutf::validate_utf32_with_errors(input);
+            }
+        }();
+        if (validated.error == simdutf::SUCCESS) {
+            std::memcpy(output.data(), input.data(), input.size() * sizeof(Input));
+        }
+        return validated;
+    }
+}
+
+template <UtfCharacter Input>
+auto TranslateSimdutfResult(const simdutf::result &result) -> std::size_t {
+    if (result.error != simdutf::SUCCESS) {
+        [&result] ATTRIBUTE_NOINLINE {
+            throw std::invalid_argument(std::format(
+                "could not transcode UTF-{} input at code-unit offset {}: {}",
+                sizeof(Input) * 8, result.count,
+                simdutf::error_to_string(result.error)));
+        }();
+    }
+    return result.count;
+}
+
 template <typename Allocator = std::allocator<std::byte>, UtfCharacter Output, UtfCharacter Input>
 [[nodiscard]] auto ConvertText(const std::basic_string_view<Input> input,
     const std::span<Output> output) -> std::size_t {
@@ -105,41 +154,8 @@ template <typename Allocator = std::allocator<std::byte>, UtfCharacter Output, U
         std::copy_n(units.begin(), count, output.begin());
         return count;
     } else {
-        const auto result = [&] {
-            if constexpr ((sizeof(Input) == 1) && (sizeof(Output) == 2)) {
-                return simdutf::convert_utf8_to_utf16_with_errors(input, output);
-            } else if constexpr ((sizeof(Input) == 1) && (sizeof(Output) == 4)) {
-                return simdutf::convert_utf8_to_utf32_with_errors(input, output);
-            } else if constexpr ((sizeof(Input) == 2) && (sizeof(Output) == 1)) {
-                return simdutf::convert_utf16_to_utf8_with_errors(input, output);
-            } else if constexpr ((sizeof(Input) == 2) && (sizeof(Output) == 4)) {
-                return simdutf::convert_utf16_to_utf32_with_errors(input, output);
-            } else if constexpr ((sizeof(Input) == 4) && (sizeof(Output) == 1)) {
-                return simdutf::convert_utf32_to_utf8_with_errors(input, output);
-            } else if constexpr ((sizeof(Input) == 4) && (sizeof(Output) == 2)) {
-                return simdutf::convert_utf32_to_utf16_with_errors(input, output);
-            } else {
-                const auto validated = [&] {
-                    if constexpr (sizeof(Input) == 1) {
-                        return simdutf::validate_utf8_with_errors(input);
-                    } else if constexpr (sizeof(Input) == 2) {
-                        return simdutf::validate_utf16_with_errors(input);
-                    } else {
-                        return simdutf::validate_utf32_with_errors(input);
-                    }
-                }();
-                if (validated.error == simdutf::SUCCESS) {
-                    std::memcpy(output.data(), input.data(), input.size() * sizeof(Input));
-                }
-                return validated;
-            }
-        }();
-        if (result.error != simdutf::SUCCESS) {
-            throw std::invalid_argument(std::format(
-                "could not transcode UTF-{} input at code-unit offset {}: {}",
-                sizeof(Input) * 8, result.count, simdutf::error_to_string(result.error)));
-        }
-        return result.count;
+        return TranslateSimdutfResult<Input>(
+            ConvertTextWithoutRebinding(input, output));
     }
 }
 
@@ -168,10 +184,12 @@ public:
             detail::TranscodedCapacity<Character, std::tuple_size_v<decltype(inline_)>>(input);
         if (capacity >= inline_.size()) {
             if (capacity == std::numeric_limits<std::size_t>::max()) [[unlikely]] {
-                throw std::length_error(std::format(
-                    "transcoded text and its terminator exceed the character "
-                    "limit of {}",
-                    std::numeric_limits<std::size_t>::max()));
+                [] ATTRIBUTE_NOINLINE {
+                    throw std::length_error(std::format(
+                        "transcoded text and its terminator exceed the "
+                        "character limit of {}",
+                        std::numeric_limits<std::size_t>::max()));
+                }();
             }
             heap_ = std::make_unique_for_overwrite<Character[]>(capacity + 1);
         }
@@ -235,31 +253,40 @@ template <typename Output>
         using Allocator = typename Output::allocator_type;
         const auto units = detail::UtfInput<Allocator>(input);
         const auto source = std::basic_string_view{units};
-        auto result = Output{};
         if (source.empty()) {
+            return Output{};
+        }
+        const auto capacity = detail::TranscodedCapacity<Character>(source);
+
+        // C++ requires the `resize_and_overwrite` callback to be nonthrowing.
+        // https://eel.is/c++draft/string.capacity#9.1
+        //
+        // `ConvertTextWithoutRebinding` cannot throw. However, the current
+        // implementation of string type rebinding can throw. Adding a `try`
+        // block inside of the callback produces poor code on MSVC. Therefore,
+        // we use `resize_and_overwrite` only for string types that do not
+        // require rebinding.
+        if constexpr (std::same_as<Character, detail::SimdUnit<Character>>) {
+            auto transcoded_result = Output{};
+            auto simdutf_result = simdutf::result{};
+            transcoded_result.resize_and_overwrite(
+                capacity, [source, &simdutf_result](Character *const buffer,
+                    const std::size_t size) noexcept {
+                    simdutf_result =
+                        detail::ConvertTextWithoutRebinding(source,
+                            std::span{buffer, size});
+                    return (simdutf_result.error != simdutf::SUCCESS) ?
+                        std::size_t{} : simdutf_result.count;
+                });
+            detail::TranslateSimdutfResult<
+                typename decltype(input)::value_type>(simdutf_result);
+            return transcoded_result;
+        } else {
+            auto result = Output(capacity, Character{});
+            result.resize(detail::ConvertText<Allocator>(
+                source, std::span{result}));
             return result;
         }
-        // The C++ standard requires the `resize_and_overwrite` callback
-        // not to throw. Because `ConvertText` can throw, its exception is
-        // saved and rethrown after `resize_and_overwrite` returns.
-        // https://eel.is/c++draft/string.capacity#9.1
-        auto failure = std::exception_ptr{};
-        result.resize_and_overwrite(
-            detail::TranscodedCapacity<Character>(source),
-            [source, &failure](Character *const buffer,
-                const std::size_t size) noexcept {
-                try {
-                    return detail::ConvertText<Allocator>(
-                        source, std::span{buffer, size});
-                } catch (...) {
-                    failure = std::current_exception();
-                    return std::size_t{};
-                }
-            });
-        if (failure) {
-            std::rethrow_exception(failure);
-        }
-        return result;
     }
 }
 

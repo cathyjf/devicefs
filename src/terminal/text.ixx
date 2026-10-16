@@ -64,7 +64,9 @@ public:
     // converts those controls to visible notation before displaying a label.
     // Decoded input distinguishes U+009B, a command introducer, from the byte
     // 0x9B occurring within an ordinary UTF-8 character.
-    [[nodiscard]] auto Preserve(const char32_t character) noexcept -> bool {
+    [[nodiscard]]
+    ATTRIBUTE_FORCEINLINE
+    inline auto Preserve(const char32_t character) noexcept -> bool {
         return Preserve<true>(character);
     }
 
@@ -88,7 +90,9 @@ private:
     // https://ecma-international.org/publications-and-standards/standards/ecma-48/
     // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
     template <bool ForDisplay>
-    [[nodiscard]] auto Preserve(const char32_t character) noexcept -> bool {
+    [[nodiscard]]
+    ATTRIBUTE_FORCEINLINE
+    inline auto Preserve(const char32_t character) noexcept -> bool {
         // OSC permits BEL (0x07) as a terminator; ST (U+009C, or `ESC \`)
         // terminates control strings generally. ESC (0x1B) starts a new escape
         // command, including the seven-bit ST that ends the discarded payload.

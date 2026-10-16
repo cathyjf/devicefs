@@ -239,7 +239,7 @@ concept ConsoleOutputWriter = std::is_nothrow_invocable_r_v<
     wil::unique_handle output,
     const ConsoleOutputWriter auto &write_output) noexcept {
     constexpr auto kBufferSize = DWORD{4096};
-    auto buffer = std::array<char8_t, kBufferSize>{};
+    /* [[indeterminate]] */ std::array<char8_t, kBufferSize> buffer;
     auto first_error = DWORD{ERROR_SUCCESS};
     auto filter = devicefs::terminal::VtFilter{};
     while (true) {

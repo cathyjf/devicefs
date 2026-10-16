@@ -41,7 +41,7 @@ export namespace devicefs {
 [[nodiscard, msvc::forceinline]]
 auto CountTrailingZeros(_Pre_satisfies_(value != 0) const std::uint64_t value)
     noexcept -> int {
-    unsigned long bit_index;
+    /* [[indeterminate]] */ unsigned long bit_index;
     std::ignore = _BitScanForward64(&bit_index, value);
     return bit_index;
 }

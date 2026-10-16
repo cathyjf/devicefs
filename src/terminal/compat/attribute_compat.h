@@ -33,6 +33,12 @@
     #define ATTRIBUTE_NO_UNIQUE_ADDRESS
 #endif
 
+#if __has_cpp_attribute(indeterminate) >= 202403L
+    #define ATTRIBUTE_INDETERMINATE [[indeterminate]]
+#else
+    #define ATTRIBUTE_INDETERMINATE
+#endif
+
 // `GSL_SUPPRESS` suppresses a named analyzer rule while keeping the reason
 // beside the code. MSVC records the justification in the attribute; Clang
 // accepts only the rule name. GCC does not support the attribute at all.

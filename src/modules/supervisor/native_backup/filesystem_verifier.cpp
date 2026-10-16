@@ -1805,8 +1805,10 @@ public:
         VerificationState &state)
         : synthetic_{synthetic}, real_{real},
           cancellation_event_{cancellation_event}, state_{state},
-          synthetic_buffer_(kReadChunkSize),
-          real_buffer_(kReadChunkSize) {}
+          synthetic_buffer_{std::make_unique_for_overwrite<
+              std::array<unsigned char, kReadChunkSize>>()},
+          real_buffer_{std::make_unique_for_overwrite<
+              std::array<unsigned char, kReadChunkSize>>()} {}
 
     [[nodiscard]] auto Compare(const ReadTask &task) -> bool {
         if (wil::event_is_signaled(cancellation_event_)) {
@@ -1848,9 +1850,9 @@ public:
                 IsVssExcludedPath(synthetic_object.relative_path);
         }
         const auto synthetic_chunk =
-            std::span{synthetic_buffer_}.first(task.length);
+            std::span{*synthetic_buffer_}.first(task.length);
         const auto real_chunk =
-            std::span{real_buffer_}.first(task.length);
+            std::span{*real_buffer_}.first(task.length);
         const auto synthetic_read = TryReadStreamChunk(
             synthetic_handle_.get(), synthetic_chunk);
         if (wil::event_is_signaled(cancellation_event_)) {
@@ -1976,8 +1978,8 @@ private:
     const FilesystemInventory &real_;
     HANDLE cancellation_event_;
     VerificationState &state_;
-    std::vector<unsigned char> synthetic_buffer_;
-    std::vector<unsigned char> real_buffer_;
+    std::unique_ptr<std::array<unsigned char, kReadChunkSize>> synthetic_buffer_;
+    std::unique_ptr<std::array<unsigned char, kReadChunkSize>> real_buffer_;
     [[msvc::no_unique_address]]
     std::optional<std::array<std::size_t, 4>> current_stream_;
     bool current_stream_readable_ = false;

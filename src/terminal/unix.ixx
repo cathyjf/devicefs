@@ -284,7 +284,7 @@ private:
             if (result == 0) {
                 return false;
             }
-            auto bytes = std::array<char, 4096>{};
+            ATTRIBUTE_INDETERMINATE std::array<char, 4096> bytes;
             const auto count = read(descriptor_, bytes.data(), bytes.size());
             if (count < 0) {
                 if (errno == EINTR) {

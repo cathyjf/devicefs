@@ -355,17 +355,18 @@ export auto VerifyOciLayerFile(
     const std::string_view digest) -> void {
     RequireSha256Digest(digest);
     const auto hash = CreateHash(BCRYPT_SHA256_ALG_HANDLE, digest);
-    auto buffer = std::vector<UCHAR>(64 * 1024);
+    const auto buffer = std::make_unique_for_overwrite<
+        std::array<UCHAR, 64 * 1024>>();
     while (true) {
         auto received = DWORD{};
-        if (!ReadFile(file, buffer.data(),
-                wil::safe_cast_failfast<DWORD>(buffer.size()), &received, nullptr)) {
+        if (!ReadFile(file, buffer->data(), CompileTimeCast<DWORD,
+                std::tuple_size_v<decltype(buffer)::element_type>>(), &received, nullptr)) {
             WinError("failed to read the OCI layer for hash verification");
         }
         if (received == 0) {
             break;
         }
-        HashData(hash.get(), std::span{buffer}.first(received), digest);
+        HashData(hash.get(), std::span{*buffer}.first(received), digest);
     }
     auto actual = std::string{"sha256:"};
     // SHA-256 produces 256 bits, with two hexadecimal digits per byte.

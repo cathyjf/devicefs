@@ -136,7 +136,7 @@ export template <typename Consumer>
     Consumer &&consumer) noexcept(std::is_nothrow_invocable_v<
         Consumer &, std::span<const char8_t>>) -> DWORD {
     constexpr auto kBufferSize = DWORD{4096};
-    auto buffer = std::array<char8_t, kBufferSize>{};
+    /* [[indeterminate]] */ std::array<char8_t, kBufferSize> buffer;
     const auto read_output = [&]() noexcept
         -> std::expected<std::span<const char8_t>, DWORD> {
         auto read = DWORD{};

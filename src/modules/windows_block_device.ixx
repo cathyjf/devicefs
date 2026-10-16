@@ -36,6 +36,16 @@ using devicefs::terminal::Transcode;
 
 export namespace devicefs {
 
+// On arm64, MSVC 14.51's implementation of `std::countr_zero` uses a software
+// loop instead of the `RBIT` and `CLZ` instructions emitted by this intrinsic.
+[[nodiscard, msvc::forceinline]]
+auto CountTrailingZeros(_Pre_satisfies_(value != 0) const std::uint64_t value)
+    noexcept -> int {
+    unsigned long bit_index;
+    std::ignore = _BitScanForward64(&bit_index, value);
+    return bit_index;
+}
+
 class SnapshotAllocationBitmap {
 public:
     SnapshotAllocationBitmap(SnapshotAllocationBitmap &&) noexcept;
@@ -180,7 +190,7 @@ struct AllocationBitmap {
             }
             const auto matching = (allocated ? word : ~word) & mask;
             if (matching != 0) {
-                return std::min(limit, word_begin + std::countr_zero(matching));
+                return std::min(limit, word_begin + CountTrailingZeros(matching));
             }
             mask = MAXUINT64;
         }
@@ -338,7 +348,11 @@ struct WindowsBlockDevice {
                 return STATUS_SUCCESS;
             }
         }
-        const auto failure = [&](const DWORD error) noexcept {
+        // Read failures are not expected during normal operation. `noinline`
+        // prevents `flatten` from enlarging the read callback with diagnostic
+        // code that successful reads never execute.
+        const auto failure = [&] [[msvc::noinline]] (const DWORD error)
+            noexcept {
             devicefs::WriteToStream(
                 devicefs::stderr,
                 L"devicefs: read failed for '{}' at offset 0x{:x} "
@@ -570,7 +584,7 @@ namespace devicefs::filesystem_internal {
 
     auto result = AllocationBitmap{
         .cluster_size = cluster_size,
-        .cluster_shift = std::countr_zero(cluster_size),
+        .cluster_shift = CountTrailingZeros(cluster_size),
         .cluster_count = cluster_count,
         .storage = std::move(storage),
     };

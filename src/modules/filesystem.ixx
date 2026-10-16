@@ -607,9 +607,9 @@ private:
 #endif
 
         // For performance reasons, this WinFsp callback should not jump to
-        // another location for its core read logic. The [[msvc::forceinline_calls]]
+        // another location for its core read logic. The [[msvc::flatten]]
         // attribute expresses that policy.
-        [[msvc::forceinline_calls]]
+        [[msvc::flatten]]
         return file->device.Read(
             buffer, offset, wanted, *transferred
 #if DEVICEFS_MEASURE_READ_PATH

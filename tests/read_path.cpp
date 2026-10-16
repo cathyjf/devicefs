@@ -61,7 +61,7 @@ template <typename Bitmap = decltype(devicefs::WindowsBlockDevice::allocation_bi
     constexpr auto header_size = offsetof(VOLUME_BITMAP_BUFFER, Buffer);
     auto bitmap = Bitmap{
         .cluster_size = cluster_size,
-        .cluster_shift = std::countr_zero(cluster_size),
+        .cluster_shift = devicefs::CountTrailingZeros(cluster_size),
         .cluster_count = cluster_count,
         .storage = std::make_unique_for_overwrite<BYTE[]>(header_size + bits.size()),
     };

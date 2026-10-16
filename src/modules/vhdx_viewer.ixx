@@ -739,7 +739,13 @@ public:
                 output, 0, source.subspan(source_position, count));
             // count is bounded by output.size(), which was constructed from
             // the ULONG wanted parameter.
-            transferred = wil::safe_cast_failfast<ULONG>(count);
+            [[gsl::suppress("26472",
+                justification:
+                    "`count` is the minimum of `output.size()` and the remaining "
+                    "source length. `output` was constructed with `wanted` "
+                    "elements, so `count ≤ wanted`. Since `wanted` is a "
+                    "`ULONG`, `count` fits in `ULONG`.")]]
+            transferred = static_cast<ULONG>(count);
             return STATUS_SUCCESS;
         };
 
@@ -756,7 +762,13 @@ public:
         const auto source_end = source_begin + source_.length;
         if (virtual_position < source_end) {
             const auto source_offset = virtual_position - source_begin;
-            const auto source_wanted = wil::safe_cast_failfast<ULONG>(
+            [[gsl::suppress("26472",
+                justification:
+                    "`std::min` selects the smaller of `std::uint64_t{wanted}` "
+                    "and the remaining source length. Its unsigned result "
+                    "therefore cannot exceed `wanted`, which is a `ULONG`, "
+                    "so the result fits in `ULONG`.")]]
+            const auto source_wanted = static_cast<ULONG>(
                 std::min(std::uint64_t{wanted},
                     source_.length - source_offset));
             const auto status = source_.Read(

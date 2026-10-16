@@ -189,17 +189,22 @@ struct RPCBlockDevice {
             binding_.get(), symbol_.c_str(), offset, wanted,
             &rpc_transferred, static_cast<BYTE *>(buffer));
         if (FAILED(result)) {
-            const auto win32_error =
-                CompileTimeCast<DWORD>(ExplicitHresult{result});
-            devicefs::WriteToStream(devicefs::stderr,
-                "devicefs: RPC read failed for '{:s}' at offset 0x{:x} "
-                "for {} bytes: {}\n",
-                symbol_ | std::views::transform(
-                    [](const unsigned char byte) noexcept {
-                        return std::bit_cast<char>(byte);
-                    }), offset, wanted,
-                TryConstructWinError("", ExplicitHresult{result}));
-            return FspNtStatusFromWin32(win32_error);
+            // Read failures are not expected during normal operation. `noinline`
+            // prevents `flatten` from enlarging the read callback with diagnostic
+            // code that successful reads never execute.
+            return [this, offset, wanted, result] [[msvc::noinline]] noexcept {
+                const auto win32_error =
+                    CompileTimeCast<DWORD>(ExplicitHresult{result});
+                devicefs::WriteToStream(devicefs::stderr,
+                    "devicefs: RPC read failed for '{:s}' at offset 0x{:x} "
+                    "for {} bytes: {}\n",
+                    symbol_ | std::views::transform(
+                        [](const unsigned char byte) noexcept {
+                            return std::bit_cast<char>(byte);
+                        }), offset, wanted,
+                    TryConstructWinError("", ExplicitHresult{result}));
+                return FspNtStatusFromWin32(win32_error);
+            }();
         }
         transferred = rpc_transferred;
         if (NT_SUCCESS(status)) {

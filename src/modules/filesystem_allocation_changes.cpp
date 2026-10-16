@@ -154,7 +154,7 @@ auto ReadAllocationChangeBlocks(
                 wil::safe_cast_failfast<std::uint64_t>(byte_index) *
                     filesystem_internal::kBitsPerByte +
                 wil::safe_cast_failfast<std::uint64_t>(
-                    std::countr_zero(changed));
+                    CountTrailingZeros(changed));
             if (cluster >= previous_bitmap.cluster_count) {
                 break;
             }

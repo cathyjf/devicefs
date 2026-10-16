@@ -235,10 +235,29 @@ template <typename Output>
         using Allocator = typename Output::allocator_type;
         const auto units = detail::UtfInput<Allocator>(input);
         const auto source = std::basic_string_view{units};
-        const auto capacity = source.empty() ? 0 : detail::TranscodedCapacity<Character>(source);
-        auto result = Output(capacity, Character{});
-        if (!source.empty()) {
-            result.resize(detail::ConvertText<Allocator>(source, std::span{result}));
+        auto result = Output{};
+        if (source.empty()) {
+            return result;
+        }
+        // The C++ standard requires the `resize_and_overwrite` callback
+        // not to throw. Because `ConvertText` can throw, its exception is
+        // saved and rethrown after `resize_and_overwrite` returns.
+        // https://eel.is/c++draft/string.capacity#9.1
+        auto failure = std::exception_ptr{};
+        result.resize_and_overwrite(
+            detail::TranscodedCapacity<Character>(source),
+            [source, &failure](Character *const buffer,
+                const std::size_t size) noexcept {
+                try {
+                    return detail::ConvertText<Allocator>(
+                        source, std::span{buffer, size});
+                } catch (...) {
+                    failure = std::current_exception();
+                    return std::size_t{};
+                }
+            });
+        if (failure) {
+            std::rethrow_exception(failure);
         }
         return result;
     }

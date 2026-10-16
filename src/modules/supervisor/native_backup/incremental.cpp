@@ -29,6 +29,7 @@ import devicefs.vss_block_descriptors;
 import devicefs.supervisor.vshadow;
 import devicefs.guid_formatter;
 import <devicefs/common.h>;
+import devicefs.stream_writer;
 
 export struct DirtyBlockMap {
     std::uint64_t volume_size;
@@ -77,6 +78,12 @@ struct RetainedSnapshotInterval {
             });
         }) |
         std::ranges::to<std::vector>();
+    devicefs::WriteToStream(devicefs::stdout,
+        "Building the dirty map for an interval containing {} "
+        "snapshot(s), including A and B.\n"
+        "Retrieving VSS properties for {} snapshot(s) not "
+        "already held open.\n",
+        catalog.stores.size() + 1, pending_identifiers.size());
     const auto properties = devicefs::vshadow::QuerySnapshotProperties(pending_identifiers);
     handles.append_range(std::views::zip_transform([payload_device](
         const GUID &identifier, const auto &snapshot) {

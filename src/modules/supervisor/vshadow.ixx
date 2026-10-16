@@ -20,6 +20,7 @@ import std;
 import <vshadow/shadow.h>;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import devicefs.guid_formatter;
 import devicefs.stream_writer;
 import devicefs.terminal.transcoding;
 
@@ -192,6 +193,9 @@ export namespace devicefs::vshadow {
     }
     return std::views::zip_transform([&client_ = *client](
         const GUID &identifier) -> std::optional<SnapshotProperties> {
+        devicefs::WriteToStream(devicefs::stdout,
+            "Retrieving the snapshot set ID, original volume, and device "
+            "path for VSS snapshot '{}'.\n", FormatGuid(identifier));
         auto snapshot_set_identifier = GUID{};
         auto original_volume = std::wstring{};
         auto device = std::wstring{};

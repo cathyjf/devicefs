@@ -133,6 +133,8 @@ struct SnapshotDiagnosticResult {
 
 [[nodiscard]] auto QueryBaselineSnapshot(
     const GUID &snapshot_identifier) -> std::vector<AvailableBaseline> {
+    devicefs::WriteToStream(devicefs::stdout,
+        "Retrieving the volume and device path of baseline snapshot A.\n");
     auto snapshot = std::move(
         devicefs::vshadow::QuerySnapshotProperties(
             std::array{snapshot_identifier}).front());
@@ -278,6 +280,9 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
         std::ranges::to<std::vector<std::string>>();
     auto reports = std::vector<VolumeReport>{};
 
+    devicefs::WriteToStream(devicefs::stdout,
+        "Creating temporary successor snapshots so snapshot B's "
+        "block descriptors can be read.\n");
     // C only makes payload B nonlatest; it is not a map input.
     const auto exit_code = devicefs::vshadow::Run(
         cancellation_event, false, successor_volumes,
@@ -286,6 +291,17 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
                 if (wil::event_is_signaled(cancellation_event)) {
                     return internal::kCancelledExitCode;
                 }
+                devicefs::WriteToStream(devicefs::stdout,
+                    "\nVolume '{}':\n"
+                    "  Snapshot A: {}\n"
+                    "    Device: {}\n"
+                    "  Snapshot B: {}\n"
+                    "    Device: {}\n",
+                    interval.volume,
+                    FormatGuid(interval.baseline_snapshot_identifier),
+                    interval.baseline_device,
+                    FormatGuid(interval.payload_snapshot_identifier),
+                    interval.payload_device);
                 reports.push_back(VolumeReport{
                     .interval = interval,
                     .map = [&interval] -> std::expected<DirtyBlockMap, std::string> {
@@ -1610,6 +1626,8 @@ auto PrintVerificationResult(
     auto result = SnapshotDiagnosticResult{};
     if (options.payload_snapshot_identifier) {
         const auto identifier = *options.payload_snapshot_identifier;
+        devicefs::WriteToStream(devicefs::stdout,
+            "Retrieving the volume and device path of comparison snapshot B.\n");
         const auto properties = devicefs::vshadow::QuerySnapshotProperties(
             std::array{identifier}).front();
         if (!properties) {
@@ -1649,6 +1667,9 @@ auto PrintVerificationResult(
     result.exit_code = internal::RunVssOperation(
         cancellation_event,
         [&] {
+            devicefs::WriteToStream(devicefs::stdout,
+                "Creating snapshot set B for comparison with "
+                "the retained snapshots.\n");
             return devicefs::vshadow::Run(
                 cancellation_event, false, volumes,
                 [&](const devicefs::vshadow::SnapshotSet &payload) {
@@ -1676,6 +1697,9 @@ auto PrintVerificationResult(
         if (previous.exit_code != 0) {
             return std::unexpected{previous.exit_code};
         }
+        devicefs::WriteToStream(devicefs::stdout,
+            "Finding which snapshots from the previous backup still exist "
+            "and match the snapshot set and volumes recorded in its manifest.\n");
         const auto snapshot_volumes =
             previous.ParseManifest().QuerySnapshotVolumes();
         if (snapshot_volumes.empty()) {

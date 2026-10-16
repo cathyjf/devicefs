@@ -368,6 +368,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/browse.ixx
     src/modules/supervisor/configuration.ixx
     src/modules/supervisor/embedded_artifacts.ixx
+    src/modules/supervisor/foreground_operation.ixx
     src/modules/supervisor/https_download.ixx
     src/modules/supervisor/installation.ixx
     src/modules/supervisor/launch_powershell.ixx

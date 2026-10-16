@@ -23,12 +23,12 @@ export module devicefs.supervisor;
 import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
-import devicefs.coherent_vector;
 import devicefs.filesystem;
 import devicefs.guid_formatter;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
 import devicefs.supervisor.browse;
+import devicefs.supervisor.foreground_operation;
 import devicefs.supervisor.launch_powershell;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.logging_console;
@@ -52,120 +52,6 @@ using namespace std::string_view_literals;
 
 constexpr auto kRunInConsoleOption = "--internal-run-in-console"sv;
 constexpr auto kInstallOption = "--install"sv;
-
-struct ForegroundContext {
-    wil::unique_event_nothrow cancellation_event = CreateCancellationEvent(nullptr);
-    wil::unique_event_nothrow completed_event = CreateCancellationEvent(nullptr);
-};
-
-// Each invocation has its own events. A handler's snapshot keeps those events
-// alive even if the invocation returns while the handler is still using them.
-auto foreground_contexts = std::optional<
-    CoherentVector<std::shared_ptr<const ForegroundContext>>>{};
-auto foreground_contexts_once = std::once_flag{};
-
-auto WINAPI ForegroundControlHandler(const DWORD) noexcept -> BOOL {
-    const auto contexts = foreground_contexts->Read();
-    if (!contexts || contexts->empty()) {
-        return FALSE;
-    }
-    // Windows terminates the process when a closure handler returns. Waiting
-    // for the operations here lets them finish their cleanup first.
-    // https://learn.microsoft.com/en-us/windows/console/handlerroutine
-    //
-    // Signal every operation before waiting, because one operation's cleanup
-    // may depend on another operation finishing.
-    for (const auto &context : *contexts) {
-        context->cancellation_event.SetEvent();
-    }
-    for (const auto &context : *contexts) {
-        context->completed_event.wait();
-    }
-    return TRUE;
-}
-
-// Return a worker callback whose cancellation and completion events are
-// registered only while the operation is running.
-[[nodiscard]] auto MakeForegroundOperation(
-    const std::shared_ptr<const ForegroundContext> &context, auto operation) {
-    return [context, operation = std::move(operation)]() mutable {
-        const auto completed = context->completed_event.SetEvent_scope_exit();
-        std::call_once(foreground_contexts_once, [] {
-            foreground_contexts.emplace();
-            if (!SetConsoleCtrlHandler(ForegroundControlHandler, TRUE)) {
-                WinError("failed to register the foreground console control handler");
-            }
-        });
-        foreground_contexts->PushBack(context);
-        const auto remove_context = wil::scope_exit([&context] {
-            foreground_contexts->Erase(context);
-        });
-        return std::invoke(std::move(operation), context->cancellation_event.get());
-    };
-}
-
-template <typename Operation>
-[[nodiscard]] auto RunForegroundOperation(
-    const std::string_view unavailable_message,
-    Operation operation) {
-    const auto input = GetStdHandle(STD_INPUT_HANDLE);
-    auto console_mode = DWORD{};
-    if (!GetConsoleMode(input, &console_mode)) {
-        WinError("{}", unavailable_message);
-    }
-    const auto context = std::make_shared<const ForegroundContext>();
-    if (!SetConsoleMode(
-            input, console_mode & ~DWORD{ENABLE_PROCESSED_INPUT})) {
-        WinError("failed to enable foreground cancellation input");
-    }
-    auto restore_console_mode = wil::scope_exit([input, console_mode] {
-        if (SetConsoleMode(input, console_mode)) {
-            return;
-        }
-        devicefs::WriteToStream(devicefs::stderr, "backup-supervisor: {}.\n",
-            TryConstructWinError(
-                "failed to restore the foreground console input mode"));
-    });
-
-    auto result = std::async(
-        std::launch::async, MakeForegroundOperation(context, std::move(operation)));
-    auto cancel_on_monitor_failure =
-        context->cancellation_event.SetEvent_scope_exit();
-    // The first signaled handle wins, giving completion priority over input.
-    // https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitformultipleobjects
-    constexpr auto kInputBatchSize = 16uz;
-    while (true) {
-        if (wil::wait_any_failfast(
-                context->completed_event, input).status() == WAIT_OBJECT_0) {
-            break;
-        }
-        auto records = std::array<INPUT_RECORD, kInputBatchSize>{};
-        auto read = DWORD{};
-        if (!ReadConsoleInputW(input, records.data(),
-                DWORD{records.size()}, &read)) {
-            WinError("failed to read foreground console input");
-        }
-        for (const auto &record : std::span{records}.first(read)) {
-            // With VT input enabled, Ctrl+C can arrive as the ETX character
-            // (`0x03`) without a virtual key code or Ctrl modifier. This was
-            // observed when running through CTest. Both representations
-            // request cancellation, allowing callers to retain VT input.
-            if ((record.EventType != KEY_EVENT) ||
-                !record.Event.KeyEvent.bKeyDown ||
-                ((record.Event.KeyEvent.uChar.UnicodeChar != L'\x03') &&
-                    ((record.Event.KeyEvent.wVirtualKeyCode != L'C') ||
-                        ((record.Event.KeyEvent.dwControlKeyState &
-                            (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) == 0)))) {
-                continue;
-            }
-            context->cancellation_event.SetEvent();
-            devicefs::WriteToStream(devicefs::stdout,
-                "Cancellation requested; waiting for cleanup.\n");
-        }
-    }
-    cancel_on_monitor_failure.release();
-    return result.get();
-}
 
 struct ForegroundOptions {
     bool no_writers = false;

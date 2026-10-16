@@ -27,7 +27,7 @@ import devicefs.coherent_vector;
 import devicefs.stream_writer;
 import devicefs.supervisor.windows_service;
 
-export struct ForegroundContext {
+struct ForegroundContext {
     wil::unique_event_nothrow cancellation_event = CreateCancellationEvent(nullptr);
     wil::unique_event_nothrow completed_event = CreateCancellationEvent(nullptr);
 };
@@ -58,12 +58,12 @@ auto WINAPI ForegroundControlHandler(const DWORD) noexcept -> BOOL {
     return TRUE;
 }
 
-// Return a worker callback whose cancellation and completion events are
-// registered only while the operation is running.
-export [[nodiscard]] auto MakeForegroundOperation(
-    const std::shared_ptr<const ForegroundContext> &context, auto &&operation) {
-    return [context, operation = std::forward<decltype(operation)>(operation)]
-        mutable {
+// Return a context and a worker callback. The context is registered only while
+// the operation is running.
+export [[nodiscard]] auto MakeForegroundOperation(auto &&operation) {
+    const auto context = std::make_shared<const ForegroundContext>();
+    return std::pair{context, [context,
+        operation = std::forward<decltype(operation)>(operation)] mutable {
         const auto completed = context->completed_event.SetEvent_scope_exit();
         std::call_once(foreground_contexts_once, [] {
             foreground_contexts.emplace();
@@ -76,13 +76,12 @@ export [[nodiscard]] auto MakeForegroundOperation(
             foreground_contexts->Erase(context);
         });
         return std::invoke(operation, context->cancellation_event.get());
-    };
+    }};
 }
 
 export [[nodiscard]] auto RunForegroundOperation(auto &&operation) {
-    const auto context = std::make_shared<const ForegroundContext>();
-    auto foreground_task = MakeForegroundOperation(
-        context, std::forward<decltype(operation)>(operation));
+    auto [context, foreground_task] = MakeForegroundOperation(
+        std::forward<decltype(operation)>(operation));
 
     // Disabling `ENABLE_PROCESSED_INPUT` prevents the operating system from
     // processing Ctrl+C and instead allows our process to read it as keyboard
@@ -91,8 +90,13 @@ export [[nodiscard]] auto RunForegroundOperation(auto &&operation) {
     // A failure to disable `ENABLE_PROCESSED_INPUT` is not a fatal error
     // condition. The only consequence is that cancellation may be slightly
     // less coordinated, but it should still work correctly.
+    //
+    // Disabling `ENABLE_PROCESSED_INPUT` requires write access to `CONIN$`.
+    // This requirement is not expressly documented by Microsoft, but it can be
+    // seen in the conhost implementation of `ApiDispatchers::ServerSetConsoleMode`.
+    // https://github.com/microsoft/terminal/blob/94dfb1/src/server/ApiDispatchers.cpp#L89
     const auto input = wil::unique_hfile{CreateFileA("CONIN$",
-        GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr, OPEN_EXISTING, 0, nullptr)};
     auto console_mode = DWORD{};
     if (!input || !GetConsoleMode(input.get(), &console_mode) ||

@@ -405,11 +405,10 @@ struct CancellableOutputOperation {
 [[nodiscard]] auto RunBackupViewInScrollingScreen(
     devicefs::terminal::WindowsConsole &terminal,
     SelectiveViewOptions options, BackupViewUser view_user) {
-    const auto context = std::make_shared<const ForegroundContext>();
     auto &account = (view_user.shell_user && *view_user.shell_user)
         ? **view_user.shell_user : view_user.invoking_user;
-    return RunOperationWithOutput(CancellableOutputOperation{
-        .operation = MakeForegroundOperation(context, [&options, &view_user, &account](
+    auto [context, foreground_task] =
+        MakeForegroundOperation([&options, &view_user, &account](
             const HANDLE cancellation_event) {
             if (!view_user.shell_user) {
                 devicefs::WriteToStream(devicefs::stdout,
@@ -428,7 +427,9 @@ struct CancellableOutputOperation {
                 options.timestamp,
                 options.address,
                 options.namespace_override);
-        }),
+        });
+    return RunOperationWithOutput(CancellableOutputOperation{
+        .operation = std::ref(foreground_task),
         .draw_header = [&options](auto &frame) {
             const auto namespace_name = options.namespace_override
                 ? (options.namespace_override->empty() ? std::string{"(root)"} :
@@ -459,10 +460,11 @@ struct CancellableOutputOperation {
 
 [[nodiscard]] auto RunFastOperation(
     devicefs::terminal::WindowsConsole &terminal,
-    const std::string_view title, auto operation) {
-    const auto context = std::make_shared<const ForegroundContext>();
+    const std::string_view title, auto &&operation) {
+    auto [context, foreground_task] = MakeForegroundOperation(
+        std::forward<decltype(operation)>(operation));
     return RunOperationWithOutput(CancellableOutputOperation{
-        .operation = MakeForegroundOperation(context, std::move(operation)),
+        .operation = std::ref(foreground_task),
         .draw_header = [title](auto &frame) {
             frame.Write("DeviceFs Backup Supervisor\n{}\n\n", title);
         },
@@ -557,9 +559,8 @@ struct CancellableOutputOperation {
 }
 
 auto RunInstallerInScrollingView(auto &&terminal) {
-    const auto context = std::make_shared<const ForegroundContext>();
-    return RunOperationWithOutput(CancellableOutputOperation{
-        .operation = MakeForegroundOperation(context, [](
+    auto [context, foreground_task] =
+        MakeForegroundOperation([](
             const HANDLE cancellation_event) -> int {
             const auto executable = Transcode<std::string>(
                 CurrentExecutablePath().native());
@@ -580,7 +581,9 @@ auto RunInstallerInScrollingView(auto &&terminal) {
                 wil::handle_wait(process.hProcess);
             }
             return ProcessExitCode(process.hProcess);
-        }),
+        });
+    return RunOperationWithOutput(CancellableOutputOperation{
+        .operation = std::ref(foreground_task),
         .draw_header = [](auto &frame) {
             frame.Write("DeviceFs Backup Supervisor\n"
                 "Install or update backup environment\n\n");

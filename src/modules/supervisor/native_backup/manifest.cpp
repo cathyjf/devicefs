@@ -24,6 +24,7 @@ import std;
 import <devicefs/common.h>;
 import <devicefs/windows_imports.h>;
 import <devicefs/winrt_imports.h>;
+import devicefs.guid_formatter;
 import :internal;
 import :pbs;
 import devicefs.supervisor.installation;
@@ -38,11 +39,6 @@ export struct PreviousBackupManifestResult {
     std::u8string manifest;
 
     struct SnapshotManifest {
-        using GuidLess = decltype([](
-            const GUID &left, const GUID &right) noexcept {
-                return std::memcmp(&left, &right, sizeof(GUID)) < 0;
-            });
-
         struct SnapshotVolume {
             GUID snapshot_identifier{};
             std::string device;

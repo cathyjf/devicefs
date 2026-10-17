@@ -47,6 +47,12 @@ struct SnapshotSet {
 
 } // namespace devicefs::vshadow
 
+auto &GetSnapshotPropertiesCache() {
+    static auto cache = std::map<
+        GUID, devicefs::vshadow::SnapshotProperties, GuidLess>{};
+    return cache;
+}
+
 template <class Operation>
 concept SnapshotOperation = std::is_invocable_r_v<
     int, Operation &, const devicefs::vshadow::SnapshotSet &>;
@@ -154,6 +160,14 @@ public:
                 }) | std::ranges::to<std::vector>(),
         };
 
+        for (const auto &snapshot : snapshot_set.snapshots) {
+            GetSnapshotPropertiesCache().emplace(snapshot.identifier,
+                devicefs::vshadow::SnapshotProperties{
+                    .snapshot_set_identifier = snapshot_set.identifier,
+                    .original_volume = snapshot.original_volume,
+                    .device = snapshot.device,
+                });
+        }
         const auto result = operation(snapshot_set);
         if (result == 0) {
             completion_ = Completion::Success;
@@ -187,7 +201,14 @@ template <bool stop_on_failure = false>
     if (snapshot_identifiers.empty()) {
         return std::vector<Properties>{};
     }
-    auto client = [] -> std::optional<VssClientOwner> {
+    auto &cache = GetSnapshotPropertiesCache();
+    auto client = [snapshot_identifiers, &cache] -> std::optional<VssClientOwner> {
+        if (std::ranges::all_of(snapshot_identifiers,
+                [&cache](const GUID &identifier) {
+                    return cache.contains(identifier);
+                })) {
+            return std::nullopt;
+        }
         try {
             return std::optional<VssClientOwner>{std::in_place, VSS_CTX_ALL};
         } catch ([[maybe_unused]] const HRESULT result) {
@@ -199,13 +220,16 @@ template <bool stop_on_failure = false>
             }
         }
     }();
-    if constexpr (!stop_on_failure) {
-        if (!client) {
-            return std::vector<Properties>(snapshot_identifiers.size());
-        }
-    }
-    return std::views::zip_transform([&client_ = *client](
+    return std::views::zip_transform([&client, &cache](
         const GUID &identifier) -> Properties {
+        if (const auto cached = cache.find(identifier); cached != cache.end()) {
+            return cached->second;
+        }
+        if constexpr (!stop_on_failure) {
+            if (!client) {
+                return std::nullopt;
+            }
+        }
         devicefs::WriteToStream(devicefs::stdout,
             "Retrieving the snapshot set ID, original volume, and device "
             "path for VSS snapshot '{}'.\n", FormatGuid(identifier));
@@ -213,7 +237,7 @@ template <bool stop_on_failure = false>
         auto original_volume = std::wstring{};
         auto device = std::wstring{};
         try {
-            client_.GetSnapshotProperties(identifier,
+            client->GetSnapshotProperties(identifier,
                 snapshot_set_identifier, original_volume, device);
         } catch ([[maybe_unused]] const HRESULT result) {
             if constexpr (stop_on_failure) {
@@ -223,12 +247,12 @@ template <bool stop_on_failure = false>
                 return std::nullopt;
             }
         }
-        return SnapshotProperties{
+        return cache.emplace(identifier, SnapshotProperties{
             .snapshot_set_identifier = snapshot_set_identifier,
             .original_volume = Transcode<std::string>(
                 original_volume),
             .device = Transcode<std::string>(device),
-        };
+        }).first->second;
     }, snapshot_identifiers) | std::ranges::to<std::vector>();
 }
 

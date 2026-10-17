@@ -7,6 +7,18 @@ import std;
 import <devicefs/windows_imports.h>;
 import devicefs.terminal.transcoding;
 
+export struct GuidLess {
+    [[nodiscard]] auto operator()(
+        const GUID &left, const GUID &right) const noexcept {
+        using Words = std::array<std::uint64_t, 2>;
+        const auto left_words = std::bit_cast<Words>(left);
+        const auto right_words = std::bit_cast<Words>(right);
+        return (std::get<0>(left_words) == std::get<0>(right_words))
+            ? std::get<1>(left_words) < std::get<1>(right_words)
+            : std::get<0>(left_words) < std::get<0>(right_words);
+    }
+};
+
 template <bool IncludeBraces>
 struct FormattedGuid {
     std::array<char, IncludeBraces ? 38 : 36> characters;

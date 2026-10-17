@@ -340,18 +340,24 @@ public:
         }
     }
 
-    [[nodiscard]] auto Read(
-        const std::uint64_t offset, const std::size_t size) const {
-        auto result = std::vector<std::byte>(size);
-        ReadExact(offset, result);
-        return result;
+    template <std::size_t Size>
+    [[nodiscard, msvc::forceinline]] auto Read(const std::uint64_t offset) const {
+        if constexpr (Size <= 512) {
+            /* [[indeterminate]] */ std::array<std::byte, Size> result;
+            ReadExact(offset, result);
+            return result;
+        } else {
+            auto result = std::make_unique_for_overwrite<
+                std::array<std::byte, Size>>();
+            ReadExact(offset, *result);
+            return result;
+        }
     }
 
 private:
     void ReadExact(
         const std::uint64_t offset, std::span<std::byte> destination) const {
-        const auto requested =
-            wil::safe_cast_failfast<std::uint64_t>(destination.size());
+        const auto requested = destination.size();
         if ((offset > size_) || (requested > (size_ - offset))) {
             ThrowOffsetError("a VSS metadata read was out of bounds",
                 offset, requested, size_);
@@ -400,24 +406,26 @@ private:
         if (const auto remainder = end % sector_size_; remainder != 0) {
             raw_end += sector_size_ - remainder;
         }
-        const auto raw_size = raw_end - raw_offset;
-        if (!std::in_range<DWORD>(raw_size)) {
-            ThrowOffsetError("an aligned VSS metadata read was too large",
-                raw_offset, raw_size, size_);
-        }
-
+        const auto raw_size = [raw_size_ = raw_end - raw_offset, &raw_offset,
+            &size_ = std::as_const(size_)] {
+            /* [[indeterminate]] */ DWORD output;
+            if (FAILED(wil::safe_cast_nothrow<DWORD>(raw_size_, &output))) {
+                ThrowOffsetError("an aligned VSS metadata read was too large",
+                    raw_offset, raw_size_, size_);
+            }
+            return output;
+        }();
         auto storage = NewAlignedArray<std::byte, false>(raw_size, buffer_alignment_);
         if (!storage) {
-            WinError("could not allocate an aligned VSS metadata buffer",
+            WinError("failed to allocate an aligned VSS metadata buffer",
                 ExplicitWin32Error{ERROR_NOT_ENOUGH_MEMORY});
         }
 
         Seek(raw_offset);
         auto completed = DWORD{};
-        if (!ReadFile(handle_.get(), storage.get(),
-                wil::safe_cast_failfast<DWORD>(raw_size),
+        if (!ReadFile(handle_.get(), storage.get(), raw_size,
                 &completed, nullptr)) {
-            WinError("could not read aligned VSS metadata at offset 0x{:x}",
+            WinError("failed to read aligned VSS metadata at offset 0x{:x}",
                 raw_offset);
         }
         if (completed != raw_size) {
@@ -529,10 +537,9 @@ auto ValidateNtfsVolume(const RawSource &source) {
     // consumed by ReadCatalog, ReadStoreHeaders, and ReadDescriptorList.
     // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_volume.c#L1199-L1290
     const auto primary = ParseNtfsHeader(
-        source.Read(0, kNtfsVolumeHeaderSize));
-    const auto backup = ParseNtfsHeader(source.Read(
-        primary.volume_size - primary.bytes_per_sector,
-        kNtfsVolumeHeaderSize));
+        source.Read<kNtfsVolumeHeaderSize>(0));
+    const auto backup = ParseNtfsHeader(source.Read<kNtfsVolumeHeaderSize>(
+        primary.volume_size - primary.bytes_per_sector));
     if (backup.volume_size != primary.volume_size) {
         throw std::runtime_error(std::format(
             "the primary NTFS header reported volume size {} and {}-byte "
@@ -627,8 +634,8 @@ auto VisitMetadataBlock(
     // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_io_handle.c#L613-L879
     while (offset != 0) {
         VisitMetadataBlock(visited, offset, "the VSS catalog chain");
-        const auto block = source.Read(offset, devicefs::vss::kBlockSize);
-        const auto data = std::span<const std::byte>{block};
+        const auto block = source.Read<devicefs::vss::kBlockSize>(offset);
+        const auto data = std::span<const std::byte>{*block};
         if (!HasIdentifier(data, 8)) {
             throw std::runtime_error(std::format(
                 "the VSS catalog block at 0x{:x} had an invalid identifier",
@@ -757,9 +764,9 @@ auto ReadStoreHeaders(const RawSource &source, std::vector<CatalogStore> &stores
         if (!store.has_in_volume_data) {
             continue;
         }
-        const auto block = source.Read(
-            store.header_offset, devicefs::vss::kBlockSize);
-        const auto data = std::span<const std::byte>{block};
+        const auto block = source.Read<devicefs::vss::kBlockSize>(
+            store.header_offset);
+        const auto data = std::span<const std::byte>{*block};
         const auto header = ParseStoreBlockHeader(data, store.header_offset);
         if (header.record_type != kStoreHeaderRecordType) {
             throw std::runtime_error(std::format(
@@ -933,8 +940,8 @@ private:
     // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_block_descriptor.c#L313-L450
     while (offset != 0) {
         VisitMetadataBlock(visited, offset, "the VSS descriptor-list chain");
-        const auto block = source.Read(offset, devicefs::vss::kBlockSize);
-        const auto data = std::span<const std::byte>{block};
+        const auto block = source.Read<devicefs::vss::kBlockSize>(offset);
+        const auto data = std::span<const std::byte>{*block};
         const auto header = ParseStoreBlockHeader(data, offset);
         if (header.record_type != kStoreIndexRecordType) {
             throw std::runtime_error(std::format(
@@ -983,8 +990,8 @@ private:
 
 [[nodiscard]] auto ReadStores(const RawSource &source,
     const std::string_view source_path) {
-    const auto signature = source.Read(
-        kVssVolumeHeaderOffset, kVssIdentifier.size());
+    const auto signature = source.Read<kVssIdentifier.size()>(
+        kVssVolumeHeaderOffset);
 
     // info_handle_open_input performs the 16-byte
     // libvshadow_check_volume_signature_file_io_handle preflight before calling
@@ -1006,8 +1013,8 @@ private:
     // only the format identity; this fresh, fully decoded header is the source
     // of the catalog pointer used by ReadCatalogOffset.
     // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_volume.c#L994-L1067
-    const auto volume_header = source.Read(
-        kVssVolumeHeaderOffset, kVssVolumeHeaderSize);
+    const auto volume_header = source.Read<kVssVolumeHeaderSize>(
+        kVssVolumeHeaderOffset);
     const auto catalog_offset = ReadCatalogOffset(volume_header);
     auto stores = ReadCatalog(source, catalog_offset);
     ReadStoreHeaders(source, stores);

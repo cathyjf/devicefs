@@ -790,14 +790,10 @@ auto DetachView(
     AttachedVhdx &view,
     const std::string_view name,
     VerificationState &state) noexcept -> void {
-    try {
-        devicefs::WriteToStream(
-            devicefs::stdout, "Detaching the {} VHDX view.\n", name);
-        devicefs::WriteToStream(
-            devicefs::stdout, L"  Volume: {}\n", view.Root());
-    } catch (const std::exception &) {
-        // Diagnostic output cannot replace or prevent VHDX cleanup.
-    }
+    devicefs::WriteToStream(
+        devicefs::stdout, "Detaching the {} VHDX view.\n", name);
+    devicefs::WriteToStream(
+        devicefs::stdout, L"  Volume: {}\n", view.Root());
     const auto status = view.Detach();
     if (status != ERROR_SUCCESS) {
         try {
@@ -811,14 +807,10 @@ auto DetachView(
         }
         return;
     }
-    try {
-        devicefs::WriteToStream(
-            devicefs::stdout, "The {} VHDX view was detached.\n", name);
-        devicefs::WriteToStream(
-            devicefs::stdout, L"  Volume: {}\n", view.Root());
-    } catch (const std::exception &) {
-        // Diagnostic output cannot replace completed VHDX cleanup.
-    }
+    devicefs::WriteToStream(
+        devicefs::stdout, "The {} VHDX view was detached.\n", name);
+    devicefs::WriteToStream(
+        devicefs::stdout, L"  Volume: {}\n", view.Root());
 }
 
 [[nodiscard]] auto ObjectPath(

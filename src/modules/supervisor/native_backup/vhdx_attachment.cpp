@@ -337,13 +337,12 @@ public:
     ~AttachedVhdx() noexcept {
         const auto status = Detach();
         if (status != ERROR_SUCCESS) {
-            try {
-                WinError("could not detach VHDX mounted as '{}'",
-                    std::wstring_view{root_},
-                    ExplicitWin32Error{status});
-            } catch (const std::exception &error) {
-                TryWriteError("VHDX cleanup failed", error);
-            }
+            [this, status] [[msvc::noinline]] noexcept {
+                devicefs::WriteToStream(devicefs::stderr,
+                    "backup-supervisor: VHDX cleanup failed: {}\n",
+                    TryConstructWinError("failed to detach VHDX mounted as '{}'",
+                        std::wstring_view{root_}, ExplicitWin32Error{status}));
+            }();
         }
     }
 
@@ -402,13 +401,14 @@ public:
         -> MountedVolume & = delete;
 
     ~MountedVolume() noexcept {
-        try {
-            if (!DeleteVolumeMountPointW(mount_path_.c_str())) {
-                WinError("could not remove the attached-volume mount point {}",
-                    std::wstring_view{mount_path_});
-            }
-        } catch (const std::exception &error) {
-            TryWriteError("attached-volume mount cleanup failed", error);
+        if (!DeleteVolumeMountPointW(mount_path_.c_str())) {
+            [this] [[msvc::noinline]] noexcept {
+                devicefs::WriteToStream(devicefs::stderr,
+                    "backup-supervisor: attached-volume mount cleanup failed: {}\n",
+                    TryConstructWinError(
+                        "failed to remove the attached-volume mount point {}",
+                        std::wstring_view{mount_path_}));
+            }();
         }
     }
 

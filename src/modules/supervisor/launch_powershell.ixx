@@ -364,19 +364,27 @@ export auto EnsureConsoleMsixRegistration(const wil::zwstring_view package_full_
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: ensuring MSIX package '{}' is registered for user '{}'\n",
         Transcode<std::string>(package_full_name), user_name);
-    try {
-        const auto manager =
-            winrt::Windows::Management::Deployment::PackageManager{};
-        const auto deployment = manager.RegisterPackageByFullNameAsync(
-            package_full_name, nullptr,
-            winrt::Windows::Management::Deployment::DeploymentOptions::None).get();
-        if (const auto result = deployment.ExtendedErrorCode(); FAILED(result)) {
-            throw winrt::hresult_error{result, deployment.ErrorText()};
+    const auto result = [package_full_name]
+        -> std::expected<void, std::pair<winrt::hresult, winrt::hstring>> {
+        try {
+            const auto manager =
+                winrt::Windows::Management::Deployment::PackageManager{};
+            const auto deployment = manager.RegisterPackageByFullNameAsync(
+                package_full_name, nullptr,
+                winrt::Windows::Management::Deployment::DeploymentOptions::None).get();
+            if (const auto result = deployment.ExtendedErrorCode(); FAILED(result)) {
+                return std::unexpected{std::pair{result, deployment.ErrorText()}};
+            }
+            return {};
+        } catch (const winrt::hresult_error &error) {
+            return std::unexpected{std::pair{error.code(), error.message()}};
         }
-    } catch (const winrt::hresult_error &error) {
-        WinError("could not register MSIX package '{}': {}",
-            std::wstring_view{package_full_name}, std::wstring_view{error.message()},
-            ExplicitHresult{error.code()});
+    }();
+    if (!result) {
+        const auto &[error, text] = result.error();
+        WinError("failed to register MSIX package '{}': {}",
+            std::wstring_view{package_full_name}, std::wstring_view{text},
+            ExplicitHresult{error});
     }
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: MSIX package '{}' is registered for user '{}'\n",

@@ -31,12 +31,10 @@ public:
         _In_z_ const char *const initialization_error,
         const RO_INIT_TYPE apartment_type = RO_INIT_SINGLETHREADED)
         : uninitialize_([initialization_error, apartment_type] {
-            try {
-                return wil::RoInitialize(apartment_type);
-            } catch (const wil::ResultException &error) {
-                WinError("{}: {}", initialization_error, error.what(),
-                    ExplicitHresult{error.GetErrorCode()});
+            if (const auto result = RoInitialize(apartment_type); FAILED(result)) {
+                WinError("{}", initialization_error, ExplicitHresult{result});
             }
+            return wil::unique_rouninitialize_call{};
         }()) {}
 
     WinrtApartment(const WinrtApartment &) = delete;

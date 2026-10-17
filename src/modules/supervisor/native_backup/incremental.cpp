@@ -84,16 +84,12 @@ struct RetainedSnapshotInterval {
         "Retrieving VSS properties for {} snapshot(s) not "
         "already held open.\n",
         catalog.stores.size() + 1, pending_identifiers.size());
-    const auto properties = devicefs::vshadow::QuerySnapshotProperties(pending_identifiers);
+    const auto properties = devicefs::vshadow::QuerySnapshotProperties<true>(
+        pending_identifiers);
     handles.append_range(std::views::zip_transform([payload_device](
         const GUID &identifier, const auto &snapshot) {
-        if (!snapshot) {
-            throw std::runtime_error(std::format(
-                "could not query VSS snapshot '{}' while retaining the "
-                "descriptor interval in '{}'", FormatGuid(identifier), payload_device));
-        }
         auto handle = wil::unique_hfile{CreateFileA(
-            snapshot->device.c_str(), GENERIC_READ,
+            snapshot.device.c_str(), GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr, OPEN_EXISTING,
             SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr)};
@@ -101,11 +97,7 @@ struct RetainedSnapshotInterval {
             WinError(
                 "could not open VSS snapshot '{}' at '{}' to retain "
                 "the descriptor interval in '{}'",
-                [identifier] {
-                    auto last_error = wil::last_error_context{};
-                    return FormatGuid(identifier);
-                }(),
-                snapshot->device, payload_device);
+                FormatGuid(identifier), snapshot.device, payload_device);
         }
         return std::pair{identifier, std::move(handle)};
     }, pending_identifiers, properties));

@@ -179,22 +179,33 @@ private:
 
 export namespace devicefs::vshadow {
 
+template <bool stop_on_failure = false>
 [[nodiscard]] auto QuerySnapshotProperties(
-    const std::span<const GUID> snapshot_identifiers)
-    -> std::vector<std::optional<SnapshotProperties>> {
+    const std::span<const GUID> snapshot_identifiers) {
+    using Properties = std::conditional_t<stop_on_failure,
+        SnapshotProperties, std::optional<SnapshotProperties>>;
+    if (snapshot_identifiers.empty()) {
+        return std::vector<Properties>{};
+    }
     auto client = [] -> std::optional<VssClientOwner> {
         try {
             return std::optional<VssClientOwner>{std::in_place, VSS_CTX_ALL};
-        } catch (HRESULT) {
-            return std::nullopt;
+        } catch ([[maybe_unused]] const HRESULT result) {
+            if constexpr (stop_on_failure) {
+                WinError("failed to initialize VSS to query snapshot properties",
+                    ExplicitHresult{result});
+            } else {
+                return std::nullopt;
+            }
         }
     }();
-    if (!client) {
-        return std::vector<std::optional<SnapshotProperties>>(
-            snapshot_identifiers.size());
+    if constexpr (!stop_on_failure) {
+        if (!client) {
+            return std::vector<Properties>(snapshot_identifiers.size());
+        }
     }
     return std::views::zip_transform([&client_ = *client](
-        const GUID &identifier) -> std::optional<SnapshotProperties> {
+        const GUID &identifier) -> Properties {
         devicefs::WriteToStream(devicefs::stdout,
             "Retrieving the snapshot set ID, original volume, and device "
             "path for VSS snapshot '{}'.\n", FormatGuid(identifier));
@@ -204,8 +215,13 @@ export namespace devicefs::vshadow {
         try {
             client_.GetSnapshotProperties(identifier,
                 snapshot_set_identifier, original_volume, device);
-        } catch (HRESULT) {
-            return std::nullopt;
+        } catch ([[maybe_unused]] const HRESULT result) {
+            if constexpr (stop_on_failure) {
+                WinError("failed to retrieve properties for VSS snapshot '{}'",
+                    FormatGuid(identifier), ExplicitHresult{result});
+            } else {
+                return std::nullopt;
+            }
         }
         return SnapshotProperties{
             .snapshot_set_identifier = snapshot_set_identifier,
@@ -215,6 +231,9 @@ export namespace devicefs::vshadow {
         };
     }, snapshot_identifiers) | std::ranges::to<std::vector>();
 }
+
+template auto QuerySnapshotProperties<false>(std::span<const GUID>);
+template auto QuerySnapshotProperties<true>(std::span<const GUID>);
 
 // Resolve a drive, mount path, or volume name using the same VShadow rules
 // used when creating snapshots. The result can also be compared with the

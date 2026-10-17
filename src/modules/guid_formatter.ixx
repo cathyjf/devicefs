@@ -9,8 +9,11 @@ import devicefs.terminal.transcoding;
 
 // Format a GUID with lowercase hexadecimal digits and hyphens.
 // If `IncludeBraces` is true, the result is enclosed in braces.
+//
+// This function preserves the last Windows error value.
 export template <bool IncludeBraces = true>
 [[nodiscard]] auto FormatGuid(const GUID &identifier) {
+    const auto last_error = wil::last_error_context{};
     return std::format(
         "{}{:08x}-{:04x}-{:04x}-{:02x}{:02x}-"
         "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{}",

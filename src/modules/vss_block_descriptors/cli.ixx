@@ -166,11 +166,18 @@ auto WriteOutput(const std::string_view output) {
         "volume-size\tin-volume\tlist-offset\theader-offset\n";
     for (auto index = 0uz; index < stores.size(); ++index) {
         const auto &store = stores[index];
+        [[gsl::suppress("26449", justification:
+            "The analyzer suggests that the view returned by the "
+            "`operator std::string_view` method of the temporary object "
+            "returned by `FormatGuid` may be invalid before it is accessed. "
+            "This suggestion is incorrect because the temporary survives until "
+            "the end of the `std::format_to(...)` expression, and the referenced "
+            "characters are accessed only while that call is executing.")]]
         std::format_to(std::back_inserter(output),
             "store\t{}\t{}\t{}\t{}\t{}\t{}\t{:016x}\t{:016x}\n",
             index, FormatGuid<false>(store.store_identifier),
             store.snapshot_identifier
-                ? FormatGuid<false>(*store.snapshot_identifier) : "-",
+                ? FormatGuid<false>(*store.snapshot_identifier) : "-"sv,
             store.creation_time, store.volume_size,
             store.has_in_volume_data ? 1 : 0,
             store.list_offset, store.header_offset);

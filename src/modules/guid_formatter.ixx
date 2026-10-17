@@ -7,14 +7,37 @@ import std;
 import <devicefs/windows_imports.h>;
 import devicefs.terminal.transcoding;
 
+template <bool IncludeBraces>
+struct FormattedGuid {
+    std::array<char, IncludeBraces ? 38 : 36> characters;
+
+    [[nodiscard]] constexpr operator std::string_view() const noexcept {
+        return {characters.data(), characters.size()};
+    }
+};
+
+template <bool IncludeBraces>
+struct std::formatter<FormattedGuid<IncludeBraces>>
+    : std::formatter<std::string_view> {};
+
 // Format a GUID with lowercase hexadecimal digits and hyphens.
 // If `IncludeBraces` is true, the result is enclosed in braces.
 //
-// This function preserves the last Windows error value.
+// This function is intended to preserve the last Windows error value.
 export template <bool IncludeBraces = true>
 [[nodiscard]] auto FormatGuid(const GUID &identifier) {
-    const auto last_error = wil::last_error_context{};
-    return std::format(
+    // The `result` buffer is intentionally uninitialized because the
+    // subsequent call to `std::format_to_n` overwrites every byte of the
+    // buffer before anything reads the buffer.
+    //
+    // This suppression uses `#pragma warning` rather than the usual
+    // `[[gsl::suppress]]` annotation because using `[[gsl::suppress]]` to
+    // annotate this function causes MSVC to crash.
+#pragma warning(push)
+#pragma warning(disable : 6001 26494)
+    /* [[indeterminate]] */ FormattedGuid<IncludeBraces> result;
+    std::ignore = std::format_to_n(result.characters.begin(),
+        std::tuple_size_v<decltype(result.characters)>,
         "{}{:08x}-{:04x}-{:04x}-{:02x}{:02x}-"
         "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{}",
         IncludeBraces ? "{" : "",
@@ -23,6 +46,8 @@ export template <bool IncludeBraces = true>
         identifier.Data4[3], identifier.Data4[4], identifier.Data4[5],
         identifier.Data4[6], identifier.Data4[7],
         IncludeBraces ? "}" : "");
+#pragma warning(pop)
+    return result;
 }
 
 // Parse a GUID with or without enclosing braces.

@@ -117,6 +117,10 @@ add_compile_options(/options:strict)
 # https://learn.microsoft.com/en-us/cpp/build/reference/wx-treat-linker-warnings-as-errors
 add_link_options(/WX)
 
+# Generate linker maps.
+# https://learn.microsoft.com/en-us/cpp/build/reference/map-generate-mapfile
+add_link_options(/MAP)
+
 # Enable certain potentially-useful warnings that might be disabled by default.
 add_compile_options(
     # C4619: "An attempt was made to disable a warning that does not exist."

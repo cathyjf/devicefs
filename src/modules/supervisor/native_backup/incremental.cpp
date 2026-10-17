@@ -26,9 +26,6 @@ import devicefs.supervisor.process_privileges;
 import devicefs.filesystem;
 import devicefs.svi_extents;
 import devicefs.vss_block_descriptors;
-import devicefs.supervisor.vshadow;
-import devicefs.guid_formatter;
-import <devicefs/common.h>;
 import devicefs.stream_writer;
 
 export struct DirtyBlockMap {
@@ -45,98 +42,6 @@ export struct DirtyBlockMap {
 namespace {
 
 using namespace std::string_view_literals;
-using namespace std::chrono_literals;
-
-// A changed catalog is retried a fixed number of times. A short pause between
-// attempts allows a pending cleanup operation to finish before trying again.
-constexpr auto kSnapshotAcquisitionAttempts = 3;
-constexpr auto kSnapshotAcquisitionRetryDelay = 100ms;
-
-using SnapshotHandles = std::vector<std::pair<GUID, wil::unique_hfile>>;
-
-struct RetainedSnapshotInterval {
-    devicefs::vss::CatalogInterval catalog;
-    SnapshotHandles handles;
-};
-
-[[nodiscard]] auto TryAcquireSnapshotInterval(
-    const std::string_view payload_device,
-    const GUID &baseline_identifier,
-    const GUID &payload_identifier,
-    SnapshotHandles &handles)
-    -> std::expected<devicefs::vss::CatalogInterval, std::runtime_error> {
-    auto catalog = devicefs::vss::ReadBlockDescriptorIntervalCatalog(
-        payload_device, baseline_identifier, payload_identifier);
-    const auto pending_identifiers = std::array{
-        std::span<const devicefs::vss::CatalogStore>{catalog.stores},
-        std::span<const devicefs::vss::CatalogStore>{std::array{catalog.payload}}
-    } | std::views::join | std::views::transform(
-        [](const auto &store) { return *store.snapshot_identifier; }) |
-        std::views::filter([&handles](const GUID &identifier) {
-            return std::ranges::none_of(handles, [&identifier](const auto &snapshot) {
-                return InlineIsEqualGUID(snapshot.first, identifier);
-            });
-        }) |
-        std::ranges::to<std::vector>();
-    devicefs::WriteToStream(devicefs::stdout,
-        "Building the dirty map for an interval containing {} "
-        "snapshot(s), including A and B.\n"
-        "Retrieving VSS properties for {} snapshot(s) not "
-        "already held open.\n",
-        catalog.stores.size() + 1, pending_identifiers.size());
-    const auto properties = devicefs::vshadow::QuerySnapshotProperties<true>(
-        pending_identifiers);
-    handles.append_range(std::views::zip_transform([payload_device](
-        const GUID &identifier, const auto &snapshot) {
-        auto handle = wil::unique_hfile{CreateFileA(
-            snapshot.device.c_str(), GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            nullptr, OPEN_EXISTING,
-            SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr)};
-        if (!handle) {
-            WinError(
-                "could not open VSS snapshot '{}' at '{}' to retain "
-                "the descriptor interval in '{}'",
-                FormatGuid(identifier), snapshot.device, payload_device);
-        }
-        return std::pair{identifier, std::move(handle)};
-    }, pending_identifiers, properties));
-    // Snapshot cleanup can change the catalog between its first read and
-    // handle acquisition. A second read with all handles open checks that
-    // the selected stores and their metadata locations have stayed unchanged.
-    const auto acquired_catalog = devicefs::vss::ReadBlockDescriptorIntervalCatalog(
-        payload_device, baseline_identifier, payload_identifier);
-    if (catalog != acquired_catalog) {
-        return std::unexpected{std::runtime_error(std::format(
-            "VSS descriptor interval '{}' to '{}' in '{}' changed "
-            "while its snapshot handles were being opened",
-            FormatGuid(baseline_identifier), FormatGuid(payload_identifier), payload_device))};
-    }
-    return catalog;
-}
-
-[[nodiscard]] auto AcquireSnapshotIntervalWithRetries(
-    const std::string_view payload_device,
-    const GUID &baseline_identifier,
-    const GUID &payload_identifier)
-    -> RetainedSnapshotInterval {
-    // Handles acquired in one attempt stay open through subsequent attempts
-    // and their pauses. Releasing them would let snapshot cleanup undo the
-    // progress made by earlier acquisitions.
-    auto handles = SnapshotHandles{};
-    for (auto attempt = 1; ; ++attempt) {
-        auto acquired = TryAcquireSnapshotInterval(
-            payload_device, baseline_identifier, payload_identifier, handles);
-        if (acquired) {
-            return RetainedSnapshotInterval{
-                .catalog = std::move(*acquired), .handles = std::move(handles)};
-        }
-        if (attempt == kSnapshotAcquisitionAttempts) {
-            throw acquired.error();
-        }
-        std::this_thread::sleep_for(kSnapshotAcquisitionRetryDelay);
-    }
-}
 
 [[nodiscard]] auto CollectDescriptorBlockOffsets(
     const std::span<const devicefs::vss::CatalogStoreDescriptors> stores) {
@@ -168,19 +73,20 @@ export [[nodiscard]] auto BuildDirtyBlockMap(
     const std::string_view baseline_device,
     const std::string_view payload_device)
     -> DirtyBlockMap {
-    // Descriptor, allocation, and SVI reads are separate operations. The
-    // snapshot handles cover that entire sequence and close when map
-    // construction returns, rather than after catalog discovery alone.
-    const auto retained = AcquireSnapshotIntervalWithRetries(
+    const auto catalog = devicefs::vss::ReadBlockDescriptorIntervalCatalog(
         payload_device, baseline_snapshot_identifier, payload_snapshot_identifier);
+    devicefs::WriteToStream(devicefs::stdout,
+        "Building the dirty map for an interval containing {} "
+        "snapshot(s), including A and B.\n",
+        catalog.stores.size() + 1);
     const auto allocation_blocks = devicefs::ReadAllocationChangeBlocks(
         baseline_device, payload_device, devicefs::vss::kBlockSize);
-    if (retained.catalog.payload.volume_size != allocation_blocks.volume_size) {
+    if (catalog.payload.volume_size != allocation_blocks.volume_size) {
         throw std::runtime_error(std::format(
             "the VSS descriptors for '{}' report a {}-byte volume, but the "
             "allocation bitmaps report {} bytes",
             payload_device,
-            retained.catalog.payload.volume_size, allocation_blocks.volume_size));
+            catalog.payload.volume_size, allocation_blocks.volume_size));
     }
 
     const auto svi_blocks = [baseline_device, payload_device] {
@@ -195,13 +101,13 @@ export [[nodiscard]] auto BuildDirtyBlockMap(
     }();
 
     const auto stores = devicefs::vss::ReadBlockDescriptors(
-        payload_device, retained.catalog.stores);
+        payload_device, catalog.stores);
     auto descriptor_blocks = CollectDescriptorBlockOffsets(stores);
     const auto descriptor_block_count = descriptor_blocks.size();
     descriptor_blocks.insert_range(allocation_blocks.block_offsets);
     descriptor_blocks.insert_range(svi_blocks);
     return DirtyBlockMap{
-        .volume_size = retained.catalog.payload.volume_size,
+        .volume_size = catalog.payload.volume_size,
         .block_offsets = std::move(descriptor_blocks),
         .descriptor_store_count = stores.size(),
         .descriptor_count = std::ranges::fold_left(stores, std::size_t{},

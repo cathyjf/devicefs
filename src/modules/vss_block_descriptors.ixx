@@ -114,8 +114,6 @@ struct CatalogStore {
     // The snapshot ID comes from the store header located by the type-3
     // catalog record. It is absent when the store has no in-volume data.
     std::optional<GUID> snapshot_identifier;
-
-    [[nodiscard]] auto operator==(const CatalogStore &) const -> bool = default;
 };
 
 // Read the catalog and store headers in catalog traversal order. The result
@@ -138,15 +136,12 @@ struct CatalogStoreDescriptors {
 struct CatalogInterval {
     CatalogStore payload;
     std::vector<CatalogStore> stores;
-
-    [[nodiscard]] auto operator==(const CatalogInterval &) const -> bool = default;
 };
 
 // Select contributing stores from the exact baseline inclusive to the exact
 // payload exclusive, in creation-time order. The payload entry is returned
-// separately. This reads store headers but not descriptor lists, so a caller
-// can open all snapshot devices before reading descriptors. A failed read or
-// selection throws; no partial interval is returned.
+// separately. This reads store headers but not descriptor lists. A failed
+// read or selection throws; no partial interval is returned.
 [[nodiscard]] auto ReadBlockDescriptorIntervalCatalog(std::string_view source,
     const GUID &baseline_identifier, const GUID &payload_identifier)
     -> CatalogInterval;
@@ -154,7 +149,6 @@ struct CatalogInterval {
 // Read every supplied store's descriptor list, in supplied order. `source`
 // exposes NTFS volume byte zero at offset zero and may be a volume device or a
 // flat image. The result preserves descriptor traversal order and multiplicity.
-// The caller keeps the selected snapshots available until this read completes.
 // Read failures throw; no partial result is returned.
 [[nodiscard]] auto ReadBlockDescriptors(std::string_view source,
     std::span<const CatalogStore> stores) -> std::vector<CatalogStoreDescriptors>;

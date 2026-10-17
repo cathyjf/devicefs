@@ -193,13 +193,10 @@ private:
 
 export namespace devicefs::vshadow {
 
-template <bool stop_on_failure = false>
 [[nodiscard]] auto QuerySnapshotProperties(
     const std::span<const GUID> snapshot_identifiers) {
-    using Properties = std::conditional_t<stop_on_failure,
-        SnapshotProperties, std::optional<SnapshotProperties>>;
     if (snapshot_identifiers.empty()) {
-        return std::vector<Properties>{};
+        return std::vector<std::optional<SnapshotProperties>>{};
     }
     auto &cache = GetSnapshotPropertiesCache();
     auto client = [snapshot_identifiers, &cache] -> std::optional<VssClientOwner> {
@@ -211,24 +208,17 @@ template <bool stop_on_failure = false>
         }
         try {
             return std::optional<VssClientOwner>{std::in_place, VSS_CTX_ALL};
-        } catch ([[maybe_unused]] const HRESULT result) {
-            if constexpr (stop_on_failure) {
-                WinError("failed to initialize VSS to query snapshot properties",
-                    ExplicitHresult{result});
-            } else {
-                return std::nullopt;
-            }
+        } catch (HRESULT) {
+            return std::nullopt;
         }
     }();
     return std::views::zip_transform([&client, &cache](
-        const GUID &identifier) -> Properties {
+        const GUID &identifier) -> std::optional<SnapshotProperties> {
         if (const auto cached = cache.find(identifier); cached != cache.end()) {
             return cached->second;
         }
-        if constexpr (!stop_on_failure) {
-            if (!client) {
-                return std::nullopt;
-            }
+        if (!client) {
+            return std::nullopt;
         }
         devicefs::WriteToStream(devicefs::stdout,
             "Retrieving the snapshot set ID, original volume, and device "
@@ -239,13 +229,8 @@ template <bool stop_on_failure = false>
         try {
             client->GetSnapshotProperties(identifier,
                 snapshot_set_identifier, original_volume, device);
-        } catch ([[maybe_unused]] const HRESULT result) {
-            if constexpr (stop_on_failure) {
-                WinError("failed to retrieve properties for VSS snapshot '{}'",
-                    FormatGuid(identifier), ExplicitHresult{result});
-            } else {
-                return std::nullopt;
-            }
+        } catch (HRESULT) {
+            return std::nullopt;
         }
         return cache.emplace(identifier, SnapshotProperties{
             .snapshot_set_identifier = snapshot_set_identifier,
@@ -255,9 +240,6 @@ template <bool stop_on_failure = false>
         }).first->second;
     }, snapshot_identifiers) | std::ranges::to<std::vector>();
 }
-
-template auto QuerySnapshotProperties<false>(std::span<const GUID>);
-template auto QuerySnapshotProperties<true>(std::span<const GUID>);
 
 // Resolve a drive, mount path, or volume name using the same VShadow rules
 // used when creating snapshots. The result can also be compared with the

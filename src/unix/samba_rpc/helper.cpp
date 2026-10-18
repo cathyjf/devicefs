@@ -116,7 +116,8 @@ struct RpcWorker {
     auto library = RpcWorkerLibrary{dlopen(
         DEVICEFS_RPC_WORKER_LIBRARY, RTLD_NOW | RTLD_GLOBAL)};
     if (!library) {
-        std::fprintf(stderr, "could not load Samba RPC worker library %s: %s\n",
+        PrintDiagnostic<true>(
+            "rpcd_devicefs: failed to load Samba RPC worker library '{}': {}",
             DEVICEFS_RPC_WORKER_LIBRARY, dlerror());
         return std::nullopt;
     }
@@ -124,9 +125,8 @@ struct RpcWorker {
     static_cast<void>(dlerror());
     auto *const address = dlsym(library.get(), "rpc_worker_main");
     if (const auto *const error = dlerror(); error != nullptr) {
-        std::fprintf(stderr,
-            "could not resolve rpc_worker_main in Samba RPC worker library "
-            "%s: %s\n",
+        PrintDiagnostic<true>("rpcd_devicefs: failed to find rpc_worker_main "
+            "in Samba RPC worker library '{}': {}",
             DEVICEFS_RPC_WORKER_LIBRARY, error);
         return std::nullopt;
     }
@@ -475,7 +475,7 @@ private:
     auto Run(const std::stop_token stop, Reader &reader) noexcept -> void {
         while (!stop.stop_requested()) {
             auto lock = std::unique_lock{mutex_};
-            if (!ready_.wait(lock, stop,
+            if (pending_.empty() && !ready_.wait(lock, stop,
                     [this] { return !pending_.empty(); })) {
                 return;
             }

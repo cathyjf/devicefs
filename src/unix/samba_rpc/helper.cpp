@@ -80,18 +80,26 @@ constexpr auto kIdleShutdownDelaySeconds = 1;
 constexpr auto kUnlimitedGrpcMessageSize = -1;
 #endif
 
-template <typename... Arguments>
-[[clang::always_inline]] void PrintDiagnostic(
-    [[maybe_unused]] const std::format_string<Arguments...> format,
-    [[maybe_unused]] Arguments &&...arguments) noexcept {
-#if defined(DEVICEFS_SAMBA_RPC_DIAGNOSTICS)
+template <bool print_in_release = false, typename... Arguments>
+#ifndef DEVICEFS_SAMBA_RPC_DIAGNOSTICS
+    requires print_in_release
+#endif
+[[clang::noinline]] void PrintDiagnostic(
+    const std::format_string<Arguments...> format,
+    Arguments &&...arguments) noexcept {
     try {
         std::println(
             stderr, format, std::forward<Arguments>(arguments)...);
         std::fflush(stderr);
     } catch (...) {}
-#endif
 }
+
+#ifndef DEVICEFS_SAMBA_RPC_DIAGNOSTICS
+template <bool print_in_release = false, typename... Arguments>
+    requires (!print_in_release)
+[[clang::always_inline]] void PrintDiagnostic(
+    const std::format_string<Arguments...>, Arguments &&...) noexcept {}
+#endif
 
 #if defined(__linux__)
 using RpcWorkerLibrary = std::unique_ptr<void,
@@ -264,7 +272,7 @@ public:
                 const auto status =
                     stub_.Read(&context, request, &response);
                 if (!status.ok()) {
-                    PrintDiagnostic(
+                    PrintDiagnostic<true>(
                         "rpcd_devicefs: gRPC Read failed (code {}): {}",
                         std::to_underlying(status.error_code()),
                         status.error_message());
@@ -293,7 +301,7 @@ public:
     };
 
     explicit GrpcBackingDevice(const std::filesystem::path &path) {
-        PrintDiagnostic(
+        PrintDiagnostic<true>(
             "rpcd_devicefs: creating gRPC channel for '{}'", path.string());
         auto arguments = grpc::ChannelArguments{};
         /*
@@ -313,17 +321,17 @@ public:
         auto context = grpc::ClientContext{};
         auto request = proxmox::backup::GetLengthRequest{};
         auto response = proxmox::backup::GetLengthResponse{};
-        PrintDiagnostic("rpcd_devicefs: calling gRPC GetLength");
+        PrintDiagnostic<true>("rpcd_devicefs: calling gRPC GetLength");
         const auto status = stub_->GetLength(&context, request, &response);
         if (!status.ok()) {
-            PrintDiagnostic(
+            PrintDiagnostic<true>(
                 "rpcd_devicefs: gRPC GetLength failed (code {}): {}",
                 std::to_underlying(status.error_code()),
                 status.error_message());
             throw std::runtime_error{status.error_message()};
         }
         length_ = response.length();
-        PrintDiagnostic(
+        PrintDiagnostic<true>(
             "rpcd_devicefs: gRPC GetLength returned {} bytes", length_);
     }
 
@@ -575,7 +583,7 @@ auto GetServers(dcesrv_context *,
         if (path == nullptr) {
             return NT_STATUS_INVALID_PARAMETER;
         }
-        PrintDiagnostic("rpcd_devicefs: inspecting backing path '{}'", path);
+        PrintDiagnostic<true>("rpcd_devicefs: inspecting backing path '{}'", path);
         try {
 #if DEVICEFS_ENABLE_GRPC_TRANSPORT
             /*
@@ -604,6 +612,13 @@ auto GetServers(dcesrv_context *,
                 state.read_executor.emplace(device);
             }, *state.backing_device);
         } catch (...) {
+            try {
+                throw;
+            } catch (const std::exception &error) {
+                PrintDiagnostic<true>("rpcd_devicefs: failed to initialize "
+                    "backing device '{}' or its reader threads: {}", path,
+                    error.what());
+            } catch (...) {}
             state.read_executor.reset();
             state.backing_device.reset();
             return NT_STATUS_UNSUCCESSFUL;
@@ -650,7 +665,7 @@ auto GetServers(dcesrv_context *,
      */
     *servers = state.endpoint_servers.data();
     *server_count = state.endpoint_servers.size();
-    PrintDiagnostic("rpcd_devicefs: Samba worker initialization complete");
+    PrintDiagnostic<true>("rpcd_devicefs: Samba worker initialization complete");
     return NT_STATUS_OK;
 }
 

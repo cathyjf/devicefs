@@ -1090,9 +1090,10 @@ auto StartVerificationWorkers(
     const auto output_filled = std::span{output_storage_.get(), returned};
 
     const auto [stream_matches, stream_offset] = [output_filled] {
-        auto output = LOOKUP_STREAM_FROM_CLUSTER_OUTPUT{};
-        std::memcpy(&output, output_filled.data(), sizeof(output));
-        return std::pair{output.NumberOfMatches, output.Offset};
+        const auto output =
+            std::start_lifetime_as<LOOKUP_STREAM_FROM_CLUSTER_OUTPUT>(
+                output_filled.data());
+        return std::pair{output->NumberOfMatches, output->Offset};
     }();
     auto result = std::vector<SnapshotStreamMatch>{};
     result.reserve(stream_matches);
@@ -1103,34 +1104,30 @@ auto StartVerificationWorkers(
     constexpr auto entry_header_size =
         offsetof(LOOKUP_STREAM_FROM_CLUSTER_ENTRY, FileName);
     while (true) {
-        auto entry = LOOKUP_STREAM_FROM_CLUSTER_ENTRY{};
-        std::memcpy(&entry, entries.data(), entry_header_size);
-        const auto entry_size = (entry.OffsetToNext == 0)
-            ? entries.size() : entry.OffsetToNext;
-        const auto name_characters =
-            (entry_size - entry_header_size) /
-            sizeof(std::wstring::value_type);
-        auto name = std::wstring{};
-        name.resize_and_overwrite(name_characters,
-            [source = entries.subspan(entry_header_size)](
-            auto *const destination, const auto count) noexcept {
-            std::memcpy(destination, source.data(),
-                count * sizeof(*destination));
-            return count;
-        });
-        // FileName is a null-terminated trailing array whose SDK declaration
-        // exposes only its first element.
-        name.resize(name.find(L'\0'));
+        const auto entry =
+            std::start_lifetime_as<LOOKUP_STREAM_FROM_CLUSTER_ENTRY>(
+                entries.data());
+        const auto next_offset = entry->OffsetToNext;
         result.push_back({
             .cluster = wil::safe_cast_failfast<std::uint64_t>(
-                entry.Cluster.QuadPart),
-            .flags = entry.Flags,
-            .name = std::move(name),
+                entry->Cluster.QuadPart),
+            .flags = entry->Flags,
+            .name = [next_offset, entries] {
+                using CharType = std::remove_extent_t<decltype(
+                    entry->FileName)>;
+                const auto entry_size = (next_offset == 0)
+                    ? entries.size() : next_offset;
+                const auto name_maximum_length_in_characters =
+                    (entry_size - entry_header_size) / sizeof(CharType);
+                return std::wstring{std::start_lifetime_as_array<CharType>(
+                    entries.subspan(entry_header_size).data(),
+                    name_maximum_length_in_characters)};
+            }(),
         });
-        if (entry.OffsetToNext == 0) {
+        if (next_offset == 0) {
             break;
         }
-        entries = entries.subspan(entry.OffsetToNext);
+        entries = entries.subspan(next_offset);
     }
     return result;
 }

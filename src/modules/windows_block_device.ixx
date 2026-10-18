@@ -417,17 +417,20 @@ struct WindowsBlockDevice {
         }
 
         const auto [bounce, temporary_backing_memory] = [read_length]
-            -> std::pair<std::span<BYTE>, decltype(NewAlignedArray(read_length, read_buffer_alignment))> {
+            -> std::pair<std::span<BYTE>, decltype(NewAlignedBuffer(
+                read_length, read_buffer_alignment))> {
             // This 5 MIB capacity comfortably accommodates a 4 MiB PBS chunk
             // and any extra bytes needed for sector alignment.
             constexpr auto kRetainedReadBufferSize = 5uz * 1024 * 1024;
             if (read_length <= kRetainedReadBufferSize) {
                 thread_local const auto retained_buffer_storage =
-                    NewAlignedArray(kRetainedReadBufferSize, read_buffer_alignment);
+                    NewAlignedBuffer(
+                        kRetainedReadBufferSize, read_buffer_alignment);
                 return {std::span{retained_buffer_storage.get(), read_length},
                     {nullptr, retained_buffer_storage.get_deleter()}};
             }
-            auto newly_allocated_memory = NewAlignedArray(read_length, read_buffer_alignment);
+            auto newly_allocated_memory = NewAlignedBuffer(
+                read_length, read_buffer_alignment);
             return {std::span{newly_allocated_memory.get(), read_length},
                 std::move(newly_allocated_memory)};
         }();

@@ -25,7 +25,7 @@ import <devicefs/windows_imports.h>;
 //
 // A buffer used for reading from the file must have an address that is a
 // multiple of the returned value. To obtain such a buffer, callers can use the
-// `NewAlignedArray` function defined below.
+// `NewAlignedBuffer` function defined below.
 //
 // For unbuffered reads, the starting position in the file and the number of
 // bytes requested must also be multiples of the volume's sector size.
@@ -43,38 +43,40 @@ export [[nodiscard]] auto QueryBufferAlignment(const HANDLE file) noexcept
     return std::align_val_t{std::size_t{information.AlignmentRequirement} + 1};
 }
 
-// Allocate an array of `size` objects of type `T` whose starting address is
-// divisible by `alignment`. This is useful for raw volume reads because such
-// reads require specially-aligned buffers.
+// Allocate a buffer of `size` bytes whose starting address is divisible by
+// `alignment`. This is useful for raw volume reads because such reads require
+// specially-aligned buffers.
 // https://learn.microsoft.com/en-us/windows/win32/fileio/file-buffering#alignment-and-file-access-requirements
 //
 // If `terminate_on_failure` is true, allocation failures terminate the process.
 // Otherwise, the function returns `std::unique_ptr{nullptr}` on failure.
 export
 template <class T = BYTE, bool terminate_on_failure = true>
-    requires std::is_trivially_destructible_v<T>
+    requires (std::same_as<T, char> ||
+        std::same_as<T, unsigned char> ||
+        std::same_as<T, std::byte>)
 [[nodiscard, msvc::forceinline]]
-auto NewAlignedArray(const std::size_t size, const std::align_val_t alignment) noexcept {
+auto NewAlignedBuffer(const std::size_t size, const std::align_val_t alignment) noexcept {
     const auto deleter = [alignment](T *const allocation) noexcept {
         [[gsl::suppress("26409",
             justification:
-                "Invoking `operator delete[]` is necessary to free the memory "
+                "Invoking `operator delete` is necessary to free the memory "
                 "allocated below.")]]
-        ::operator delete[](allocation, alignment);
+        ::operator delete(allocation, alignment);
     };
-    return std::unique_ptr<T[], decltype(deleter)>{
+    return std::unique_ptr<T, decltype(deleter)>{
         [size, alignment] noexcept {
             [[gsl::suppress("26409",
                 justification:
                     "The analyzer suggests using `std::make_unique`, but that "
                     "function cannot allocate an over-aligned byte array.")]]
-            const auto buffer = ::new (alignment, std::nothrow) T[size];
+            const auto buffer = ::operator new(size, alignment, std::nothrow);
             if constexpr (terminate_on_failure) {
                 if (!buffer) {
                     std::terminate();
                 }
             }
-            return buffer;
+            return static_cast<T *>(buffer);
         }(),
         deleter
     };

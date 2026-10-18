@@ -6,6 +6,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
@@ -323,13 +324,14 @@ public static unsafe class DeviceFsTestNative {
             : volumeName;
     }
 
-    private static SafeFileHandle OpenDevice(string path) {
-        var handle = CreateFile(DevicePath(path), (uint)GENERIC_ACCESS_RIGHTS.GENERIC_READ,
+    private static SafeFileHandle OpenDevice(string path,
+        uint desiredAccess = (uint)GENERIC_ACCESS_RIGHTS.GENERIC_READ) {
+        var handle = CreateFile(DevicePath(path), desiredAccess,
             (FILE_SHARE_MODE.FILE_SHARE_READ | FILE_SHARE_MODE.FILE_SHARE_WRITE | FILE_SHARE_MODE.FILE_SHARE_DELETE),
             null, FILE_CREATION_DISPOSITION.OPEN_EXISTING,
             (FILE_FLAGS_AND_ATTRIBUTES.SECURITY_SQOS_PRESENT | FILE_FLAGS_AND_ATTRIBUTES.SECURITY_IDENTIFICATION), null);
         if (handle.IsInvalid) {
-            var error = LastError("could not open volume device");
+            var error = LastError($"failed to open volume device '{path}'");
             handle.Dispose();
             throw error;
         }
@@ -340,7 +342,7 @@ public static unsafe class DeviceFsTestNative {
     private static SafeFileHandle OpenRawReadDevice(string path) {
         var device = OpenDevice(path);
         try {
-            _ = Control(device, FSCTL_ALLOW_EXTENDED_DASD_IO, null, 0);
+            _ = Control(device, path, FSCTL_ALLOW_EXTENDED_DASD_IO, null, 0);
             return device;
         } catch {
             device.Dispose();
@@ -363,22 +365,42 @@ public static unsafe class DeviceFsTestNative {
         return handle;
     }
 
-    internal static IoResult Control(SafeFileHandle device, uint code,
-        byte[] input, int outputSize, bool allowMoreData = false) {
+    internal static IoResult Control(SafeFileHandle device, string devicePath,
+        uint code, byte[] input, int outputSize, bool allowMoreData = false,
+        [CallerArgumentExpression(nameof(code))] string codeName = null) {
         var output = outputSize == 0 ? null : new byte[outputSize];
         if (!DeviceIoControl(device, code, input, output, out var returned, null)) {
             var error = Marshal.GetLastWin32Error();
             if (!allowMoreData || (error != (int)WIN32_ERROR.ERROR_MORE_DATA)) {
-                throw Win32Error($"DeviceIoControl 0x{code:X8} failed", error);
+                throw Win32Error(
+                    $"DeviceIoControl {codeName} (0x{code:X8}) failed for '{devicePath}'", error);
             }
         }
 
         return new IoResult(output ?? Array.Empty<byte>(), returned);
     }
 
-    private static long QueryLength(SafeFileHandle device) {
+    public static byte[] QueryDeviceUniqueId(string devicePath) {
+        // The pinned Win32 metadata omits this mountdev.h declaration.
+        // CTL_CODE('M', 0, METHOD_BUFFERED, FILE_ANY_ACCESS)
+        const uint IOCTL_MOUNTDEV_QUERY_UNIQUE_ID = 0x004d0000;
+        using var device = OpenDevice(devicePath, 0);
+
+        // `MOUNTDEV_UNIQUE_ID` starts with a USHORT byte count followed by the
+        // ID. Its sizeof is four, including the trailing array and padding.
+        // A short buffer receives the count even when the ID does not fit.
+        // https://github.com/microsoft/Windows-driver-samples/blob/main/storage/class/classpnp/src/class.c#L6758-L6789
+        var header = Control(device, devicePath, IOCTL_MOUNTDEV_QUERY_UNIQUE_ID,
+            null, 4, allowMoreData: true).Buffer;
+        var length = BinaryPrimitives.ReadUInt16LittleEndian(header);
+        var output = Control(device, devicePath, IOCTL_MOUNTDEV_QUERY_UNIQUE_ID,
+            null, Math.Max(header.Length, sizeof(ushort) + length)).Buffer;
+        return output.AsSpan(sizeof(ushort), length).ToArray();
+    }
+
+    private static long QueryLength(SafeFileHandle device, string devicePath) {
         var result = Control(
-            device, IOCTL_DISK_GET_LENGTH_INFO, null, sizeof(GET_LENGTH_INFORMATION));
+            device, devicePath, IOCTL_DISK_GET_LENGTH_INFO, null, sizeof(GET_LENGTH_INFORMATION));
         if (result.BytesReturned < sizeof(GET_LENGTH_INFORMATION)) {
             throw new InvalidDataException(
                 "IOCTL_DISK_GET_LENGTH_INFO returned incomplete data");
@@ -393,9 +415,9 @@ public static unsafe class DeviceFsTestNative {
         return length;
     }
 
-    private static uint QuerySectorSize(SafeFileHandle device) {
+    private static uint QuerySectorSize(SafeFileHandle device, string devicePath) {
         var result = Control(
-            device, IOCTL_DISK_GET_DRIVE_GEOMETRY, null, sizeof(DISK_GEOMETRY));
+            device, devicePath, IOCTL_DISK_GET_DRIVE_GEOMETRY, null, sizeof(DISK_GEOMETRY));
         if (result.BytesReturned < sizeof(DISK_GEOMETRY)) {
             throw new InvalidDataException(
                 "IOCTL_DISK_GET_DRIVE_GEOMETRY returned incomplete data");
@@ -410,9 +432,9 @@ public static unsafe class DeviceFsTestNative {
         return sectorSize;
     }
 
-    private static NTFS_VOLUME_DATA_BUFFER QueryNtfsData(SafeFileHandle device) {
+    private static NTFS_VOLUME_DATA_BUFFER QueryNtfsData(SafeFileHandle device, string devicePath) {
         var result = Control(
-            device, FSCTL_GET_NTFS_VOLUME_DATA, null, sizeof(NTFS_VOLUME_DATA_BUFFER));
+            device, devicePath, FSCTL_GET_NTFS_VOLUME_DATA, null, sizeof(NTFS_VOLUME_DATA_BUFFER));
         if (result.BytesReturned < sizeof(NTFS_VOLUME_DATA_BUFFER)) {
             throw new InvalidDataException(
                 "FSCTL_GET_NTFS_VOLUME_DATA returned incomplete data");
@@ -422,13 +444,13 @@ public static unsafe class DeviceFsTestNative {
     }
 
     private static (long ClusterCount, uint ClusterSize, uint SectorSize)
-        QueryVolumeGeometry(SafeFileHandle device, string fileSystemName) {
+        QueryVolumeGeometry(SafeFileHandle device, string devicePath, string fileSystemName) {
         if (string.Equals(fileSystemName, "NTFS", StringComparison.OrdinalIgnoreCase)) {
-            var ntfs = QueryNtfsData(device);
+            var ntfs = QueryNtfsData(device, devicePath);
             return (ntfs.TotalClusters, ntfs.BytesPerCluster, ntfs.BytesPerSector);
         }
         if (string.Equals(fileSystemName, "ReFS", StringComparison.OrdinalIgnoreCase)) {
-            var result = Control(device, FSCTL_GET_REFS_VOLUME_DATA, null, sizeof(REFS_VOLUME_DATA_BUFFER));
+            var result = Control(device, devicePath, FSCTL_GET_REFS_VOLUME_DATA, null, sizeof(REFS_VOLUME_DATA_BUFFER));
             if (result.BytesReturned < sizeof(REFS_VOLUME_DATA_BUFFER)) {
                 throw new InvalidDataException("FSCTL_GET_REFS_VOLUME_DATA returned incomplete data");
             }
@@ -464,7 +486,7 @@ public static unsafe class DeviceFsTestNative {
     }
 
     private static VolumeAllocationBitmap QueryBitmap(SafeFileHandle device,
-        bool requireReadOnly, Action<string> log) {
+        string devicePath, bool requireReadOnly, Action<string> log) {
         QueryVolumeInformation(device, out _, out var fileSystemName,
             out var fileSystemFlags);
         if (requireReadOnly && ((fileSystemFlags & FILE_READ_ONLY_VOLUME) == 0)) {
@@ -472,12 +494,12 @@ public static unsafe class DeviceFsTestNative {
                 "volume is not reported read-only");
         }
 
-        var length = QueryLength(device);
-        var sectorSize = QuerySectorSize(device);
-        var geometry = QueryVolumeGeometry(device, fileSystemName);
+        var length = QueryLength(device, devicePath);
+        var sectorSize = QuerySectorSize(device, devicePath);
+        var geometry = QueryVolumeGeometry(device, devicePath, fileSystemName);
         ValidateVolumeGeometry(length, sectorSize, geometry);
 
-        var retrievalBase = Control(device, FSCTL_GET_RETRIEVAL_POINTER_BASE,
+        var retrievalBase = Control(device, devicePath, FSCTL_GET_RETRIEVAL_POINTER_BASE,
             null, sizeof(RETRIEVAL_POINTER_BASE));
         if ((retrievalBase.BytesReturned < sizeof(RETRIEVAL_POINTER_BASE)) ||
             (MemoryMarshal.Read<RETRIEVAL_POINTER_BASE>(retrievalBase.Buffer).FileAreaOffset != 0)) {
@@ -493,7 +515,7 @@ public static unsafe class DeviceFsTestNative {
         }
 
         var input = new byte[sizeof(long)];
-        var result = Control(device, FSCTL_GET_VOLUME_BITMAP, input,
+        var result = Control(device, devicePath, FSCTL_GET_VOLUME_BITMAP, input,
             Math.Max(sizeof(VOLUME_BITMAP_BUFFER), (int)requiredSize), allowMoreData: true);
         var bitmap = MemoryMarshal.Read<VOLUME_BITMAP_BUFFER>(result.Buffer);
         if ((result.BytesReturned < requiredSize) ||
@@ -514,12 +536,12 @@ public static unsafe class DeviceFsTestNative {
             geometry.ClusterCount, bits);
     }
 
-    private static VolumeIdentity InspectHandle(SafeFileHandle device) {
+    private static VolumeIdentity InspectHandle(SafeFileHandle device, string devicePath) {
         QueryVolumeInformation(device, out var label, out var fileSystemName,
             out _);
 
-        var length = QueryLength(device);
-        var extents = Control(device, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+        var length = QueryLength(device, devicePath);
+        var extents = Control(device, devicePath, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
             null, sizeof(VOLUME_DISK_EXTENTS));
         if ((extents.BytesReturned < sizeof(VOLUME_DISK_EXTENTS)) ||
             (MemoryMarshal.Read<VOLUME_DISK_EXTENTS>(extents.Buffer).NumberOfDiskExtents != 1)) {
@@ -593,20 +615,20 @@ public static unsafe class DeviceFsTestNative {
 
     public static VolumeIdentity InspectVolume(string volumeName) {
         using var device = OpenDevice(volumeName);
-        return InspectHandle(device);
+        return InspectHandle(device, volumeName);
     }
 
     public static VolumeAllocationBitmap GetAllocationBitmap(string devicePath,
         bool requireReadOnly, Action<string> log = null) {
         using var device = OpenDevice(devicePath);
-        return QueryBitmap(device, requireReadOnly, log ?? Console.WriteLine);
+        return QueryBitmap(device, devicePath, requireReadOnly, log ?? Console.WriteLine);
     }
 
     public static byte[] ReadDeviceAt(string devicePath,
         long offset, int count) {
         using var device = OpenRawReadDevice(devicePath);
-        return ReadDeviceAt(device, QueryLength(device),
-            QuerySectorSize(device), offset, count);
+        return ReadDeviceAt(device, QueryLength(device, devicePath),
+            QuerySectorSize(device, devicePath), offset, count);
     }
 
     public static IDisposable EnableBackupPrivilege() {
@@ -996,8 +1018,8 @@ public static unsafe class DeviceFsTestNative {
     public static void CopyDeviceToFile(string devicePath,
         string destinationPath) {
         using var source = OpenRawReadDevice(devicePath);
-        var length = QueryLength(source);
-        var sectorSize = QuerySectorSize(source);
+        var length = QueryLength(source, devicePath);
+        var sectorSize = QuerySectorSize(source, devicePath);
         using var destination = new FileStream(destinationPath,
             FileMode.CreateNew, FileAccess.Write, FileShare.Read);
         const int readSize = 4 * 1024 * 1024;
@@ -1242,8 +1264,8 @@ public static unsafe class DeviceFsTestNative {
         using var synthetic = new FileStream(syntheticImagePath, FileMode.Open,
             FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1,
             FileOptions.SequentialScan);
-        var length = QueryLength(source);
-        var sectorSize = QuerySectorSize(source);
+        var length = QueryLength(source, sourceDevicePath);
+        var sectorSize = QuerySectorSize(source, sourceDevicePath);
         if ((length != bitmap.Length) ||
             (sectorSize != bitmap.SectorSize) ||
             (normal.Length != length) || (synthetic.Length != length)) {
@@ -1352,9 +1374,11 @@ public sealed unsafe class DeviceFsTestDisk : IDisposable {
         }
         return MemoryMarshal.Read<T>(buffer.AsSpan(offset));
     }
-    private static byte[] Control(SafeFileHandle disk, uint code,
-        byte[] input = null, int outputSize = 0) {
-        var result = DeviceFsTestNative.Control(disk, code, input, outputSize);
+    private static byte[] Control(SafeFileHandle disk, string devicePath, uint code,
+        byte[] input = null, int outputSize = 0,
+        [CallerArgumentExpression(nameof(code))] string codeName = null) {
+        var result = DeviceFsTestNative.Control(
+            disk, devicePath, code, input, outputSize, codeName: codeName);
         return result.Buffer.AsSpan(0, checked((int)result.BytesReturned)).ToArray();
     }
 
@@ -1475,20 +1499,20 @@ public sealed unsafe class DeviceFsTestDisk : IDisposable {
                 RequireSuccess((WIN32_ERROR)Marshal.GetLastWin32Error(), $"Open '{physicalPath}'");
             }
             var number = Structure<STORAGE_DEVICE_NUMBER>(Control(
-                disk, IOCTL_STORAGE_GET_DEVICE_NUMBER, outputSize: sizeof(STORAGE_DEVICE_NUMBER)));
+                disk, physicalPath, IOCTL_STORAGE_GET_DEVICE_NUMBER, outputSize: sizeof(STORAGE_DEVICE_NUMBER)));
             result.DiskNumber = number.DeviceNumber;
             result.DiskLength = Structure<GET_LENGTH_INFORMATION>(Control(
-                disk, IOCTL_DISK_GET_LENGTH_INFO, outputSize: sizeof(GET_LENGTH_INFORMATION))).Length;
+                disk, physicalPath, IOCTL_DISK_GET_LENGTH_INFO, outputSize: sizeof(GET_LENGTH_INFORMATION))).Length;
             if (initialize) {
                 var create = new CREATE_DISK { PartitionStyle = PARTITION_STYLE.PARTITION_STYLE_GPT };
                 create.Gpt = new CREATE_DISK_GPT { DiskId = Guid.NewGuid(), MaxPartitionCount = GptEntryCount };
-                Control(disk, IOCTL_DISK_CREATE_DISK, Bytes(create));
+                Control(disk, physicalPath, IOCTL_DISK_CREATE_DISK, Bytes(create));
             }
             // `IOCTL_DISK_UPDATE_PROPERTIES` makes Windows reread the initialized
             // partition table before its usable range is queried.
             // https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_disk_update_properties
-            if (initialize) { Control(disk, IOCTL_DISK_UPDATE_PROPERTIES); }
-            var (header, partitions) = ReadLayout(disk);
+            if (initialize) { Control(disk, physicalPath, IOCTL_DISK_UPDATE_PROPERTIES); }
+            var (header, partitions) = ReadLayout(disk, physicalPath);
             if (header.PartitionStyle != (uint)PARTITION_STYLE.PARTITION_STYLE_GPT) {
                 throw new InvalidDataException($"'{path}' does not contain a GPT disk.");
             }
@@ -1521,9 +1545,9 @@ public sealed unsafe class DeviceFsTestDisk : IDisposable {
                     partition.RewritePartition = true;
                     Bytes(partition).CopyTo(updated, headerSize + index * entrySize);
                 }
-                Control(disk, IOCTL_DISK_SET_DRIVE_LAYOUT_EX, updated);
-                Control(disk, IOCTL_DISK_UPDATE_PROPERTIES);
-                (_, partitions) = ReadLayout(disk);
+                Control(disk, physicalPath, IOCTL_DISK_SET_DRIVE_LAYOUT_EX, updated);
+                Control(disk, physicalPath, IOCTL_DISK_UPDATE_PROPERTIES);
+                (_, partitions) = ReadLayout(disk, physicalPath);
             }
             var selected = partitions.FindAll(
                 partition => partition.Gpt.PartitionType == PARTITION_BASIC_DATA_GUID);
@@ -1542,7 +1566,7 @@ public sealed unsafe class DeviceFsTestDisk : IDisposable {
         }
     }
     private static (DRIVE_LAYOUT_INFORMATION_EX Header, List<PARTITION_INFORMATION_EX> Partitions) ReadLayout(
-        SafeFileHandle disk) {
+        SafeFileHandle disk, string devicePath) {
         // `PartitionEntry` begins the variable-length partition list. The
         // generated structure includes its first element, but only the bytes
         // preceding that member belong to the fixed header.
@@ -1550,7 +1574,7 @@ public sealed unsafe class DeviceFsTestDisk : IDisposable {
         var headerSize = Marshal.OffsetOf<DRIVE_LAYOUT_INFORMATION_EX>(nameof(DRIVE_LAYOUT_INFORMATION_EX.PartitionEntry)).ToInt32();
         var entrySize = sizeof(PARTITION_INFORMATION_EX);
         // Both the created fixtures and VhdxViewer use 128 GPT entries.
-        var layout = Control(disk, IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
+        var layout = Control(disk, devicePath, IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
             outputSize: headerSize + checked((int)GptEntryCount) * entrySize);
         var header = new DRIVE_LAYOUT_INFORMATION_EX();
         layout.AsSpan(0, headerSize).CopyTo(

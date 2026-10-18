@@ -5,9 +5,7 @@
 # compiled together with the test helpers by PowerShell's `Add-Type`.
 # https://github.com/microsoft/CsWin32/tree/v0.3.335/src/CsWin32Generator
 param(
-    [string] $CMakeCachePath = [IO.Path]::GetFullPath(
-        "../../build/windows-$([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant())/CMakeCache.txt",
-        $PSScriptRoot),
+    [Parameter(Mandatory)] [string] $CMakeCachePath,
     [string] $Configuration = 'Release'
 )
 

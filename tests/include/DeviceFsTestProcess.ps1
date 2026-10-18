@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# Return the requested executable from the repository's native-architecture
-# `Release` build. `OSArchitecture` selects `windows-x64` or `windows-arm64`
-# independently of the architecture of the PowerShell process.
-function Get-DefaultTestExecutablePath {
-    param(
-        [Parameter(Mandatory)]
-        [string] $Name
-    )
-
-    $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
-    return [IO.Path]::GetFullPath(
-        (Join-Path $PSScriptRoot "../../build/windows-$architecture/Release/$Name"))
-}
+. (Join-Path $PSScriptRoot 'DeviceFsTestBuild.ps1')
 
 function Start-DeviceFsTestProcess {
     param(

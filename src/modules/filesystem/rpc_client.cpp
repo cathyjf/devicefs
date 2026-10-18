@@ -48,17 +48,18 @@ namespace rpc_client {
 
 using namespace std::string_view_literals;
 
-constexpr auto kTcpPrefix = "tcp:"sv;
 constexpr auto kTcpUsername = "devicefs"sv;
 
 [[nodiscard]] auto IsRpcDevice(const internal::Mapping &mapping) noexcept {
-    return mapping.device.starts_with(internal::kRpcDevicePrefix);
+    return mapping.device.starts_with(devicefs::rpc::kDeviceSourcePrefix);
 }
 
 [[nodiscard]] auto IsTcpDevice(const internal::Mapping &mapping) noexcept {
     return IsRpcDevice(mapping) &&
-        std::string_view{mapping.device}.substr(
-            internal::kRpcDevicePrefix.size()).starts_with(kTcpPrefix);
+        std::string_view{mapping.device}
+            .substr(std::string_view{
+                devicefs::rpc::kDeviceSourcePrefix}.size())
+            .starts_with(devicefs::rpc::kTcpSourcePrefix);
 }
 
 [[nodiscard]] auto MakeRpcBinding(const std::string_view binding) {
@@ -100,7 +101,8 @@ constexpr auto kTcpUsername = "devicefs"sv;
     const internal::Mapping &mapping,
     const std::string_view password) {
     const auto source = std::string_view{mapping.device}.substr(
-        internal::kRpcDevicePrefix.size() + kTcpPrefix.size());
+        std::string_view{devicefs::rpc::kDeviceSourcePrefix}.size() +
+            std::string_view{devicefs::rpc::kTcpSourcePrefix}.size());
     auto fields = source | std::views::split(':');
     auto position = fields.begin();
     const auto next = [&]() {

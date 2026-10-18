@@ -109,7 +109,8 @@ struct DeviceFsStartRequest {
         arguments.emplace_back("--map");
         arguments.emplace_back(source.name);
         arguments.emplace_back(request.rpc_endpoint
-            ? std::format(R"(\\\{})", source.source)
+            ? std::format("{}{}",
+                devicefs::rpc::kDeviceSourcePrefix, source.source)
             : source.source);
     }
     if (request.rpc_endpoint &&

@@ -296,7 +296,7 @@ try {
         Write-Host "DeviceFs mount point: $devicefs_mount"
         $password | & $SupervisorPath --devicefs --vhdx `
             --mount $devicefs_mount `
-            --map fixture.vhdx "\\\tcp:127.0.0.1:$port"
+            --map fixture.vhdx "\\\rpc:tcp:127.0.0.1:$port"
         if ($LASTEXITCODE -ne 0) {
             throw "DeviceFs failed with exit code $LASTEXITCODE."
         }

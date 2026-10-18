@@ -24,5 +24,7 @@ export namespace devicefs::rpc {
 
 constexpr auto kEndpointEnvironmentVariable = "DEVICEFS_RPC_ENDPOINT";
 constexpr auto kProtocolSequence = "ncalrpc";
+constexpr auto kDeviceSourcePrefix = R"(\\\rpc:)";
+constexpr auto kTcpSourcePrefix = "tcp:";
 
 } // namespace devicefs::rpc

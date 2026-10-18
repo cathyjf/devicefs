@@ -27,6 +27,6 @@ struct Mapping {
     std::string device;
 };
 
-constexpr auto kRpcDevicePrefix = R"(\\\)"sv;
+constexpr auto kHandleDevicePrefix = R"(\\\handle:)"sv;
 
 } // namespace internal

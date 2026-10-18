@@ -256,6 +256,10 @@ struct AllocationBitmap {
 
 export namespace devicefs {
 
+[[nodiscard]] auto OpenBlockDevice(
+    const std::filesystem::path &filename,
+    std::string_view description) -> wil::unique_hfile;
+
 struct WindowsBlockDevice {
     // A thread reuses its retained read buffer across devices, so that buffer
     // must satisfy every device's alignment requirement. The default is the
@@ -279,8 +283,20 @@ struct WindowsBlockDevice {
     filesystem_internal::AllocationBitmap allocation_bitmap;
 
     [[nodiscard]] static auto FromFilename(
-        std::filesystem::path filename, bool extended_dasd,
-        bool cache, bool synthetic_free_clusters,
+        std::filesystem::path filename, auto &&...arguments)
+        -> WindowsBlockDevice {
+        auto handle = OpenBlockDevice(filename,
+            std::get<sizeof...(arguments) - 1>(
+                std::forward_as_tuple(arguments...)));
+        return FromHandle(std::move(handle), std::move(filename),
+            std::forward<decltype(arguments)>(arguments)...);
+    }
+
+    // Take ownership of an overlapped read handle. `filename` identifies the
+    // source in diagnostics.
+    [[nodiscard]] static auto FromHandle(
+        wil::unique_hfile handle, std::filesystem::path filename,
+        bool extended_dasd, bool cache, bool synthetic_free_clusters,
         std::string_view description) -> WindowsBlockDevice;
 
     // Return a bitmap that lets a backup client skip reading chunks that `Read`
@@ -608,18 +624,24 @@ using filesystem_internal::AllocationBitmap;
 using filesystem_internal::Ioctl;
 using filesystem_internal::LoadAllocationBitmap;
 
-auto WindowsBlockDevice::FromFilename(
-    std::filesystem::path filename, const bool extended_dasd,
-    const bool cache, const bool synthetic_free_clusters,
-    const std::string_view description) -> WindowsBlockDevice {
+auto OpenBlockDevice(
+    const std::filesystem::path &filename,
+    const std::string_view description) -> wil::unique_hfile {
     auto handle = wil::unique_hfile(CreateFileW(filename.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
     if (!handle) {
-        WinError("could not open block device '{}' for {}",
+        WinError("failed to open block device '{}' for {}",
             std::wstring_view{filename.native()}, description);
     }
+    return handle;
+}
 
+auto WindowsBlockDevice::FromHandle(
+    wil::unique_hfile handle, std::filesystem::path filename,
+    const bool extended_dasd, const bool cache,
+    const bool synthetic_free_clusters,
+    const std::string_view description) -> WindowsBlockDevice {
     const auto alignment = QueryBufferAlignment(handle.get());
     if (!alignment) {
         WinError("could not query buffer alignment for block device '{}' ({})",

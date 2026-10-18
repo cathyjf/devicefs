@@ -27,6 +27,7 @@ import :winfsp_loader;
 export import devicefs.windows_block_device;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import devicefs.rpc_constants;
 import devicefs.stream_writer;
 import devicefs.vhdx_viewer;
 
@@ -343,6 +344,19 @@ struct DeviceFile {
 template <typename DeviceType>
 using DeviceFiles = std::map<std::wstring, DeviceFile<DeviceType>>;
 
+[[nodiscard]] auto ParseInheritedHandle(
+    const std::string_view value, const std::string_view description) {
+    auto handle = std::uintptr_t{};
+    const auto [end, error] = std::from_chars(
+        value.data(), value.data() + value.size(), handle);
+    if ((error != std::errc{}) || (end != std::to_address(value.end()))) {
+        throw std::invalid_argument(std::format(
+            "invalid inherited block-device handle '{}' for {}; "
+            "expected an unsigned decimal integer", value, description));
+    }
+    return wil::unique_hfile{std::bit_cast<HANDLE>(handle)};
+}
+
 template <BlockDevice DeviceType>
 [[nodiscard]] auto OpenSource(
     const internal::Mapping &mapping, const bool extended_dasd,
@@ -359,12 +373,23 @@ template <BlockDevice DeviceType>
             tcp
                 ? std::string_view{}
                 : std::string_view{mapping.device}.substr(
-                    internal::kRpcDevicePrefix.size()));
+                    std::string_view{
+                        devicefs::rpc::kDeviceSourcePrefix}.size()));
     } else {
-        return WindowsBlockDevice::FromFilename(
-            std::filesystem::path{mapping.device}, extended_dasd,
-            cache, synthetic_free_clusters,
-            std::format("--map #{}", map_number));
+        const auto source = std::string_view{mapping.device};
+        const auto description = std::format("--map #{}", map_number);
+        return [source, &description](auto &&...arguments) {
+            if (source.starts_with(internal::kHandleDevicePrefix)) {
+                return WindowsBlockDevice::FromHandle(
+                    ParseInheritedHandle(
+                        source.substr(internal::kHandleDevicePrefix.size()),
+                        description),
+                    std::forward<decltype(arguments)>(arguments)...);
+            }
+            return WindowsBlockDevice::FromFilename(
+                std::forward<decltype(arguments)>(arguments)...);
+        }(std::filesystem::path{mapping.device}, extended_dasd,
+            cache, synthetic_free_clusters, description);
     }
 }
 

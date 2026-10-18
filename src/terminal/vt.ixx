@@ -9,11 +9,12 @@ using namespace std::string_view_literals;
 
 namespace devicefs::terminal::vt::detail {
 
-template <const std::string_view &... Parts>
+template <const auto &... Parts>
 constexpr auto kConcatenated = [] {
-    auto result = std::array<char, (0uz + ... + Parts.size())>{};
+    auto result = std::array<char,
+        (0uz + ... + std::string_view{Parts}.size())>{};
     auto output = result.begin();
-    ((output = std::ranges::copy(Parts, output).out), ...);
+    ((output = std::ranges::copy(std::string_view{Parts}, output).out), ...);
     return result;
 }();
 
@@ -58,7 +59,7 @@ constexpr auto kXtermMetaModifier = 8u;
 // `Concatenate` joins constant strings at compile time. The returned view
 // refers to an array with static storage duration, so it can itself be used
 // as a constant command wherever the combined operations are needed.
-template <const std::string_view &... Parts>
+template <const auto &... Parts>
 [[nodiscard]] consteval auto Concatenate() noexcept {
     return std::string_view{detail::kConcatenated<Parts...>};
 }

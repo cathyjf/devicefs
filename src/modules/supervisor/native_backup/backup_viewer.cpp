@@ -29,10 +29,12 @@ import :port_selection;
 import devicefs.supervisor.process_privileges;
 import :vhdx_attachment;
 import <devicefs/common.h>;
+import devicefs.rpc_constants;
 import devicefs.stream_writer;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.temporary_paths;
 import devicefs.terminal.transcoding;
+import devicefs.terminal.vt;
 
 using devicefs::terminal::Transcode;
 
@@ -249,10 +251,18 @@ auto WaitForViewSession(
         devicefs::stdout,
         "Samba reported that the view RPC service is ready.\n");
 
+    static constexpr auto kDeviceSourcePrefix =
+        std::string_view{devicefs::rpc::kDeviceSourcePrefix};
+    static constexpr auto kTcpSourcePrefix =
+        std::string_view{devicefs::rpc::kTcpSourcePrefix};
+    static constexpr auto kEndpointFormat = "{}:{}"sv;
     const auto source = std::array{
         internal::DeviceFsSource{
             .name = std::string{vhdx_filename},
-            .source = std::format(R"(\\\tcp:{}:{})", address, port),
+            .source = std::format(
+                devicefs::terminal::vt::Concatenate<
+                    kDeviceSourcePrefix, kTcpSourcePrefix,
+                    kEndpointFormat>(), address, port),
         },
     };
     auto devicefs = internal::DeviceFsChild{

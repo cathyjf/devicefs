@@ -400,13 +400,11 @@ struct WindowsBlockDevice {
         const auto end = offset + wanted;
         const auto read_end = (end + sector_mask) & ~sector_mask;
         using LengthType = std::remove_cv_t<decltype(wanted)>;
-        const auto aligned_length = read_end - read_offset;
-        if (!std::in_range<LengthType>(aligned_length)) {
+        /* [[indeterminate]] */ LengthType read_length;
+        if (FAILED(wil::safe_cast_nothrow<LengthType>(
+                read_end - read_offset, &read_length))) {
             return STATUS_INVALID_PARAMETER;
         }
-        [[gsl::suppress("type.1",
-            justification: "std::in_range above proves aligned_length is representable by LengthType.")]]
-        const auto read_length = static_cast<LengthType>(aligned_length);
         if ((read_offset == offset) && (read_length == wanted)) {
             const auto status = read(output.data(), offset, wanted, &transferred);
             if (!NT_SUCCESS(status)) {

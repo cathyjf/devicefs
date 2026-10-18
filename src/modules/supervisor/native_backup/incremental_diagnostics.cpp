@@ -1037,24 +1037,24 @@ auto StartVerificationWorkers(
         std::as_bytes(std::span{api_clusters});
     constexpr auto input_header_size =
         offsetof(LOOKUP_STREAM_FROM_CLUSTER_INPUT, Cluster);
-    const auto input_size =
-        input_header_size + api_cluster_bytes.size();
-    if (!std::in_range<DWORD>(input_size)) {
-        throw std::runtime_error(
-            "the uncovered-cluster lookup input is too large");
-    }
-    const auto api_input_size =
-        wil::safe_cast_failfast<DWORD>(input_size);
+    const auto input_size = [input_size_ =
+            input_header_size + api_cluster_bytes.size()] {
+        /* [[indeterminate]] */ DWORD output;
+        if (FAILED(wil::safe_cast_nothrow<DWORD>(input_size_, &output))) {
+            throw std::runtime_error(
+                "the uncovered-cluster lookup input is too large");
+        }
+        return output;
+    }();
     const auto input_header = LOOKUP_STREAM_FROM_CLUSTER_INPUT{
         .Flags = 0,
         .NumberOfClusters =
             wil::safe_cast_failfast<DWORD>(clusters.size()),
     };
-    auto input_storage = std::vector<std::byte>(input_size);
-    std::memcpy(
-        input_storage.data(), &input_header, input_header_size);
-    std::memcpy(
-        input_storage.data() + input_header_size,
+    const auto input_storage =
+        std::make_unique_for_overwrite<std::byte[]>(input_size);
+    std::memcpy(input_storage.get(), &input_header, input_header_size);
+    std::memcpy(input_storage.get() + input_header_size,
         api_cluster_bytes.data(), api_cluster_bytes.size());
 
     auto device = OpenVerificationSnapshot(snapshot, description);
@@ -1062,8 +1062,8 @@ auto StartVerificationWorkers(
         void *const output, const DWORD output_size, DWORD &returned) {
         return DeviceIoControl(device.get(),
             FSCTL_LOOKUP_STREAM_FROM_CLUSTER,
-            input_storage.data(),
-            api_input_size,
+            input_storage.get(),
+            input_size,
             output, output_size, &returned, nullptr);
     };
 
@@ -1080,36 +1080,44 @@ auto StartVerificationWorkers(
         return std::vector<SnapshotStreamMatch>{};
     }
 
-    auto output_storage =
-        std::vector<std::byte>(probe.BufferSizeRequired);
+    const auto output_storage_ = std::make_unique_for_overwrite<std::byte[]>(
+        probe.BufferSizeRequired);
     if (!lookup(
-            output_storage.data(), probe.BufferSizeRequired, returned)) {
+            output_storage_.get(), probe.BufferSizeRequired, returned)) {
         WinError("FSCTL_LOOKUP_STREAM_FROM_CLUSTER failed for {}",
             description);
     }
+    const auto output_filled = std::span{output_storage_.get(), returned};
 
-    auto output = LOOKUP_STREAM_FROM_CLUSTER_OUTPUT{};
-    std::memcpy(&output, output_storage.data(), sizeof(output));
+    const auto [stream_matches, stream_offset] = [output_filled] {
+        auto output = LOOKUP_STREAM_FROM_CLUSTER_OUTPUT{};
+        std::memcpy(&output, output_filled.data(), sizeof(output));
+        return std::pair{output.NumberOfMatches, output.Offset};
+    }();
     auto result = std::vector<SnapshotStreamMatch>{};
-    result.reserve(output.NumberOfMatches);
-    if (output.Offset == 0) {
+    result.reserve(stream_matches);
+    if (stream_offset == 0) {
         return result;
     }
-    auto entries = std::span{output_storage}.first(returned)
-        .subspan(output.Offset);
+    auto entries = output_filled.subspan(stream_offset);
     constexpr auto entry_header_size =
         offsetof(LOOKUP_STREAM_FROM_CLUSTER_ENTRY, FileName);
     while (true) {
         auto entry = LOOKUP_STREAM_FROM_CLUSTER_ENTRY{};
         std::memcpy(&entry, entries.data(), entry_header_size);
-        const auto entry_size = entry.OffsetToNext == 0
+        const auto entry_size = (entry.OffsetToNext == 0)
             ? entries.size() : entry.OffsetToNext;
         const auto name_characters =
             (entry_size - entry_header_size) /
             sizeof(std::wstring::value_type);
-        auto name = std::wstring(name_characters, L'\0');
-        std::memcpy(name.data(), entries.data() + entry_header_size,
-            name.size() * sizeof(std::wstring::value_type));
+        auto name = std::wstring{};
+        name.resize_and_overwrite(name_characters,
+            [source = entries.subspan(entry_header_size)](
+            auto *const destination, const auto count) noexcept {
+            std::memcpy(destination, source.data(),
+                count * sizeof(*destination));
+            return count;
+        });
         // FileName is a null-terminated trailing array whose SDK declaration
         // exposes only its first element.
         name.resize(name.find(L'\0'));

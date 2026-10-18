@@ -55,18 +55,17 @@ public:
             static_cast<std::byte *>(buffer), wanted};
         const auto request_end = offset + wanted;
         auto position = offset;
+        auto next_payload = payload_block_offsets_.lower_bound(
+            offset - (offset % block_size_));
 
         [[gsl::suppress("6001",
             justification:
                 "The `_Pre_equal_to_(0)` contract establishes that "
                 "`transferred` is initialized before this read.")]]
         while (transferred != wanted) {
-            const auto block_offset =
-                position - (position % block_size_);
-            auto next_payload = payload_block_offsets_.lower_bound(block_offset);
             const auto use_payload =
                 (next_payload != payload_block_offsets_.end()) &&
-                (*next_payload == block_offset);
+                (*next_payload <= position);
 
             auto segment_end = request_end;
             if (use_payload) {

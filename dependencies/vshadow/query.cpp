@@ -36,6 +36,11 @@
 
 // Main header
 #include "shadow.h"
+#include <utility>
+
+namespace VShadowVendor {
+auto CacheSnapshotProperties(const VssClient::SnapshotProperties &) -> void;
+}
 
 
 // Return properties for the shadow copies in the given set.
@@ -84,16 +89,18 @@ auto VssClient::QuerySnapshotSet(VSS_ID snapshotSetID) -> vector<SnapshotPropert
         // Automatically call VssFreeSnapshotProperties on this structure at the end of scope
         CAutoSnapPointer snapAutoCleanup(&Snap);
 
-        if ((snapshotSetID != GUID_NULL) && (Snap.m_SnapshotSetId != snapshotSetID)) {
-            // Skip shadow copies not targeted by the caller's query.
-            continue;
-        }
-        result.push_back(SnapshotProperties{
+        auto properties = SnapshotProperties{
             .snapshotID = Snap.m_SnapshotId,
             .snapshotSetID = Snap.m_SnapshotSetId,
             .originalVolumeName = Snap.m_pwszOriginalVolumeName,
             .snapshotDeviceObject = Snap.m_pwszSnapshotDeviceObject,
-        });
+        };
+        VShadowVendor::CacheSnapshotProperties(properties);
+        if ((snapshotSetID != GUID_NULL) && (Snap.m_SnapshotSetId != snapshotSetID)) {
+            // Skip shadow copies not targeted by the caller's query.
+            continue;
+        }
+        result.push_back(std::move(properties));
         PrintSnapshotProperties(Snap);
     }
     return result;

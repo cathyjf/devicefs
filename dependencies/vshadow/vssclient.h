@@ -51,9 +51,6 @@ class VssClient
 {
 public:
 
-    using StreamWriter =
-        std::move_only_function<void(std::wstring_view) const noexcept>;
-
     struct SnapshotProperties {
         VSS_ID snapshotID;
         VSS_ID snapshotSetID;
@@ -61,8 +58,13 @@ public:
         wstring snapshotDeviceObject;
     };
 
-    // Constructor
-    VssClient(StreamWriter);
+    using StreamWriter =
+        std::move_only_function<void(std::wstring_view) const noexcept>;
+
+    using SnapshotCacheWriter =
+        std::move_only_function<void(const SnapshotProperties &)>;
+
+    VssClient(StreamWriter, SnapshotCacheWriter);
 
     // Destructor
     ~VssClient();

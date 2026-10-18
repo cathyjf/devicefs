@@ -53,6 +53,23 @@ auto &GetSnapshotPropertiesCache() {
     return cache;
 }
 
+auto CacheSnapshotProperties(
+    const GUID &identifier,
+    const GUID &snapshot_set_identifier,
+    const std::wstring_view original_volume,
+    const std::wstring_view device)
+    -> devicefs::vshadow::SnapshotProperties {
+    auto properties = devicefs::vshadow::SnapshotProperties{
+        .snapshot_set_identifier = snapshot_set_identifier,
+        .original_volume = Transcode<std::string>(original_volume),
+        .device = Transcode<std::string>(device),
+    };
+    try {
+        GetSnapshotPropertiesCache().insert_or_assign(identifier, properties);
+    } catch (...) {}
+    return properties;
+}
+
 template <class Operation>
 concept SnapshotOperation = std::is_invocable_r_v<
     int, Operation &, const devicefs::vshadow::SnapshotSet &>;
@@ -66,10 +83,14 @@ public:
             "VssClientOwner does not have a default constructor. This variadic "
             "constructor requires at least one argument, but the analyzer "
             "incorrectly classifies it as a default constructor.")]]
-    explicit VssClientOwner(Arguments &&...arguments)
-        : VssClient{[](const std::wstring_view text) noexcept {
-              devicefs::WriteToStream(devicefs::stdout, L"{}\n", text);
-          }} {
+    explicit VssClientOwner(Arguments &&...arguments) :
+        VssClient{[](const std::wstring_view text) noexcept {
+            devicefs::WriteToStream(devicefs::stdout, L"{}\n", text);
+        }, [](const VssClient::SnapshotProperties &snapshot) {
+            CacheSnapshotProperties(snapshot.snapshotID,
+                snapshot.snapshotSetID, snapshot.originalVolumeName,
+                snapshot.snapshotDeviceObject);
+        }} {
         Initialize(std::forward<Arguments>(arguments)...);
     }
 
@@ -88,11 +109,11 @@ class Backup {
     };
 
 public:
-    Backup(const HANDLE cancellation_event, const bool use_writers)
-        : client_{
-              use_writers ? VSS_CTX_APP_ROLLBACK : VSS_CTX_NAS_ROLLBACK,
-              L"", false, cancellation_event},
-          use_writers_{use_writers} {}
+    Backup(const HANDLE cancellation_event, const bool use_writers) :
+        client_{
+            use_writers ? VSS_CTX_APP_ROLLBACK : VSS_CTX_NAS_ROLLBACK,
+            L"", false, cancellation_event},
+        use_writers_{use_writers} {}
 
     Backup(const Backup &) = delete;
     auto operator=(const Backup &) -> Backup & = delete;
@@ -160,14 +181,6 @@ public:
                 }) | std::ranges::to<std::vector>(),
         };
 
-        for (const auto &snapshot : snapshot_set.snapshots) {
-            GetSnapshotPropertiesCache().emplace(snapshot.identifier,
-                devicefs::vshadow::SnapshotProperties{
-                    .snapshot_set_identifier = snapshot_set.identifier,
-                    .original_volume = snapshot.original_volume,
-                    .device = snapshot.device,
-                });
-        }
         const auto result = operation(snapshot_set);
         if (result == 0) {
             completion_ = Completion::Success;
@@ -232,12 +245,8 @@ export namespace devicefs::vshadow {
         } catch (HRESULT) {
             return std::nullopt;
         }
-        return cache.emplace(identifier, SnapshotProperties{
-            .snapshot_set_identifier = snapshot_set_identifier,
-            .original_volume = Transcode<std::string>(
-                original_volume),
-            .device = Transcode<std::string>(device),
-        }).first->second;
+        return CacheSnapshotProperties(
+            identifier, snapshot_set_identifier, original_volume, device);
     }, snapshot_identifiers) | std::ranges::to<std::vector>();
 }
 

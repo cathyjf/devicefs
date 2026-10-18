@@ -43,17 +43,18 @@
 
 namespace {
 auto g_streamWriter = VssClient::StreamWriter{};
+auto g_snapshotCacheWriter = VssClient::SnapshotCacheWriter{};
 }
 
 
 // Constructor
-VssClient::VssClient(StreamWriter streamWriter)
-{
-    // Every client passes this gate before logging; the first selects the
-    // process-wide writer.
-    static auto streamWriterOnce = std::once_flag{};
-    std::call_once(streamWriterOnce, [&streamWriter] {
+VssClient::VssClient(
+    StreamWriter streamWriter, SnapshotCacheWriter snapshotCacheWriter) {
+    // The first client selects the process-wide callbacks.
+    static auto callbacksOnce = std::once_flag{};
+    std::call_once(callbacksOnce, [&streamWriter, &snapshotCacheWriter] {
         g_streamWriter = std::move(streamWriter);
+        g_snapshotCacheWriter = std::move(snapshotCacheWriter);
     });
     m_bCoInitializeCalled = false;
     m_hCancellationEvent = NULL;
@@ -65,6 +66,13 @@ VssClient::VssClient(StreamWriter streamWriter)
 
 
 namespace VShadowVendor {
+
+auto CacheSnapshotProperties(const VssClient::SnapshotProperties &snapshot)
+    -> void {
+    if (g_snapshotCacheWriter) {
+        g_snapshotCacheWriter(snapshot);
+    }
+}
 
 void WriteLog(const std::wstring_view text) noexcept
 {

@@ -207,14 +207,14 @@ constexpr auto kVssIdentifier = std::array{
     std::byte{0x6e}, std::byte{0x6c}, std::byte{0xc7}, std::byte{0x52},
 };
 
-[[noreturn]] auto ThrowOffsetError(
+[[noreturn, msvc::noinline]] auto ThrowOffsetError(
     const std::string_view description,
     const std::uint64_t offset,
     const std::uint64_t size,
     const std::uint64_t source_size) {
-    throw std::runtime_error(std::format(
-        "{} at offset 0x{:x} requested {} byte(s) from a {}-byte source",
-        description, offset, size, source_size));
+    WinError("{} at offset 0x{:x} requested {} byte(s) from a {}-byte source",
+        description, offset, size, source_size,
+        ExplicitWin32Error{ERROR_INVALID_DATA});
 }
 
 [[nodiscard]] auto StartsWithOrdinalIgnoreCase(
@@ -227,8 +227,8 @@ constexpr auto kVssIdentifier = std::array{
 }
 
 class RawSource {
-public:
-    explicit RawSource(const std::string_view path) {
+    auto Open(const std::string_view path) {
+        auto buffer_alignment = std::align_val_t{alignof(std::max_align_t)};
         auto normalized_path = Transcode<std::wstring>(path);
         constexpr auto volume_guid_prefix =
             LR"(\\?\Volume{)"sv;
@@ -268,7 +268,7 @@ public:
                   SECURITY_IDENTIFICATION,
               nullptr));
         if (!handle_) {
-            WinError("could not open VSS descriptor source '{}'",
+            WinError("failed to open VSS descriptor source '{}'",
                 std::wstring_view{normalized_path});
         }
 
@@ -286,23 +286,23 @@ public:
 
             // The parser requests arbitrary byte ranges, but Windows requires
             // noncached volume reads to start and end on sector boundaries.
-            // `ReadRawExact` uses this sector size to expand each read, then
-            // copies only the bytes that the parser requested.
+            // `ReadRawExact` uses this sector size to expand each read. The
+            // returned view covers only the bytes that the parser requested.
             auto geometry = DISK_GEOMETRY{};
             returned = 0;
             if (!DeviceIoControl(handle_.get(), IOCTL_DISK_GET_DRIVE_GEOMETRY,
                     nullptr, 0, &geometry, sizeof(geometry),
                     &returned, nullptr)) {
-                WinError("could not obtain geometry for VSS descriptor source '{}'",
+                WinError("failed to obtain geometry for VSS descriptor source '{}'",
                     std::wstring_view{normalized_path});
             }
             sector_size_ = geometry.BytesPerSector;
             const auto alignment = QueryBufferAlignment(handle_.get());
             if (!alignment) {
-                WinError("could not query buffer alignment for VSS descriptor source '{}'",
+                WinError("failed to query buffer alignment for VSS descriptor source '{}'",
                     std::wstring_view{normalized_path});
             }
-            buffer_alignment_ = *alignment;
+            buffer_alignment = *alignment;
 
             // ValidateNtfsVolume reads the backup NTFS header in the final
             // sector, so request permission to read beyond the filesystem's
@@ -320,57 +320,57 @@ public:
                 ((device_error != ERROR_INVALID_FUNCTION) &&
                 (device_error != ERROR_NOT_SUPPORTED) &&
                 (device_error != ERROR_INVALID_PARAMETER))) {
-                WinError("could not obtain the length of VSS descriptor source '{}'",
+                WinError("failed to obtain the length of VSS descriptor source '{}'",
                     std::wstring_view{normalized_path},
                     ExplicitWin32Error{device_error});
             }
 
             auto file_size = LARGE_INTEGER{};
             if (!GetFileSizeEx(handle_.get(), &file_size)) {
-                WinError("could not obtain the length of VSS descriptor image '{}'",
+                WinError("failed to obtain the length of VSS descriptor image '{}'",
                     std::wstring_view{normalized_path});
             }
             size_ = wil::safe_cast_failfast<std::uint64_t>(file_size.QuadPart);
         }
 
-        if (size_ == 0) {
-            throw std::runtime_error(std::format(
-                "VSS descriptor source '{}' is empty",
-                Transcode<std::string>(normalized_path)));
+        // A raw read can include up to one sector minus one byte before and
+        // after the requested range. The buffer accommodates that padding
+        // even for the largest read, which is one VSS block.
+        const auto buffer_size = devicefs::vss::kBlockSize +
+            ((sector_size_ == 0) ? 0 : (2 * (std::uint64_t{sector_size_} - 1)));
+        auto buffer = NewAlignedArray<std::byte, false>(
+            buffer_size, buffer_alignment);
+        if (!buffer) {
+            WinError("failed to allocate a {}-byte VSS metadata buffer "
+                "with {}-byte alignment", buffer_size,
+                std::to_underlying(buffer_alignment),
+                ExplicitWin32Error{ERROR_NOT_ENOUGH_MEMORY});
         }
+        return buffer;
     }
 
+public:
+    explicit RawSource(const std::string_view path) : buffer_(Open(path)) {}
+
+    // The returned bytes are overwritten by the next read on this source.
     template <std::size_t Size>
+        requires ((Size > 0) && (Size <= devicefs::vss::kBlockSize))
     [[nodiscard, msvc::forceinline]] auto Read(const std::uint64_t offset) const {
-        if constexpr (Size <= 512) {
-            /* [[indeterminate]] */ std::array<std::byte, Size> result;
-            ReadExact(offset, result);
-            return result;
-        } else {
-            auto result = std::make_unique_for_overwrite<
-                std::array<std::byte, Size>>();
-            ReadExact(offset, *result);
-            return result;
-        }
-    }
-
-private:
-    void ReadExact(
-        const std::uint64_t offset, std::span<std::byte> destination) const {
-        const auto requested = destination.size();
-        if ((offset > size_) || (requested > (size_ - offset))) {
+        if ((offset > size_) || (Size > (size_ - offset))) {
             ThrowOffsetError("a VSS metadata read was out of bounds",
-                offset, requested, size_);
+                offset, Size, size_);
         }
         if (sector_size_ != 0) {
-            ReadRawExact(offset, destination);
-            return;
+            return std::span<const std::byte, Size>{
+                ReadRawExact(offset, Size), Size};
         }
 
         Seek(offset);
-        ReadCurrentExact(offset, destination);
+        return std::span<const std::byte, Size>{
+            ReadCurrentExact(offset, Size), Size};
     }
 
+private:
     void Seek(const std::uint64_t offset) const {
         const auto position = LARGE_INTEGER{
             .QuadPart = wil::safe_cast_failfast<LONGLONG>(offset),
@@ -380,12 +380,10 @@ private:
         }
     }
 
-    void ReadCurrentExact(
-        const std::uint64_t offset, std::span<std::byte> destination) const {
-        const auto requested =
-            wil::safe_cast_failfast<DWORD>(destination.size());
+    auto ReadCurrentExact(const std::uint64_t offset,
+        const DWORD requested) const -> const std::byte * {
         auto completed = DWORD{};
-        if (!ReadFile(handle_.get(), destination.data(), requested,
+        if (!ReadFile(handle_.get(), buffer_.get(), requested,
                 &completed, nullptr)) {
             WinError("could not read VSS metadata at offset 0x{:x}", offset);
         }
@@ -393,14 +391,12 @@ private:
             ThrowOffsetError("a VSS metadata read completed short",
                 offset, requested, size_);
         }
+        return buffer_.get();
     }
 
-    void ReadRawExact(
-        const std::uint64_t offset, const std::span<std::byte> destination) const {
-        if (destination.empty()) {
-            return;
-        }
-        const auto end = offset + destination.size();
+    auto ReadRawExact(const std::uint64_t offset,
+        const DWORD requested) const -> const std::byte * {
+        const auto end = offset + requested;
         const auto raw_offset = offset - (offset % sector_size_);
         auto raw_end = end;
         if (const auto remainder = end % sector_size_; remainder != 0) {
@@ -415,15 +411,9 @@ private:
             }
             return output;
         }();
-        auto storage = NewAlignedArray<std::byte, false>(raw_size, buffer_alignment_);
-        if (!storage) {
-            WinError("failed to allocate an aligned VSS metadata buffer",
-                ExplicitWin32Error{ERROR_NOT_ENOUGH_MEMORY});
-        }
-
         Seek(raw_offset);
         auto completed = DWORD{};
-        if (!ReadFile(handle_.get(), storage.get(), raw_size,
+        if (!ReadFile(handle_.get(), buffer_.get(), raw_size,
                 &completed, nullptr)) {
             WinError("failed to read aligned VSS metadata at offset 0x{:x}",
                 raw_offset);
@@ -432,16 +422,13 @@ private:
             ThrowOffsetError("an aligned VSS metadata read completed short",
                 raw_offset, raw_size, size_);
         }
-        std::memcpy(destination.data(),
-            storage.get() +
-                wil::safe_cast_failfast<std::size_t>(offset - raw_offset),
-            destination.size());
+        return buffer_.get() + (offset - raw_offset);
     }
 
     wil::unique_hfile handle_;
     std::uint64_t size_ = 0;
     DWORD sector_size_ = 0;
-    std::align_val_t buffer_alignment_{1};
+    decltype(NewAlignedArray<std::byte, false>(0, std::align_val_t{1})) buffer_;
 };
 
 // ReadField decodes integer fields and serialized Windows GUIDs directly into
@@ -452,12 +439,11 @@ static_assert(std::endian::native == std::endian::little);
 template <class Field>
     requires (std::unsigned_integral<Field> || std::same_as<Field, GUID>)
 [[nodiscard]] auto ReadField(
-    const std::span<const std::byte> data, const std::size_t offset) {
+    const std::span<const std::byte> data, const std::size_t offset) noexcept {
     static_assert(std::is_trivially_copyable_v<Field>);
     if ((offset > data.size()) ||
         (sizeof(Field) > (data.size() - offset))) {
-        throw std::runtime_error(
-            "an internal VSS field read was out of bounds");
+        __fastfail(FAST_FAIL_RANGE_CHECK_FAILURE);
     }
     auto encoded = std::array<std::byte, sizeof(Field)>{};
     std::ranges::copy(data.subspan(offset, encoded.size()), encoded.begin());
@@ -634,8 +620,7 @@ auto VisitMetadataBlock(
     // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_io_handle.c#L613-L879
     while (offset != 0) {
         VisitMetadataBlock(visited, offset, "the VSS catalog chain");
-        const auto block = source.Read<devicefs::vss::kBlockSize>(offset);
-        const auto data = std::span<const std::byte>{*block};
+        const auto data = source.Read<devicefs::vss::kBlockSize>(offset);
         if (!HasIdentifier(data, 8)) {
             throw std::runtime_error(std::format(
                 "the VSS catalog block at 0x{:x} had an invalid identifier",
@@ -764,9 +749,8 @@ auto ReadStoreHeaders(const RawSource &source, std::vector<CatalogStore> &stores
         if (!store.has_in_volume_data) {
             continue;
         }
-        const auto block = source.Read<devicefs::vss::kBlockSize>(
+        const auto data = source.Read<devicefs::vss::kBlockSize>(
             store.header_offset);
-        const auto data = std::span<const std::byte>{*block};
         const auto header = ParseStoreBlockHeader(data, store.header_offset);
         if (header.record_type != kStoreHeaderRecordType) {
             throw std::runtime_error(std::format(
@@ -940,8 +924,7 @@ private:
     // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_block_descriptor.c#L313-L450
     while (offset != 0) {
         VisitMetadataBlock(visited, offset, "the VSS descriptor-list chain");
-        const auto block = source.Read<devicefs::vss::kBlockSize>(offset);
-        const auto data = std::span<const std::byte>{*block};
+        const auto data = source.Read<devicefs::vss::kBlockSize>(offset);
         const auto header = ParseStoreBlockHeader(data, offset);
         if (header.record_type != kStoreIndexRecordType) {
             throw std::runtime_error(std::format(

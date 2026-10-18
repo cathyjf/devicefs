@@ -431,26 +431,23 @@ private:
     decltype(NewAlignedBuffer<std::byte, false>(0, std::align_val_t{1})) buffer_;
 };
 
-// ReadField decodes integer fields and serialized Windows GUIDs directly into
-// their native object representations, so every supported field requires the
-// little-endian object representation used by Windows.
-static_assert(std::endian::native == std::endian::little);
-
+// This implementation of `ReadField` assumes that the native endianness
+// matches the little endian format used in the VSS metadata.
 template <class Field>
-    requires (std::unsigned_integral<Field> || std::same_as<Field, GUID>)
+    requires ((std::unsigned_integral<Field> || std::same_as<Field, GUID>) &&
+        (std::endian::native == std::endian::little))
 [[nodiscard]] auto ReadField(
     const std::span<const std::byte> data, const std::size_t offset) noexcept {
-    static_assert(std::is_trivially_copyable_v<Field>);
-    if ((offset > data.size()) ||
-        (sizeof(Field) > (data.size() - offset))) {
-        __fastfail(FAST_FAIL_RANGE_CHECK_FAILURE);
+    if constexpr (std::same_as<Field, GUID>) {
+        // In the VSS metadata format, GUID fields occupy exactly 16 bytes.
+        // This implementation of `ReadField` relies on the `GUID` type
+        // being exactly that size and containing no additional padding.
+        static_assert(sizeof(Field) == 16);
     }
-    auto encoded = std::array<std::byte, sizeof(Field)>{};
-    std::ranges::copy(data.subspan(offset, encoded.size()), encoded.begin());
-    return std::bit_cast<Field>(encoded);
+    return std::bit_cast<Field>(
+        *std::start_lifetime_as<std::byte[sizeof(Field)]>(
+            data.subspan(offset, sizeof(Field)).data()));
 }
-
-static_assert(sizeof(GUID) == 16);
 
 [[nodiscard]] auto HasIdentifier(
     const std::span<const std::byte> data,

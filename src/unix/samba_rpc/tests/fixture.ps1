@@ -386,13 +386,10 @@ try {
             $detach_output = & $LosetupPath --detach $device 2>&1
         }
         if ($LASTEXITCODE -ne 0) {
-            $detach_failure =
-                "$detach_operation failed:`n$($detach_output | Out-String)"
-            if ($null -eq $failure) {
-                $failure = $detach_failure
-            } else {
-                Write-Warning $detach_failure
-            }
+            Write-Warning (
+                "Fixture cleanup (informational only): $detach_operation failed: " +
+                ($detach_output | Out-String).Trim()
+            )
         }
     }
     foreach ($log in Get-ChildItem -LiteralPath $root -Filter 'log.*') {

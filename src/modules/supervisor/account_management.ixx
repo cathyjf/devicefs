@@ -579,20 +579,21 @@ auto EnsureMaterializedWslDistribution(
     const std::string_view distribution,
     const std::filesystem::path &installed_executable) {
     const auto arguments = std::array{
-        Transcode<std::string>(installed_executable.native()), std::string{kMaterializeOciOption},
+        Transcode<std::string>(installed_executable.native()),
+        std::string{kMaterializeOciOption},
         std::string{distribution},
     };
     auto command = Transcode<std::wstring>(wil::ArgvToCommandLine(arguments));
     devicefs::WriteToStream(devicefs::stdout,
-        L"backup-supervisor: preparing WSL distribution '{}' as internal Windows account '{}'\n",
-        Transcode<std::wstring>(distribution),
+        L"backup-supervisor: preparing WSL distribution '{}' as internal "
+        "Windows account '{}'\n", Transcode<std::wstring>(distribution),
         std::wstring_view{username.c_str(), username.size()});
     const auto exit_code = RunInternalWindowsAccountProcess(
         username, installed_executable, std::move(command));
     if (exit_code != 0) {
-        throw std::runtime_error(std::format(
-            "installed backup supervisor failed to materialize WSL distribution '{}' "
-            "(exit code 0x{:08x})", distribution, exit_code));
+        // Exit codes returned by the child process are Windows error codes.
+        WinError("installed backup supervisor failed to materialize WSL "
+            "distribution '{}'", distribution, ExplicitWin32Error{exit_code});
     }
 }
 

@@ -6,6 +6,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -396,6 +397,65 @@ public static unsafe class DeviceFsTestNative {
         var output = Control(device, devicePath, IOCTL_MOUNTDEV_QUERY_UNIQUE_ID,
             null, Math.Max(header.Length, sizeof(ushort) + length)).Buffer;
         return output.AsSpan(sizeof(ushort), length).ToArray();
+    }
+
+    // Neither the SDK nor WDK metadata package supplies these mountmgr.h
+    // structures, so CsWin32 cannot generate their declarations.
+    // https://learn.microsoft.com/windows-hardware/drivers/ddi/mountmgr/ns-mountmgr-_mountmgr_mount_point
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MountManagerMountPoint {
+        public uint SymbolicLinkNameOffset;
+        public ushort SymbolicLinkNameLength;
+        public ushort Reserved1;
+        public uint UniqueIdOffset;
+        public ushort UniqueIdLength;
+        public ushort Reserved2;
+        public uint DeviceNameOffset;
+        public ushort DeviceNameLength;
+        public ushort Reserved3;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MountManagerMountPointsHeader {
+        public uint Size;
+        public uint NumberOfMountPoints;
+    }
+
+    public static string[] QueryDevicePathsByUniqueId(byte[] identifier) {
+        ArgumentNullException.ThrowIfNull(identifier);
+        ArgumentOutOfRangeException.ThrowIfZero(identifier.Length);
+        const string managerPath = @"\\.\MountPointManager";
+        // CTL_CODE('m', 2, METHOD_BUFFERED, FILE_ANY_ACCESS)
+        const uint IOCTL_MOUNTMGR_QUERY_POINTS = 0x006d0008;
+        var request = new MountManagerMountPoint {
+            UniqueIdOffset = (uint)sizeof(MountManagerMountPoint),
+            UniqueIdLength = checked((ushort)identifier.Length),
+        };
+        var input = new byte[sizeof(MountManagerMountPoint) + identifier.Length];
+        MemoryMarshal.Write(input.AsSpan(), in request);
+        identifier.AsSpan().CopyTo(input.AsSpan(sizeof(MountManagerMountPoint)));
+        using var manager = OpenDevice(managerPath, 0);
+
+        // The minimum output includes the header and its one-element array.
+        // https://learn.microsoft.com/windows-hardware/drivers/ddi/mountmgr/ni-mountmgr-ioctl_mountmgr_query_points#output-buffer-length
+        var probe = Control(manager, managerPath, IOCTL_MOUNTMGR_QUERY_POINTS,
+            input, sizeof(MountManagerMountPointsHeader) + sizeof(MountManagerMountPoint),
+            allowMoreData: true);
+        var header = MemoryMarshal.Read<MountManagerMountPointsHeader>(probe.Buffer);
+        var output = Control(manager, managerPath, IOCTL_MOUNTMGR_QUERY_POINTS,
+            input, checked((int)header.Size));
+        var data = output.Buffer.AsSpan(0, checked((int)output.BytesReturned));
+        header = MemoryMarshal.Read<MountManagerMountPointsHeader>(data);
+        var points = MemoryMarshal.Cast<byte, MountManagerMountPoint>(data.Slice(
+            sizeof(MountManagerMountPointsHeader),
+            checked((int)header.NumberOfMountPoints * sizeof(MountManagerMountPoint))));
+        var devices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var point in points) {
+            var name = Encoding.Unicode.GetString(data.Slice(
+                checked((int)point.DeviceNameOffset), point.DeviceNameLength));
+            devices.Add(@"\\?\GLOBALROOT" + name);
+        }
+        return devices.ToArray();
     }
 
     private static long QueryLength(SafeFileHandle device, string devicePath) {

@@ -50,6 +50,7 @@ struct DeviceFsProcess {
     wil::unique_process_information process;
     std::filesystem::path readiness_path;
     std::string stop_event_name;
+    wil::unique_event_nothrow stop_event;
 };
 
 struct DeviceFsSource {
@@ -76,6 +77,12 @@ struct DeviceFsStartRequest {
     const DeviceFsStartRequest &request) {
     auto stop_event_name = std::format(
         "Global\\devicefs-stop-{}", UniqueName());
+    auto stop_event = wil::unique_event_nothrow{CreateEventExA(
+        nullptr, stop_event_name.c_str(),
+        CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS)};
+    if (!stop_event) {
+        WinError("failed to create devicefs stop event '{}'", stop_event_name);
+    }
     auto arguments = std::vector<std::string>{
         Transcode<std::string>(CurrentExecutablePath().native()),
         "--devicefs",
@@ -165,6 +172,7 @@ struct DeviceFsStartRequest {
         .process = std::move(process),
         .readiness_path = std::move(readiness_path),
         .stop_event_name = std::move(stop_event_name),
+        .stop_event = std::move(stop_event),
     };
 }
 
@@ -288,29 +296,9 @@ public:
         // signal an event to request that DeviceFs shut down gracefully. After
         // receipt of that signal, DeviceFs waits for open files to close before
         // exiting, so that it can continue serving a VHDX that remains attached.
-        const auto error = [this] noexcept -> DWORD {
-            const auto deadline = std::chrono::steady_clock::now() +
-                DeviceFsProcess::kShutdownTimeout;
-            while (true) {
-                if (const auto stop_event = wil::unique_event_nothrow{OpenEventA(
-                        EVENT_MODIFY_STATE, FALSE,
-                        devicefs_.stop_event_name.c_str())}; stop_event) {
-                    stop_event.SetEvent();
-                    return WaitForProcess(devicefs_.process.hProcess,
-                        DeviceFsProcess::kShutdownTimeout)
-                        ? ERROR_SUCCESS : ERROR_TIMEOUT;
-                }
-                if (const auto last_error = wil::last_error_context{};
-                    WaitForProcess(devicefs_.process.hProcess,
-                        DeviceFsProcess::kPollInterval)) {
-                    return ERROR_SUCCESS;
-                }
-                if (std::chrono::steady_clock::now() >= deadline) {
-                    return GetLastError();
-                }
-            }
-        }();
-        if (error == ERROR_SUCCESS) {
+        devicefs_.stop_event.SetEvent();
+        if (WaitForProcess(devicefs_.process.hProcess,
+                DeviceFsProcess::kShutdownTimeout)) {
             if (exit_confirmed_) {
                 exit_confirmed_->get() = true;
             }
@@ -334,7 +322,7 @@ public:
                 CompileTimeCast<std::uint32_t>(
                     devicefs_.process.dwProcessId),
                 devicefs_.stop_event_name,
-                ExplicitWin32Error{error}));
+                ExplicitWin32Error{ERROR_TIMEOUT}));
     }
 
     [[nodiscard]] auto Process() const noexcept

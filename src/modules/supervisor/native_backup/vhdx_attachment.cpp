@@ -72,7 +72,7 @@ constexpr auto kShareMode =
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
     if (!result) {
-        WinError("could not open attached VHDX physical disk '{}'",
+        WinError("failed to open attached VHDX physical disk '{}'",
             std::wstring_view{path});
     }
     return result;
@@ -85,7 +85,7 @@ constexpr auto kShareMode =
     auto returned = DWORD{};
     if (!DeviceIoControl(disk, IOCTL_STORAGE_GET_DEVICE_NUMBER,
             nullptr, 0, &number, sizeof(number), &returned, nullptr)) {
-        WinError("could not identify attached VHDX physical disk '{}'", path);
+        WinError("failed to identify attached VHDX physical disk '{}'", path);
     }
     return number.DeviceNumber;
 }
@@ -118,7 +118,7 @@ constexpr auto kShareMode =
                 return result;
             }
             if (std::chrono::steady_clock::now() >= retry_deadline) {
-                WinError("could not open attached VHDX Partition1 root {}",
+                WinError("failed to open attached VHDX Partition1 root {}",
                     std::wstring_view{partition_root});
             }
             if (wil::handle_wait(
@@ -137,7 +137,7 @@ constexpr auto kShareMode =
     const auto result = wil::GetFinalPathNameByHandleW(
         partition.get(), volume_root, wil::VolumePrefix::VolumeGuid);
     if (FAILED(result)) {
-        WinError("could not obtain the volume name for attached root '{}'",
+        WinError("failed to obtain the volume name for attached root '{}'",
             std::wstring_view{partition_root},
             ExplicitHresult{result});
     }
@@ -186,7 +186,7 @@ namespace internal {
     auto completion_event = wil::unique_event_nothrow{};
     if (!completion_event.try_create(
             wil::EventOptions::ManualReset, nullptr)) {
-        WinError("could not create the VHDX attachment event");
+        WinError("failed to create the VHDX attachment event");
     }
     auto operation = OVERLAPPED{
         .hEvent = completion_event.get(),
@@ -214,7 +214,7 @@ namespace internal {
             const auto error = GetLastError();
             if (error != ERROR_NOT_FOUND) {
                 devicefs::WriteToStream(devicefs::stdout,
-                    "Could not cancel the pending VHDX attachment "
+                    "Failed to cancel the pending VHDX attachment "
                     "({}); waiting for it to finish.\n",
                     TryConstructWinError("", ExplicitWin32Error{error}));
             }
@@ -284,7 +284,7 @@ public:
             path.native());
         auto disk = OpenVhdx(path);
         if (!disk) {
-            WinError("could not open VHDX '{}'",
+            WinError("failed to open VHDX '{}'",
                 std::wstring_view{path.native()},
                 ExplicitWin32Error{disk.error()});
         }
@@ -297,7 +297,7 @@ public:
         const auto attach_status = AttachVhdx(
             disk->get(), cancellation_event);
         if (attach_status != ERROR_SUCCESS) {
-            WinError("could not attach VHDX '{}'",
+            WinError("failed to attach VHDX '{}'",
                 std::wstring_view{path.native()},
                 ExplicitWin32Error{attach_status});
         }
@@ -335,7 +335,7 @@ public:
     auto operator=(AttachedVhdx &&) -> AttachedVhdx & = delete;
 
     ~AttachedVhdx() noexcept {
-        const auto status = Detach();
+        const auto status = DetachNoThrow();
         if (status != ERROR_SUCCESS) {
             [this, status] [[msvc::noinline]] noexcept {
                 devicefs::WriteToStream(devicefs::stderr,
@@ -351,11 +351,8 @@ public:
         return root_;
     }
 
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return disk_.is_valid();
-    }
-
-    [[nodiscard]] auto Detach() noexcept -> DWORD {
+protected:
+    [[nodiscard]] auto DetachNoThrow() noexcept -> DWORD {
         if (!disk_) {
             return ERROR_SUCCESS;
         }
@@ -388,7 +385,7 @@ public:
         const auto volume_name = std::wstring{volume_root};
         if (!SetVolumeMountPointW(
                 mount_path_.c_str(), volume_name.c_str())) {
-            WinError("could not mount the attached volume at {}",
+            WinError("failed to mount the attached volume at {}",
                 std::wstring_view{directory.native()});
         }
     }

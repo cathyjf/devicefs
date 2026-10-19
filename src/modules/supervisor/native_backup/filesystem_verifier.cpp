@@ -24,6 +24,7 @@ import std;
 import <devicefs/windows_imports.h>;
 import :devicefs_process;
 import :internal;
+import devicefs.supervisor.process_launch;
 import devicefs.supervisor.process_privileges;
 import :vhdx_attachment;
 import <devicefs/common.h>;
@@ -286,28 +287,9 @@ struct VerificationObservation {
     bool plan_ready = false;
     bool comparison_complete = false;
     bool failed = false;
-    std::string failure;
+    std::exception_ptr failure;
     std::vector<std::string> cleanup_failures;
 };
-
-class VerificationFailure final : public std::runtime_error {
-public:
-    using std::runtime_error::runtime_error;
-};
-
-[[nodiscard]] auto IsCancellationError(
-    const std::system_error &error) noexcept {
-    return (error.code() == std::error_code{
-        ERROR_CANCELLED, std::system_category()}) ||
-        (error.code() == std::error_code{
-            ERROR_OPERATION_ABORTED, std::system_category()});
-}
-
-[[nodiscard]] constexpr auto IsCancellationError(
-    const DWORD error) noexcept {
-    return (error == ERROR_CANCELLED) ||
-        (error == ERROR_OPERATION_ABORTED);
-}
 
 class SynchronousIoCancellation {
 public:
@@ -357,7 +339,7 @@ public:
             THREAD_TERMINATE, FALSE, GetCurrentThreadId())};
         if (!thread) {
             WinError(
-                "could not register filesystem-verification I/O");
+                "failed to register filesystem-verification I/O");
         }
         return Registration{*this, std::move(thread)};
     }
@@ -396,7 +378,7 @@ auto RequestPendingIoCancellation(
     first_failure = error;
     devicefs::WriteToStream(
         devicefs::stdout,
-        "Could not interrupt pending filesystem-verification I/O: {}\n",
+        "Failed to interrupt pending filesystem-verification I/O: {}\n",
         TryConstructWinError("", ExplicitWin32Error{error}));
 }
 
@@ -487,7 +469,7 @@ public:
         return failed_.load(std::memory_order_acquire);
     }
 
-    auto Fail(std::string failure) -> void {
+    auto Fail(std::exception_ptr failure) -> void {
         const auto lock = std::scoped_lock{mutex_};
         if (failed_.load(std::memory_order_relaxed)) {
             return;
@@ -551,9 +533,13 @@ public:
         ++mismatch.differing_chunks;
     }
 
-    auto RecordCleanupFailure(std::string failure) -> void {
-        const auto lock = std::scoped_lock{mutex_};
-        cleanup_failures_.push_back(std::move(failure));
+    auto RecordCleanupFailure(const std::string_view failure) noexcept -> void {
+        try {
+            const auto lock = std::scoped_lock{mutex_};
+            cleanup_failures_.emplace_back(failure);
+        } catch (...) {
+            // Cleanup reporting must not replace the verification result.
+        }
     }
 
     [[nodiscard]] auto NewMismatches(
@@ -697,7 +683,7 @@ private:
     std::atomic<bool> comparison_complete_{};
     std::atomic<bool> failed_{};
     mutable std::mutex mutex_;
-    std::string failure_;
+    std::exception_ptr failure_;
     // This count comes from FSCTL_QUERY_FILE_LAYOUT, which has proved flaky
     // and untrustworthy as filesystem inventory. Progress reporting is its
     // only consumer; it is never evidence used by the verification result.
@@ -713,105 +699,85 @@ private:
     std::vector<OperationComparison> operation_comparison_records_;
 };
 
-class AttachedVhdx {
+class AttachedVhdx : private internal::AttachedVhdx {
 public:
     [[nodiscard]] static auto Attach(
         const std::filesystem::path &path,
         const std::string_view name,
         const HANDLE cancellation_event,
         wil::srwlock &virtual_disk_lock,
-        SynchronousIoCancellation &io_cancellation) {
-        try {
-            const auto lock = virtual_disk_lock.lock_exclusive();
-            if (wil::event_is_signaled(cancellation_event)) {
-                WinError("VHDX attachment was cancelled",
-                    ExplicitWin32Error{ERROR_CANCELLED});
-            }
-            devicefs::WriteToStream(
-                devicefs::stdout,
-                "\nPreparing the {} VHDX attachment:\n", name);
-            auto registration =
-                io_cancellation.RegisterCurrentThread();
-            return AttachedVhdx{
-                internal::AttachedVhdx::Attach(
-                    path, cancellation_event,
-                    [&registration] noexcept {
-                        registration.Unregister();
-                    }),
-                virtual_disk_lock};
-        } catch (const VerificationFailure &error) {
-            throw VerificationFailure(std::format(
-                "could not prepare the {} VHDX view: {}",
-                name, error.what()));
-        } catch (const std::system_error &error) {
-            if (IsCancellationError(error)) {
-                throw;
-            }
-            throw VerificationFailure(std::format(
-                "could not prepare the {} VHDX view: {}",
-                name, error.what()));
-        }
+        SynchronousIoCancellation &io_cancellation,
+        VerificationState &state) {
+        const auto lock = virtual_disk_lock.lock_exclusive();
+        devicefs::WriteToStream(devicefs::stdout,
+            "\nPreparing the {} VHDX attachment:\n", name);
+        auto registration = io_cancellation.RegisterCurrentThread();
+        return AttachedVhdx{
+            internal::AttachedVhdx::Attach(
+                path, cancellation_event,
+                [&registration] noexcept {
+                    registration.Unregister();
+                }),
+            virtual_disk_lock, name, state};
     }
 
+    [[gsl::suppress("26434", justification:
+        "Constructors cannot be virtual.")]]
     AttachedVhdx(const AttachedVhdx &) = delete;
+
+    [[gsl::suppress("26456", justification:
+        "The base class's assignment operator is deleted.")]]
     auto operator=(const AttachedVhdx &) -> AttachedVhdx & = delete;
+
+    [[gsl::suppress("26434", justification:
+        "Constructors cannot be virtual.")]]
     AttachedVhdx(AttachedVhdx &&) = delete;
+
+    [[gsl::suppress("26456", justification:
+        "The base class's move assignment operator is deleted.")]]
     auto operator=(AttachedVhdx &&) -> AttachedVhdx & = delete;
 
-    ~AttachedVhdx() {
-        if (attachment_) {
-            const auto lock = virtual_disk_lock_.lock_exclusive();
-            static_cast<void>(attachment_.Detach());
-        }
-    }
-
-    [[nodiscard]] auto Root() const noexcept
-        -> std::wstring_view {
-        return attachment_.Root();
-    }
-
-    [[nodiscard]] auto Detach() noexcept {
+    ~AttachedVhdx() noexcept {
+        state_.SetPhase(VerificationPhase::Detaching);
         const auto lock = virtual_disk_lock_.lock_exclusive();
-        return attachment_.Detach();
+        devicefs::WriteToStream(devicefs::stdout,
+            "Detaching the {} VHDX view.\n", name_);
+        devicefs::WriteToStream(devicefs::stdout,
+            L"  Volume: {}\n", Root());
+        const auto status = DetachNoThrow();
+        if (status != ERROR_SUCCESS) {
+            [this, status] [[msvc::noinline]] noexcept {
+                const auto error = TryConstructWinError(
+                    "failed to detach the {} VHDX view", name_,
+                    ExplicitWin32Error{status});
+                state_.RecordCleanupFailure(error ? error->what() :
+                    "failed to detach the VHDX view: unknown error");
+            }();
+            return;
+        }
+        devicefs::WriteToStream(devicefs::stdout,
+            "The {} VHDX view was detached.\n", name_);
+        devicefs::WriteToStream(devicefs::stdout,
+            L"  Volume: {}\n", Root());
     }
+
+    using internal::AttachedVhdx::Root;
 
 private:
+    [[gsl::suppress("26434", justification:
+        "Constructors cannot be virtual.")]]
     AttachedVhdx(
         internal::AttachedVhdx attachment,
-        wil::srwlock &virtual_disk_lock) noexcept
-        : attachment_{std::move(attachment)},
-          virtual_disk_lock_{virtual_disk_lock} {}
+        wil::srwlock &virtual_disk_lock,
+        const std::string_view name,
+        VerificationState &state) noexcept
+        : internal::AttachedVhdx{std::move(attachment)},
+          virtual_disk_lock_{virtual_disk_lock}, name_{name}, state_{state} {}
 
-    internal::AttachedVhdx attachment_;
     wil::srwlock &virtual_disk_lock_;
+    const std::string_view name_;
+    VerificationState &state_;
 };
-
-auto DetachView(
-    AttachedVhdx &view,
-    const std::string_view name,
-    VerificationState &state) noexcept -> void {
-    devicefs::WriteToStream(
-        devicefs::stdout, "Detaching the {} VHDX view.\n", name);
-    devicefs::WriteToStream(
-        devicefs::stdout, L"  Volume: {}\n", view.Root());
-    const auto status = view.Detach();
-    if (status != ERROR_SUCCESS) {
-        try {
-            const auto error = TryConstructWinError(
-                "could not detach the {} VHDX view", name,
-                ExplicitWin32Error{status});
-            state.RecordCleanupFailure(error ? error->what() :
-                "could not detach the VHDX view: unknown error");
-        } catch (const std::bad_alloc &) {
-            // Cleanup reporting must not replace the verification result.
-        }
-        return;
-    }
-    devicefs::WriteToStream(
-        devicefs::stdout, "The {} VHDX view was detached.\n", name);
-    devicefs::WriteToStream(
-        devicefs::stdout, L"  Volume: {}\n", view.Root());
-}
 
 [[nodiscard]] auto ObjectPath(
     const FilesystemInventory &inventory,
@@ -1852,11 +1818,7 @@ public:
         }
         const auto real_read = TryReadStreamChunk(
             real_handle_.get(), real_chunk);
-        if (wil::event_is_signaled(cancellation_event_) &&
-            ((synthetic_read &&
-                IsCancellationError(synthetic_read->error)) ||
-                (real_read &&
-                    IsCancellationError(real_read->error)))) {
+        if (wil::event_is_signaled(cancellation_event_)) {
             return false;
         }
         auto compared_length = task.length;
@@ -1917,11 +1879,7 @@ private:
         }
         auto real_handle = TryOpenFilesystemObject(
             StreamPath(real_, real_object, real_stream));
-        if (wil::event_is_signaled(cancellation_event_) &&
-            ((!synthetic_handle &&
-                IsCancellationError(synthetic_handle.error().error)) ||
-                (!real_handle &&
-                    IsCancellationError(real_handle.error().error)))) {
+        if (wil::event_is_signaled(cancellation_event_)) {
             return false;
         }
         if (!synthetic_handle || !real_handle) {
@@ -2017,10 +1975,8 @@ auto RunComparisonWorkers(
         for (auto index = 0uz; index < worker_count; ++index) {
             workers.push_back(std::async(std::launch::async, run));
         }
-    } catch (const std::system_error &error) {
-        state.Fail(std::format(
-            "could not start a filesystem-verification worker: {}",
-            error.what()));
+    } catch (const std::system_error &) {
+        state.Fail(std::current_exception());
     }
     for (auto &worker : workers) {
         worker.get();
@@ -2089,7 +2045,7 @@ auto CompareFilesystems(
             });
         } catch (const std::exception &error) {
             devicefs::WriteToStream(devicefs::stdout,
-                "Could not start the optional layout count for volume {}. "
+                "Failed to start the optional layout count for volume {}. "
                 "Verification will continue without a percentage or ETA.\n",
                 volume_identifier);
             devicefs::WriteToStream(
@@ -2151,10 +2107,10 @@ auto CompareFilesystems(
                     *plan, *synthetic, *real,
                     cancellation_event, io_cancellation, state)) {
                 if (comparison_surface_incomplete) {
-                    state.Fail(
-                        "ordinary filesystem traversal could not observe "
+                    state.Fail(std::make_exception_ptr(std::runtime_error{
+                        "ordinary filesystem traversal failed to observe "
                         "the complete namespace beneath at least one "
-                        "directory");
+                        "directory"}));
                 } else {
                     state.CompleteComparison();
                 }
@@ -2178,43 +2134,24 @@ auto VerifyVolume(
     if (wil::event_is_signaled(cancellation_event)) {
         return;
     }
+    const auto complete = wil::scope_exit([&state] noexcept {
+        state.SetPhase(VerificationPhase::Complete);
+    });
     state.SetPhase(VerificationPhase::AttachingSynthetic);
     auto synthetic_attachment = AttachedVhdx::Attach(
         synthetic_vhdx, "synthetic", cancellation_event,
-        virtual_disk_lock, io_cancellation);
+        virtual_disk_lock, io_cancellation, state);
     if (wil::event_is_signaled(cancellation_event)) {
-        state.SetPhase(VerificationPhase::Detaching);
-        DetachView(synthetic_attachment, "synthetic", state);
-        state.SetPhase(VerificationPhase::Complete);
         return;
     }
-    try {
-        state.SetPhase(VerificationPhase::AttachingReal);
-        auto real_attachment = AttachedVhdx::Attach(
-            real_vhdx, "real B", cancellation_event,
-            virtual_disk_lock, io_cancellation);
-        try {
-            CompareFilesystems(volume.volume_identifier,
-                volume.payload_snapshot_identifier,
-                synthetic_attachment.Root(), real_attachment.Root(),
-                cancellation_event, percentage,
-                io_cancellation, state);
-        } catch (...) {
-            state.SetPhase(VerificationPhase::Detaching);
-            DetachView(real_attachment, "real-B", state);
-            throw;
-        }
-        state.SetPhase(VerificationPhase::Detaching);
-        DetachView(real_attachment, "real-B", state);
-    } catch (...) {
-        state.SetPhase(VerificationPhase::Detaching);
-        DetachView(synthetic_attachment, "synthetic", state);
-        state.SetPhase(VerificationPhase::Complete);
-        throw;
-    }
-
-    DetachView(synthetic_attachment, "synthetic", state);
-    state.SetPhase(VerificationPhase::Complete);
+    state.SetPhase(VerificationPhase::AttachingReal);
+    auto real_attachment = AttachedVhdx::Attach(
+        real_vhdx, "real B", cancellation_event,
+        virtual_disk_lock, io_cancellation, state);
+    CompareFilesystems(volume.volume_identifier,
+        volume.payload_snapshot_identifier,
+        synthetic_attachment.Root(), real_attachment.Root(),
+        cancellation_event, percentage, io_cancellation, state);
 }
 
 struct VolumeJob {
@@ -2231,30 +2168,22 @@ template <typename Operation>
 [[nodiscard]] auto StartVerification(
     const GUID &volume_identifier,
     const double percentage,
-    const HANDLE cancellation_event,
     Operation operation) -> VolumeJob {
     auto state = std::make_unique<VerificationState>();
     auto &borrowed_state = *state;
     auto future = [&]() -> std::future<void> {
         try {
             return std::async(std::launch::async,
-                [operation = std::move(operation), cancellation_event,
-                    &borrowed_state] {
+                [operation = std::move(operation), &borrowed_state] {
                     try {
                         operation(borrowed_state);
-                    } catch (const VerificationFailure &error) {
-                        borrowed_state.Fail(error.what());
-                        borrowed_state.SetPhase(VerificationPhase::Complete);
-                    } catch (const std::system_error &error) {
-                        if (!(IsCancellationError(error) &&
-                            wil::event_is_signaled(cancellation_event))) {
-                            borrowed_state.Fail(error.what());
-                        }
+                    } catch (...) {
+                        borrowed_state.Fail(std::current_exception());
                         borrowed_state.SetPhase(VerificationPhase::Complete);
                     }
                 });
-        } catch (const std::system_error &error) {
-            state->Fail(error.what());
+        } catch (...) {
+            state->Fail(std::current_exception());
             state->SetPhase(VerificationPhase::Complete);
             return {};
         }
@@ -2558,6 +2487,26 @@ auto PrintTraversalProgress(
         remaining_tasks / (tasks_per_second * 60.0));
 }
 
+auto PrintVerificationFailure(
+    const std::string_view prefix,
+    const std::exception_ptr &failure) noexcept -> int {
+    try {
+        std::rethrow_exception(failure);
+    } catch (const std::exception &error) {
+        devicefs::WriteToStream(devicefs::stdout,
+            "{}{}\n", prefix, &error);
+        if (const auto system_error_ = dynamic_cast<
+                const std::system_error *>(&error);
+                system_error_ && system_error_->code()) {
+            return system_error_->code().value();
+        }
+    } catch (...) {
+        devicefs::WriteToStream(devicefs::stdout,
+            "{}unknown non-standard exception\n", prefix);
+    }
+    return EXIT_FAILURE;
+}
+
 auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     devicefs::WriteToStream(
         devicefs::stdout, "\nFilesystem verification progress:\n");
@@ -2623,9 +2572,8 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             observation.exclusion_count,
             observation.matched_error_count);
         if (observation.failed) {
-            devicefs::WriteToStream(devicefs::stdout,
-                "    Verification failure: {}\n",
-                observation.failure);
+            PrintVerificationFailure(
+                "    Verification failure: ", observation.failure);
         }
     }
 }
@@ -2643,12 +2591,13 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     const std::span<const VolumeJob> jobs,
     const std::size_t optimization_unavailable,
     const std::size_t preparation_failures) {
-    devicefs::WriteToStream(
-        devicefs::stdout, "\nFilesystem verification results:\n");
+    devicefs::WriteToStream(devicefs::stdout,
+        "\nFilesystem verification results:\n");
+    auto error_exit_status = EXIT_FAILURE;
     auto verified = 0uz;
     auto sample_verified = 0uz;
     auto mismatched = 0uz;
-    auto indeterminate = 0uz;
+    auto error_volumes = 0uz;
     auto incomplete = 0uz;
     auto cleanup_failed = 0uz;
     auto matched_error_volumes = 0uz;
@@ -2668,29 +2617,17 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             "\n  Volume ID: {}\n", FormatGuid(job.volume_identifier));
         if (observation.mismatch_count != 0) {
             ++mismatched;
-            if (observation.failed) {
-                devicefs::WriteToStream(devicefs::stdout,
-                    "    Status: MISMATCH; an operational failure also "
-                    "prevented complete comparison\n");
-                devicefs::WriteToStream(devicefs::stdout,
-                    "    Failure: {}\n", observation.failure);
-            } else if (observation.comparison_complete) {
+            if (observation.comparison_complete) {
                 devicefs::WriteToStream(
                     devicefs::stdout, "    Status: MISMATCH\n");
             } else {
                 devicefs::WriteToStream(devicefs::stdout,
                     "    Status: MISMATCH; comparison incomplete\n");
             }
-        } else if (observation.failed) {
-            ++indeterminate;
-            devicefs::WriteToStream(devicefs::stdout,
-                "    Status: INDETERMINATE\n"
-                "    Failure: {}\n",
-                observation.failure);
         } else if (!observation.comparison_complete) {
             ++incomplete;
             devicefs::WriteToStream(devicefs::stdout,
-                "    Status: CANCELLED/INCOMPLETE\n");
+                "    Status: INCOMPLETE\n");
         } else if (observation.selected_bytes !=
             observation.available_bytes) {
             ++sample_verified;
@@ -2701,6 +2638,17 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             ++verified;
             devicefs::WriteToStream(devicefs::stdout,
                 "    Status: VERIFIED\n");
+        }
+        if (observation.failed) {
+            ++error_volumes;
+            const auto verification_error_code = PrintVerificationFailure(
+                "    Failure: ", observation.failure);
+            // The first non-generic exit status (if any) is preserved to
+            // become the return value of this function.
+            if ((error_exit_status == EXIT_FAILURE) &&
+                    (verification_error_code != EXIT_FAILURE)) {
+                error_exit_status = verification_error_code;
+            }
         }
         devicefs::WriteToStream(devicefs::stdout,
             "    Synthetic namespace: {} directories, {} object(s), "
@@ -2770,28 +2718,23 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     }
     devicefs::WriteToStream(devicefs::stdout,
         "\nSummary: {} verified, {} sample verified, {} mismatched, "
-        "{} indeterminate, {} cancelled/incomplete, "
+        "{} volume(s) with errors, {} incomplete, "
         "{} volume(s) with VSS exclusions, "
         "{} volume(s) with matched filesystem errors, "
         "{} volume(s) optimization unavailable, "
         "{} view-preparation failure(s), and "
         "{} cleanup-failure volume(s).\n",
         verified, sample_verified, mismatched,
-        indeterminate, incomplete, exclusion_volumes,
+        error_volumes, incomplete, exclusion_volumes,
         matched_error_volumes,
         optimization_unavailable,
         preparation_failures, cleanup_failed);
-    if ((indeterminate != 0) || (mismatched != 0) ||
-        (preparation_failures != 0)) {
-        return 1;
+    if ((error_volumes != 0) || (mismatched != 0) ||
+            (preparation_failures != 0) || (incomplete != 0) ||
+            (cleanup_failed != 0)) {
+        return error_exit_status;
     }
-    if (incomplete != 0) {
-        return internal::kCancelledExitCode;
-    }
-    if (cleanup_failed != 0) {
-        return 1;
-    }
-    return 0;
+    return EXIT_SUCCESS;
 }
 
 [[nodiscard]] auto FinishVerification(
@@ -2834,7 +2777,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     auto name = std::array<wchar_t, MAX_PATH>{};
     if (!GetVolumeNameForVolumeMountPointW(
             path.c_str(), name.data(), CompileTimeCast<DWORD, name.size()>())) {
-        WinError("could not obtain the mounted volume for '{}'",
+        WinError("failed to obtain the mounted volume for '{}'",
             std::wstring_view{path});
     }
     return std::wstring{name.data()};
@@ -2848,7 +2791,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     const std::filesystem::path &real_mount,
     const double percentage) -> int {
     if (wil::event_is_signaled(cancellation_event)) {
-        return internal::kCancelledExitCode;
+        return ERROR_CANCELLED;
     }
     const auto synthetic_root = MountedVolumeRoot(synthetic_mount);
     const auto real_root = MountedVolumeRoot(real_mount);
@@ -2857,7 +2800,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     const auto volume_identifier = ParseGuid(
         Transcode<std::string>(real_root).substr(10, 38));
     if (!volume_identifier) {
-        WinError("could not read the volume GUID from '{}'",
+        WinError("failed to read the volume GUID from '{}'",
             std::wstring_view{real_root}, ExplicitHresult{volume_identifier.error()});
     }
     auto privileges = ProcessPrivilegeEnabler{
@@ -2867,7 +2810,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     // The mounted reference volume's GUID makes content sampling repeatable
     // while the caller keeps this pair mounted.
     auto jobs = std::array{StartVerification(*volume_identifier, percentage,
-        cancellation_event, [&](VerificationState &state) {
+        [&](VerificationState &state) {
             CompareFilesystems(*volume_identifier, *volume_identifier,
                 synthetic_root, real_root, cancellation_event, percentage,
                 io_cancellation, state);
@@ -2895,30 +2838,41 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             })};
     if (!internal::WaitForDeviceFs(
             child.Process(), cancellation_event)) {
-        return internal::kCancelledExitCode;
+        return ERROR_CANCELLED;
     }
     const auto preserve_for_manual_mount =
-        [&](const std::string_view error) {
+        [&child, cancellation_event](const std::string_view error,
+            auto &&...failure) -> int
+            requires (sizeof...(failure) <= 1) {
             devicefs::WriteToStream(
                 devicefs::stdout,
                 "\nAutomatic VHDX inventory failed: {}\n",
                 error);
-            devicefs::WriteToStream(devicefs::stdout,
-                L"The VHDX remains available for manual mounting:\n"
-                L"  VHDX file: {}\n"
-                L"After unmounting any manual attachment, press Ctrl+C "
-                L"to stop devicefs.\n",
-                child.Process().readiness_path.native());
-            const auto processes = std::array{&child.Process()};
-            const auto result =
-                internal::WaitForDeviceFsExitOrCancellation(
-                    processes, cancellation_event);
-            if (result) {
+
+            if (!wil::event_is_signaled(cancellation_event) &&
+                !WaitForProcess(child.Process().process.hProcess, 0ms)) {
                 devicefs::WriteToStream(devicefs::stdout,
-                    "devicefs exited with code {}.\n",
-                    result->exit_code);
+                    L"The VHDX remains available for manual mounting:\n"
+                    L"  VHDX file: {}\n"
+                    L"After unmounting any manual attachment, press Ctrl+C "
+                    L"to stop devicefs.\n",
+                    child.Process().readiness_path.native());
+                const auto processes = std::array{&child.Process()};
+                const auto result =
+                    internal::WaitForDeviceFsExitOrCancellation(
+                        processes, cancellation_event);
+                if (result) {
+                    devicefs::WriteToStream(devicefs::stdout,
+                        "devicefs exited with code {}.\n",
+                        result->exit_code);
+                }
             }
-            return 1;
+
+            if constexpr (sizeof...(failure) == 0) {
+                return 1;
+            } else {
+                std::rethrow_exception((failure, ...));
+            }
         };
 
     auto state = VerificationState{};
@@ -2926,131 +2880,106 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     auto virtual_disk_lock = wil::srwlock{};
     const auto vhdx_path = child.Process().readiness_path;
 
-    auto automatic_inventory_finished = false;
-    try {
-        auto privileges = ProcessPrivilegeEnabler{
-            GetCurrentProcess(),
-            std::array{
-                wil::zwstring_view{SE_BACKUP_NAME},
-                wil::zwstring_view{SE_MANAGE_VOLUME_NAME},
-            },
-            "the backup and volume-management privileges"sv};
-        auto operation = std::async(std::launch::async,
-            [&state, &io_cancellation, &virtual_disk_lock,
-                vhdx_path, device, cancellation_event] {
-                try {
-                    auto view = AttachedVhdx::Attach(
-                        vhdx_path, "requested device",
-                        cancellation_event,
-                        virtual_disk_lock, io_cancellation);
-                    state.BeginTraversal();
-                    devicefs::WriteToStream(
-                        devicefs::stdout,
-                        L"\nBeginning VHDX filesystem inventory:\n"
-                        L"  Source device: {}\n"
-                        L"  VHDX file: {}\n"
-                        L"  Attached volume: {}\n"
-                        L"  Traversal workers: {}\n",
-                        Transcode<std::wstring>(device),
-                        vhdx_path.native(), view.Root(),
-                        kVerificationWorkerCount);
-                    const auto root = std::wstring{view.Root()};
-                    const auto inventory = InventoryFilesystem(
-                        root, VerificationEndpoint::Synthetic,
-                        cancellation_event, io_cancellation, state);
-                    if (inventory) {
-                        state.CompleteTraversal();
-                    }
-                    if (inventory && !inventory->issues.empty()) {
-                        const auto &first = inventory->issues.front();
-                        const auto error = TryConstructWinError("",
-                            ExplicitWin32Error{first.failure.error});
-                        throw VerificationFailure{std::format(
-                            "ordinary traversal retained {} filesystem-"
-                            "operation failure(s); first: {} for {}: {}",
-                            inventory->issues.size(),
-                            OperationName(first.key.operation),
-                            Transcode<std::string>(DisplayPath(
-                                first.key.path)),
-                            error ? error->what() : "unknown error")};
-                    }
-                    state.SetPhase(VerificationPhase::Detaching);
-                    DetachView(view, "requested device", state);
-                    state.SetPhase(VerificationPhase::Complete);
-                    return inventory.has_value();
-                } catch (const std::system_error &error) {
-                    if (IsCancellationError(error) &&
-                        wil::event_is_signaled(
-                            cancellation_event)) {
-                        state.SetPhase(VerificationPhase::Complete);
-                        return false;
-                    }
-                    throw;
-                }
+    auto privileges = ProcessPrivilegeEnabler{
+        GetCurrentProcess(),
+        std::array{
+            wil::zwstring_view{SE_BACKUP_NAME},
+            wil::zwstring_view{SE_MANAGE_VOLUME_NAME},
+        },
+        "the backup and volume-management privileges"sv};
+    auto operation = std::async(std::launch::async,
+        [&state, &io_cancellation, &virtual_disk_lock,
+            vhdx_path, device, cancellation_event] {
+            const auto complete = wil::scope_exit([&state] noexcept {
+                state.SetPhase(VerificationPhase::Complete);
             });
-        auto next_progress =
-            std::chrono::steady_clock::now() +
-            kProgressReportInterval;
-        auto cancellation_failure = DWORD{ERROR_SUCCESS};
-        while (operation.wait_for(0s) !=
-            std::future_status::ready) {
-            if (wil::event_is_signaled(
-                    cancellation_event)) {
-                RequestPendingIoCancellation(
-                    io_cancellation, cancellation_failure);
-            }
-            const auto now = std::chrono::steady_clock::now();
-            if (now >= next_progress) {
-                const auto observation = state.Observe();
-                devicefs::WriteToStream(devicefs::stdout,
-                    "\nVHDX inventory progress:\n");
-                const auto elapsed = observation.traversal_started
-                    ? std::chrono::duration<double>(
-                        now - *observation.traversal_started).count()
-                    : 0.0;
-                PrintTraversalProgress(devicefs::stdout,
-                    "Requested device", observation.synthetic,
-                    std::nullopt, elapsed);
-                next_progress = now + kProgressReportInterval;
-            }
-            std::this_thread::sleep_for(kReporterPollInterval);
-        }
-        const auto inventory_complete = operation.get();
-        automatic_inventory_finished = true;
-        const auto observation = state.Observe();
-        devicefs::WriteToStream(devicefs::stdout,
-            "\nVHDX inventory {}:\n",
-            inventory_complete ? "complete" : "cancelled/incomplete");
-        const auto elapsed = observation.traversal_started
-            ? std::chrono::duration<double>(
-                std::chrono::steady_clock::now() -
-                *observation.traversal_started).count()
-            : 0.0;
-        PrintTraversalProgress(devicefs::stdout,
-            "Requested device", observation.synthetic,
-            std::nullopt, elapsed);
-        for (const auto &failure : observation.cleanup_failures) {
+            auto view = AttachedVhdx::Attach(
+                vhdx_path, "requested device",
+                cancellation_event,
+                virtual_disk_lock, io_cancellation, state);
+            state.BeginTraversal();
             devicefs::WriteToStream(
-                devicefs::stdout, "  Cleanup failure: {}\n", failure);
+                devicefs::stdout,
+                L"\nBeginning VHDX filesystem inventory:\n"
+                L"  Source device: {}\n"
+                L"  VHDX file: {}\n"
+                L"  Attached volume: {}\n"
+                L"  Traversal workers: {}\n",
+                Transcode<std::wstring>(device),
+                vhdx_path.native(), view.Root(),
+                kVerificationWorkerCount);
+            const auto root = std::wstring{view.Root()};
+            const auto inventory = InventoryFilesystem(
+                root, VerificationEndpoint::Synthetic,
+                cancellation_event, io_cancellation, state);
+            if (!inventory) {
+                WinError("VHDX filesystem inventory was cancelled",
+                    ExplicitWin32Error{ERROR_CANCELLED});
+            }
+            state.CompleteTraversal();
+            for (const auto &issue : inventory->issues) {
+                devicefs::WriteToStream(devicefs::stdout,
+                    "VHDX inventory failure: {}\n",
+                    TryConstructWinError("{} failed for '{}'",
+                        OperationName(issue.key.operation),
+                        DisplayPath(issue.key.path),
+                        ExplicitWin32Error{issue.failure.error}));
+            }
+        });
+    auto next_progress =
+        std::chrono::steady_clock::now() +
+        kProgressReportInterval;
+    auto cancellation_failure = DWORD{ERROR_SUCCESS};
+    while (operation.wait_for(0s) !=
+        std::future_status::ready) {
+        if (wil::event_is_signaled(
+                cancellation_event)) {
+            RequestPendingIoCancellation(
+                io_cancellation, cancellation_failure);
         }
-        if (!inventory_complete) {
-            return internal::kCancelledExitCode;
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= next_progress) {
+            const auto observation = state.Observe();
+            devicefs::WriteToStream(devicefs::stdout,
+                "\nVHDX inventory progress:\n");
+            const auto elapsed = observation.traversal_started
+                ? std::chrono::duration<double>(
+                    now - *observation.traversal_started).count()
+                : 0.0;
+            PrintTraversalProgress(devicefs::stdout,
+                "Requested device", observation.synthetic,
+                std::nullopt, elapsed);
+            next_progress = now + kProgressReportInterval;
         }
-        if (!observation.cleanup_failures.empty()) {
-            return 1;
-        }
-        return 0;
-    } catch (const VerificationFailure &error) {
-        if (automatic_inventory_finished) {
-            throw;
-        }
-        return preserve_for_manual_mount(error.what());
-    } catch (const std::system_error &error) {
-        if (automatic_inventory_finished) {
-            throw;
-        }
-        return preserve_for_manual_mount(error.what());
+        std::this_thread::sleep_for(kReporterPollInterval);
     }
+    const auto observation = state.Observe();
+    devicefs::WriteToStream(devicefs::stdout,
+        "\nVHDX inventory {}:\n",
+        observation.traversal_complete ? "complete" : "incomplete");
+    const auto elapsed = observation.traversal_started
+        ? std::chrono::duration<double>(
+            std::chrono::steady_clock::now() -
+            *observation.traversal_started).count()
+        : 0.0;
+    PrintTraversalProgress(devicefs::stdout,
+        "Requested device", observation.synthetic,
+        std::nullopt, elapsed);
+    for (const auto &failure : observation.cleanup_failures) {
+        devicefs::WriteToStream(
+            devicefs::stdout, "  Cleanup failure: {}\n", failure);
+    }
+    try {
+        operation.get();
+    } catch (const std::exception &error) {
+        return preserve_for_manual_mount(
+            error.what(), std::current_exception());
+    }
+    if (observation.synthetic.failures != 0) {
+        return preserve_for_manual_mount(
+            "filesystem traversal reported errors");
+    }
+    return observation.cleanup_failures.empty() ? 0 : 1;
 }
 
 export [[nodiscard]] auto VerifyFilesystemViews(
@@ -3098,7 +3027,6 @@ export [[nodiscard]] auto VerifyFilesystemViews(
         auto synthetic_vhdx = synthetic_mount / volume.filename;
         auto real_vhdx = real_mount / volume.filename;
         jobs.push_back(StartVerification(volume.volume_identifier, percentage,
-            cancellation_event,
             [volume, synthetic_vhdx = std::move(synthetic_vhdx),
                 real_vhdx = std::move(real_vhdx), cancellation_event, percentage,
                 &virtual_disk_lock, &io_cancellation](VerificationState &state) {

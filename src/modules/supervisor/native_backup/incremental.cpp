@@ -96,7 +96,6 @@ export [[nodiscard]] auto BuildDirtyBlockMap(
         auto svi_blocks = devicefs::svi::ReadBlockOffsets(baseline_device);
         auto payload_svi_blocks = devicefs::svi::ReadBlockOffsets(payload_device);
         svi_blocks.merge(payload_svi_blocks);
-        privileges.Restore();
         return svi_blocks;
     }();
 

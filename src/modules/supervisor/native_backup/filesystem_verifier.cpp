@@ -2873,12 +2873,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                 io_cancellation, state);
             state.SetPhase(VerificationPhase::Complete);
         })};
-    const auto result = FinishVerification(
-        jobs, cancellation_event, io_cancellation, 0, 0);
-    if (result == 0) {
-        privileges.Restore();
-    }
-    return result;
+    return FinishVerification(jobs, cancellation_event, io_cancellation, 0, 0);
 }
 
 [[nodiscard]] auto InventoryVhdx(
@@ -3038,7 +3033,6 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             devicefs::WriteToStream(
                 devicefs::stdout, "  Cleanup failure: {}\n", failure);
         }
-        privileges.Restore();
         if (!inventory_complete) {
             return internal::kCancelledExitCode;
         }
@@ -3113,12 +3107,6 @@ export [[nodiscard]] auto VerifyFilesystemViews(
                     io_cancellation, state);
             }));
     }
-
-    const auto result = FinishVerification(jobs, cancellation_event,
+    return FinishVerification(jobs, cancellation_event,
         io_cancellation, optimization_unavailable, preparation_failures);
-    if (result != 0) {
-        return result;
-    }
-    privileges.Restore();
-    return 0;
 }

@@ -253,8 +253,6 @@ template <std::size_t Size>
             std::wstring_view{username.c_str(), username.size()},
             LsaWin32Error((substatus != 0) ? substatus : logon));
     }
-
-    privileges.Restore();
     return token;
 }
 

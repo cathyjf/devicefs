@@ -19,9 +19,7 @@ export module devicefs.supervisor.process_privileges;
 import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
-
-using OutputErrorType = std::optional<std::reference_wrapper<std::expected<
-    void, std::unique_ptr<std::runtime_error>>>>;
+import devicefs.stream_writer;
 
 export template <std::size_t PrivilegeCount>
 class ProcessPrivilegeEnabler {
@@ -34,14 +32,16 @@ public:
         const HANDLE process,
         const std::span<const wil::zwstring_view, PrivilegeCount> privilege_names,
         const std::string_view description,
-        const OutputErrorType output_error = std::nullopt)
-        : description_{description} {
-        const auto handle_error = [output_error]<class... Arguments>(
+        const auto &&...output_error) requires (sizeof...(output_error) <= 1):
+        description_{description},
+        should_throw_cleanup_exceptions_(sizeof...(output_error) == 0) {
+        const auto handle_error = [&output_error...]<class... Arguments>(
             const detail::WinErrorFormatString<Arguments...> format,
             Arguments &&...arguments) {
-            if (output_error) {
-                output_error->get() = std::unexpected{TryConstructWinError(
-                    format, std::forward<Arguments>(arguments)...)};
+            if constexpr (sizeof...(output_error) > 0) {
+                (output_error, ...).get() = std::unexpected{
+                    TryConstructWinError(format,
+                        std::forward<Arguments>(arguments)...)};
             } else {
                 WinError(format, std::forward<Arguments>(arguments)...);
             }
@@ -50,7 +50,7 @@ public:
         if (!OpenProcessToken(process,
                 TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
                 token_.addressof())) {
-            handle_error("could not open the backup-supervisor process token");
+            handle_error("failed to open the backup-supervisor process token");
             return;
         }
 
@@ -64,7 +64,7 @@ public:
         };
         for (auto &&[entry, name] : std::views::zip(entries, privilege_names)) {
             if (!LookupPrivilegeValueW(nullptr, name.c_str(), &entry.Luid)) {
-                handle_error("could not identify {} ('{}')",
+                handle_error("failed to identify {} ('{}')",
                     description_,
                     std::wstring_view{name.data(), name.length()});
                 return;
@@ -86,14 +86,14 @@ public:
                 token_.get(), FALSE, state,
                 CompileTimeCast<DWORD, kStateSize>(), previous_state,
                 &previous_state_size)) {
-            handle_error("could not enable {}", description_);
+            handle_error("failed to enable {}", description_);
             return;
         }
         previous_state_ = previous_state;
         const auto last_error = GetLastError();
         if (last_error != ERROR_SUCCESS) {
             std::ignore = RestoreNoThrow();
-            handle_error("could not enable {}", description_,
+            handle_error("failed to enable {}", description_,
                 ExplicitWin32Error{last_error});
         }
     }
@@ -105,16 +105,23 @@ public:
     auto operator=(ProcessPrivilegeEnabler &&)
         -> ProcessPrivilegeEnabler & = delete;
 
-    ~ProcessPrivilegeEnabler() {
-        std::ignore = RestoreNoThrow();
-    }
-
-    auto Restore() {
+    ~ProcessPrivilegeEnabler() noexcept(false) {
         const auto error = RestoreNoThrow();
-        if (error != ERROR_SUCCESS) {
-            WinError("could not restore {}", description_,
-                ExplicitWin32Error{error});
+        if (error == ERROR_SUCCESS) {
+            return;
         }
+        [this]<class... Arguments>(
+            const detail::WinErrorFormatString<Arguments...> format,
+            Arguments &&...arguments) {
+            if (should_throw_cleanup_exceptions_ &&
+                    (initial_exceptions_ == std::uncaught_exceptions())) {
+                WinError(format, std::forward<Arguments>(arguments)...);
+            }
+            devicefs::WriteToStream(devicefs::stderr,
+                "backup-supervisor: continuing despite the following "
+                "non-fatal error: {}\n", TryConstructWinError(
+                    format, std::forward<Arguments>(arguments)...));
+        }("failed to restore {}", description_, ExplicitWin32Error{error});
     }
 
 private:
@@ -122,8 +129,7 @@ private:
         if (previous_state_ == nullptr) {
             return DWORD{ERROR_SUCCESS};
         }
-        if (!AdjustTokenPrivileges(
-                token_.get(), FALSE, previous_state_,
+        if (!AdjustTokenPrivileges(token_.get(), FALSE, previous_state_,
                 0, nullptr, nullptr)) {
             return GetLastError();
         }
@@ -135,6 +141,8 @@ private:
     }
 
     const std::string_view description_;
+    const bool should_throw_cleanup_exceptions_;
+    const int initial_exceptions_ = std::uncaught_exceptions();
     wil::unique_handle token_;
     alignas(TOKEN_PRIVILEGES) std::array<std::byte, kStateSize> previous_state_storage_{};
     TOKEN_PRIVILEGES *previous_state_ = nullptr;
@@ -143,6 +151,4 @@ private:
 export template <std::size_t PrivilegeCount>
 ProcessPrivilegeEnabler(HANDLE,
     const std::array<wil::zwstring_view, PrivilegeCount> &,
-    std::string_view,
-    OutputErrorType = std::nullopt)
-    -> ProcessPrivilegeEnabler<PrivilegeCount>;
+    std::string_view, ...) -> ProcessPrivilegeEnabler<PrivilegeCount>;

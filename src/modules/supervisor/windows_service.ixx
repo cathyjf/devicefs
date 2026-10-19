@@ -78,7 +78,7 @@ struct BackupProcess {
     wil::unique_handle job;
 
     [[nodiscard]] auto Wait(
-        const std::chrono::milliseconds timeout) const {
+        const std::chrono::milliseconds timeout) const noexcept {
         return WaitForProcess(process.hProcess, timeout);
     }
 

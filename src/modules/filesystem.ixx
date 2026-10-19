@@ -379,10 +379,10 @@ template <BlockDevice DeviceType>
         const auto source = std::string_view{mapping.device};
         const auto description = std::format("--map #{}", map_number);
         return [source, &description](auto &&...arguments) {
-            if (source.starts_with(internal::kHandleDevicePrefix)) {
+            if (source.starts_with(devicefs::kHandleDevicePrefix)) {
                 return WindowsBlockDevice::FromHandle(
                     ParseInheritedHandle(
-                        source.substr(internal::kHandleDevicePrefix.size()),
+                        source.substr(devicefs::kHandleDevicePrefix.size()),
                         description),
                     std::forward<decltype(arguments)>(arguments)...);
             }

@@ -29,7 +29,9 @@ export import :manifest;
 import :pbs;
 import <devicefs/common.h>;
 import devicefs.file_reader;
+import devicefs.guid_formatter;
 import devicefs.stream_writer;
+import devicefs.windows_block_device;
 import devicefs.supervisor.configuration;
 import devicefs.supervisor.launch_powershell;
 import devicefs.supervisor.installation;
@@ -125,6 +127,26 @@ export [[nodiscard]] auto RunSelectiveView(
 
 namespace internal {
 
+[[nodiscard]] auto QuerySnapshotMountManagerIds(
+    const std::span<const devicefs::vshadow::Snapshot> snapshots,
+    const SnapshotHandles &snapshot_handles) {
+    auto mount_manager_ids = std::map<GUID, std::vector<BYTE>, GuidLess>{};
+    for (const auto &snapshot : snapshots) {
+        auto result = devicefs::QueryMountManagerId(
+            snapshot_handles.at(snapshot.identifier).get());
+        if (result) {
+            mount_manager_ids.emplace(snapshot.identifier, std::move(*result));
+            continue;
+        }
+        devicefs::WriteToStream(devicefs::stderr,
+            "backup-supervisor: {}.\n",
+            TryConstructWinError("failed to retrieve the mount manager ID "
+                "for snapshot device '{}'; continuing anyway", snapshot.device,
+                ExplicitWin32Error{result.error()}));
+    }
+    return mount_manager_ids;
+}
+
 [[nodiscard]] auto RunSnapshotBackup(
     const HANDLE cancellation_event,
     const devicefs::vshadow::SnapshotSet &snapshot_set,
@@ -162,35 +184,31 @@ namespace internal {
         std::filesystem::remove(mount_target);
     }
 
-    const auto devicefs = StartDeviceFs(
-        snapshot_set.snapshots, read_user, use_known_data_map);
-    auto cleanup = wil::scope_exit([&] {
-        TryStopDeviceFs(devicefs);
-    });
+    const auto snapshot_handles = snapshot_set.snapshots |
+        std::views::transform([](const auto &snapshot) {
+            return std::pair{snapshot.identifier,
+                devicefs::OpenBlockDevice(std::filesystem::path{snapshot.device},
+                    SnapshotImageName(snapshot), true)};
+        }) | std::ranges::to<SnapshotHandles>();
+    const auto devicefs = DeviceFsChild{StartDeviceFs(
+        snapshot_set.snapshots, read_user, use_known_data_map,
+        snapshot_handles)};
 
-    auto result = kCancelledExitCode;
-    if (WaitForDeviceFs(devicefs, cancellation_event)) {
-        result = RunPbsFish(
-            cancellation_event,
-            namespace_override,
-            PbsFishRequest{
-                .snapshot_manifest = [&snapshot_set](const std::string_view layer) {
-                    return SerializeSnapshotManifest(snapshot_set, layer);
-                },
-                .send_encryption_key = true,
-            }).exit_code;
+    if (!WaitForDeviceFs(devicefs.Process(), cancellation_event)) {
+        return kCancelledExitCode;
     }
-
-    cleanup.release();
-    try {
-        StopDeviceFs(devicefs, result == 0);
-    } catch (const std::exception &error) {
-        if (result == 0) {
-            throw;
-        }
-        TryWriteError("devicefs cleanup failed", error);
-    }
-    return result;
+    return RunPbsFish(
+        cancellation_event,
+        namespace_override,
+        PbsFishRequest{
+            .snapshot_manifest = [&snapshot_set, &snapshot_handles](
+                const std::string_view layer) {
+                return SerializeSnapshotManifest(
+                    snapshot_set, QuerySnapshotMountManagerIds(
+                        snapshot_set.snapshots, snapshot_handles), layer);
+            },
+            .send_encryption_key = true,
+        }).exit_code;
 }
 
 } // namespace internal

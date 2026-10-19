@@ -319,6 +319,7 @@ namespace internal {
 
 [[nodiscard]] auto SerializeSnapshotManifest(
     const devicefs::vshadow::SnapshotSet &snapshot_set,
+    const std::map<GUID, std::vector<BYTE>, GuidLess> &mount_manager_ids,
     const std::string_view wsl_oci_layer) -> std::u8string {
     try {
         const auto apartment = WinrtApartment{
@@ -327,6 +328,7 @@ namespace internal {
         using winrt::Windows::Data::Json::JsonObject;
         using winrt::Windows::Data::Json::JsonArray;
         using winrt::Windows::Data::Json::JsonValue;
+        using winrt::Windows::Security::Cryptography::CryptographicBuffer;
 
         auto volumes = JsonObject{};
         for (const auto &snapshot : snapshot_set.snapshots) {
@@ -342,6 +344,18 @@ namespace internal {
             notes.SetNamedValue(L"mount-points", mount_points);
             notes.SetNamedValue(L"volume-label", JsonValue::CreateStringValue(
                 VolumeLabel(original_volume)));
+            notes.SetNamedValue(L"snapshot-device",
+                JsonValue::CreateStringValue(
+                    Transcode<std::wstring>(snapshot.device)));
+            if (const auto mount_manager_id =
+                    mount_manager_ids.find(snapshot.identifier);
+                mount_manager_id != mount_manager_ids.end()) {
+                notes.SetNamedValue(L"snapshot-mount-manager-id",
+                    JsonValue::CreateStringValue(
+                        CryptographicBuffer::EncodeToHexString(
+                            CryptographicBuffer::CreateFromByteArray(
+                                mount_manager_id->second))));
+            }
 
             auto volume = JsonObject{};
             volume.SetNamedValue(L"snapshot-id", JsonValue::CreateStringValue(

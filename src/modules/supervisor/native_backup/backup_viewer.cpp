@@ -169,13 +169,17 @@ auto WaitForViewSession(
         devicefs.Process().process.hProcess,
         fish.Process(), cancellation_event).status();
     if (result == WAIT_OBJECT_0) {
-        throw std::runtime_error(std::format(
-            "devicefs exited while the backup view was mounted with code {}",
-            ProcessExitCode(devicefs.Process().process.hProcess)));
+        if (const auto exit_code =
+                ProcessExitCode(devicefs.Process().process.hProcess);
+            exit_code != ERROR_SUCCESS) {
+            WinError("devicefs exited while the backup view was mounted",
+                ExplicitWin32Error{exit_code});
+        }
+        return;
     }
     if (result == (WAIT_OBJECT_0 + 1)) {
         throw std::runtime_error(std::format(
-            "the Linux view operation exited while the view was mounted "
+            "the GNU/Linux view operation exited while the view was mounted "
             "with code {}",
             ProcessExitCode(fish.Process())));
     }
@@ -204,13 +208,12 @@ auto WaitForViewSession(
         auto information = wil::unique_tokeninfo_ptr<TOKEN_USER>{};
         if (const auto result = wil::get_token_information_nothrow(
                 information, GetCurrentProcessToken()); FAILED(result)) {
-            WinError("could not identify the invoking user",
+            WinError("failed to identify the invoking user",
                 ExplicitHresult{result});
         }
         return information;
     }();
-    const auto port = std::to_string(
-        internal::SelectTcpPortCandidate());
+    const auto port = std::to_string(internal::SelectTcpPortCandidate());
     auto devicefs_directory = internal::ViewDirectory{
         "devicefs-view", user->User.Sid};
     const auto devicefs_mount = devicefs_directory.Path() / "view";
@@ -238,8 +241,11 @@ auto WaitForViewSession(
     auto fish = internal::StartViewFish(
         namespace_override, snapshot_override, timestamp, archive, address,
         port, std::string_view{rpc_password->data(), rpc_password->size()});
-    auto stop_fish = wil::scope_exit([&] noexcept {
-        internal::TryStopPbsFish(fish);
+    auto should_stop_pbs = true;
+    const auto stop_fish = wil::scope_exit([&fish, &should_stop_pbs] noexcept {
+        if (should_stop_pbs) {
+            internal::TryStopPbsFish(fish);
+        }
     });
     if (!internal::WaitForSambaReadiness(
             fish, cancellation_event)) {
@@ -269,17 +275,12 @@ auto WaitForViewSession(
         internal::StartDeviceFs(internal::DeviceFsStartRequest{
             .sources = source,
             .mount_target = Transcode<std::string>(devicefs_mount.native()),
-            .read_user = read_user.empty() ? std::nullopt : std::optional{std::string{read_user}},
+            .read_user = read_user.empty() ?
+                std::nullopt : std::optional{std::string{read_user}},
             .rpc_password = std::string_view{
                 rpc_password->data(), rpc_password->size()},
             .vhdx = true,
-        })};
-    const auto stop_view = wil::scope_exit([&] noexcept {
-        if (devicefs.TryStop()) {
-            internal::TryStopPbsFish(fish);
-        }
-    });
-    stop_fish.release();
+        }), std::ref(should_stop_pbs)};
     rpc_password.reset();
     if (!internal::WaitForDeviceFs(
             devicefs.Process(), cancellation_event)) {

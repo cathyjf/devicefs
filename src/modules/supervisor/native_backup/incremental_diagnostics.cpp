@@ -543,17 +543,11 @@ enum class BackupViewPreparation {
             "Mounted the corresponding real-B VHDX files at {}.\n",
             synthetic_sources.size(), synthetic_mount_text,
             real_mount_text);
-        const auto result = VerifyFilesystemViews(
+        return VerifyFilesystemViews(
             cancellation_event, verification_volumes,
             synthetic_mount, real_mount,
             *verification_percentage,
             optimization_unavailable, preparation_failures);
-        if (result != 0) {
-            return result;
-        }
-        synthetic_devicefs.Stop();
-        real_devicefs.Stop();
-        return 0;
     }
 
     devicefs::WriteToStream(
@@ -577,8 +571,6 @@ enum class BackupViewPreparation {
             "views with code {}.",
             kChildNames[exit->process_index], exit->exit_code));
     }
-    synthetic_devicefs.Stop();
-    real_devicefs.Stop();
     return 0;
 }
 

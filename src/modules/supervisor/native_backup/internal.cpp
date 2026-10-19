@@ -23,12 +23,15 @@ module devicefs.supervisor.native_backup:internal;
 import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import devicefs.guid_formatter;
 import devicefs.stream_writer;
 import devicefs.supervisor.vshadow;
 
 namespace internal {
 
 inline constexpr auto kCancelledExitCode = 130;
+
+using SnapshotHandles = std::map<GUID, wil::unique_hfile, GuidLess>;
 
 template <typename Operation>
 [[nodiscard]] auto RunVssOperation(

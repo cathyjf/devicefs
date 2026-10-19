@@ -25,20 +25,14 @@ import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import devicefs.supervisor.process_attribute_list;
 
-export [[nodiscard]] auto WaitForProcess(
+export
+[[gsl::suppress("26447",
+    justification: "`wil::safe_cast_failfast` cannot throw.")]]
+[[nodiscard]] auto WaitForProcess(
     const HANDLE process,
-    const std::chrono::milliseconds timeout) -> bool {
+    const std::chrono::milliseconds timeout) noexcept -> bool {
     return wil::handle_wait(
-        process, [count = timeout.count()] {
-            auto converted = DWORD{};
-            if (FAILED(wil::safe_cast_nothrow(count, &converted))) {
-                throw std::runtime_error(std::format(
-                    "could not wait for a backup process: timeout {} ms "
-                    "is outside the supported range of 0 to {} ms",
-                    count, std::numeric_limits<decltype(converted)>::max()));
-            }
-            return converted;
-        }());
+        process, wil::safe_cast_failfast<DWORD>(timeout.count()));
 }
 
 export [[nodiscard]] auto ProcessExitCode(const HANDLE process) {
@@ -51,12 +45,12 @@ export [[nodiscard]] auto ProcessExitCode(const HANDLE process) {
 
 export [[nodiscard]] auto DuplicateInheritableHandle(const HANDLE source) {
     if ((source == nullptr) || (source == INVALID_HANDLE_VALUE)) {
-        throw std::runtime_error("a child-process standard handle is unavailable");
+        throw std::runtime_error("a child-process handle is unavailable");
     }
     auto duplicate = wil::unique_handle{};
     if (!DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(),
             duplicate.addressof(), 0, TRUE, DUPLICATE_SAME_ACCESS)) {
-        WinError("could not duplicate a child-process standard handle");
+        WinError("failed to duplicate a child-process handle");
     }
     return duplicate;
 }
@@ -66,18 +60,21 @@ export [[nodiscard]] auto StartProcessWithHandles(
     const HANDLE standard_output,
     const HANDLE standard_error,
     const auto &start,
+    const std::span<const HANDLE> additional_handles = {},
     auto &&...additional_attributes) {
     const auto child_handles = std::array{
         DuplicateInheritableHandle(standard_input),
         DuplicateInheritableHandle(standard_output),
         DuplicateInheritableHandle(standard_error),
     };
-    auto inherited_handles = std::array{
+    auto inherited_handles = std::vector{
         child_handles[0].get(), child_handles[1].get(), child_handles[2].get(),
     };
+    inherited_handles.append_range(additional_handles);
     const auto attributes = ProcessAttributeList{
         std::tuple{PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            inherited_handles.data(), sizeof(inherited_handles)},
+            inherited_handles.data(),
+            inherited_handles.size() * sizeof(inherited_handles[0])},
         std::forward<decltype(additional_attributes)>(additional_attributes)...};
 
     auto startup = STARTUPINFOEXA{
@@ -101,6 +98,8 @@ struct ProcessLaunchOptions {
     HANDLE standard_input = GetStdHandle(STD_INPUT_HANDLE);
     HANDLE standard_output = GetStdHandle(STD_OUTPUT_HANDLE);
     HANDLE standard_error = GetStdHandle(STD_ERROR_HANDLE);
+    // These handles must already be inheritable.
+    std::span<const HANDLE> inherited_handles;
 };
 
 // Start the fully qualified executable in `options.argv[0]`. The child
@@ -123,7 +122,9 @@ export template <typename Argv>
                 WinError("failed to start program '{}'", executable);
             }
             return process;
-        }, std::forward<decltype(additional_attributes)>(additional_attributes)...);
+        }, options.inherited_handles,
+        std::forward<decltype(additional_attributes)>(
+            additional_attributes)...);
 }
 
 export using PipeOutputConsumption = std::expected<std::size_t, DWORD>;

@@ -2900,7 +2900,6 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             })};
     if (!internal::WaitForDeviceFs(
             child.Process(), cancellation_event)) {
-        child.Stop();
         return internal::kCancelledExitCode;
     }
     const auto preserve_for_manual_mount =
@@ -2924,7 +2923,6 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                     "devicefs exited with code {}.\n",
                     result->exit_code);
             }
-            child.Stop();
             return 1;
         };
 
@@ -3041,7 +3039,6 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                 devicefs::stdout, "  Cleanup failure: {}\n", failure);
         }
         privileges.Restore();
-        child.Stop();
         if (!inventory_complete) {
             return internal::kCancelledExitCode;
         }

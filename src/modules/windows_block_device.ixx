@@ -36,6 +36,8 @@ using devicefs::terminal::Transcode;
 
 export namespace devicefs {
 
+constexpr auto kHandleDevicePrefix = std::string_view{R"(\\\handle:)"};
+
 // On arm64, MSVC 14.51's implementation of `std::countr_zero` uses a software
 // loop instead of the `RBIT` and `CLZ` instructions emitted by this intrinsic.
 [[nodiscard, msvc::forceinline]]
@@ -258,7 +260,8 @@ export namespace devicefs {
 
 [[nodiscard]] auto OpenBlockDevice(
     const std::filesystem::path &filename,
-    std::string_view description) -> wil::unique_hfile;
+    std::string_view description,
+    bool inherit_handle = false) -> wil::unique_hfile;
 
 struct WindowsBlockDevice {
     // A thread reuses its retained read buffer across devices, so that buffer
@@ -626,15 +629,62 @@ using filesystem_internal::LoadAllocationBitmap;
 
 auto OpenBlockDevice(
     const std::filesystem::path &filename,
-    const std::string_view description) -> wil::unique_hfile {
+    const std::string_view description,
+    const bool inherit_handle) -> wil::unique_hfile {
+    auto attributes = SECURITY_ATTRIBUTES{
+        .nLength = sizeof(SECURITY_ATTRIBUTES),
+        .lpSecurityDescriptor = nullptr,
+        .bInheritHandle = inherit_handle,
+    };
     auto handle = wil::unique_hfile(CreateFileW(filename.c_str(), GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-        FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        &attributes, OPEN_EXISTING,
+        FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+        nullptr));
     if (!handle) {
         WinError("failed to open block device '{}' for {}",
             std::wstring_view{filename.native()}, description);
     }
     return handle;
+}
+
+// Retrieve the mount manager's opaque device ID through `device`.
+export [[nodiscard]] auto QueryMountManagerId(const HANDLE device)
+    -> std::expected<std::vector<BYTE>, DWORD> {
+    // Windows SDKs 26100 and 28000 omit the mount manager query declarations
+    // supplied by the WDK in `mountdev.h`. Declaring them locally allows
+    // DeviceFs to issue the query without requiring the WDK to build.
+    constexpr auto kQueryUniqueId =
+        CTL_CODE('M', 0, METHOD_BUFFERED, FILE_ANY_ACCESS);
+    struct {
+        USHORT length;
+        BYTE bytes[1];
+    } header{};
+    // The documented minimum output size is `sizeof(MOUNTDEV_UNIQUE_ID)`,
+    // so the length probe uses the full structure even though it only
+    // needs `UniqueIdLength`.
+    // https://learn.microsoft.com/windows-hardware/drivers/ddi/mountdev/ni-mountdev-ioctl_mountdev_query_unique_id#output-buffer-length
+    const auto probe_error = Ioctl(
+        device, kQueryUniqueId, &header, sizeof(header));
+    if ((probe_error != ERROR_SUCCESS) && (probe_error != ERROR_MORE_DATA)) {
+        return std::unexpected{probe_error};
+    }
+    constexpr auto kIdOffset =
+        CompileTimeCast<DWORD, offsetof(decltype(header), bytes)>();
+    const auto output_size = std::max(
+        CompileTimeCast<DWORD, sizeof(header)>(), kIdOffset + header.length);
+    const auto output = std::make_unique_for_overwrite<BYTE[]>(output_size);
+    if (const auto error =
+            Ioctl(device, kQueryUniqueId, output.get(), output_size);
+        error != ERROR_SUCCESS) {
+        return std::unexpected{error};
+    }
+    const auto length =
+        std::start_lifetime_as<decltype(header)>(output.get())->length;
+    return std::span{
+        std::start_lifetime_as_array<BYTE>(
+            output.get() + kIdOffset, length),
+        length} | std::ranges::to<std::vector<BYTE>>();
 }
 
 auto WindowsBlockDevice::FromHandle(

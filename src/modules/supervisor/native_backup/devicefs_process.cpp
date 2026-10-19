@@ -26,6 +26,7 @@ import :internal;
 import <devicefs/common.h>;
 import devicefs.rpc_constants;
 import devicefs.stream_writer;
+import devicefs.windows_block_device;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.temporary_paths;
@@ -58,6 +59,7 @@ struct DeviceFsSource {
 
 struct DeviceFsStartRequest {
     std::span<const DeviceFsSource> sources;
+    std::span<const HANDLE> inherited_handles;
     std::string mount_target;
     std::optional<std::string> read_user;
     std::optional<std::string> rpc_endpoint;
@@ -157,6 +159,7 @@ struct DeviceFsStartRequest {
         .flags = request.rpc_endpoint ? CREATE_SUSPENDED : DWORD{},
         .standard_input = password_input
             ? password_input.get() : GetStdHandle(STD_INPUT_HANDLE),
+        .inherited_handles = request.inherited_handles,
     });
     return DeviceFsProcess{
         .process = std::move(process),
@@ -174,17 +177,24 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
 [[nodiscard]] auto StartDeviceFs(
     const std::span<const devicefs::vshadow::Snapshot> snapshots,
     const std::string_view read_user,
-    const bool use_known_data_map) {
+    const bool use_known_data_map,
+    const SnapshotHandles &snapshot_handles) {
+    const auto inherited_handles = snapshot_handles | std::views::values |
+        std::views::transform([](const auto &handle) { return handle.get(); }) |
+        std::ranges::to<std::vector<HANDLE>>();
     const auto sources = snapshots |
-        std::views::transform([](const auto &snapshot) {
+        std::views::transform([&snapshot_handles](const auto &snapshot) {
             return DeviceFsSource{
                 .name = SnapshotImageName(snapshot),
-                .source = snapshot.device,
+                .source = std::format("{}{}", devicefs::kHandleDevicePrefix,
+                    std::bit_cast<std::uintptr_t>(
+                        snapshot_handles.at(snapshot.identifier).get())),
             };
         }) |
         std::ranges::to<std::vector<DeviceFsSource>>();
     return StartDeviceFs(DeviceFsStartRequest{
         .sources = sources,
+        .inherited_handles = inherited_handles,
         .mount_target = std::string{DeviceFsProcess::kMountTarget},
         .read_user = std::string{read_user},
         .expose_known_data_map = use_known_data_map,
@@ -253,69 +263,16 @@ struct DeviceFsExit {
     return std::nullopt;
 }
 
-auto StopDeviceFs(
-    const DeviceFsProcess &devicefs,
-    const bool backup_succeeded) {
-    const auto deadline =
-        std::chrono::steady_clock::now() +
-        DeviceFsProcess::kShutdownTimeout;
-    auto stop_requested = false;
-    while (!WaitForProcess(devicefs.process.hProcess, 0ms)) {
-        if (!stop_requested) {
-            auto stop_event = wil::unique_event_nothrow{OpenEventA(
-                EVENT_MODIFY_STATE, FALSE,
-                devicefs.stop_event_name.c_str())};
-            if (stop_event) {
-                stop_event.SetEvent();
-                stop_requested = true;
-            } else {
-                const auto error = GetLastError();
-                if (error != ERROR_FILE_NOT_FOUND) {
-                    WinError("could not open devicefs shutdown event '{}'",
-                        devicefs.stop_event_name,
-                        ExplicitWin32Error{error});
-                }
-            }
-        }
-        if (WaitForProcess(
-                devicefs.process.hProcess,
-                DeviceFsProcess::kPollInterval)) {
-            break;
-        }
-        if (std::chrono::steady_clock::now() >= deadline) {
-            throw std::runtime_error(std::format(
-                "devicefs did not exit within {} seconds after shutdown was requested",
-                std::chrono::duration_cast<std::chrono::seconds>(
-                    DeviceFsProcess::kShutdownTimeout).count()));
-        }
-    }
-    if (!backup_succeeded) {
-        return;
-    }
-    const auto exit_code = ProcessExitCode(devicefs.process.hProcess);
-    if (!stop_requested) {
-        throw std::runtime_error(std::format(
-            "devicefs exited before shutdown was requested with code {}.",
-            exit_code));
-    }
-    if (exit_code != 0) {
-        throw std::runtime_error(std::format(
-            "devicefs exited with code {}.", exit_code));
-    }
-}
-
-auto TryStopDeviceFs(const DeviceFsProcess &devicefs) noexcept {
-    try {
-        StopDeviceFs(devicefs, false);
-    } catch (const std::exception &error) {
-        TryWriteError("devicefs cleanup failed", error);
-    }
-}
-
 class DeviceFsChild {
 public:
-    explicit DeviceFsChild(DeviceFsProcess devicefs) noexcept
-        : devicefs_{std::move(devicefs)} {}
+    explicit DeviceFsChild(DeviceFsProcess devicefs,
+        std::optional<std::reference_wrapper<bool>> exit_confirmed =
+            std::nullopt) noexcept
+        : devicefs_{std::move(devicefs)}, exit_confirmed_{exit_confirmed} {
+        if (exit_confirmed_) {
+            exit_confirmed_->get() = false;
+        }
+    }
 
     DeviceFsChild(const DeviceFsChild &) = delete;
     auto operator=(const DeviceFsChild &)
@@ -325,9 +282,48 @@ public:
         -> DeviceFsChild & = delete;
 
     ~DeviceFsChild() {
-        if (stop_required_) {
-            static_cast<void>(TryStop());
+        // Windows must still be able to read a VHDX's backing file to detach
+        // the disk. If detachment failed, terminating DeviceFs could make the
+        // disk impossible to detach without rebooting. To mitigate that, we
+        // signal an event to request that DeviceFs shut down gracefully. After
+        // receipt of that signal, DeviceFs waits for open files to close before
+        // exiting, so that it can continue serving a VHDX that remains attached.
+        const auto error = [this] noexcept -> DWORD {
+            const auto deadline = std::chrono::steady_clock::now() +
+                DeviceFsProcess::kShutdownTimeout;
+            while (true) {
+                if (const auto stop_event = wil::unique_event_nothrow{OpenEventA(
+                        EVENT_MODIFY_STATE, FALSE,
+                        devicefs_.stop_event_name.c_str())}; stop_event) {
+                    stop_event.SetEvent();
+                    return WaitForProcess(devicefs_.process.hProcess,
+                        DeviceFsProcess::kShutdownTimeout)
+                        ? ERROR_SUCCESS : ERROR_TIMEOUT;
+                }
+                if (const auto last_error = wil::last_error_context{};
+                    WaitForProcess(devicefs_.process.hProcess,
+                        DeviceFsProcess::kPollInterval)) {
+                    return ERROR_SUCCESS;
+                }
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    return GetLastError();
+                }
+            }
+        }();
+        if (error == ERROR_SUCCESS) {
+            if (exit_confirmed_) {
+                exit_confirmed_->get() = true;
+            }
+            return;
         }
+        devicefs::WriteToStream(devicefs::stderr,
+            "backup-supervisor: {}\n",
+            TryConstructWinError("failed to stop devicefs process {} "
+                "(shutdown event '{}')",
+                CompileTimeCast<std::uint32_t>(
+                    devicefs_.process.dwProcessId),
+                devicefs_.stop_event_name,
+                ExplicitWin32Error{error}));
     }
 
     [[nodiscard]] auto Process() const noexcept
@@ -335,30 +331,9 @@ public:
         return devicefs_;
     }
 
-    auto Stop() {
-        if (!stop_required_) {
-            return;
-        }
-        StopDeviceFs(devicefs_, false);
-        stop_required_ = false;
-    }
-
-    [[nodiscard]] auto TryStop() noexcept -> bool {
-        try {
-            Stop();
-            return true;
-        } catch (const std::exception &error) {
-            TryWriteError("devicefs cleanup failed", error);
-            // This method owns the single shutdown attempt. Its caller can use
-            // the false result to retain resources that DeviceFs may still use.
-            stop_required_ = false;
-            return false;
-        }
-    }
-
 private:
     DeviceFsProcess devicefs_;
-    bool stop_required_ = true;
+    std::optional<std::reference_wrapper<bool>> exit_confirmed_;
 };
 
 } // namespace internal

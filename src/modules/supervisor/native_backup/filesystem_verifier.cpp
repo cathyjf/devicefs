@@ -2849,10 +2849,9 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                     L"After unmounting any manual attachment, press Ctrl+C "
                     L"to stop devicefs.\n",
                     child.Process().readiness_path.native());
-                const auto processes = std::array{&child.Process()};
                 const auto result =
                     internal::WaitForDeviceFsExitOrCancellation(
-                        processes, cancellation_event);
+                        cancellation_event, child.Process());
                 if (result) {
                     devicefs::WriteToStream(devicefs::stdout,
                         "devicefs exited with code {}.\n",

@@ -557,12 +557,9 @@ enum class BackupViewPreparation {
         "Press Ctrl+C to stop.\n",
         synthetic_sources.size(), synthetic_mount_text,
         real_mount_text);
-    const auto processes = std::array{
-        &synthetic_devicefs.Process(),
-        &real_devicefs.Process(),
-    };
     const auto exit = internal::WaitForDeviceFsExitOrCancellation(
-        processes, cancellation_event);
+        cancellation_event, synthetic_devicefs.Process(),
+        real_devicefs.Process());
     if (exit) {
         constexpr auto kChildNames =
             std::array{"synthetic", "real"};

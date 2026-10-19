@@ -246,26 +246,18 @@ struct DeviceFsExit {
 };
 
 [[nodiscard]] auto WaitForDeviceFsExitOrCancellation(
-    const std::span<const DeviceFsProcess *const> devicefs_processes,
-    const HANDLE cancellation_event) -> std::optional<DeviceFsExit> {
-    auto handles = devicefs_processes |
-        std::views::transform([](const auto devicefs) {
-            return devicefs->process.hProcess;
-        }) |
-        std::ranges::to<std::vector<HANDLE>>();
-    handles.push_back(cancellation_event);
-    const auto result = WaitForMultipleObjects(
-        wil::safe_cast_failfast<DWORD>(handles.size()),
-        handles.data(), FALSE, INFINITE);
-    if (result == WAIT_FAILED) {
-        WinError("could not wait for devicefs or cancellation");
-    }
+    const HANDLE cancellation_event,
+    const auto &...devicefs_processes) -> std::optional<DeviceFsExit> {
+    const auto result = wil::wait_any_failfast(
+        devicefs_processes.process.hProcess..., cancellation_event);
     const auto process_index =
-        CompileTimeCast<std::size_t>(result - WAIT_OBJECT_0);
-    if (process_index < devicefs_processes.size()) {
+        CompileTimeCast<std::size_t>(result.status() - WAIT_OBJECT_0);
+    if (process_index < sizeof...(devicefs_processes)) {
+        const auto processes = std::array{&devicefs_processes...};
         return DeviceFsExit{
             .process_index = process_index,
-            .exit_code = ProcessExitCode(handles[process_index]),
+            .exit_code = ProcessExitCode(
+                processes[process_index]->process.hProcess),
         };
     }
     return std::nullopt;

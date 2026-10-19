@@ -507,7 +507,7 @@ public:
 
     auto RecordMismatch(MismatchDetail mismatch) -> void {
         const auto lock = std::scoped_lock{mutex_};
-        mismatches_.push_back(std::move(mismatch));
+        std::ignore = AppendMismatch(std::move(mismatch));
     }
 
     auto RecordOperationComparison(
@@ -525,7 +525,15 @@ public:
         if (!operation_comparisons_.insert(comparison).second) {
             return;
         }
-        operation_comparison_records_.push_back(std::move(comparison));
+        const auto &record =
+            operation_comparison_records_.emplace_back(std::move(comparison));
+        if (IsMatchedError(record)) {
+            ++observation_.matched_error_count;
+        } else if (IsVssExcludedDifference(record)) {
+            ++observation_.exclusion_count;
+        } else {
+            ++observation_.mismatch_count;
+        }
     }
 
     auto RecordContentMismatch(
@@ -539,8 +547,7 @@ public:
         const auto key = MismatchKey{path, stream};
         auto found = content_mismatches_.find(key);
         if (found == content_mismatches_.end()) {
-            const auto index = mismatches_.size();
-            mismatches_.push_back(MismatchDetail{
+            const auto index = AppendMismatch(MismatchDetail{
                 .kind = MismatchKind::StreamContents,
                 .path = path,
                 .stream = stream,
@@ -605,25 +612,19 @@ public:
 
     [[nodiscard]] auto Observe() const -> VerificationObservation {
         const auto lock = std::scoped_lock{mutex_};
-        auto result = observation_;
-        result.mismatch_count = std::ranges::count_if(
-            mismatches_, [](const MismatchDetail &mismatch) {
-                return !IsVssExcludedPath(mismatch.path);
-            }) +
-            std::ranges::count_if(operation_comparison_records_,
-                IsOperationMismatch);
-        result.exclusion_count = std::ranges::count_if(
-            mismatches_, [](const MismatchDetail &mismatch) {
-                return IsVssExcludedPath(mismatch.path);
-            }) +
-            std::ranges::count_if(operation_comparison_records_,
-                IsVssExcludedDifference);
-        result.matched_error_count = std::ranges::count_if(
-            operation_comparison_records_, IsMatchedError);
-        return result;
+        return observation_;
     }
 
 private:
+    [[nodiscard]] auto AppendMismatch(MismatchDetail mismatch) -> std::size_t {
+        const auto index = mismatches_.size();
+        const auto &record = mismatches_.emplace_back(std::move(mismatch));
+        auto &count = IsVssExcludedPath(record.path)
+            ? observation_.exclusion_count : observation_.mismatch_count;
+        ++count;
+        return index;
+    }
+
     static auto AddSaturating(
         std::atomic<std::uint64_t> &value,
         const std::uint64_t addend) noexcept -> void {

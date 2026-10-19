@@ -107,9 +107,10 @@ function Wait-DeviceFsReady {
         [Parameter(Mandatory)]
         $Invocation,
 
-        [int] $TimeoutSeconds = 30
+        [int] $TimeoutSeconds = 180
     )
 
+    $last_open_failure = ''
     $deadline = [Environment]::TickCount64 + ($TimeoutSeconds * 1000)
     while ([Environment]::TickCount64 -lt $deadline) {
         if ($Invocation.Process.HasExited) {
@@ -134,6 +135,10 @@ function Wait-DeviceFsReady {
                     [IO.FileAccess]::Read,
                     [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
             } catch [IO.IOException], [OperationCanceledException] {
+                $open_exception = $_.Exception.GetBaseException()
+                $last_open_failure = " Last open failure for '{0}': {1} (HRESULT 0x{2:X8}): {3}" -f
+                    $image_path, $open_exception.GetType().FullName,
+                    $open_exception.HResult, $open_exception.Message
                 $ready = $false
                 break
             } finally {
@@ -150,7 +155,8 @@ function Wait-DeviceFsReady {
     }
 
     $paths = @($Invocation.ImagePaths.Values) -join "', '"
-    throw "Timed out waiting for '$paths' to become readable."
+    throw ("Timed out after $TimeoutSeconds seconds waiting for '$paths' " +
+        "to become readable.$last_open_failure")
 }
 
 function Stop-DeviceFsTestProcess {

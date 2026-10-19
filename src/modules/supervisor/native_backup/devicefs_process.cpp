@@ -314,11 +314,22 @@ public:
             if (exit_confirmed_) {
                 exit_confirmed_->get() = true;
             }
+            if (auto exit_code = DWORD{};
+                GetExitCodeProcess(devicefs_.process.hProcess, &exit_code) &&
+                    (exit_code != ERROR_SUCCESS)) {
+                devicefs::WriteToStream(devicefs::stderr,
+                    "backup-supervisor: informational: {}\n",
+                    TryConstructWinError("devicefs child process {} exited "
+                        "with a nonzero status",
+                        CompileTimeCast<std::uint32_t>(
+                            devicefs_.process.dwProcessId),
+                        ExplicitWin32Error{exit_code}));
+            }
             return;
         }
         devicefs::WriteToStream(devicefs::stderr,
             "backup-supervisor: {}\n",
-            TryConstructWinError("failed to stop devicefs process {} "
+            TryConstructWinError("failed to stop devicefs child process {} "
                 "(shutdown event '{}')",
                 CompileTimeCast<std::uint32_t>(
                     devicefs_.process.dwProcessId),

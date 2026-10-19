@@ -304,22 +304,41 @@ struct InventoryObservation {
         : std::string_view{};
 }
 
+// This type releases a lock when it is copy constructed.
+// It is used as a member of `VerificationObservation` below.
+//
+// Specifically, copy construction clears the source's `lock` before unlocking,
+// allowing another observer to supply its own lock. The destination's `lock`
+// stays null, so that copying the report later does not attempt another unlock.
+struct UnlockOnCopy {
+    mutable std::unique_lock<std::mutex> *lock = nullptr;
+
+    UnlockOnCopy() noexcept = default;
+
+    [[gsl::suppress("26432", justification:
+        "The copy operations suppress implicit move operations, and the "
+        "implicit destructor is sufficient.")]]
+    UnlockOnCopy(const UnlockOnCopy &source) {
+        if (auto *const held_lock = std::exchange(source.lock, nullptr)) {
+            held_lock->unlock();
+        }
+    }
+
+    auto operator=(const UnlockOnCopy &) -> UnlockOnCopy & = default;
+};
+
 struct VerificationObservation {
-    // These flags publish the counters below. Copying the record must read
-    // the flags before reading those counters.
+    // Writers update the counters before setting `plan_ready` or
+    // `comparison_complete` with a release store. The generated copy constructor
+    // copies members in declaration order, and `CopyableAtomic` uses acquire
+    // loads for these flags. With the flags first, a copy that reads a set flag
+    // also sees the counter updates made before that flag was set.
     CopyableAtomic<bool, std::memory_order_acquire> plan_ready{};
     CopyableAtomic<bool, std::memory_order_acquire> comparison_complete{};
-    CopyableAtomic<VerificationPhase, std::memory_order_acquire> phase{
-        VerificationPhase::AttachingSynthetic};
-    InventoryObservation synthetic;
-    InventoryObservation real;
-    // This count comes from FSCTL_QUERY_FILE_LAYOUT, which has proved flaky
+    // This count comes from `FSCTL_QUERY_FILE_LAYOUT`, which has proved flaky
     // and untrustworthy as filesystem inventory. Progress reporting is its
     // only consumer; it is never evidence used by the verification result.
     std::optional<std::uint64_t> layout_entry_estimate;
-    CopyableAtomic<std::uint64_t> available_bytes{};
-    CopyableAtomic<std::uint64_t> selected_bytes{};
-    CopyableAtomic<std::uint64_t> compared_bytes{};
     std::optional<std::chrono::steady_clock::time_point>
         traversal_started;
     std::optional<std::chrono::steady_clock::time_point>
@@ -327,10 +346,25 @@ struct VerificationObservation {
     std::size_t mismatch_count = 0;
     std::size_t exclusion_count = 0;
     std::size_t matched_error_count = 0;
-    CopyableAtomic<bool, std::memory_order_acquire> traversal_complete{};
     CopyableAtomic<bool, std::memory_order_acquire> failed{};
     std::exception_ptr failure;
     std::vector<std::string> cleanup_failures;
+
+    // `Observe` holds `mutex_` while copying the preceding members. Copying
+    // `unlock` releases it before the remaining atomic members are copied,
+    // since their writers do not use the mutex.
+    //
+    // Both `failed` and `failure` precede `unlock`, so the report cannot see
+    // a new failure flag without the corresponding exception.
+    UnlockOnCopy unlock;
+    CopyableAtomic<VerificationPhase, std::memory_order_acquire> phase{
+        VerificationPhase::AttachingSynthetic};
+    InventoryObservation synthetic;
+    InventoryObservation real;
+    CopyableAtomic<std::uint64_t> available_bytes{};
+    CopyableAtomic<std::uint64_t> selected_bytes{};
+    CopyableAtomic<std::uint64_t> compared_bytes{};
+    CopyableAtomic<bool, std::memory_order_acquire> traversal_complete{};
 };
 
 class SynchronousIoCancellation {
@@ -611,7 +645,8 @@ public:
     }
 
     [[nodiscard]] auto Observe() const -> VerificationObservation {
-        const auto lock = std::scoped_lock{mutex_};
+        auto lock = std::unique_lock{mutex_};
+        observation_.unlock.lock = &lock;
         return observation_;
     }
 

@@ -450,9 +450,6 @@ public:
         internal::CheckNt(FspFileSystemCreate(device.data(), &params, &interface_, fs_.put()),
             "could not create WinFsp filesystem");
         fs_.get()->UserContext = this;
-    }
-
-    auto Start() {
         if (!mount_.network) {
             // The Windows mount directory has its own security descriptor.
             // Passing ours here gives `--read-user` access to that directory
@@ -467,7 +464,12 @@ public:
             "could not start WinFsp dispatcher");
     }
 
-    auto WaitForOpenFilesToClose() const noexcept {
+    DeviceFs(const DeviceFs &) = delete;
+    auto operator=(const DeviceFs &) -> DeviceFs & = delete;
+    DeviceFs(DeviceFs &&) = delete;
+    auto operator=(DeviceFs &&) -> DeviceFs & = delete;
+
+    ~DeviceFs() noexcept {
         auto open_files = open_file_count_.load();
         if (open_files != 0) {
             devicefs::WriteToStream(devicefs::stderr,
@@ -774,43 +776,45 @@ auto WINAPI ControlHandler(const DWORD event) noexcept -> BOOL {
 }
 
 template <BlockDevice DeviceType>
-auto RunWithDevices(
-    const Options &options, DeviceFiles<DeviceType> files) {
-    auto security = MakeSecurityDescriptor(options.read_user);
-    auto stop_event = wil::unique_event_nothrow{CreateEventExA(
-        nullptr, options.stop_event.c_str(),
-        CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS)};
-    if (!stop_event) {
-        WinError("could not create shutdown event '{}'", options.stop_event);
+auto RunWithDevices(const Options &options, DeviceFiles<DeviceType> files) {
+    std::tie(g_stop_event, g_stopped_event) = [&options] {
+        auto stop_event = wil::unique_event_nothrow{CreateEventExA(
+            nullptr, options.stop_event.c_str(),
+            CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS)};
+        if (!stop_event) {
+            WinError("failed to create stop event '{}'", options.stop_event);
+        }
+        auto stopped_event = wil::unique_event_nothrow{};
+        if (!stopped_event.try_create(wil::EventOptions::ManualReset, nullptr)) {
+            WinError("failed to create completion event");
+        }
+        // The console application signal handler that is installed below
+        // references these two events. That signal handler is never
+        // unregistered. Therefore, these two events must not be freed while
+        // the process remains running. Releasing the events from their smart
+        // owners prevents them from being freed.
+        return std::pair{stop_event.release(), stopped_event.release()};
+    }();
+    const auto signal_completion_event_on_exit = wil::scope_exit([] noexcept {
+        // This completion event (`g_stopped_event`) must be signalled on all
+        // paths out of this function.
+        SetEvent(g_stopped_event);
+    });
+    if (!SetConsoleCtrlHandler(ControlHandler, TRUE)) {
+        WinError("failed to install console application signal handler");
     }
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        throw std::runtime_error(std::format(
-            "--stop-event '{}' already exists", options.stop_event));
+    if constexpr (WindowsBlockDevice::kMeasureFreeClusterData) {
+        if (options.synthetic_free_clusters) {
+            devicefs::WriteToStream(
+                devicefs::stderr,
+                "devicefs: free-cluster measurement is enabled; "
+                "free-only reads will access the source device\n");
+        }
     }
-    auto stopped_event = wil::unique_event_nothrow{};
-    if (!stopped_event.try_create(wil::EventOptions::ManualReset, nullptr)) {
-        WinError("could not create shutdown-complete event");
-    }
-
     {
-        if constexpr (WindowsBlockDevice::kMeasureFreeClusterData) {
-            if (options.synthetic_free_clusters) {
-                devicefs::WriteToStream(
-                    devicefs::stderr,
-                    "devicefs: free-cluster measurement is enabled; "
-                    "free-only reads will access the source device\n");
-            }
-        }
-        auto filesystem = DeviceFs<DeviceType>(
-            std::move(files), std::move(security), options.mount, options.cache);
-        g_stop_event = stop_event.get();
-        g_stopped_event = stopped_event.get();
-        filesystem.Start();
-
-        if (!SetConsoleCtrlHandler(ControlHandler, TRUE)) {
-            WinError("could not install console handler");
-        }
-
+        const auto filesystem = DeviceFs{
+            std::move(files), MakeSecurityDescriptor(options.read_user),
+            options.mount, options.cache};
         devicefs::WriteToStream(
             devicefs::stdout,
             "devicefs: mounted {} device(s) at {}; read access: {}; "
@@ -818,13 +822,8 @@ auto RunWithDevices(
             options.mappings.size(),
             Transcode<std::string>(options.mount.value),
             options.read_user, options.stop_event);
-        stop_event.wait();
-        filesystem.WaitForOpenFilesToClose();
+        wil::handle_wait(g_stop_event);
     }
-    stopped_event.SetEvent();
-    // The registered handler lives until process exit, so its handles must as well.
-    stop_event.release();
-    stopped_event.release();
     if (g_dispatcher_stopped_unexpectedly) {
         throw std::runtime_error("WinFsp dispatcher stopped unexpectedly");
     }

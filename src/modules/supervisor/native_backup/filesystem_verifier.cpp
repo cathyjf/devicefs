@@ -295,10 +295,15 @@ class SynchronousIoCancellation {
 public:
     class Registration {
     public:
-        Registration(
-            SynchronousIoCancellation &owner,
-            wil::unique_handle thread)
-            : owner_{owner}, thread_{std::move(thread)} {
+        // CancelSynchronousIo requires a thread handle with
+        // THREAD_TERMINATE access.
+        explicit Registration(SynchronousIoCancellation &owner)
+            : owner_{owner}, thread_{OpenThread(
+                  THREAD_TERMINATE, FALSE, GetCurrentThreadId())} {
+            if (!thread_) {
+                WinError(
+                    "failed to register filesystem-verification I/O");
+            }
             const auto lock = owner_.lock_.lock_exclusive();
             owner_.threads_.push_back(thread_.get());
         }
@@ -310,39 +315,19 @@ public:
         auto operator=(Registration &&)
             -> Registration & = delete;
 
-        ~Registration() {
-            Unregister();
-        }
-
         [[gsl::suppress("26447",
             justification:
                 "Erasing a HANDLE performs only nonthrowing HANDLE "
                 "comparisons, assignments, and destruction.")]]
-        auto Unregister() noexcept -> void {
-            if (!thread_) {
-                return;
-            }
+        ~Registration() noexcept {
             const auto lock = owner_.lock_.lock_exclusive();
             std::erase(owner_.threads_, thread_.get());
-            thread_.reset();
         }
 
     private:
         SynchronousIoCancellation &owner_;
         wil::unique_handle thread_;
     };
-
-    [[nodiscard]] auto RegisterCurrentThread() {
-        // CancelSynchronousIo requires a thread handle with
-        // THREAD_TERMINATE access.
-        auto thread = wil::unique_handle{OpenThread(
-            THREAD_TERMINATE, FALSE, GetCurrentThreadId())};
-        if (!thread) {
-            WinError(
-                "failed to register filesystem-verification I/O");
-        }
-        return Registration{*this, std::move(thread)};
-    }
 
     [[nodiscard]] auto CancelPending() noexcept {
         // Retain the registry lock so a Registration cannot close a thread
@@ -711,12 +696,14 @@ public:
         const auto lock = virtual_disk_lock.lock_exclusive();
         devicefs::WriteToStream(devicefs::stdout,
             "\nPreparing the {} VHDX attachment:\n", name);
-        auto registration = io_cancellation.RegisterCurrentThread();
+        auto registration =
+            std::optional<SynchronousIoCancellation::Registration>{
+                std::in_place, io_cancellation};
         return AttachedVhdx{
             internal::AttachedVhdx::Attach(
                 path, cancellation_event,
                 [&registration] noexcept {
-                    registration.Unregister();
+                    registration.reset();
                 }),
             virtual_disk_lock, name, state};
     }
@@ -909,7 +896,8 @@ private:
     auto storage = std::vector<std::max_align_t>(
         batch_size / sizeof(std::max_align_t));
     const auto buffer = std::as_writable_bytes(std::span{storage});
-    const auto registration = io_cancellation.RegisterCurrentThread();
+    const auto registration =
+        SynchronousIoCancellation::Registration{io_cancellation};
     const auto query_once = [&]()
         -> std::expected<std::uint64_t, DWORD> {
         if (wil::event_is_signaled(cancellation_event)) {
@@ -1154,7 +1142,7 @@ private:
     auto Worker() -> void {
         try {
             const auto registration =
-                io_cancellation_.RegisterCurrentThread();
+                SynchronousIoCancellation::Registration{io_cancellation_};
             while (auto task = Take()) {
                 if (!Process(std::move(*task))) {
                     return;
@@ -1949,7 +1937,7 @@ auto RunComparisonWorkers(
     auto completed_tasks = std::atomic<std::size_t>{};
     const auto run = [&] {
         const auto registration =
-            io_cancellation.RegisterCurrentThread();
+            SynchronousIoCancellation::Registration{io_cancellation};
         auto worker = ComparisonWorker{
             synthetic, real, cancellation_event, state};
         while (!state.Failed() &&

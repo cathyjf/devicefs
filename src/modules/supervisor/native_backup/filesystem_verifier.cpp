@@ -45,6 +45,42 @@ export struct FilesystemVerificationVolume {
 
 namespace {
 
+template <class T,
+    std::memory_order CopyOrder = std::memory_order_relaxed>
+struct CopyableAtomic : std::atomic<T> {
+    using std::atomic<T>::operator=;
+
+    CopyableAtomic() noexcept = default;
+
+    explicit CopyableAtomic(const T value) noexcept
+        : std::atomic<T>{value} {}
+
+    [[gsl::suppress("26432", justification:
+        "The user-declared copy operations suppress implicit move operations. "
+        "Rvalues use the same value-copying operations, and the implicit "
+        "destructor is sufficient.")]]
+    CopyableAtomic(const CopyableAtomic &source) noexcept
+        : std::atomic<T>{source.load(CopyOrder)} {}
+
+    auto operator=(const CopyableAtomic &source) noexcept
+        -> CopyableAtomic & {
+        this->store(source.load(CopyOrder), std::memory_order_relaxed);
+        return *this;
+    }
+
+    operator T() const noexcept {
+        return this->load(std::memory_order_relaxed);
+    }
+};
+
+} // namespace
+
+template <class T, std::memory_order CopyOrder, class Character>
+struct std::formatter<CopyableAtomic<T, CopyOrder>, Character>
+    : std::formatter<T, Character> {};
+
+namespace {
+
 using namespace std::chrono_literals;
 using namespace std::string_view_literals;
 
@@ -244,13 +280,13 @@ struct MismatchDetail {
 };
 
 struct InventoryObservation {
-    std::uint64_t tasks_discovered = 0;
-    std::uint64_t tasks_completed = 0;
-    std::uint64_t directories = 0;
-    std::uint64_t objects = 0;
-    std::uint64_t streams = 0;
-    std::uint64_t stream_bytes = 0;
-    std::uint64_t failures = 0;
+    CopyableAtomic<std::uint64_t> tasks_discovered{};
+    CopyableAtomic<std::uint64_t> tasks_completed{};
+    CopyableAtomic<std::uint64_t> directories{};
+    CopyableAtomic<std::uint64_t> objects{};
+    CopyableAtomic<std::uint64_t> streams{};
+    CopyableAtomic<std::uint64_t> stream_bytes{};
+    CopyableAtomic<std::uint64_t> failures{};
 };
 
 [[nodiscard]] constexpr auto SaturatingSum(
@@ -269,13 +305,21 @@ struct InventoryObservation {
 }
 
 struct VerificationObservation {
-    VerificationPhase phase = VerificationPhase::AttachingSynthetic;
+    // These flags publish the counters below. Copying the record must read
+    // the flags before reading those counters.
+    CopyableAtomic<bool, std::memory_order_acquire> plan_ready{};
+    CopyableAtomic<bool, std::memory_order_acquire> comparison_complete{};
+    CopyableAtomic<VerificationPhase, std::memory_order_acquire> phase{
+        VerificationPhase::AttachingSynthetic};
     InventoryObservation synthetic;
     InventoryObservation real;
+    // This count comes from FSCTL_QUERY_FILE_LAYOUT, which has proved flaky
+    // and untrustworthy as filesystem inventory. Progress reporting is its
+    // only consumer; it is never evidence used by the verification result.
     std::optional<std::uint64_t> layout_entry_estimate;
-    std::uint64_t available_bytes = 0;
-    std::uint64_t selected_bytes = 0;
-    std::uint64_t compared_bytes = 0;
+    CopyableAtomic<std::uint64_t> available_bytes{};
+    CopyableAtomic<std::uint64_t> selected_bytes{};
+    CopyableAtomic<std::uint64_t> compared_bytes{};
     std::optional<std::chrono::steady_clock::time_point>
         traversal_started;
     std::optional<std::chrono::steady_clock::time_point>
@@ -283,10 +327,8 @@ struct VerificationObservation {
     std::size_t mismatch_count = 0;
     std::size_t exclusion_count = 0;
     std::size_t matched_error_count = 0;
-    bool traversal_complete = false;
-    bool plan_ready = false;
-    bool comparison_complete = false;
-    bool failed = false;
+    CopyableAtomic<bool, std::memory_order_acquire> traversal_complete{};
+    CopyableAtomic<bool, std::memory_order_acquire> failed{};
     std::exception_ptr failure;
     std::vector<std::string> cleanup_failures;
 };
@@ -372,7 +414,7 @@ public:
     auto BeginTraversal() -> void {
         {
             const auto lock = std::scoped_lock{mutex_};
-            traversal_started_ = std::chrono::steady_clock::now();
+            observation_.traversal_started = std::chrono::steady_clock::now();
         }
         SetPhase(VerificationPhase::Traversing);
     }
@@ -385,7 +427,7 @@ public:
     }
 
     auto SetPhase(const VerificationPhase phase) noexcept -> void {
-        phase_.store(phase, std::memory_order_release);
+        observation_.phase.store(phase, std::memory_order_release);
     }
 
     auto RecordInventory(
@@ -418,49 +460,49 @@ public:
     }
 
     auto CompleteTraversal() noexcept -> void {
-        traversal_complete_.store(true, std::memory_order_release);
+        observation_.traversal_complete.store(true, std::memory_order_release);
     }
 
     auto SetTraversalEstimate(const std::uint64_t estimate) -> void {
         const auto lock = std::scoped_lock{mutex_};
-        layout_entry_estimate_ = estimate;
+        observation_.layout_entry_estimate = estimate;
     }
 
     auto SetPlan(const ComparisonPlan &plan) noexcept -> void {
-        available_bytes_.store(
+        observation_.available_bytes.store(
             plan.available_bytes, std::memory_order_relaxed);
-        selected_bytes_.store(
+        observation_.selected_bytes.store(
             plan.selected_bytes, std::memory_order_relaxed);
-        plan_ready_.store(true, std::memory_order_release);
+        observation_.plan_ready.store(true, std::memory_order_release);
     }
 
     auto RecordCompared(const std::size_t bytes) noexcept -> void {
-        compared_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+        observation_.compared_bytes.fetch_add(bytes, std::memory_order_relaxed);
     }
 
     auto CompleteComparison() noexcept -> void {
-        comparison_complete_.store(true, std::memory_order_release);
+        observation_.comparison_complete.store(true, std::memory_order_release);
     }
 
     auto BeginComparison() -> void {
         {
             const auto lock = std::scoped_lock{mutex_};
-            comparison_started_ = std::chrono::steady_clock::now();
+            observation_.comparison_started = std::chrono::steady_clock::now();
         }
         SetPhase(VerificationPhase::Comparing);
     }
 
     [[nodiscard]] auto Failed() const noexcept {
-        return failed_.load(std::memory_order_acquire);
+        return observation_.failed.load(std::memory_order_acquire);
     }
 
     auto Fail(std::exception_ptr failure) -> void {
         const auto lock = std::scoped_lock{mutex_};
-        if (failed_.load(std::memory_order_relaxed)) {
+        if (observation_.failed.load(std::memory_order_relaxed)) {
             return;
         }
-        failure_ = std::move(failure);
-        failed_.store(true, std::memory_order_release);
+        observation_.failure = std::move(failure);
+        observation_.failed.store(true, std::memory_order_release);
     }
 
     auto RecordMismatch(MismatchDetail mismatch) -> void {
@@ -521,7 +563,7 @@ public:
     auto RecordCleanupFailure(const std::string_view failure) noexcept -> void {
         try {
             const auto lock = std::scoped_lock{mutex_};
-            cleanup_failures_.emplace_back(failure);
+            observation_.cleanup_failures.emplace_back(failure);
         } catch (...) {
             // Cleanup reporting must not replace the verification result.
         }
@@ -562,29 +604,8 @@ public:
     }
 
     [[nodiscard]] auto Observe() const -> VerificationObservation {
-        const auto plan_ready =
-            plan_ready_.load(std::memory_order_acquire);
-        const auto comparison_complete =
-            comparison_complete_.load(std::memory_order_acquire);
-        auto result = VerificationObservation{
-            .phase = phase_.load(std::memory_order_acquire),
-            .synthetic = ObserveInventory(synthetic_inventory_),
-            .real = ObserveInventory(real_inventory_),
-            .available_bytes =
-                available_bytes_.load(std::memory_order_relaxed),
-            .selected_bytes =
-                selected_bytes_.load(std::memory_order_relaxed),
-            .compared_bytes =
-                compared_bytes_.load(std::memory_order_relaxed),
-            .traversal_complete = traversal_complete_.load(
-                std::memory_order_acquire),
-            .plan_ready = plan_ready,
-            .comparison_complete = comparison_complete,
-        };
         const auto lock = std::scoped_lock{mutex_};
-        result.layout_entry_estimate = layout_entry_estimate_;
-        result.traversal_started = traversal_started_;
-        result.comparison_started = comparison_started_;
+        auto result = observation_;
         result.mismatch_count = std::ranges::count_if(
             mismatches_, [](const MismatchDetail &mismatch) {
                 return !IsVssExcludedPath(mismatch.path);
@@ -599,9 +620,6 @@ public:
                 IsVssExcludedDifference);
         result.matched_error_count = std::ranges::count_if(
             operation_comparison_records_, IsMatchedError);
-        result.failed = failed_.load(std::memory_order_acquire);
-        result.failure = failure_;
-        result.cleanup_failures = cleanup_failures_;
         return result;
     }
 
@@ -619,65 +637,15 @@ private:
                 std::memory_order_relaxed)) {}
     }
 
-    struct InventoryCounters {
-        std::atomic<std::uint64_t> tasks_discovered{};
-        std::atomic<std::uint64_t> tasks_completed{};
-        std::atomic<std::uint64_t> directories{};
-        std::atomic<std::uint64_t> objects{};
-        std::atomic<std::uint64_t> streams{};
-        std::atomic<std::uint64_t> stream_bytes{};
-        std::atomic<std::uint64_t> failures{};
-    };
-
     [[nodiscard]] auto Inventory(
         const VerificationEndpoint endpoint) noexcept
-        -> InventoryCounters & {
+        -> InventoryObservation & {
         return endpoint == VerificationEndpoint::Synthetic
-            ? synthetic_inventory_ : real_inventory_;
+            ? observation_.synthetic : observation_.real;
     }
 
-    [[nodiscard]] static auto ObserveInventory(
-        const InventoryCounters &inventory) noexcept -> InventoryObservation {
-        return InventoryObservation{
-            .tasks_discovered = inventory.tasks_discovered.load(
-                std::memory_order_relaxed),
-            .tasks_completed = inventory.tasks_completed.load(
-                std::memory_order_relaxed),
-            .directories = inventory.directories.load(
-                std::memory_order_relaxed),
-            .objects = inventory.objects.load(
-                std::memory_order_relaxed),
-            .streams = inventory.streams.load(
-                std::memory_order_relaxed),
-            .stream_bytes = inventory.stream_bytes.load(
-                std::memory_order_relaxed),
-            .failures = inventory.failures.load(
-                std::memory_order_relaxed),
-        };
-    }
-
-    std::atomic<VerificationPhase> phase_{
-        VerificationPhase::AttachingSynthetic};
-    InventoryCounters synthetic_inventory_;
-    InventoryCounters real_inventory_;
-    std::atomic<std::uint64_t> available_bytes_{};
-    std::atomic<std::uint64_t> selected_bytes_{};
-    std::atomic<std::uint64_t> compared_bytes_{};
-    std::atomic<bool> traversal_complete_{};
-    std::atomic<bool> plan_ready_{};
-    std::atomic<bool> comparison_complete_{};
-    std::atomic<bool> failed_{};
     mutable std::mutex mutex_;
-    std::exception_ptr failure_;
-    // This count comes from FSCTL_QUERY_FILE_LAYOUT, which has proved flaky
-    // and untrustworthy as filesystem inventory. Progress reporting is its
-    // only consumer; it is never evidence used by the verification result.
-    std::optional<std::uint64_t> layout_entry_estimate_;
-    std::optional<std::chrono::steady_clock::time_point>
-        traversal_started_;
-    std::optional<std::chrono::steady_clock::time_point>
-        comparison_started_;
-    std::vector<std::string> cleanup_failures_;
+    VerificationObservation observation_;
     std::vector<MismatchDetail> mismatches_;
     std::map<MismatchKey, std::size_t> content_mismatches_;
     std::set<OperationComparison> operation_comparisons_;

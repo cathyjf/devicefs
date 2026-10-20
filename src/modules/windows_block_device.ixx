@@ -24,6 +24,7 @@ import std;
 import <devicefs/windows_imports.h>;
 import devicefs.allocation;
 import <devicefs/common.h>;
+import <devicefs/malloca.h>;
 import devicefs.stream_writer;
 
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
@@ -673,20 +674,7 @@ export [[nodiscard]] auto QueryMountManagerId(const HANDLE device)
         CompileTimeCast<DWORD, offsetof(decltype(header), bytes)>();
     const auto output_size = std::max(
         CompileTimeCast<DWORD, sizeof(header)>(), kIdOffset + header.length);
-
-    const auto output_deleter = [] (BYTE *const buffer) noexcept {
-        _freea(buffer);
-    };
-    // `_malloca` records whether the allocation used the stack or the heap so
-    // that `_freea` knows whether to call `free`. The CRT allocates space for
-    // that record, but C6386 incorrectly reports writing to it as a buffer
-    // overrun. C26408 and C26477 complain about the presence of `malloc` and
-    // `NULL` inside of the CRT `_malloca` macro.
-#pragma warning(push)
-#pragma warning(disable : 6386 26408 26477)
-    const auto output = std::unique_ptr<BYTE[], decltype(output_deleter)>{
-        static_cast<BYTE *>(_malloca(output_size)), output_deleter};
-#pragma warning(pop)
+    const auto output = NEW_MALLOCA_BUFFER(BYTE, output_size);
     if (!output) {
         return std::unexpected{ERROR_NOT_ENOUGH_MEMORY};
     }

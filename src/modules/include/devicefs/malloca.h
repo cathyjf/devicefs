@@ -19,15 +19,31 @@ struct MallocaDeleter {
 
 } // namespace malloca_detail
 
+// Allocate a buffer of `length` bytes, using stack or heap storage according
+// to `_malloca`'s size threshold. The returned smart pointer exposes a `T *`
+// buffer and releases the storage with `_freea`.
+//
 // `_malloca` records whether the allocation used the stack or the heap so
 // that `_freea` knows whether to call `free`. The CRT allocates space for
 // that record, but C6386 incorrectly reports writing to it as a buffer
 // overrun. C26408 and C26477 complain about the presence of `malloc` and
 // `NULL` inside of the CRT `_malloca` macro.
-#define NEW_MALLOCA_BUFFER(T, bytes) \
+//
+// In order for the suppressions to be effective, `NEW_MALLOCA_BUFFER` must
+// appear on the same line of source code as the variable initialization.
+//
+// For example, this works:
+//     const auto buffer = NEW_MALLOCA_BUFFER(std::byte,
+//         length);
+//
+// By contrast, this raises analyzer errors:
+//     const auto buffer =
+//         NEW_MALLOCA_BUFFER(std::byte, length);
+//
+#define NEW_MALLOCA_BUFFER(T, length) \
     __pragma(warning(push)) \
     __pragma(warning(disable : 6386 26408 26477)) \
     std::unique_ptr<T[], \
         malloca_detail::MallocaDeleter<_freea>>{ \
-            static_cast<T *>(_malloca(bytes))} \
+            static_cast<T *>(_malloca(length))} \
     __pragma(warning(pop))

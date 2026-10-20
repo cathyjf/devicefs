@@ -31,6 +31,7 @@ import :internal;
 import :manifest;
 import devicefs.allocation;
 import <devicefs/common.h>;
+import <devicefs/malloca.h>;
 import devicefs.filesystem;
 import devicefs.guid_formatter;
 import devicefs.rpc_block_device_server;
@@ -1040,8 +1041,10 @@ auto StartVerificationWorkers(
         .NumberOfClusters =
             wil::safe_cast_failfast<DWORD>(clusters.size()),
     };
-    const auto input_storage =
-        std::make_unique_for_overwrite<std::byte[]>(input_size);
+    const auto input_storage = NEW_MALLOCA_BUFFER(std::byte, input_size);
+    if (!input_storage) {
+        throw std::bad_alloc{};
+    }
     std::memcpy(input_storage.get(), &input_header, input_header_size);
     std::memcpy(input_storage.get() + input_header_size,
         api_cluster_bytes.data(), api_cluster_bytes.size());
@@ -1069,8 +1072,11 @@ auto StartVerificationWorkers(
         return std::vector<SnapshotStreamMatch>{};
     }
 
-    const auto output_storage_ = std::make_unique_for_overwrite<std::byte[]>(
+    const auto output_storage_ = NEW_MALLOCA_BUFFER(std::byte,
         probe.BufferSizeRequired);
+    if (!output_storage_) {
+        throw std::bad_alloc{};
+    }
     if (!lookup(
             output_storage_.get(), probe.BufferSizeRequired, returned)) {
         WinError("FSCTL_LOOKUP_STREAM_FROM_CLUSTER failed for {}",

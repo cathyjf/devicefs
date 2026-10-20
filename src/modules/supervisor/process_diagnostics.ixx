@@ -19,6 +19,7 @@ export module devicefs.supervisor.process_diagnostics;
 import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import <devicefs/malloca.h>;
 import devicefs.supervisor.logging_console;
 import devicefs.terminal.transcoding;
 
@@ -37,13 +38,16 @@ constexpr auto kProcessCommandLineInformation =
     if (bytes < sizeof(UNICODE_STRING)) {
         return std::wstring{};
     }
-    auto storage = std::vector<std::byte>(bytes);
+    const auto storage = NEW_MALLOCA_BUFFER(std::byte, bytes);
+    if (!storage) {
+        return std::wstring{};
+    }
     if (!NT_SUCCESS(NtQueryInformationProcess(process, kProcessCommandLineInformation,
-            storage.data(), bytes, &bytes))) {
+            storage.get(), bytes, &bytes))) {
         return std::wstring{};
     }
     const auto *const command_line =
-        std::start_lifetime_as<UNICODE_STRING>(storage.data());
+        std::start_lifetime_as<UNICODE_STRING>(storage.get());
     if (command_line->Buffer == nullptr) {
         return std::wstring{};
     }

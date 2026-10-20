@@ -22,6 +22,7 @@ export module devicefs.supervisor.native_backup:manifest;
 
 import std;
 import <devicefs/common.h>;
+import <devicefs/malloca.h>;
 import <devicefs/windows_imports.h>;
 import <devicefs/winrt_imports.h>;
 import devicefs.guid_formatter;
@@ -68,13 +69,17 @@ using namespace wil::literals;
         (GetLastError() != ERROR_MORE_DATA)) {
         return {};
     }
-    auto paths = std::vector<wchar_t>(required);
+    const auto paths = NEW_MALLOCA_BUFFER(wchar_t, required);
+    if (!paths) {
+        return {};
+    }
     if (!GetVolumePathNamesForVolumeNameW(
-            volume.c_str(), paths.data(), required, &required)) {
+            volume.c_str(), paths.get(), required, &required)) {
         return {};
     }
     auto result = std::vector<std::wstring>{};
-    for (const auto path : paths | std::views::split(L'\0')) {
+    for (const auto path :
+        std::span{paths.get(), required} | std::views::split(L'\0')) {
         if (path.empty()) {
             break;
         }

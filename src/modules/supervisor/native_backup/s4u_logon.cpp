@@ -24,6 +24,7 @@ import std;
 import <devicefs/windows_imports.h>;
 import devicefs.supervisor.process_privileges;
 import <devicefs/common.h>;
+import <devicefs/malloca.h>;
 import devicefs.stream_writer;
 
 namespace internal {
@@ -69,10 +70,14 @@ template <std::size_t Size>
         }
 
         auto sid = std::vector<BYTE>(sid_size);
-        auto domain = std::vector<wchar_t>(std::max<DWORD>(1, domain_size));
+        const auto domain = NEW_MALLOCA_BUFFER(wchar_t,
+            std::max<DWORD>(1, domain_size));
+        if (!domain) {
+            return std::nullopt;
+        }
         if (!LookupAccountNameW(
             nullptr, username.c_str(), sid.data(), &sid_size,
-            domain.data(), &domain_size, &use)) {
+            domain.get(), &domain_size, &use)) {
             return std::nullopt;
         }
         return sid;
@@ -165,11 +170,15 @@ template <std::size_t Size>
     // `request_storage` contains the structure followed by both strings; its
     // allocation must remain stable and its storage must include all three
     // objects until `LsaLogonUser` returns.
-    auto request_storage = std::vector<std::byte>(
+    const auto request_size =
         sizeof(MSV1_0_S4U_LOGON) +
         (username_text.size() + 1) * sizeof(wchar_t) +
-        (domain_text.size() + 1) * sizeof(wchar_t));
-    auto &request = *::new (request_storage.data()) MSV1_0_S4U_LOGON{
+        (domain_text.size() + 1) * sizeof(wchar_t);
+    const auto request_storage = NEW_MALLOCA_BUFFER(std::byte, request_size);
+    if (!request_storage) {
+        throw std::bad_alloc{};
+    }
+    auto &request = *::new (request_storage.get()) MSV1_0_S4U_LOGON{
         .MessageType = MsV1_0S4ULogon,
         .Flags = 0,
     };
@@ -177,7 +186,7 @@ template <std::size_t Size>
     std::tie(request.UserPrincipalName, request.DomainName) =
         [&request_storage, username_text, domain_text] {
             auto next_string_storage =
-                request_storage.data() + sizeof(MSV1_0_S4U_LOGON);
+                request_storage.get() + sizeof(MSV1_0_S4U_LOGON);
             const auto copy_and_advance = [&next_string_storage](
                 const std::wstring_view text) {
                 const auto storage = std::span{
@@ -245,7 +254,7 @@ template <std::size_t Size>
     // <https://learn.microsoft.com/en-us/windows/win32/api/ntsecapi/nf-ntsecapi-lsaaddaccountrights>
     const auto logon = LsaLogonUser(
         lsa.get(), &lsa_name, Batch, authentication_package,
-        &request, wil::safe_cast_failfast<ULONG>(request_storage.size()),
+        &request, wil::safe_cast_failfast<ULONG>(request_size),
         nullptr, &source, wil::out_param(profile), &profile_size,
         &logon_id, token.addressof(), &quotas, &substatus);
     if (logon != 0) {

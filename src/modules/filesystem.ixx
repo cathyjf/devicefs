@@ -27,6 +27,7 @@ import :winfsp_loader;
 export import devicefs.windows_block_device;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import <devicefs/malloca.h>;
 import devicefs.rpc_constants;
 import devicefs.stream_writer;
 import devicefs.vhdx_viewer;
@@ -294,15 +295,18 @@ auto Usage(const auto output) noexcept {
         WinError("could not resolve --read-user account '{}'", account);
     }
 
-    auto sid = std::vector<BYTE>(sid_size);
-    auto domain = std::vector<char>(std::max<DWORD>(1, domain_size));
-    if (!LookupAccountNameA(nullptr, account.c_str(), sid.data(), &sid_size,
-            domain.data(), &domain_size, &use)) {
+    const auto sid = NEW_MALLOCA_BUFFER(BYTE, sid_size);
+    const auto domain = NEW_MALLOCA_BUFFER(char, std::max<DWORD>(1, domain_size));
+    if (!sid || !domain) {
+        throw std::bad_alloc{};
+    }
+    if (!LookupAccountNameA(nullptr, account.c_str(), sid.get(), &sid_size,
+            domain.get(), &domain_size, &use)) {
         WinError("could not resolve --read-user account '{}'", account);
     }
 
     auto sid_text = wil::unique_hlocal_ansistring{};
-    if (!ConvertSidToStringSidA(sid.data(), sid_text.addressof())) {
+    if (!ConvertSidToStringSidA(sid.get(), sid_text.addressof())) {
         WinError("could not format the SID for --read-user account '{}'", account);
     }
 

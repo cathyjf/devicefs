@@ -23,6 +23,7 @@ export module devicefs.supervisor.installation;
 import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import <devicefs/malloca.h>;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
 import devicefs.supervisor.configuration;
@@ -282,20 +283,22 @@ export [[nodiscard]] auto CurrentExecutablePath() {
 export template <class T = std::string>
 [[nodiscard]] auto CurrentProductVersion() -> std::optional<T> {
     const auto executable = CurrentExecutablePath();
-    auto information = std::vector<std::byte>(
-        GetFileVersionInfoSizeW(executable.c_str(), nullptr));
-    if (information.empty()) {
+    const auto information_size =
+        GetFileVersionInfoSizeW(executable.c_str(), nullptr);
+    if (information_size == 0) {
+        return std::nullopt;
+    }
+    const auto information = NEW_MALLOCA_BUFFER(std::byte, information_size);
+    if (!information) {
         return std::nullopt;
     }
     if (!GetFileVersionInfoW(
-        executable.c_str(), 0,
-        wil::safe_cast_failfast<DWORD>(information.size()),
-        information.data())) {
+        executable.c_str(), 0, information_size, information.get())) {
         return std::nullopt;
     }
     auto value = LPVOID{};
     auto length = UINT{};
-    if (!VerQueryValueW(information.data(),
+    if (!VerQueryValueW(information.get(),
         L"\\StringFileInfo\\0409fde9\\ProductVersion",
         &value, &length)) {
         return std::nullopt;

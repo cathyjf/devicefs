@@ -118,23 +118,19 @@ auto FurtherHardenProcess() {
     }
 }
 
-[[nodiscard]] auto Lowercase(const wil::zwstring_view value) {
-    const auto output_size = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
-        value.c_str(), -1, nullptr, 0, nullptr, nullptr, 0);
-    if (output_size == 0) {
-        WinError("could not lowercase virtual filename '{}'",
-            std::wstring_view{value.c_str(), value.size()});
+struct FilenameLess {
+    using is_transparent = std::true_type;
+
+    [[nodiscard]] auto operator()(auto &&left, auto &&right) const {
+        return _wcsicmp_l(wil::str_raw_ptr(left), wil::str_raw_ptr(right),
+            locale_.get()) < 0;
     }
 
-    auto result = std::wstring(output_size, L'\0');
-    if (!LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
-            value.c_str(), -1, result.data(), output_size, nullptr, nullptr, 0)) {
-        WinError("could not lowercase virtual filename '{}'",
-            std::wstring_view{value.c_str(), value.size()});
-    }
-    result.pop_back();
-    return result;
-}
+private:
+    // This locale is chosen for compatibility with the directory listings
+    // produced by cmd.exe's `dir /L` command.
+    wil::shared_locale locale_{_create_locale(LC_ALL, ".OCP")};
+};
 
 [[nodiscard]] auto CurrentUserName() {
     auto buffer = std::array<char, UNLEN + 1>{};
@@ -238,7 +234,7 @@ auto Usage(const auto output) noexcept {
             "--expose-known-data-map cannot be combined with --vhdx");
     }
 
-    auto names = std::unordered_set<std::wstring>{};
+    auto names = std::set<std::wstring, FilenameLess>{};
     const auto register_name = [&names](const std::wstring &name, const std::size_t map_number) {
         if ((name.empty()) || (name == L".") || (name == L"..") ||
             (name.size() > kMaxNameLength) ||
@@ -247,7 +243,7 @@ auto Usage(const auto output) noexcept {
                 "invalid filename '{}' in --map #{}",
                 Transcode<std::string>(name), map_number));
         }
-        if (!names.emplace(Lowercase(name)).second) {
+        if (!names.emplace(name).second) {
             throw std::invalid_argument(std::format(
                 "duplicate filename '{}' in --map #{}",
                 Transcode<std::string>(name), map_number));
@@ -342,7 +338,7 @@ struct DeviceFile {
 
 // WinFsp directory markers require a stable order and an upper-bound lookup.
 template <typename DeviceType>
-using DeviceFiles = std::map<std::wstring, DeviceFile<DeviceType>>;
+using DeviceFiles = std::map<std::wstring, DeviceFile<DeviceType>, FilenameLess>;
 
 [[nodiscard]] auto ParseInheritedHandle(
     const std::string_view value, const std::string_view description) {
@@ -488,7 +484,7 @@ private:
 
     [[nodiscard]] auto File(wil::zwstring_view path) const {
         path.remove_prefix(1);
-        const auto found = files_.find(Lowercase(path));
+        const auto found = files_.find(path);
         return found == files_.end() ? nullptr : &found->second;
     }
 
@@ -669,7 +665,7 @@ private:
             const auto &self = Self(fs);
             auto current = marker == nullptr
                 ? self.files_.begin()
-                : self.files_.upper_bound(Lowercase(marker));
+                : self.files_.upper_bound(marker);
             alignas(FSP_FSCTL_DIR_INFO) auto storage = std::array<BYTE, kMaxDirectoryInfoSize>{};
             auto *const info = std::start_lifetime_as<FSP_FSCTL_DIR_INFO>(storage.data());
             for (; current != self.files_.end(); ++current) {
@@ -848,7 +844,7 @@ template <BlockDevice DeviceType>
             }
         }();
         files.emplace(
-            Lowercase(mapping.name),
+            mapping.name,
             DeviceFile<DeviceType>{
                 .name = mapping.name,
                 .info = {
@@ -863,13 +859,13 @@ template <BlockDevice DeviceType>
     if constexpr (std::same_as<DeviceType, WindowsDeviceOrBitmap>) {
         for (const auto &mapping : options.mappings) {
             const auto &device = std::get<WindowsBlockDevice>(
-                files.at(Lowercase(mapping.name)).device.contents);
+                files.at(mapping.name).device.contents);
             if (!device.allocation_bitmap.storage) {
                 continue;
             }
             auto bitmap = device.MakeKnownDataMap(*options.known_data_map_cluster_size);
             const auto name = mapping.name + kKnownDataMapSuffix;
-            files.emplace(Lowercase(name), DeviceFile<DeviceType>{
+            files.emplace(name, DeviceFile<DeviceType>{
                 .name = name,
                 .info = {
                     .FileAttributes = FILE_ATTRIBUTE_READONLY,

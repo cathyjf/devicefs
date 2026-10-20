@@ -726,7 +726,7 @@ private:
         Self(fs).open_file_count_.store(0);
         Self(fs).open_file_count_.notify_all();
         g_dispatcher_stopped_unexpectedly = true;
-        SetEvent(g_stop_event);
+        FAIL_FAST_IF_WIN32_BOOL_FALSE(SetEvent(g_stop_event));
     }
 
     static const FSP_FILE_SYSTEM_INTERFACE interface_;
@@ -757,24 +757,6 @@ const FSP_FILE_SYSTEM_INTERFACE DeviceFs<DeviceType>::interface_ = {
     .DispatcherStopped = DispatcherStopped,
 };
 
-auto WINAPI ControlHandler(const DWORD event) noexcept -> BOOL {
-    switch (event) {
-    case CTRL_C_EVENT:
-    case CTRL_BREAK_EVENT:
-        return SetEvent(g_stop_event);
-    case CTRL_CLOSE_EVENT:
-    case CTRL_LOGOFF_EVENT:
-    case CTRL_SHUTDOWN_EVENT:
-        if (!SetEvent(g_stop_event)) {
-            return FALSE;
-        }
-        wil::handle_wait(g_stopped_event);
-        return TRUE;
-    default:
-        return FALSE;
-    }
-}
-
 template <BlockDevice DeviceType>
 auto RunWithDevices(const Options &options, DeviceFiles<DeviceType> files) {
     std::tie(g_stop_event, g_stopped_event) = [&options] {
@@ -798,9 +780,14 @@ auto RunWithDevices(const Options &options, DeviceFiles<DeviceType> files) {
     const auto signal_completion_event_on_exit = wil::scope_exit([] noexcept {
         // This completion event (`g_stopped_event`) must be signalled on all
         // paths out of this function.
-        SetEvent(g_stopped_event);
+        FAIL_FAST_IF_WIN32_BOOL_FALSE(SetEvent(g_stopped_event));
     });
-    if (!SetConsoleCtrlHandler(ControlHandler, TRUE)) {
+    const auto signal_handler = [](DWORD) noexcept -> BOOL {
+        FAIL_FAST_IF_WIN32_BOOL_FALSE(SetEvent(g_stop_event));
+        wil::handle_wait(g_stopped_event);
+        return TRUE;
+    };
+    if (!SetConsoleCtrlHandler(signal_handler, TRUE)) {
         WinError("failed to install console application signal handler");
     }
     if constexpr (WindowsBlockDevice::kMeasureFreeClusterData) {

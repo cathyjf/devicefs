@@ -58,26 +58,39 @@ template <std::size_t Size>
 // create the required batch logon.
 [[nodiscard]] auto TryGrantBatchLogonRight(
     const wil::zwstring_view username) -> bool {
-    auto sid = [username] -> std::optional<std::vector<BYTE>> {
-        auto sid_size = DWORD{};
-        auto domain_size = DWORD{};
-        auto use = SID_NAME_USE{};
-        std::ignore = LookupAccountNameW(
-            nullptr, username.c_str(), nullptr, &sid_size,
-            nullptr, &domain_size, &use);
-        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+    auto sid = [username]
+        -> std::optional<std::array<BYTE, SECURITY_MAX_SID_SIZE>> {
+        // The point of the first call to `LookupAccountNameW` is purely to
+        // obtain the length of the domain name. We don't actually care about
+        // the domain name, but it is believed to be necessary to supply a
+        // suitably-long domain name buffer to `LookupAccountNameW` in order
+        // for it to return the data that we actually care about: the SID.
+        auto domain_size = [username] {
+            auto domain_size = DWORD{};
+            auto unused_sid_size = DWORD{};
+            auto unused_sid_name_use = SID_NAME_USE{};
+            std::ignore = LookupAccountNameW(
+                nullptr, username.c_str(), nullptr, &unused_sid_size,
+                nullptr, &domain_size, &unused_sid_name_use);
+            return (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+                ? std::optional{domain_size} : std::nullopt;
+        }();
+        if (!domain_size) {
             return std::nullopt;
         }
 
-        auto sid = std::vector<BYTE>(sid_size);
         const auto domain = NEW_MALLOCA_BUFFER(wchar_t,
-            std::max<DWORD>(1, domain_size));
+            std::max<DWORD>(1, *domain_size));
         if (!domain) {
             return std::nullopt;
         }
+        auto sid = std::array<BYTE, SECURITY_MAX_SID_SIZE>{};
+        auto sid_capacity = CompileTimeCast<DWORD, sid.size()>();
+        auto unused_sid_name_use = SID_NAME_USE{};
         if (!LookupAccountNameW(
-            nullptr, username.c_str(), sid.data(), &sid_size,
-            domain.get(), &domain_size, &use)) {
+            nullptr, username.c_str(), sid.data(), &sid_capacity,
+            domain.get(), std::addressof(*domain_size),
+            &unused_sid_name_use)) {
             return std::nullopt;
         }
         return sid;

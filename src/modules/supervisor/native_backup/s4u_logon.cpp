@@ -57,9 +57,9 @@ template <std::size_t Size>
 // `LsaLogonUser` call below authoritatively determines whether the account can
 // create the required batch logon.
 [[nodiscard]] auto TryGrantBatchLogonRight(
-    const wil::zwstring_view username) -> bool {
+    const wil::zwstring_view username) -> std::expected<void, DWORD> {
     auto sid = [username]
-        -> std::optional<std::array<BYTE, SECURITY_MAX_SID_SIZE>> {
+        -> std::expected<std::array<BYTE, SECURITY_MAX_SID_SIZE>, DWORD> {
         // The point of the first call to `LookupAccountNameW` is purely to
         // obtain the length of the domain name. We don't actually care about
         // the domain name, but it is believed to be necessary to supply a
@@ -72,17 +72,19 @@ template <std::size_t Size>
             std::ignore = LookupAccountNameW(
                 nullptr, username.c_str(), nullptr, &unused_sid_size,
                 nullptr, &domain_size, &unused_sid_name_use);
-            return (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
-                ? std::optional{domain_size} : std::nullopt;
+            const auto last_error = GetLastError();
+            return (last_error == ERROR_INSUFFICIENT_BUFFER) ?
+                std::expected<DWORD, DWORD>{domain_size} :
+                std::unexpected{last_error};
         }();
         if (!domain_size) {
-            return std::nullopt;
+            return std::unexpected{domain_size.error()};
         }
 
         const auto domain = NEW_MALLOCA_BUFFER(wchar_t,
             std::max<DWORD>(1, *domain_size));
         if (!domain) {
-            return std::nullopt;
+            return std::unexpected{ERROR_NOT_ENOUGH_MEMORY};
         }
         auto sid = std::array<BYTE, SECURITY_MAX_SID_SIZE>{};
         auto sid_capacity = CompileTimeCast<DWORD, sid.size()>();
@@ -91,24 +93,24 @@ template <std::size_t Size>
             nullptr, username.c_str(), sid.data(), &sid_capacity,
             domain.get(), std::addressof(*domain_size),
             &unused_sid_name_use)) {
-            return std::nullopt;
+            return std::unexpected{GetLastError()};
         }
         return sid;
     }();
     if (!sid) {
-        return false;
+        return std::unexpected{sid.error()};
     }
 
     auto policy_attributes = LSA_OBJECT_ATTRIBUTES{
         .Length = sizeof(LSA_OBJECT_ATTRIBUTES),
     };
     auto policy = wil::unique_hlsa{};
-    const auto open = LsaOpenPolicy(
+    const auto open_status = LsaOpenPolicy(
         nullptr, &policy_attributes,
         POLICY_LOOKUP_NAMES | POLICY_CREATE_ACCOUNT,
         policy.addressof());
-    if (open != 0) {
-        return false;
+    if (open_status != STATUS_SUCCESS) {
+        return std::unexpected{LsaNtStatusToWinError(open_status)};
     }
 
     // The configured account is already trusted to execute arbitrary backup
@@ -116,18 +118,26 @@ template <std::size_t Size>
     // the narrower ability to create a batch logon adds no independent
     // persistence boundary.
     auto right = LSA_UNICODE_STRING RTL_CONSTANT_STRING(SE_BATCH_LOGON_NAME);
-    return LsaAddAccountRights(policy.get(), sid->data(), &right, 1) == 0;
+    const auto status = LsaAddAccountRights(
+        policy.get(), sid->data(), &right, 1);
+    if (status != STATUS_SUCCESS) {
+        return std::unexpected{LsaNtStatusToWinError(status)};
+    }
+    return std::expected<void, DWORD>{};
 }
 
 [[nodiscard]] auto LogOnWindowsAccountWithS4u(
     const wil::zwstring_view username) {
-    if (!TryGrantBatchLogonRight(username)) {
+    if (const auto status = TryGrantBatchLogonRight(username); !status) {
         devicefs::WriteToStream(
             devicefs::stderr,
-            L"backup-supervisor: warning: could not grant "
-            L"SeBatchLogonRight to configured WSL account '{}'; attempting "
-            L"S4U logon in case the account already holds it\n",
-            std::wstring_view{username.c_str(), username.size()});
+            L"backup-supervisor: warning: continuing despite the following "
+            L"error: failed to grant SeBatchLogonRight to configured WSL "
+            L"account '{}': {}\n"
+            L"Attempting S4U logon in case the account already holds the "
+            L"necessary right.\n",
+            std::wstring_view{username.c_str(), username.size()},
+            TryConstructWinError("", ExplicitWin32Error{status.error()}));
     }
 
     auto privileges = ProcessPrivilegeEnabler{

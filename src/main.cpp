@@ -66,6 +66,9 @@ auto main(
         if (dynamic_cast<const std::invalid_argument *>(&error)) {
             return ERROR_INVALID_COMMAND_LINE;
         }
+        if (dynamic_cast<const std::bad_alloc *>(&error)) {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
         if (const auto system_error_ = dynamic_cast<
                 const std::system_error *>(&error);
                 system_error_ && system_error_->code()) {

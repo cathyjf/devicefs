@@ -185,6 +185,21 @@ private:
     }
 
     template <typename Character>
+        requires ((sizeof(Character) == 1) &&
+            !std::same_as<Character, char>)
+    [[msvc::forceinline]]
+    auto WriteText(const std::basic_string_view<Character> output) -> void {
+        [[gsl::suppress("26490",
+            justification:
+                "C++ permits accessing any object's representation "
+                "through `char`.")]]
+        WriteText(std::string_view{
+            reinterpret_cast<const char *>(output.data()), output.size()});
+    }
+
+    template <typename Character>
+        requires (std::same_as<Character, char> || (sizeof(Character) > 1))
+    [[msvc::noinline]]
     auto WriteText(std::basic_string_view<Character> output) -> void {
         while (!output.empty()) {
             if (output.front() == Character{'\r'}) {

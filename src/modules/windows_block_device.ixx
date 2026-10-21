@@ -182,16 +182,35 @@ struct AllocationBitmap {
     std::unique_ptr<FreeClusterMeasurement> measurement;
 #endif
 
-    // Search [first, limit) for an allocated cluster (a set bit) or a free
-    // cluster (a clear bit). A `UINT64` result is the first matching index, or
-    // `limit` if none exists. A `bool` result reports whether a match exists;
-    // it can return as soon as a word or block comparison establishes that.
+    [[nodiscard, msvc::forceinline]]
+    _Pre_satisfies_(cluster_size != 0)
+    constexpr auto BitmapData() const noexcept -> std::span<const BYTE> {
+        // The bitmap loader and test fixture set `cluster_size` together
+        // with an allocated `storage` buffer. The nonzero `cluster_size`
+        // precondition identifies that initialized state, so `storage`
+        // is non-null.
+        [[assume(storage.get() != nullptr)]];
+        return {storage.get() + kVolumeBitmapHeaderSize,
+            cluster_count / kBitsPerByte +
+                ((cluster_count % kBitsPerByte) != 0)};
+    }
+
+    // Search the nonempty range [first, limit) for an allocated cluster (a
+    // set bit) or a free cluster (a clear bit). `bytes` begins at cluster zero
+    // and covers the searched range. A `UINT64` result is the first matching
+    // index, or `limit` if none exists. A `bool` result reports whether a match
+    // exists; it can return as soon as a word or block comparison establishes
+    // that.
     template <bool allocated, class Result>
         requires (std::same_as<Result, UINT64> || std::same_as<Result, bool>)
     [[nodiscard, msvc::forceinline]]
-    _Pre_satisfies_((first <= limit) && (limit <= cluster_count))
-    auto FindCluster(const UINT64 first, const UINT64 limit) const noexcept
-        -> Result {
+    _Pre_satisfies_(first < limit)
+    static auto FindCluster(const std::span<const BYTE> bytes,
+        const UINT64 first, const UINT64 limit) noexcept -> Result {
+        // The caller supplies `bytes` covering the searched cluster range,
+        // so the byte containing cluster `limit - 1` is within the span.
+        _Analysis_assume_(
+            ((limit - 1) / kBitsPerByte) < bytes.size());
         const auto no_match = [limit] -> Result {
             if constexpr (std::same_as<Result, bool>) {
                 std::ignore = limit;
@@ -200,9 +219,6 @@ struct AllocationBitmap {
                 return limit;
             }
         }();
-        if (first == limit) {
-            return no_match;
-        }
         const auto found = [](const UINT64 word_begin,
             const UINT64 matching) static -> Result {
             if constexpr (std::same_as<Result, bool>) {
@@ -215,9 +231,6 @@ struct AllocationBitmap {
         };
         constexpr auto bits_per_word = std::numeric_limits<UINT64>::digits;
         constexpr auto nonmatching_word = allocated ? UINT64{} : MAXUINT64;
-        const auto bytes = std::span{storage.get() + kVolumeBitmapHeaderSize,
-            cluster_count / kBitsPerByte +
-                ((cluster_count % kBitsPerByte) != 0)};
         const auto first_bit = first % bits_per_word;
         const auto first_word = first - first_bit;
         const auto first_matching =
@@ -304,7 +317,10 @@ struct AllocationBitmap {
     _Post_satisfies_((first <= return) && (return <= limit))
     [[nodiscard]] auto FindNextCluster(
         const UINT64 first, const UINT64 limit) const noexcept {
-        return FindCluster<allocated, UINT64>(first, limit);
+        if (first == limit) {
+            return limit;
+        }
+        return FindCluster<allocated, UINT64>(BitmapData(), first, limit);
     }
 
     _Pre_satisfies_((cluster_count == 0) || (cluster_size != 0))
@@ -321,7 +337,8 @@ struct AllocationBitmap {
         if (last_cluster >= cluster_count) {
             return true;
         }
-        return FindCluster<true, bool>(first_cluster, last_cluster + 1);
+        return FindCluster<true, bool>(
+            BitmapData(), first_cluster, last_cluster + 1);
     }
 
     // Precondition: the caller supplies a buffer that does not overlap
@@ -339,22 +356,25 @@ struct AllocationBitmap {
             return;
         }
 
+        const auto bytes = BitmapData();
+        const auto shift = cluster_shift;
         const auto end = offset + output_size;
-        const auto first_cluster = offset >> cluster_shift;
+        const auto first_cluster = offset >> shift;
         // Bytes beyond the volume's cluster count must retain their source contents.
-        const auto limit = std::min(cluster_count, ((end - 1) >> cluster_shift) + 1);
+        const auto limit = std::min(cluster_count, ((end - 1) >> shift) + 1);
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
         measurement->ObserveRead(std::span{output, output_size}, offset);
 #endif
         auto cluster = first_cluster;
         while (cluster < limit) {
-            const auto free_cluster = FindNextCluster<false>(cluster, limit);
+            const auto free_cluster =
+                FindCluster<false, UINT64>(bytes, cluster, limit);
             if (free_cluster == limit) {
                 return;
             }
-            cluster = FindNextCluster<true>(free_cluster, limit);
-            const auto free_begin = std::max(offset, free_cluster << cluster_shift);
-            const auto free_end = std::min(end, cluster << cluster_shift);
+            cluster = FindCluster<true, UINT64>(bytes, free_cluster, limit);
+            const auto free_begin = std::max(offset, free_cluster << shift);
+            const auto free_end = std::min(end, cluster << shift);
             std::memset(output + (free_begin - offset), 0,
                 free_end - free_begin);
         }

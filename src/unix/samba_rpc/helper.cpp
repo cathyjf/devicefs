@@ -164,12 +164,14 @@ public:
     explicit LocalBackingDevice(const std::filesystem::path &path)
         : file_{std::fopen(path.c_str(), "rb")} {
         if (!file_) {
-            throw std::system_error{errno, std::generic_category()};
+            throw std::system_error{
+                errno, std::generic_category(), "fopen(\"rb\") failed"};
         }
         const auto descriptor = fileno(file_.get());
         struct stat information {};
         if (fstat(descriptor, &information) == -1) {
-            throw std::system_error{errno, std::generic_category()};
+            throw std::system_error{
+                errno, std::generic_category(), "fstat failed"};
         }
 
         if (!S_ISBLK(information.st_mode)) {
@@ -186,15 +188,20 @@ public:
 #if defined(__linux__)
             auto length = std::uint64_t{};
             if (ioctl(descriptor, BLKGETSIZE64, &length) == -1) {
-                throw std::system_error{errno, std::generic_category()};
+                throw std::system_error{errno, std::generic_category(),
+                    "ioctl(BLKGETSIZE64) failed"};
             }
             return length;
 #elif defined(__APPLE__)
             auto block_size = std::uint32_t{};
             auto block_count = std::uint64_t{};
-            if ((ioctl(descriptor, DKIOCGETBLOCKSIZE, &block_size) == -1) ||
-                (ioctl(descriptor, DKIOCGETBLOCKCOUNT, &block_count) == -1)) {
-                throw std::system_error{errno, std::generic_category()};
+            if (ioctl(descriptor, DKIOCGETBLOCKSIZE, &block_size) == -1) {
+                throw std::system_error{errno, std::generic_category(),
+                    "ioctl(DKIOCGETBLOCKSIZE) failed"};
+            }
+            if (ioctl(descriptor, DKIOCGETBLOCKCOUNT, &block_count) == -1) {
+                throw std::system_error{errno, std::generic_category(),
+                    "ioctl(DKIOCGETBLOCKCOUNT) failed"};
             }
             if ((block_size == 0) ||
                 (block_count >

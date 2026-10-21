@@ -253,6 +253,9 @@ set_source_files_properties(${DEVICEFS_WINDOWS_HEADER_UNITS}
 )
 
 add_executable(devicefs-read-path-test tests/read_path.cpp)
+target_module_interfaces(devicefs-read-path-test PRIVATE
+    src/modules/supervisor/math.ixx
+)
 target_link_libraries(devicefs-read-path-test PRIVATE
     ${DEVICEFS_COMMON_LINK_LIBRARIES} devicefs-windows-imports
 )

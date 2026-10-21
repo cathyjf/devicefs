@@ -182,36 +182,129 @@ struct AllocationBitmap {
     std::unique_ptr<FreeClusterMeasurement> measurement;
 #endif
 
-    // Search the cluster indices in [first, limit), returning the first match or
-    // `limit` if none exists. If `allocated` is true, search for an allocated
-    // cluster (a set bit); otherwise, search for a free cluster (a clear bit).
-    // The range must lie within the bitmap. Each iteration skips a whole word
-    // if it contains no matching bits.
+    // Search [first, limit) for an allocated cluster (a set bit) or a free
+    // cluster (a clear bit). A `UINT64` result is the first matching index, or
+    // `limit` if none exists. A `bool` result reports whether a match exists;
+    // it can return as soon as a word or block comparison establishes that.
+    template <bool allocated, class Result>
+        requires (std::same_as<Result, UINT64> || std::same_as<Result, bool>)
+    [[nodiscard, msvc::forceinline]]
+    _Pre_satisfies_((first <= limit) && (limit <= cluster_count))
+    auto FindCluster(const UINT64 first, const UINT64 limit) const noexcept
+        -> Result {
+        const auto no_match = [limit] -> Result {
+            if constexpr (std::same_as<Result, bool>) {
+                std::ignore = limit;
+                return false;
+            } else {
+                return limit;
+            }
+        }();
+        if (first == limit) {
+            return no_match;
+        }
+        const auto found = [](const UINT64 word_begin,
+            const UINT64 matching) static -> Result {
+            if constexpr (std::same_as<Result, bool>) {
+                std::ignore = word_begin;
+                std::ignore = matching;
+                return true;
+            } else {
+                return word_begin + CountTrailingZeros(matching);
+            }
+        };
+        constexpr auto bits_per_word = std::numeric_limits<UINT64>::digits;
+        constexpr auto nonmatching_word = allocated ? UINT64{} : MAXUINT64;
+        const auto bytes = std::span{storage.get() + kVolumeBitmapHeaderSize,
+            cluster_count / kBitsPerByte +
+                ((cluster_count % kBitsPerByte) != 0)};
+        const auto first_bit = first % bits_per_word;
+        const auto first_word = first - first_bit;
+        const auto first_matching =
+            (LoadBitmapWord(std::as_bytes(
+                bytes.subspan(first_word / kBitsPerByte))) ^
+                nonmatching_word) & (MAXUINT64 << first_bit);
+        // A range ending in this word also needs its upper bits masked out.
+        // Longer ranges use only the starting-bit mask here; their final word
+        // is handled after the complete-word scan.
+        if ((limit - first) <= (bits_per_word - first_bit)) {
+            const auto matching = first_matching &
+                (MAXUINT64 >> (bits_per_word - (limit - first_word)));
+            return matching != 0 ? found(first_word, matching) : no_match;
+        }
+        if (first_matching != 0) {
+            return found(first_word, first_matching);
+        }
+
+        std::conditional_t<std::same_as<Result, bool>, const UINT64, UINT64>
+            word_begin = first_word + bits_per_word;
+        const auto word_limit = limit - (limit % bits_per_word);
+        const auto complete_words = bytes.subspan(word_begin / kBitsPerByte,
+            (word_limit - word_begin) / kBitsPerByte);
+        const auto *cursor = complete_words.data();
+        if constexpr (std::same_as<Result, bool>) {
+            // PBS reads are usually about 2 MiB, but intervening layers may combine
+            // requests. A 128-byte reference lets the complete-word bitmap scan for a
+            // 4 MiB read use one `memcmp` call at the common 4 KiB cluster size.
+            // Shorter scans compare only the required prefix, so the extra capacity
+            // adds no comparison work to those reads.
+            //
+            // This capacity is chosen for the expected workload. NTFS permits clusters
+            // as small as 512 bytes; their longer bitmap scans reuse the reference
+            // over multiple comparisons.
+            alignas(std::hardware_constructive_interference_size)
+            static constexpr auto nonmatching_bytes = [] {
+                auto result = std::array<BYTE, 128>{};
+                result.fill(allocated ? BYTE{} :
+                    std::numeric_limits<BYTE>::max());
+                return result;
+            }();
+            auto remaining = complete_words.size();
+            while (remaining != 0) {
+                const auto count = std::min(
+                    remaining, nonmatching_bytes.size());
+                if (std::memcmp(cursor, nonmatching_bytes.data(), count) != 0) {
+                    return true;
+                }
+                cursor += count;
+                remaining -= count;
+            }
+        } else {
+            const auto *const word_end = cursor + complete_words.size();
+            for (; cursor != word_end;
+                 cursor += sizeof(UINT64), word_begin += bits_per_word) {
+                const auto matching = LoadBitmapWord(std::as_bytes(
+                    std::span<const BYTE, sizeof(UINT64)>{
+                        cursor, sizeof(UINT64)})) ^ nonmatching_word;
+                if (matching != 0) {
+                    return found(word_begin, matching);
+                }
+            }
+        }
+        if (word_limit != limit) {
+            const auto mask =
+                MAXUINT64 >> (bits_per_word - (limit - word_limit));
+            const auto matching =
+                (LoadBitmapWord(std::as_bytes(
+                    bytes.subspan(word_limit / kBitsPerByte))) ^
+                    nonmatching_word) & mask;
+            if (matching != 0) {
+                return found(word_limit, matching);
+            }
+        }
+        return no_match;
+    }
+
+    // Search the cluster indices in [first, limit), returning the first match
+    // or `limit` if none exists. If `allocated` is true, search for an
+    // allocated cluster (a set bit); otherwise, search for a free cluster
+    // (a clear bit).
     template <bool allocated>
     _Pre_satisfies_((first <= limit) && (limit <= cluster_count))
     _Post_satisfies_((first <= return) && (return <= limit))
-    [[nodiscard]] auto FindNextCluster(const UINT64 first, const UINT64 limit) const noexcept {
-        if (first == limit) {
-            return limit;
-        }
-        constexpr auto bits_per_word = std::numeric_limits<UINT64>::digits;
-        const auto bytes = std::span{storage.get() + kVolumeBitmapHeaderSize,
-            cluster_count / kBitsPerByte + ((cluster_count % kBitsPerByte) != 0)};
-        const auto first_bit = first % bits_per_word;
-        // Only the first word can begin before `first`. Its mask excludes those
-        // earlier cluster indices; subsequent words need no such mask.
-        auto mask = MAXUINT64 << first_bit;
-        for (auto word_begin = first - first_bit; word_begin < limit;
-             word_begin += bits_per_word) {
-            const auto word = LoadBitmapWord(std::as_bytes(
-                bytes.subspan(word_begin / kBitsPerByte)));
-            const auto matching = (allocated ? word : ~word) & mask;
-            if (matching != 0) {
-                return std::min(limit, word_begin + CountTrailingZeros(matching));
-            }
-            mask = MAXUINT64;
-        }
-        return limit;
+    [[nodiscard]] auto FindNextCluster(
+        const UINT64 first, const UINT64 limit) const noexcept {
+        return FindCluster<allocated, UINT64>(first, limit);
     }
 
     _Pre_satisfies_((cluster_count == 0) || (cluster_size != 0))
@@ -228,7 +321,7 @@ struct AllocationBitmap {
         if (last_cluster >= cluster_count) {
             return true;
         }
-        return FindNextCluster<true>(first_cluster, last_cluster + 1) <= last_cluster;
+        return FindCluster<true, bool>(first_cluster, last_cluster + 1);
     }
 
     _Pre_satisfies_((cluster_count == 0) || (cluster_size != 0))

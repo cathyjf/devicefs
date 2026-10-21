@@ -18,6 +18,7 @@ import <devicefs/windows_imports.h>;
 import devicefs.allocation;
 import <devicefs/common.h>;
 import devicefs.windows_block_device;
+import devicefs.supervisor.math;
 
 namespace {
 
@@ -109,6 +110,35 @@ auto CheckRange(const auto &bitmap, const std::span<const BYTE> bits,
             "{} clusters, {} bytes per cluster, offset {}, count {}",
             bitmap.cluster_count, bitmap.cluster_size, offset, count));
     }
+    const auto first = std::min<std::uint64_t>(
+        bitmap.cluster_count, offset / bitmap.cluster_size);
+    const auto limit = count == 0 ? first : std::min<std::uint64_t>(
+        bitmap.cluster_count, ((offset + count - 1) / bitmap.cluster_size) + 1);
+    // Both `std::min` calls cap the search at `bitmap.cluster_count`.
+    // For an empty byte range, `limit` equals `first`. Otherwise, the
+    // range's last byte is at or after its first byte, so its exclusive
+    // cluster limit is greater than its starting cluster. Capping both
+    // endpoints at the same cluster count preserves their order.
+    _Analysis_assume_((first <= limit) && (limit <= bitmap.cluster_count));
+    for (const auto allocated : {false, true}) {
+        auto expected = first;
+        while ((expected != limit) &&
+            (((bits[expected >> 3] & (1u << (expected & 7))) != 0) !=
+                allocated)) {
+            ++expected;
+        }
+        const auto actual_ = allocated
+            ? bitmap.template FindNextCluster<true>(first, limit)
+            : bitmap.template FindNextCluster<false>(first, limit);
+        if (actual_ != expected) {
+            throw std::runtime_error(std::format(
+                "cluster search differs from the per-bit result: "
+                "{} clusters, range [{}, {}), allocated {}, "
+                "expected {}, got {}",
+                bitmap.cluster_count, first, limit,
+                allocated, expected, actual_));
+        }
+    }
 }
 
 // Check the supplied bitmap at every starting byte with lengths around cluster
@@ -162,6 +192,38 @@ auto TestBitmaps() -> void {
     }
     std::println("PASS: each isolated allocated or free cluster in a 129-cluster "
         "bitmap produces the expected search and zeroing results.");
+
+    // Two Boolean comparison blocks follow the initial word, and the final
+    // cluster occupies a partial word. Moving one differing bit through the map
+    // checks both query types; ranges ending at that bit exclude it.
+    constexpr auto comparison_clusters = 2113uz;
+    for (const auto pattern : {BYTE{}, BYTE{0xff}}) {
+        auto bits = std::vector<BYTE>(devicefs::math::Ceil<
+            comparison_clusters, std::numeric_limits<BYTE>::digits>(), pattern);
+        for (auto bit = 0uz; bit <= comparison_clusters; ++bit) {
+            if (bit != comparison_clusters) {
+                bits.at(bit >> 3) ^=
+                    wil::safe_cast_failfast<BYTE>(1u << (bit & 7));
+            }
+            const auto bitmap = MakeBitmap(bits, comparison_clusters, 1);
+            for (const auto first : {0uz, 1uz, 7uz, 8uz, 63uz, 64uz, 65uz}) {
+                for (const auto limit : {bit,
+                         std::min(bit + 1, comparison_clusters),
+                         comparison_clusters}) {
+                    if (first <= limit) {
+                        CheckRange(bitmap, bits, first, limit - first);
+                    }
+                }
+            }
+            if (bit != comparison_clusters) {
+                bits.at(bit >> 3) ^=
+                    wil::safe_cast_failfast<BYTE>(1u << (bit & 7));
+            }
+        }
+    }
+    std::println("PASS: comparison-block searches find every isolated "
+        "allocated or free cluster and exclude matches outside the "
+        "requested range.");
 
     // The fixed seed makes a failing random case repeatable. Random geometry
     // extends the checks to larger clusters, while a 64 KiB limit on each range

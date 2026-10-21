@@ -58,7 +58,8 @@ auto SnapshotAllocationBitmap::ClusterSize() const noexcept
 auto SnapshotAllocationBitmap::SynthesizeFreeClusters(
     const std::span<unsigned char> output,
     const std::uint64_t offset) const noexcept -> void {
-    state_->bitmap.SynthesizeFreeClusters(output, offset);
+    state_->bitmap.SynthesizeFreeClusters(
+        output.data(), output.size(), offset);
 }
 
 auto LoadSnapshotAllocationBitmap(

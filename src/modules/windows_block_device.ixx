@@ -324,20 +324,27 @@ struct AllocationBitmap {
         return FindCluster<true, bool>(first_cluster, last_cluster + 1);
     }
 
+    // Precondition: the caller supplies a buffer that does not overlap
+    // `*this` or the bitmap storage owned by `storage`. `__restrict` lets
+    // the compiler rely on that promise when optimizing buffer writes.
     _Pre_satisfies_((cluster_count == 0) || (cluster_size != 0))
     auto SynthesizeFreeClusters(
-        const std::span<BYTE> output,
+        _When_(output_size != 0,
+            _Out_writes_bytes_(output_size)
+            _When_(DEVICEFS_MEASURE_FREE_CLUSTER_DATA, _Inout_))
+        BYTE *__restrict const output,
+        const std::size_t output_size,
         const UINT64 offset) const noexcept {
-        if (!storage || output.empty()) {
+        if (!storage || (output_size == 0)) {
             return;
         }
 
-        const auto end = offset + output.size();
+        const auto end = offset + output_size;
         const auto first_cluster = offset >> cluster_shift;
         // Bytes beyond the volume's cluster count must retain their source contents.
         const auto limit = std::min(cluster_count, ((end - 1) >> cluster_shift) + 1);
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
-        measurement->ObserveRead(output, offset);
+        measurement->ObserveRead(std::span{output, output_size}, offset);
 #endif
         auto cluster = first_cluster;
         while (cluster < limit) {
@@ -348,11 +355,8 @@ struct AllocationBitmap {
             cluster = FindNextCluster<true>(free_cluster, limit);
             const auto free_begin = std::max(offset, free_cluster << cluster_shift);
             const auto free_end = std::min(end, cluster << cluster_shift);
-            const auto free = output.subspan(free_begin - offset, free_end - free_begin);
-            // MSVC 19.52's `std::ranges::fill` misses its `memset` optimization
-            // and emits a byte-at-a-time loop. `std::fill` reaches `memset`,
-            // so we use it for the zero-filling operations in this file.
-            std::fill(free.begin(), free.end(), 0);
+            std::memset(output + (free_begin - offset), 0,
+                free_end - free_begin);
         }
     }
 };
@@ -463,6 +467,9 @@ struct WindowsBlockDevice {
         if constexpr (!kMeasureFreeClusterData) {
             if (!allocation_bitmap.HasAllocatedClusters(offset, wanted)) {
                 (observers.RecordSynthetic(), ...);
+                // MSVC 19.52's `std::ranges::fill` misses its `memset`
+                // optimization and emits a byte-at-a-time loop.
+                // `std::fill` reaches `memset`, so we use it here.
                 std::fill(output.begin(), output.end(), BYTE{});
                 transferred = wanted;
                 return STATUS_SUCCESS;
@@ -532,7 +539,8 @@ struct WindowsBlockDevice {
             if (!NT_SUCCESS(status)) {
                 return status;
             }
-            allocation_bitmap.SynthesizeFreeClusters(output, offset);
+            allocation_bitmap.SynthesizeFreeClusters(
+                output.data(), output.size(), offset);
             return STATUS_SUCCESS;
         }
 
@@ -549,7 +557,8 @@ struct WindowsBlockDevice {
             transferred = wanted;
             std::ranges::copy(bounce.subspan(offset - read_offset, wanted),
                 output.begin());
-            allocation_bitmap.SynthesizeFreeClusters(output, offset);
+            allocation_bitmap.SynthesizeFreeClusters(
+                output.data(), output.size(), offset);
             (observers.RecordBounce(), ...);
             return STATUS_SUCCESS;
         };

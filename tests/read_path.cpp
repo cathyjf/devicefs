@@ -86,7 +86,7 @@ template <typename Bitmap = decltype(devicefs::WindowsBlockDevice::allocation_bi
 auto CheckRange(const auto &bitmap, const std::span<const BYTE> bits,
     const std::size_t offset, const std::size_t count) -> void {
     auto actual = std::vector<BYTE>(count + 2, kSentinelByte);
-    bitmap.SynthesizeFreeClusters(std::span{actual}.subspan(1, count), offset);
+    bitmap.SynthesizeFreeClusters(actual.data() + 1, count, offset);
     if ((actual.front() != kSentinelByte) || (actual.back() != kSentinelByte)) {
         throw std::runtime_error("bitmap synthesis wrote outside the output span");
     }

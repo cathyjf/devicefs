@@ -30,7 +30,7 @@ constexpr auto kSentinelByte = BYTE{0xa5};
 // larger alignments, and that the returned addresses satisfy those requirements.
 auto TestAlignedAllocations() -> void {
     const auto check = []<class T>(const std::size_t alignment) {
-        const auto storage = NewAlignedBuffer<T, false>(1, std::align_val_t{alignment});
+        const auto storage = NewAlignedBuffer<T>(1, std::align_val_t{alignment});
         [[gsl::suppress("26490",
             justification:
                 "The test converts the pointer to an integer to check whether its "

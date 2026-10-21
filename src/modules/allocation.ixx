@@ -48,10 +48,9 @@ export [[nodiscard]] auto QueryBufferAlignment(const HANDLE file) noexcept
 // specially-aligned buffers.
 // https://learn.microsoft.com/en-us/windows/win32/fileio/file-buffering#alignment-and-file-access-requirements
 //
-// If `terminate_on_failure` is true, allocation failures terminate the process.
-// Otherwise, the function returns `std::unique_ptr{nullptr}` on failure.
+// The function returns `std::unique_ptr{nullptr}` on allocation failure.
 export
-template <class T = BYTE, bool terminate_on_failure = true>
+template <class T = BYTE>
     requires (std::same_as<T, char> ||
         std::same_as<T, unsigned char> ||
         std::same_as<T, std::byte>)
@@ -64,20 +63,10 @@ auto NewAlignedBuffer(const std::size_t size, const std::align_val_t alignment) 
                 "allocated below.")]]
         ::operator delete(allocation, alignment);
     };
-    return std::unique_ptr<T, decltype(deleter)>{
-        [size, alignment] noexcept {
-            [[gsl::suppress("26409",
-                justification:
-                    "The analyzer suggests using `std::make_unique`, but that "
-                    "function cannot allocate an over-aligned byte array.")]]
-            const auto buffer = ::operator new(size, alignment, std::nothrow);
-            if constexpr (terminate_on_failure) {
-                if (!buffer) {
-                    std::terminate();
-                }
-            }
-            return static_cast<T *>(buffer);
-        }(),
-        deleter
-    };
+    [[gsl::suppress("26409",
+        justification:
+            "The analyzer suggests using `std::make_unique`, but that "
+            "function cannot allocate an over-aligned byte array.")]]
+    return std::unique_ptr<T, decltype(deleter)>{static_cast<T *>(
+        ::operator new(size, alignment, std::nothrow)), deleter};
 };

@@ -733,7 +733,7 @@ struct VerificationJob {
         WinError("could not query buffer alignment for verification snapshot '{}'",
             source);
     }
-    auto result = NewAlignedBuffer<unsigned char, false>(
+    auto result = NewAlignedBuffer(
         kComparisonChunkSize, *alignment);
     if (!result) {
         WinError("could not allocate an incremental verification buffer",

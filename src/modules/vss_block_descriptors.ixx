@@ -338,7 +338,7 @@ class RawSource {
         // even for the largest read, which is one VSS block.
         const auto buffer_size = devicefs::vss::kBlockSize +
             ((sector_size_ == 0) ? 0 : (2 * (std::uint64_t{sector_size_} - 1)));
-        auto buffer = NewAlignedBuffer<std::byte, false>(
+        auto buffer = NewAlignedBuffer<std::byte>(
             buffer_size, buffer_alignment);
         if (!buffer) {
             WinError("failed to allocate a {}-byte VSS metadata buffer "
@@ -428,7 +428,7 @@ private:
     wil::unique_hfile handle_;
     std::uint64_t size_ = 0;
     DWORD sector_size_ = 0;
-    decltype(NewAlignedBuffer<std::byte, false>(0, std::align_val_t{1})) buffer_;
+    decltype(NewAlignedBuffer<std::byte>(0, std::align_val_t{1})) buffer_;
 };
 
 // This implementation of `ReadField` assumes that the native endianness

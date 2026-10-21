@@ -345,13 +345,6 @@ struct WindowsBlockDevice {
     }
 
     template <typename... Observers>
-    [[gsl::suppress("26445",
-        justification:
-            "This function contains a structured binding that copies a pair, "
-            "including a `std::span`. C26445 incorrectly diagnoses a reference "
-            "to the `std::span` even though the declaration uses `const auto`, "
-            "without `&`. A suppression placed closer to the structured binding "
-            "was ineffective.")]]
     _Success_(return == STATUS_SUCCESS)
     auto Read(
         _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
@@ -421,6 +414,8 @@ struct WindowsBlockDevice {
         const auto read_end = (end + sector_mask) & ~sector_mask;
         using LengthType = std::remove_cv_t<decltype(wanted)>;
         /* [[indeterminate]] */ LengthType read_length;
+        [[gsl::suppress("26447",
+            justification: "`wil::safe_cast_nothrow` cannot throw.")]]
         if (FAILED(wil::safe_cast_nothrow<LengthType>(
                 read_end - read_offset, &read_length))) {
             return STATUS_INVALID_PARAMETER;
@@ -434,36 +429,47 @@ struct WindowsBlockDevice {
             return STATUS_SUCCESS;
         }
 
-        const auto [bounce, temporary_backing_memory] = [read_length]
-            -> std::pair<std::span<BYTE>, decltype(NewAlignedBuffer(
-                read_length, read_buffer_alignment))> {
-            // This 5 MIB capacity comfortably accommodates a 4 MiB PBS chunk
-            // and any extra bytes needed for sector alignment.
-            constexpr auto kRetainedReadBufferSize = 5uz * 1024 * 1024;
-            if (read_length <= kRetainedReadBufferSize) {
-                thread_local const auto retained_buffer_storage =
-                    NewAlignedBuffer(
-                        kRetainedReadBufferSize, read_buffer_alignment);
-                return {std::span{retained_buffer_storage.get(), read_length},
-                    {nullptr, retained_buffer_storage.get_deleter()}};
+        const auto read_into_bounce_buffer_and_copy_to_destination =
+            [&](BYTE *const bounce_storage) {
+            const auto bounce = std::span{bounce_storage, read_length};
+            auto device_transferred = LengthType{};
+            const auto status = read(
+                bounce.data(), read_offset, read_length, &device_transferred);
+            if (!NT_SUCCESS(status)) {
+                return status;
             }
-            auto newly_allocated_memory = NewAlignedBuffer(
-                read_length, read_buffer_alignment);
-            return {std::span{newly_allocated_memory.get(), read_length},
-                std::move(newly_allocated_memory)};
-        }();
-        auto device_transferred = LengthType{};
-        const auto status = read(
-            bounce.data(), read_offset, read_length, &device_transferred);
-        if (!NT_SUCCESS(status)) {
-            return status;
-        }
 
-        transferred = wanted;
-        std::ranges::copy(bounce.subspan(offset - read_offset, wanted), output.begin());
-        allocation_bitmap.SynthesizeFreeClusters(output, offset);
-        (observers.RecordBounce(), ...);
-        return STATUS_SUCCESS;
+            transferred = wanted;
+            std::ranges::copy(bounce.subspan(offset - read_offset, wanted),
+                output.begin());
+            allocation_bitmap.SynthesizeFreeClusters(output, offset);
+            (observers.RecordBounce(), ...);
+            return STATUS_SUCCESS;
+        };
+
+        // This 5 MIB capacity comfortably accommodates a 4 MiB PBS chunk
+        // and any extra bytes needed for sector alignment.
+        constexpr auto kRetainedReadBufferSize = 5uz * 1024 * 1024;
+        if (read_length <= kRetainedReadBufferSize) {
+            thread_local const auto retained_buffer_storage = [&failure] {
+                auto buffer = NewAlignedBuffer(
+                    kRetainedReadBufferSize, read_buffer_alignment);
+                if (!buffer) {
+                    failure(ERROR_NOT_ENOUGH_MEMORY);
+                    std::_Exit(ERROR_NOT_ENOUGH_MEMORY);
+                }
+                return buffer;
+            }();
+            return read_into_bounce_buffer_and_copy_to_destination(
+                retained_buffer_storage.get());
+        }
+        const auto newly_allocated_memory = NewAlignedBuffer(
+            read_length, read_buffer_alignment);
+        if (!newly_allocated_memory) {
+            return failure(ERROR_NOT_ENOUGH_MEMORY);
+        }
+        return read_into_bounce_buffer_and_copy_to_destination(
+            newly_allocated_memory.get());
     }
 };
 

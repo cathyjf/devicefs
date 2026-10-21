@@ -145,17 +145,25 @@ inline constexpr auto kVolumeBitmapHeaderSize =
     offsetof(VOLUME_BITMAP_BUFFER, Buffer);
 inline constexpr auto kBitsPerByte = std::numeric_limits<BYTE>::digits;
 
+[[gsl::suppress("26497", justification:
+    "Both loading branches call `std::memcpy`, so this function "
+    "cannot be evaluated in a constant expression.")]]
 [[nodiscard, msvc::forceinline]]
 auto LoadBitmapWord(const std::span<const std::byte> bytes) noexcept {
-    auto word = std::uint64_t{};
-    // MSVC 19.52 on ARM64 calls `memcpy` on every iteration when a
-    // ternary selects the length. Keeping the constant-size copy in its
-    // own branch lets the compiler use one load for each complete word.
-    if (bytes.size() >= sizeof(word)) {
-        std::memcpy(&word, bytes.data(), sizeof(word));
-    } else {
-        std::memcpy(&word, bytes.data(), bytes.size());
-    }
+    auto word = [bytes] {
+        using Word = std::uint64_t;
+        // MSVC 19.52 on ARM64 calls `memcpy` on every iteration when a
+        // ternary selects the length. Keeping the constant-size copy in its
+        // own branch lets the compiler use one load for each complete word.
+        if (bytes.size() >= sizeof(Word)) {
+            /* [[indeterminate]] */ Word result;
+            std::memcpy(&result, bytes.data(), sizeof(result));
+            return result;
+        }
+        auto result = Word{};
+        std::memcpy(&result, bytes.data(), bytes.size());
+        return result;
+    }();
     // `VOLUME_BITMAP_BUFFER` numbers bits from the low bit of each byte.
     // Reversing the bytes on a big-endian host preserves that order within
     // the word.
@@ -370,8 +378,8 @@ struct WindowsBlockDevice {
         // Read failures are not expected during normal operation. `noinline`
         // prevents `flatten` from enlarging the read callback with diagnostic
         // code that successful reads never execute.
-        const auto failure = [&] [[msvc::noinline]] (const DWORD error)
-            noexcept {
+        const auto failure = [&filename = filename, offset, wanted]
+            [[msvc::noinline]] (const DWORD error) noexcept {
             devicefs::WriteToStream(
                 devicefs::stderr,
                 L"devicefs: read failed for '{}' at offset 0x{:x} "
@@ -381,8 +389,9 @@ struct WindowsBlockDevice {
             return FspNtStatusFromWin32(error);
         };
         const auto read = [&](void *const output, const UINT64 position,
-                              const auto count, auto *const done) {
-            // ReadFile resets the event; each dispatcher thread uses it serially.
+            const auto count, auto *const done) {
+            // This function does not call itself, so the event can reside
+            // in `thread_local` storage.
             thread_local auto event = wil::unique_event_nothrow{};
             if (!event && !event.try_create(wil::EventOptions::ManualReset, nullptr)) {
                 return failure(GetLastError());
@@ -419,13 +428,12 @@ struct WindowsBlockDevice {
         const auto end = offset + wanted;
         const auto read_end = (end + sector_mask) & ~sector_mask;
         using LengthType = std::remove_cv_t<decltype(wanted)>;
-        /* [[indeterminate]] */ LengthType read_length;
-        [[gsl::suppress("26447",
-            justification: "`wil::safe_cast_nothrow` cannot throw.")]]
-        if (FAILED(wil::safe_cast_nothrow<LengthType>(
-                read_end - read_offset, &read_length))) {
+        if (!std::in_range<LengthType>(read_end - read_offset)) {
             return STATUS_INVALID_PARAMETER;
         }
+        [[gsl::suppress("26472", justification:
+            "This cast is proved safe by the range check above.")]]
+        const auto read_length = static_cast<LengthType>(read_end - read_offset);
         if ((read_offset == offset) && (read_length == wanted)) {
             const auto status = read(output.data(), offset, wanted, &transferred);
             if (!NT_SUCCESS(status)) {

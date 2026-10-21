@@ -42,8 +42,6 @@ public:
     }
 
     template <typename... Observers>
-    [[gsl::suppress("26447",
-        justification: "`wil::safe_cast_failfast` cannot throw.")]]
     _Success_(return >= 0)
     auto Read(
         _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
@@ -55,6 +53,10 @@ public:
             static_cast<std::byte *>(buffer), wanted};
         const auto request_end = offset + wanted;
         auto position = offset;
+        [[gsl::suppress("26447", justification:
+            "`lower_bound` is not declared `noexcept`, but this lookup only "
+            "traverses existing nodes and compares `std::uint64_t` values "
+            "with `std::less<std::uint64_t>`, so it cannot throw.")]]
         auto next_payload = payload_block_offsets_.lower_bound(
             offset - (offset % BlockSize));
 
@@ -83,15 +85,30 @@ public:
                 segment_end = std::min(request_end, *next_payload);
             }
 
-            // A source segment is a subrange of the ULONG-sized request.
+            [[gsl::suppress("26472", justification:
+                "Each segment is contained in the original read request. The read "
+                "precondition `wanted <= length - offset` prevents overflow in "
+                "`request_end = offset + wanted`. The loop keeps "
+                "`offset <= position <= segment_end <= request_end`, so "
+                "`segment_end - position` is between zero and `wanted`. "
+                "Because `wanted` is an `ULONG`, this cast preserves the value.")]]
             const auto segment_wanted =
-                wil::safe_cast_failfast<ULONG>(segment_end - position);
+                static_cast<ULONG>(segment_end - position);
             auto segment_transferred = ULONG{};
-            const auto status =
-                (use_payload ? payload_ : baseline_).Read(
-                    output.subspan(transferred).data(),
-                    position, segment_wanted, segment_transferred,
-                    observers...);
+            const auto &source = use_payload ? payload_ : baseline_;
+            // Construction requires both sources to have the exposed length.
+            _Analysis_assume_(source.length == length);
+            // Completed segments advance `position` and `transferred` equally,
+            // so another iteration has bytes remaining. Each selection branch
+            // ends at a later block boundary, a later payload offset, or the
+            // request end, and caps that endpoint at `request_end`.
+            _Analysis_assume_((position < request_end) && (request_end <= length));
+            _Analysis_assume_((segment_wanted > 0) &&
+                (segment_wanted <= (request_end - position)));
+            const auto status = source.Read(
+                output.subspan(transferred).data(),
+                position, segment_wanted, segment_transferred,
+                observers...);
             transferred += segment_transferred;
 
             // The source owns short-read policy. Preserve its partial result

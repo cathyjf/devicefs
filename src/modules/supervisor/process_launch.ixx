@@ -23,6 +23,7 @@ export module devicefs.supervisor.process_launch;
 import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import <devicefs/malloca.h>;
 import devicefs.supervisor.process_attribute_list;
 
 export
@@ -67,14 +68,21 @@ export [[nodiscard]] auto StartProcessWithHandles(
         DuplicateInheritableHandle(standard_output),
         DuplicateInheritableHandle(standard_error),
     };
-    auto inherited_handles = std::vector{
-        child_handles[0].get(), child_handles[1].get(), child_handles[2].get(),
-    };
-    inherited_handles.append_range(additional_handles);
+    const auto inherited_handle_count =
+        child_handles.size() + additional_handles.size();
+    const auto inherited_handles = NEW_MALLOCA_BUFFER(
+        decltype(child_handles[0].get()), inherited_handle_count);
+    if (!inherited_handles) {
+        throw std::bad_alloc{};
+    }
+    std::ranges::copy(additional_handles,
+        std::ranges::transform(
+            child_handles, inherited_handles.get(),
+            [](const auto &handle) { return handle.get(); }).out);
     const auto attributes = ProcessAttributeList{
         std::tuple{PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            inherited_handles.data(),
-            inherited_handles.size() * sizeof(inherited_handles[0])},
+            inherited_handles.get(),
+            inherited_handle_count * sizeof(inherited_handles[0])},
         std::forward<decltype(additional_attributes)>(additional_attributes)...};
 
     auto startup = STARTUPINFOEXA{

@@ -146,9 +146,21 @@ auto ReadAllocationChangeBlocks(
             }
         }
     };
-    for (auto byte_index = 0uz; byte_index < bitmap_size; ++byte_index) {
-        auto changed = std::to_integer<unsigned int>(
-            previous_bits[byte_index] ^ current_bits[byte_index]);
+    for (auto byte_index = 0uz; byte_index < bitmap_size;) {
+        auto changed = filesystem_internal::LoadBitmapWord(
+            previous_bits.subspan(byte_index)) ^
+            filesystem_internal::LoadBitmapWord(
+                current_bits.subspan(byte_index));
+        const auto next_byte = byte_index +
+            std::min(sizeof(changed), bitmap_size - byte_index);
+        if (changed == 0) {
+            const auto remaining = previous_bits.subspan(next_byte);
+            const auto mismatch = std::ranges::mismatch(
+                remaining, current_bits.subspan(next_byte));
+            byte_index = next_byte + wil::safe_cast_failfast<std::size_t>(
+                std::ranges::distance(remaining.begin(), mismatch.in1));
+            continue;
+        }
         while (changed != 0) {
             const auto cluster =
                 wil::safe_cast_failfast<std::uint64_t>(byte_index) *
@@ -161,6 +173,7 @@ auto ReadAllocationChangeBlocks(
             add_cluster(cluster);
             changed &= changed - 1;
         }
+        byte_index = next_byte;
     }
     return {
         .volume_size = previous_size,

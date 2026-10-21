@@ -145,6 +145,26 @@ inline constexpr auto kVolumeBitmapHeaderSize =
     offsetof(VOLUME_BITMAP_BUFFER, Buffer);
 inline constexpr auto kBitsPerByte = std::numeric_limits<BYTE>::digits;
 
+[[nodiscard, msvc::forceinline]]
+auto LoadBitmapWord(const std::span<const std::byte> bytes) noexcept {
+    auto word = std::uint64_t{};
+    // MSVC 19.52 on ARM64 calls `memcpy` on every iteration when a
+    // ternary selects the length. Keeping the constant-size copy in its
+    // own branch lets the compiler use one load for each complete word.
+    if (bytes.size() >= sizeof(word)) {
+        std::memcpy(&word, bytes.data(), sizeof(word));
+    } else {
+        std::memcpy(&word, bytes.data(), bytes.size());
+    }
+    // `VOLUME_BITMAP_BUFFER` numbers bits from the low bit of each byte.
+    // Reversing the bytes on a big-endian host preserves that order within
+    // the word.
+    if constexpr (std::endian::native == std::endian::big) {
+        word = std::byteswap(word);
+    }
+    return word;
+}
+
 struct AllocationBitmap {
     UINT32 cluster_size = 0;
     int cluster_shift = 0;
@@ -175,22 +195,8 @@ struct AllocationBitmap {
         auto mask = MAXUINT64 << first_bit;
         for (auto word_begin = first - first_bit; word_begin < limit;
              word_begin += bits_per_word) {
-            const auto remaining = bytes.subspan(word_begin / kBitsPerByte);
-            auto word = UINT64{};
-            // MSVC 19.52 on ARM64 calls `memcpy` on every iteration when a
-            // ternary selects the length. Keeping the constant-size copy in its
-            // own branch lets the compiler use one load for each complete word.
-            if (remaining.size() >= sizeof(word)) {
-                std::memcpy(&word, remaining.data(), sizeof(word));
-            } else {
-                std::memcpy(&word, remaining.data(), remaining.size());
-            }
-            // `VOLUME_BITMAP_BUFFER` numbers bits from the low bit of each byte.
-            // Reversing the bytes on a big-endian host preserves that order within
-            // the word.
-            if constexpr (std::endian::native == std::endian::big) {
-                word = std::byteswap(word);
-            }
+            const auto word = LoadBitmapWord(std::as_bytes(
+                bytes.subspan(word_begin / kBitsPerByte)));
             const auto matching = (allocated ? word : ~word) & mask;
             if (matching != 0) {
                 return std::min(limit, word_begin + CountTrailingZeros(matching));

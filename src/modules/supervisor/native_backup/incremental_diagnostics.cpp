@@ -328,7 +328,8 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
 
 using SyntheticBackupDevice =
     devicefs::SyntheticBackupBlockDevice<
-        devicefs::WindowsBlockDevice>;
+        devicefs::WindowsBlockDevice,
+        devicefs::vss::kBlockSize>;
 using SyntheticBackupServer =
     devicefs::RpcBlockDeviceServer<SyntheticBackupDevice>;
 
@@ -369,7 +370,6 @@ enum class BackupViewPreparation {
                 ? alignment : std::max(devicefs::WindowsBlockDevice::read_buffer_alignment, alignment);
             return SyntheticBackupDevice::FromBlockDevices(
                 std::move(baseline), std::move(payload),
-                devicefs::vss::kBlockSize,
                 report.map->block_offsets);
         } catch (const std::runtime_error &error) {
             devicefs::WriteToStream(output,

@@ -22,14 +22,14 @@ import devicefs.filesystem;
 
 export namespace devicefs {
 
-template <BlockDevice DeviceType>
+template <BlockDevice DeviceType, std::uint64_t BlockSize>
+    requires (BlockSize > 0)
 class SyntheticBackupBlockDevice {
 public:
     const std::uint64_t length;
 
     [[nodiscard]] static auto FromBlockDevices(
         DeviceType baseline, DeviceType payload,
-        const std::uint64_t block_size,
         std::set<std::uint64_t> payload_block_offsets) {
         if (baseline.length != payload.length) {
             throw std::runtime_error(std::format(
@@ -37,7 +37,7 @@ public:
                 baseline.length, payload.length));
         }
         return SyntheticBackupBlockDevice{
-            std::move(baseline), std::move(payload), block_size,
+            std::move(baseline), std::move(payload),
             std::move(payload_block_offsets)};
     }
 
@@ -56,7 +56,7 @@ public:
         const auto request_end = offset + wanted;
         auto position = offset;
         auto next_payload = payload_block_offsets_.lower_bound(
-            offset - (offset % block_size_));
+            offset - (offset % BlockSize));
 
         [[gsl::suppress("6001",
             justification:
@@ -70,13 +70,13 @@ public:
             auto segment_end = request_end;
             if (use_payload) {
                 segment_end = position + std::min(
-                    block_size_ - (position % block_size_),
+                    BlockSize - (position % BlockSize),
                     request_end - position);
                 while ((segment_end != request_end) &&
                     (++next_payload != payload_block_offsets_.end()) &&
                     (*next_payload == segment_end)) {
                     segment_end += std::min(
-                        block_size_, request_end - segment_end);
+                        BlockSize, request_end - segment_end);
                 }
             } else if (next_payload !=
                 payload_block_offsets_.end()) {
@@ -108,17 +108,14 @@ public:
 private:
     SyntheticBackupBlockDevice(
         DeviceType baseline, DeviceType payload,
-        const std::uint64_t block_size,
         std::set<std::uint64_t> payload_block_offsets)
         : length{payload.length},
           baseline_{std::move(baseline)},
           payload_{std::move(payload)},
-          block_size_{block_size},
           payload_block_offsets_{std::move(payload_block_offsets)} {}
 
     [[msvc::no_unique_address]] DeviceType baseline_;
     [[msvc::no_unique_address]] DeviceType payload_;
-    std::uint64_t block_size_;
     std::set<std::uint64_t> payload_block_offsets_;
 };
 

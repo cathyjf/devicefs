@@ -119,10 +119,18 @@ private:
     }
 
     [[nodiscard]] auto FindDevice(
-        const std::basic_string_view<unsigned char> symbol) const noexcept
+        _In_z_ const unsigned char *const symbol) const noexcept
         -> const DeviceType * {
         for (const auto &[candidate, device] : devices_) {
-            if (std::basic_string_view<unsigned char>{candidate} == symbol) {
+            // `strcmp` compares the null-terminated names directly, avoiding
+            // the preliminary length scan needed to construct a string view.
+            [[gsl::suppress("26490",
+                justification:
+                    "C++ permits accessing any object's representation "
+                    "through `char`.")]]
+            if (std::strcmp(
+                    reinterpret_cast<const char *>(candidate.c_str()),
+                    reinterpret_cast<const char *>(symbol)) == 0) {
                 return std::addressof(device);
             }
         }

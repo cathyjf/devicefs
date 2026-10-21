@@ -28,12 +28,19 @@ public static class DiskArbitration {
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void DiskAppearedCallback(IntPtr disk, IntPtr context);
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void IdleCallback(IntPtr context);
+
     [DllImport(DiskArbitrationLibrary)]
     private static extern IntPtr DASessionCreate(IntPtr allocator);
 
     [DllImport(DiskArbitrationLibrary)]
     private static extern void DARegisterDiskAppearedCallback(
         IntPtr session, IntPtr match, DiskAppearedCallback callback, IntPtr context);
+
+    [DllImport(DiskArbitrationLibrary)]
+    private static extern void DARegisterIdleCallback(
+        IntPtr session, IdleCallback callback, IntPtr context);
 
     [DllImport(DiskArbitrationLibrary)]
     private static extern void DASessionScheduleWithRunLoop(
@@ -80,7 +87,14 @@ public static class DiskArbitration {
 
     public static void WaitForDisk(string bsdName) {
         var runLoop = CFRunLoopGetCurrent();
-        DiskAppearedCallback appeared = (_, _) => CFRunLoopStop(runLoop);
+        var diskAppeared = false;
+        DiskAppearedCallback appeared = (_, _) => diskAppeared = true;
+        IdleCallback idle = _ => {
+            if (diskAppeared) {
+                CFRunLoopStop(runLoop);
+            }
+        };
+
         // BSD names can be reused while Disk Arbitration still has the old
         // disk in its list. Matching the current IOMedia's registry ID prevents
         // that old disk's appearance notification from satisfying this wait.
@@ -115,6 +129,12 @@ public static class DiskArbitration {
                 throw new InvalidOperationException(
                     $"failed to create Disk Arbitration session for '{bsdName}'");
             }
+            // Appearance identifies the target disk; the subsequent idle
+            // notification waits for Disk Arbitration's pending processing.
+            // Registering `idle` first also covers an already-idle daemon:
+            // registering `appeared` queues existing disk appearances followed
+            // by an idle notification.
+            DARegisterIdleCallback(session, idle, IntPtr.Zero);
             // Registration also reports disks that have already appeared, so
             // attachment can finish before this callback is registered.
             DARegisterDiskAppearedCallback(session, match, appeared, IntPtr.Zero);
@@ -133,6 +153,7 @@ public static class DiskArbitration {
             }
             IOObjectRelease(media);
             GC.KeepAlive(appeared);
+            GC.KeepAlive(idle);
         }
     }
 }

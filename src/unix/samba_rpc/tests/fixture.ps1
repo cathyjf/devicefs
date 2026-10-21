@@ -237,10 +237,12 @@ try {
             $device =
                 ([string]($attachment | Select-Object -First 1)).Split()[0]
             Add-Type -Path (Join-Path $PSScriptRoot 'types/DiskArbitration.cs')
-            Write-Host "Testing: Disk Arbitration appearance of '$device'."
+            Write-Host ("Testing: Disk Arbitration idle after appearance of " +
+                "'$device'.")
             [DeviceFs.Tests.DiskArbitration]::WaitForDisk(
                 [IO.Path]::GetFileName($device))
-            Write-Host "Passed: Disk Arbitration reported appearance of '$device'."
+            Write-Host ("Passed: Disk Arbitration reported idle after " +
+                "appearance of '$device'.")
         } else {
             $attachment = @(& $LosetupPath --find --show --read-only `
                 $backing 2>&1)

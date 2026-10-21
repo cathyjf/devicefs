@@ -89,7 +89,7 @@ export [[nodiscard]] auto BuildDirtyBlockMap(
             catalog.payload.volume_size, allocation_blocks.volume_size));
     }
 
-    const auto svi_blocks = [baseline_device, payload_device] {
+    auto svi_blocks = [baseline_device, payload_device] {
         auto privileges = ProcessPrivilegeEnabler{
             GetCurrentProcess(), std::array{wil::zwstring_view{SE_BACKUP_NAME}},
             "the backup privilege"sv};
@@ -98,13 +98,14 @@ export [[nodiscard]] auto BuildDirtyBlockMap(
         svi_blocks.merge(payload_svi_blocks);
         return svi_blocks;
     }();
+    const auto svi_block_count = svi_blocks.size();
 
     const auto stores = devicefs::vss::ReadBlockDescriptors(
         payload_device, catalog.stores);
     auto descriptor_blocks = CollectDescriptorBlockOffsets(stores);
     const auto descriptor_block_count = descriptor_blocks.size();
     descriptor_blocks.insert_range(allocation_blocks.block_offsets);
-    descriptor_blocks.insert_range(svi_blocks);
+    descriptor_blocks.merge(svi_blocks);
     return DirtyBlockMap{
         .volume_size = catalog.payload.volume_size,
         .block_offsets = std::move(descriptor_blocks),
@@ -119,6 +120,6 @@ export [[nodiscard]] auto BuildDirtyBlockMap(
             }),
         .descriptor_block_count = descriptor_block_count,
         .allocation_block_count = allocation_blocks.block_offsets.size(),
-        .svi_block_count = svi_blocks.size(),
+        .svi_block_count = svi_block_count,
     };
 }

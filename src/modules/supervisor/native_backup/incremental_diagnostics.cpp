@@ -817,25 +817,25 @@ auto AppendDifferingClusters(
     DirtyBlockIterator &next_dirty,
     const DirtyBlockIterator dirty_end) {
     auto result = ComparisonObservation{};
-    if (std::ranges::equal(baseline, payload)) {
-        return result;
-    }
-
     for (auto relative = 0uz; relative < baseline.size();
         relative += kMapBlockSize) {
+        const auto mismatch = std::ranges::mismatch(
+            baseline.begin() + relative, baseline.end(),
+            payload.begin() + relative, payload.end());
+        if (mismatch.in1 == baseline.end()) {
+            break;
+        }
+        const auto first_relative = wil::safe_cast_failfast<std::size_t>(
+            std::ranges::distance(baseline.begin(), mismatch.in1));
+        relative = first_relative - (first_relative % kMapBlockSize);
         const auto size = std::min(
             kMapBlockSize, baseline.size() - relative);
         const auto baseline_block = baseline.subspan(relative, size);
         const auto payload_block = payload.subspan(relative, size);
-        const auto mismatch = std::ranges::mismatch(
-            baseline_block, payload_block);
-        if (mismatch.in1 == baseline_block.end()) {
-            continue;
-        }
 
         const auto differing_bytes = std::transform_reduce(
-            baseline_block.begin(), baseline_block.end(),
-            payload_block.begin(), std::uint64_t{}, std::plus{},
+            mismatch.in1, baseline.begin() + (relative + size),
+            mismatch.in2, std::uint64_t{}, std::plus{},
             std::not_equal_to{});
         result.differing_bytes += differing_bytes;
         ++result.differing_blocks;
@@ -859,13 +859,9 @@ auto AppendDifferingClusters(
             baseline_block, payload_block, block_offset,
             cluster_size, result.uncovered_clusters);
         if (!result.first_uncovered) {
-            const auto relative_byte =
-                wil::safe_cast_failfast<std::uint64_t>(
-                    std::ranges::distance(
-                        baseline_block.begin(), mismatch.in1));
             result.first_uncovered = UnexpectedDifference{
                 .block_offset = block_offset,
-                .byte_offset = block_offset + relative_byte,
+                .byte_offset = chunk_offset + first_relative,
                 .baseline = *mismatch.in1,
                 .payload = *mismatch.in2,
             };

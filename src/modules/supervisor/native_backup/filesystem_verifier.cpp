@@ -1839,8 +1839,8 @@ public:
             const auto first_relative = std::ranges::distance(
                 synthetic_compared.begin(), first.in1);
             const auto differing_bytes = std::transform_reduce(
-                synthetic_compared.begin(), synthetic_compared.end(),
-                real_compared.begin(), std::uint64_t{}, std::plus{},
+                first.in1, synthetic_compared.end(),
+                first.in2, std::uint64_t{}, std::plus{},
                 std::not_equal_to{});
             state_.RecordContentMismatch(
                 synthetic_object.relative_path,

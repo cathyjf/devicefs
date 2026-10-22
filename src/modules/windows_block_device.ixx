@@ -393,19 +393,67 @@ struct AllocationBitmap {
     std::string_view description) -> AllocationBitmap;
 
 struct WindowsBlockDeviceSettings {
-    // A thread reuses its retained read buffer across devices, so that buffer
-    // must satisfy every device's alignment requirement. The default is the
-    // system page size; device initialization replaces it with the maximum
-    // requirement before any reads begin. It remains unchanged thereafter
-    // because buffers allocated by earlier reads retain their original alignment.
-    inline static auto read_buffer_alignment = [] {
-        auto information = SYSTEM_INFO{};
-        GetSystemInfo(&information);
-        return std::align_val_t{information.dwPageSize};
-    }();
+    // A thread shares its retained read buffer across local devices. Device
+    // setup selects the maximum required alignment before reads begin. If no
+    // alignment was supplied, the first retained buffer allocation selects the
+    // system page size. The alignment remains fixed thereafter because existing
+    // buffers keep the alignment with which they were allocated.
+    inline static auto read_buffer_alignment = std::align_val_t{};
     static constexpr auto kAdvertisedSectorSize = UINT16{512};
     static constexpr auto kMeasureFreeClusterData =
         DEVICEFS_MEASURE_FREE_CLUSTER_DATA != 0;
+
+    // This 5 MiB capacity accommodates a 4 MiB PBS chunk and the extra
+    // bytes needed for sector alignment.
+    static constexpr auto kRetainedReadBufferSize = 5uz * 1024 * 1024;
+
+    [[nodiscard, msvc::forceinline]]
+    static auto &GetReadResources() noexcept {
+        // This non-template accessor gives every `WindowsBlockDevice` and
+        // `Read` specialization the same resource owner on each thread.
+        // The event and retained buffer share one TLS object, initialized
+        // on the thread's first source-backed read.
+        // `noinline` keeps the one-time initialization code out of read
+        // callbacks.
+        thread_local struct {
+            decltype(NewAlignedBuffer(kRetainedReadBufferSize,
+                read_buffer_alignment)) retained_buffer;
+            wil::unique_event_nothrow event;
+        } resources = {
+            .retained_buffer = [] [[msvc::noinline]] static noexcept {
+                static auto alignment_once = std::once_flag{};
+                std::call_once(alignment_once, [] static noexcept {
+                    if (read_buffer_alignment == std::align_val_t{}) {
+                        auto information = SYSTEM_INFO{};
+                        GetSystemInfo(&information);
+                        read_buffer_alignment =
+                            std::align_val_t{information.dwPageSize};
+                    }
+                });
+                auto buffer = NewAlignedBuffer(
+                    kRetainedReadBufferSize, read_buffer_alignment);
+                if (!buffer) {
+                    devicefs::WriteToStream(devicefs::stderr,
+                        "devicefs: failed to allocate retained read buffer "
+                        "of {} bytes\n", kRetainedReadBufferSize);
+                    std::_Exit(ERROR_NOT_ENOUGH_MEMORY);
+                }
+                return buffer;
+            }(),
+            .event = [] [[msvc::noinline]] static noexcept {
+                auto event = wil::unique_event_nothrow{};
+                if (!event.try_create(wil::EventOptions::ManualReset, nullptr)) {
+                    const auto error = GetLastError();
+                    devicefs::WriteToStream(devicefs::stderr,
+                        "devicefs: failed to create read completion event: {}\n",
+                        TryConstructWinError("", ExplicitWin32Error{error}));
+                    std::_Exit(error);
+                }
+                return event;
+            }(),
+        };
+        return resources;
+    }
 };
 
 } // namespace devicefs::filesystem_internal
@@ -524,35 +572,10 @@ struct WindowsBlockDevice
                 TryConstructWinError("", ExplicitWin32Error{error}));
             return FspNtStatusFromWin32(error);
         };
-        // This 5 MiB capacity accommodates a 4 MiB PBS chunk and the extra
-        // bytes needed for sector alignment.
-        constexpr auto kRetainedReadBufferSize = 5uz * 1024 * 1024;
-        // The event and retained buffer share one per-thread owner so reads
-        // can address both resources through the same TLS object. Its buffer
-        // is allocated on the first source-backed read.
-        thread_local struct {
-            decltype(NewAlignedBuffer(kRetainedReadBufferSize,
-                read_buffer_alignment)) retained_buffer;
-            wil::unique_event_nothrow event;
-        } read_resources{
-            .retained_buffer = [&failure] {
-                auto buffer = NewAlignedBuffer(
-                    kRetainedReadBufferSize, read_buffer_alignment);
-                if (!buffer) {
-                    failure(ERROR_NOT_ENOUGH_MEMORY);
-                    std::_Exit(ERROR_NOT_ENOUGH_MEMORY);
-                }
-                return buffer;
-            }(),
-            .event = {},
-        };
+        auto &read_resources = GetReadResources();
         const auto read = [&](void *__restrict const output,
             const UINT64 position, const auto count,
             auto *__restrict const done) {
-            if (!read_resources.event && !read_resources.event.try_create(
-                    wil::EventOptions::ManualReset, nullptr)) {
-                return failure(GetLastError());
-            }
             auto operation = OVERLAPPED{};
             const auto parts = ULARGE_INTEGER{.QuadPart = position};
             operation.Offset = parts.LowPart;

@@ -86,10 +86,10 @@ struct VariantMultiBlockDevice<DeviceTypes...> {
         using WindowsType = SelectedWindowsBlockDevice<DeviceTypes...>;
         if constexpr (
             (std::same_as<DeviceTypes, WindowsType> || ...)) {
-            if (auto *const device = std::get_if<WindowsType>(
-                    &self.contents)) [[likely]] {
+            if (std::holds_alternative<WindowsType>(self.contents)) [[likely]] {
                 return std::invoke(
-                    std::forward<decltype(visitor)>(visitor), *device);
+                    std::forward<decltype(visitor)>(visitor),
+                    std::get<WindowsType>(self.contents));
             }
         }
         return std::visit(

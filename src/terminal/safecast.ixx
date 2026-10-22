@@ -16,7 +16,50 @@ import std;
     #define __has_builtin(x) 0
 #endif
 
+namespace devicefs::terminal::safecast_detail {
+
+[[noreturn]]
+ATTRIBUTE_FORCEINLINE
+inline auto FastFail() noexcept -> void {
+#ifdef _WIN32
+    // Reason code 8 is FAST_FAIL_RANGE_CHECK_FAILURE.
+    __fastfail(8);
+#elif __has_builtin(__builtin_trap)
+    __builtin_trap();
+#else
+    std::abort();
+#endif
+}
+
+} // namespace devicefs::terminal::safecast_detail
+
 export namespace devicefs::terminal {
+
+// Convert an integer after checking that its value fits in the target type.
+// Return true and assign `output` on success; otherwise, return false without
+// modifying `output`. The constraint excludes conversions that are safe for
+// every source value, preventing redundant checked casts.
+template <std::integral Target, std::integral Source>
+    requires ((std::numeric_limits<Target>::digits <
+        std::numeric_limits<Source>::digits) ||
+        (std::is_signed_v<Source> && !std::is_signed_v<Target>))
+[[nodiscard]]
+ATTRIBUTE_FORCEINLINE
+constexpr auto TryCast(const Source input, Target &output) noexcept -> bool {
+    // Unary `+` promotes character operands to ordinary integer types without
+    // changing their values. The standard comparison functions can then accept
+    // those values even though the functions exclude `char` and `wchar_t`.
+    if (std::cmp_less(+input, +std::numeric_limits<Target>::lowest()) ||
+            std::cmp_greater(+input, +std::numeric_limits<Target>::max()))
+            [[unlikely]] {
+        return false;
+    }
+    GSL_SUPPRESS("26472",
+        "The above range check establishes that the input is representable "
+        "in the target type.")
+    output = static_cast<Target>(input);
+    return true;
+}
 
 // `FailFastCast` converts an integer after checking that its value fits in the
 // target type. A value outside that range violates the caller's invariant, so
@@ -24,30 +67,17 @@ export namespace devicefs::terminal {
 // which the source type's full range does not fit in the target; conversions
 // already safe for every source value are excluded.
 template <std::integral Target, std::integral Source>
-    requires ((std::numeric_limits<Target>::digits <
-        std::numeric_limits<Source>::digits) ||
-        (std::is_signed_v<Source> && !std::is_signed_v<Target>))
+    requires requires(const Source input, Target &output) {
+        TryCast(input, output);
+    }
 [[nodiscard]]
 ATTRIBUTE_FORCEINLINE
 constexpr auto FailFastCast(const Source input) noexcept -> Target {
-    // Unary `+` promotes character operands to ordinary integer types without
-    // changing their values. The standard comparison functions can then accept
-    // those values even though the functions exclude `char` and `wchar_t`.
-    if (std::cmp_less(+input, +std::numeric_limits<Target>::lowest()) ||
-        std::cmp_greater(+input, +std::numeric_limits<Target>::max())) [[unlikely]] {
-#ifdef _WIN32
-        // Reason code 8 is FAST_FAIL_RANGE_CHECK_FAILURE.
-        __fastfail(8);
-#elif __has_builtin(__builtin_trap)
-        __builtin_trap();
-#else
-        std::terminate();
-#endif
+    ATTRIBUTE_INDETERMINATE std::remove_const_t<Target> output;
+    if (!TryCast(input, output)) [[unlikely]] {
+        safecast_detail::FastFail();
     }
-    GSL_SUPPRESS("26472",
-        "The range check establishes that the input is representable in "
-        "the target type. A failed check terminates before this cast.")
-    return static_cast<Target>(input);
+    return output;
 }
 
 template <class Target, auto... Constant, class... Source>

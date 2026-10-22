@@ -1042,7 +1042,7 @@ auto StartVerificationWorkers(
     const auto input_size = [input_size_ =
             input_header_size + api_cluster_bytes.size()] {
         /* [[indeterminate]] */ DWORD output;
-        if (FAILED(wil::safe_cast_nothrow<DWORD>(input_size_, &output))) {
+        if (!devicefs::terminal::TryCast(input_size_, output)) {
             throw std::runtime_error(
                 "the uncovered-cluster lookup input is too large");
         }

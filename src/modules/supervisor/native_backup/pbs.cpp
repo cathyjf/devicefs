@@ -21,6 +21,7 @@ module;
 module devicefs.supervisor.native_backup:pbs;
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import :internal;
 import devicefs.supervisor.process_privileges;
@@ -516,7 +517,7 @@ auto CreateUniquePipe() {
         }
         const auto size = [bytes = input.size_bytes()] {
             auto converted = DWORD{};
-            if (FAILED(wil::safe_cast_nothrow(bytes, &converted))) {
+            if (!devicefs::terminal::TryCast(bytes, converted)) {
                 throw std::runtime_error(std::format(
                     "could not send WSL input: {} bytes exceeds the maximum "
                     "of {} bytes per write",

@@ -408,7 +408,7 @@ private:
         const auto raw_size = [raw_size_ = raw_end - raw_offset, &raw_offset,
             &size_ = std::as_const(size_)] {
             /* [[indeterminate]] */ DWORD output;
-            if (FAILED(wil::safe_cast_nothrow<DWORD>(raw_size_, &output))) {
+            if (!devicefs::terminal::TryCast(raw_size_, output)) {
                 ThrowOffsetError("an aligned VSS metadata read was too large",
                     raw_offset, raw_size_, size_);
             }

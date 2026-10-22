@@ -748,7 +748,7 @@ namespace devicefs::filesystem_internal {
         [output_size = std::max(sizeof(VOLUME_BITMAP_BUFFER), bitmap_data_size),
         &filename, description] {
         auto converted = DWORD{};
-        if (FAILED(wil::safe_cast_nothrow(output_size, &converted))) {
+        if (!devicefs::terminal::TryCast(output_size, converted)) {
             throw std::runtime_error(std::format(
                 "the allocation bitmap for '{}' requires {} bytes, exceeding "
                 "the DeviceIoControl buffer limit of {} bytes ({})",

@@ -21,6 +21,7 @@ module;
 export module devicefs.supervisor.installation;
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import <devicefs/malloca.h>;
@@ -250,7 +251,7 @@ auto ConfigurePreshutdownTimeout(
     auto configuration = SERVICE_PRESHUTDOWN_INFO{
         .dwPreshutdownTimeout = [count = preshutdown_timeout.count()] {
             auto converted = DWORD{};
-            if (FAILED(wil::safe_cast_nothrow(count, &converted))) {
+            if (!devicefs::terminal::TryCast(count, converted)) {
                 throw std::runtime_error(std::format(
                     "could not configure service '{}' with a {} ms preshutdown "
                     "timeout: the supported range is 0 to {} ms",

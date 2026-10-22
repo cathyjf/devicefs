@@ -21,6 +21,7 @@ module;
 export module devicefs.supervisor.logging_console;
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import devicefs.supervisor.process_attribute_list;
@@ -154,7 +155,7 @@ private:
         // accepts an arbitrary string view, so reject a length WriteFile cannot represent.
         const auto size = [bytes = output.size()] {
             auto converted = DWORD{};
-            if (FAILED(wil::safe_cast_nothrow(bytes, &converted))) {
+            if (!devicefs::terminal::TryCast(bytes, converted)) {
                 throw std::runtime_error(std::format(
                     "could not write the backup supervisor log: {} bytes "
                     "exceeds the maximum of {} bytes per write",

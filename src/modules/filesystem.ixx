@@ -433,6 +433,10 @@ using devicefs::VhdxViewer;
 using devicefs::BlockDevice;
 using rpc_client::RPCBlockDevice;
 
+// Preconditions for reads: `contents.size() == length`, and the destination
+// buffer does not overlap this object, the storage owned by `contents`, or
+// `transferred`.
+// `__restrict` expresses the non-overlap condition to the optimizer.
 struct MemoryBlockDevice {
     const std::uint64_t length;
     std::vector<BYTE> contents;
@@ -440,13 +444,13 @@ struct MemoryBlockDevice {
     template <typename... Observers>
     _Success_(return == STATUS_SUCCESS)
     auto Read(
-        _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
+        _Out_writes_bytes_to_(wanted, transferred)
+        void *__restrict const buffer,
         _In_range_(0, length - 1) const std::uint64_t offset,
         _In_range_(1, length - offset) const ULONG wanted,
         _Pre_equal_to_(0) ULONG &transferred,
         Observers &...) const noexcept -> NTSTATUS {
-        std::ranges::copy(std::span{contents}.subspan(offset, wanted),
-            std::span{static_cast<BYTE *>(buffer), wanted}.begin());
+        std::memcpy(buffer, contents.data() + offset, wanted);
         transferred = wanted;
         return STATUS_SUCCESS;
     }

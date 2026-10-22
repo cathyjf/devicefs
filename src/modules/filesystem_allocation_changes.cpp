@@ -152,9 +152,11 @@ auto ReadAllocationChangeBlocks(
     };
     for (auto byte_index = 0uz; byte_index < bitmap_size;) {
         auto changed = filesystem_internal::LoadBitmapWord(
-            previous_bits.subspan(byte_index)) ^
+            previous_bitmap.BitmapData() + byte_index,
+            bitmap_size - byte_index) ^
             filesystem_internal::LoadBitmapWord(
-                current_bits.subspan(byte_index));
+                current_bitmap.BitmapData() + byte_index,
+                bitmap_size - byte_index);
         const auto next_byte = byte_index +
             std::min(sizeof(changed), bitmap_size - byte_index);
         if (changed == 0) {

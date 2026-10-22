@@ -152,19 +152,20 @@ inline constexpr auto kBitsPerByte = std::numeric_limits<BYTE>::digits;
     "Both loading branches call `std::memcpy`, so this function "
     "cannot be evaluated in a constant expression.")]]
 [[nodiscard, msvc::forceinline]]
-auto LoadBitmapWord(const std::span<const std::byte> bytes) noexcept {
-    auto word = [bytes] {
+auto LoadBitmapWord(_In_reads_bytes_(byte_count) const BYTE *const bytes,
+    const std::size_t byte_count) noexcept {
+    auto word = [bytes, byte_count] {
         using Word = std::uint64_t;
         // MSVC 19.52 on ARM64 calls `memcpy` on every iteration when a
         // ternary selects the length. Keeping the constant-size copy in its
         // own branch lets the compiler use one load for each complete word.
-        if (bytes.size() >= sizeof(Word)) {
+        if (byte_count >= sizeof(Word)) {
             /* [[indeterminate]] */ Word result;
-            std::memcpy(&result, bytes.data(), sizeof(result));
+            std::memcpy(&result, bytes, sizeof(result));
             return result;
         }
         auto result = Word{};
-        std::memcpy(&result, bytes.data(), bytes.size());
+        std::memcpy(&result, bytes, byte_count);
         return result;
     }();
     // `VOLUME_BITMAP_BUFFER` numbers bits from the low bit of each byte.
@@ -188,13 +189,14 @@ struct AllocationBitmap {
 #endif
 
     [[nodiscard, msvc::forceinline]]
-    constexpr auto BitmapData() const noexcept -> std::span<const BYTE> {
-        // The initialized-bitmap precondition includes an allocated `storage`
-        // buffer containing the volume-bitmap header and its cluster bits.
-        [[assume(storage.get() != nullptr)]];
-        return {storage.get() + kVolumeBitmapHeaderSize,
-            cluster_count / kBitsPerByte +
-                ((cluster_count % kBitsPerByte) != 0)};
+    constexpr auto BitmapData() const noexcept -> const BYTE * {
+        return storage.get() + kVolumeBitmapHeaderSize;
+    }
+
+    [[nodiscard, msvc::forceinline]]
+    constexpr auto BitmapByteCount() const noexcept -> std::size_t {
+        return cluster_count / kBitsPerByte +
+            ((cluster_count % kBitsPerByte) != 0);
     }
 
     // Search [first, limit) for an allocated cluster (a set bit) or a free
@@ -203,25 +205,21 @@ struct AllocationBitmap {
     // exists; it can return as soon as a word or block comparison establishes
     // that.
     //
-    // Preconditions: `first < limit`; `bytes` begins with the bits for cluster
-    // zero and contains every bit in the searched range.
+    // Preconditions: `first < limit`; `bytes` points to `byte_count` readable
+    // bytes beginning with the bits for cluster zero and containing every bit
+    // in the searched range.
     template <bool allocated, class Result>
         requires (std::same_as<Result, UINT64> || std::same_as<Result, bool>)
     [[nodiscard, msvc::forceinline]]
     _Pre_satisfies_(first < limit)
-    static auto FindCluster(const std::span<const BYTE> bytes,
+    static auto FindCluster(
+        _In_reads_bytes_(byte_count) const BYTE *const bytes,
+        const std::size_t byte_count,
         const UINT64 first, const UINT64 limit) noexcept -> Result {
-        // The nonempty-range precondition gives `first < limit`. The coverage
-        // precondition places the byte for cluster `limit - 1` within `bytes`.
-        //
-        // MSVC does not accept the presence of `kBitsPerByte` within the
-        // [[assume]] statement. However, defining a local `kBitsPerByte_`
-        // works.
-        [[assume(first < limit)]];
-        constexpr auto kBitsPerByte_ = kBitsPerByte;
-        [[assume(((limit - 1) / kBitsPerByte_) < bytes.size())]];
+        // The coverage precondition places the byte for cluster `limit - 1`
+        // within `bytes`.
         _Analysis_assume_(
-            ((limit - 1) / kBitsPerByte) < bytes.size());
+            ((limit - 1) / kBitsPerByte) < byte_count);
         const auto no_match = [limit] -> Result {
             if constexpr (std::same_as<Result, bool>) {
                 std::ignore = limit;
@@ -244,9 +242,10 @@ struct AllocationBitmap {
         constexpr auto nonmatching_word = allocated ? UINT64{} : MAXUINT64;
         const auto first_bit = first % bits_per_word;
         const auto first_word = first - first_bit;
+        const auto first_word_offset = first_word / kBitsPerByte;
         const auto first_matching =
-            (LoadBitmapWord(std::as_bytes(
-                bytes.subspan(first_word / kBitsPerByte))) ^
+            (LoadBitmapWord(bytes + first_word_offset,
+                byte_count - first_word_offset) ^
                 nonmatching_word) & (MAXUINT64 << first_bit);
         // A range ending in this word also needs its upper bits masked out.
         // Longer ranges use only the starting-bit mask here; their final word
@@ -263,9 +262,10 @@ struct AllocationBitmap {
         std::conditional_t<std::same_as<Result, bool>, const UINT64, UINT64>
             word_begin = first_word + bits_per_word;
         const auto word_limit = limit - (limit % bits_per_word);
-        const auto complete_words = bytes.subspan(word_begin / kBitsPerByte,
-            (word_limit - word_begin) / kBitsPerByte);
-        const auto *cursor = complete_words.data();
+        const auto complete_words_offset = word_begin / kBitsPerByte;
+        const auto complete_words_size =
+            (word_limit - word_begin) / kBitsPerByte;
+        const auto *cursor = bytes + complete_words_offset;
         if constexpr (std::same_as<Result, bool>) {
             // PBS reads are usually about 2 MiB, but intervening layers may combine
             // requests. A 128-byte reference lets the complete-word bitmap scan for a
@@ -283,9 +283,9 @@ struct AllocationBitmap {
                     std::numeric_limits<BYTE>::max());
                 return result;
             }();
-            auto remaining = complete_words.size();
+            auto remaining = complete_words_size;
             while (remaining != 0) {
-                const auto count = std::min(
+                const auto count = std::min<decltype(remaining)>(
                     remaining, nonmatching_bytes.size());
                 if (std::memcmp(cursor, nonmatching_bytes.data(), count) != 0) {
                     return true;
@@ -294,23 +294,23 @@ struct AllocationBitmap {
                 remaining -= count;
             }
         } else {
-            const auto *const word_end = cursor + complete_words.size();
+            const auto *const word_end = cursor + complete_words_size;
             for (; cursor != word_end;
                  cursor += sizeof(UINT64), word_begin += bits_per_word) {
-                const auto matching = LoadBitmapWord(std::as_bytes(
-                    std::span<const BYTE, sizeof(UINT64)>{
-                        cursor, sizeof(UINT64)})) ^ nonmatching_word;
+                const auto matching = LoadBitmapWord(cursor, sizeof(UINT64)) ^
+                    nonmatching_word;
                 if (matching != 0) {
                     return found(word_begin, matching);
                 }
             }
         }
         if (word_limit != limit) {
+            const auto final_word_offset = word_limit / kBitsPerByte;
             const auto mask =
                 MAXUINT64 >> (bits_per_word - (limit - word_limit));
             const auto matching =
-                (LoadBitmapWord(std::as_bytes(
-                    bytes.subspan(word_limit / kBitsPerByte))) ^
+                (LoadBitmapWord(bytes + final_word_offset,
+                    byte_count - final_word_offset) ^
                     nonmatching_word) & mask;
             if (matching != 0) {
                 return found(word_limit, matching);
@@ -328,22 +328,16 @@ struct AllocationBitmap {
     _Post_satisfies_((first <= return) && (return <= limit))
     [[nodiscard]] auto FindNextCluster(
         const UINT64 first, const UINT64 limit) const noexcept {
-        // The declared search-range precondition implies both inequalities.
-        [[assume(first <= limit)]];
-        [[assume(limit <= cluster_count)]];
         if (first == limit) {
             return limit;
         }
-        return FindCluster<allocated, UINT64>(BitmapData(), first, limit);
+        return FindCluster<allocated, UINT64>(
+            BitmapData(), BitmapByteCount(), first, limit);
     }
 
     [[nodiscard]] auto HasAllocatedClusters(
         const UINT64 offset,
         _In_range_(1, MAXUINT64 - offset) const UINT64 length) const noexcept {
-        // The declared byte-range precondition makes the range nonempty and
-        // keeps its exclusive endpoint representable by `UINT64`.
-        [[assume(length > 0)]];
-        [[assume(length <= (MAXUINT64 - offset))]];
         const auto first_cluster = offset >> cluster_shift;
         const auto last_cluster =
             (offset + (length - 1)) >> cluster_shift;
@@ -351,7 +345,7 @@ struct AllocationBitmap {
             return true;
         }
         return FindCluster<true, bool>(
-            BitmapData(), first_cluster, last_cluster + 1);
+            BitmapData(), BitmapByteCount(), first_cluster, last_cluster + 1);
     }
 
     // Preconditions: the output byte range is nonempty, its exclusive end
@@ -366,11 +360,8 @@ struct AllocationBitmap {
         BYTE *__restrict const output,
         const std::size_t output_size,
         const UINT64 offset) const noexcept {
-        // The byte-range preconditions imply a positive size and a
-        // non-wrapping exclusive endpoint.
-        [[assume(output_size > 0)]];
-        [[assume(output_size <= (MAXUINT64 - offset))]];
-        const auto bytes = BitmapData();
+        const auto *const bytes = BitmapData();
+        const auto byte_count = BitmapByteCount();
         const auto shift = cluster_shift;
         const auto end = offset + output_size;
         const auto first_cluster = offset >> shift;
@@ -382,11 +373,12 @@ struct AllocationBitmap {
         auto cluster = first_cluster;
         while (cluster < limit) {
             const auto free_cluster =
-                FindCluster<false, UINT64>(bytes, cluster, limit);
+                FindCluster<false, UINT64>(bytes, byte_count, cluster, limit);
             if (free_cluster == limit) {
                 return;
             }
-            cluster = FindCluster<true, UINT64>(bytes, free_cluster, limit);
+            cluster = FindCluster<true, UINT64>(
+                bytes, byte_count, free_cluster, limit);
             const auto free_begin = std::max(offset, free_cluster << shift);
             const auto free_end = std::min(end, cluster << shift);
             std::memset(output + (free_begin - offset), 0,
@@ -497,22 +489,24 @@ struct WindowsBlockDevice
         return result;
     }
 
+    // Preconditions: `sector_size` is a nonzero power of two, `length` is a
+    // multiple of `sector_size`, and the nonempty requested byte range is
+    // contained in `[0, length)`. The destination buffer does not overlap this
+    // object, its owned storage, or `transferred`; `__restrict` expresses that
+    // non-overlap condition to the optimizer.
     template <typename... Observers>
     _Success_(return == STATUS_SUCCESS)
     auto Read(
-        _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
+        _Out_writes_bytes_to_(wanted, transferred)
+        void *__restrict const buffer,
         _In_range_(0, length - 1) const std::uint64_t offset,
         _In_range_(1, length - offset) const ULONG wanted,
         _Pre_equal_to_(0) ULONG &transferred,
         Observers &...observers) const noexcept -> NTSTATUS {
-        const auto output = std::span<BYTE>{static_cast<BYTE *>(buffer), wanted};
         if constexpr (HasAllocationBitmap && !kMeasureFreeClusterData) {
             if (!allocation_bitmap.HasAllocatedClusters(offset, wanted)) {
                 (observers.RecordSynthetic(), ...);
-                // MSVC 19.52's `std::ranges::fill` misses its `memset`
-                // optimization and emits a byte-at-a-time loop.
-                // `std::fill` reaches `memset`, so we use it here.
-                std::fill(output.begin(), output.end(), BYTE{});
+                std::memset(buffer, 0, wanted);
                 transferred = wanted;
                 return STATUS_SUCCESS;
             }
@@ -530,19 +524,40 @@ struct WindowsBlockDevice
                 TryConstructWinError("", ExplicitWin32Error{error}));
             return FspNtStatusFromWin32(error);
         };
-        const auto read = [&](void *const output, const UINT64 position,
-            const auto count, auto *const done) {
-            // This function does not call itself, so the event can reside
-            // in `thread_local` storage.
-            thread_local auto event = wil::unique_event_nothrow{};
-            if (!event && !event.try_create(wil::EventOptions::ManualReset, nullptr)) {
+        // This 5 MiB capacity accommodates a 4 MiB PBS chunk and the extra
+        // bytes needed for sector alignment.
+        constexpr auto kRetainedReadBufferSize = 5uz * 1024 * 1024;
+        // The event and retained buffer share one per-thread owner so reads
+        // can address both resources through the same TLS object. Its buffer
+        // is allocated on the first source-backed read.
+        thread_local struct {
+            decltype(NewAlignedBuffer(kRetainedReadBufferSize,
+                read_buffer_alignment)) retained_buffer;
+            wil::unique_event_nothrow event;
+        } read_resources{
+            .retained_buffer = [&failure] {
+                auto buffer = NewAlignedBuffer(
+                    kRetainedReadBufferSize, read_buffer_alignment);
+                if (!buffer) {
+                    failure(ERROR_NOT_ENOUGH_MEMORY);
+                    std::_Exit(ERROR_NOT_ENOUGH_MEMORY);
+                }
+                return buffer;
+            }(),
+            .event = {},
+        };
+        const auto read = [&](void *__restrict const output,
+            const UINT64 position, const auto count,
+            auto *__restrict const done) {
+            if (!read_resources.event && !read_resources.event.try_create(
+                    wil::EventOptions::ManualReset, nullptr)) {
                 return failure(GetLastError());
             }
             auto operation = OVERLAPPED{};
             const auto parts = ULARGE_INTEGER{.QuadPart = position};
             operation.Offset = parts.LowPart;
             operation.OffsetHigh = parts.HighPart;
-            operation.hEvent = event.get();
+            operation.hEvent = read_resources.event.get();
             (observers.BeginSourceRead(), ...);
             // GetOverlappedResult supplies the byte count for either completion path.
             if (!ReadFile(handle.get(), output, count, nullptr, &operation)) {
@@ -577,53 +592,40 @@ struct WindowsBlockDevice
             "This cast is proved safe by the range check above.")]]
         const auto read_length = static_cast<LengthType>(read_end - read_offset);
         if ((read_offset == offset) && (read_length == wanted)) {
-            const auto status = read(output.data(), offset, wanted, &transferred);
+            const auto status = read(buffer, offset, wanted, &transferred);
             if (!NT_SUCCESS(status)) {
                 return status;
             }
             if constexpr (HasAllocationBitmap) {
                 allocation_bitmap.SynthesizeFreeClusters(
-                    output.data(), output.size(), offset);
+                    static_cast<BYTE *>(buffer), wanted, offset);
             }
             return STATUS_SUCCESS;
         }
 
         const auto read_into_bounce_buffer_and_copy_to_destination =
-            [&](BYTE *const bounce_storage) {
-            const auto bounce = std::span{bounce_storage, read_length};
+            [&](BYTE *__restrict const bounce_storage) {
             auto device_transferred = LengthType{};
             const auto status = read(
-                bounce.data(), read_offset, read_length, &device_transferred);
+                bounce_storage, read_offset, read_length, &device_transferred);
             if (!NT_SUCCESS(status)) {
                 return status;
             }
 
             transferred = wanted;
-            std::ranges::copy(bounce.subspan(offset - read_offset, wanted),
-                output.begin());
+            const auto copy_offset = offset - read_offset;
+            std::memcpy(buffer, bounce_storage + copy_offset, wanted);
             if constexpr (HasAllocationBitmap) {
                 allocation_bitmap.SynthesizeFreeClusters(
-                    output.data(), output.size(), offset);
+                    static_cast<BYTE *>(buffer), wanted, offset);
             }
             (observers.RecordBounce(), ...);
             return STATUS_SUCCESS;
         };
 
-        // This 5 MIB capacity comfortably accommodates a 4 MiB PBS chunk
-        // and any extra bytes needed for sector alignment.
-        constexpr auto kRetainedReadBufferSize = 5uz * 1024 * 1024;
         if (read_length <= kRetainedReadBufferSize) {
-            thread_local const auto retained_buffer_storage = [&failure] {
-                auto buffer = NewAlignedBuffer(
-                    kRetainedReadBufferSize, read_buffer_alignment);
-                if (!buffer) {
-                    failure(ERROR_NOT_ENOUGH_MEMORY);
-                    std::_Exit(ERROR_NOT_ENOUGH_MEMORY);
-                }
-                return buffer;
-            }();
             return read_into_bounce_buffer_and_copy_to_destination(
-                retained_buffer_storage.get());
+                read_resources.retained_buffer.get());
         }
         const auto newly_allocated_memory = NewAlignedBuffer(
             read_length, read_buffer_alignment);

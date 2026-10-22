@@ -181,6 +181,8 @@ $server = $null
 $device = $null
 $mounted_directory = $null
 $failure = $null
+$log_tail = $null
+$diagnostics_job = $null
 try {
     if (-not $TestClient) {
         $format_output = & $MkfsFatPath -F 32 $backing 2>&1
@@ -254,9 +256,45 @@ try {
         $helper_backing = $device
     }
 
+    if ($IsMacOS -and -not $GrpcBacking) {
+        $tail_start_info = [Diagnostics.ProcessStartInfo]::new('/usr/bin/tail')
+        $tail_start_info.UseShellExecute = $false
+        $tail_start_info.RedirectStandardOutput = $true
+        foreach ($argument in @(
+                '-n', '+1', '-F',
+                [IO.Path]::Combine($root, 'log.rpcd_devicefs'))) {
+            $tail_start_info.ArgumentList.Add($argument)
+        }
+        try {
+            $log_tail = [Diagnostics.Process]::Start($tail_start_info)
+            $diagnostics_job = Start-ThreadJob `
+                -ArgumentList $log_tail, $device {
+                param($Tail, $DevicePath)
+                while ($null -ne ($line = $Tail.StandardOutput.ReadLine())) {
+                    if (-not $line.Contains(
+                            'rpcd_devicefs: failed to initialize ')) {
+                        continue
+                    }
+                    "Backing-device metadata after failure: '$DevicePath'"
+                    & /usr/bin/stat -f `
+                        'uid=%u gid=%g mode=0%Lp device=%Hr:%Lr' $DevicePath
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Warning `
+                            "stat failed with exit code $LASTEXITCODE."
+                    }
+                    [DeviceFs.Tests.DiskArbitration]::DescribeDisk(
+                        [IO.Path]::GetFileName($DevicePath))
+                    break
+                }
+            }
+        } catch {
+            Write-Warning "Starting backing-device diagnostics failed: $_"
+        }
+    }
+
     # Only samba-dcerpcd should inherit the client end of this pipe. Creating
-    # it after the gRPC process is running prevents that unrelated process from
-    # keeping the readiness channel open if Samba exits without signaling.
+    # it after the backing server and log reader are running prevents either
+    # from keeping the readiness channel open if Samba exits without signaling.
     $ready_pipe = [IO.Pipes.AnonymousPipeServerStream]::new(
         [IO.Pipes.PipeDirection]::In,
         [IO.HandleInheritability]::Inheritable)
@@ -339,6 +377,28 @@ try {
 } catch {
     $failure = $_
 } finally {
+    if ($null -ne $log_tail) {
+        try {
+            if (-not $log_tail.HasExited) {
+                $log_tail.Kill()
+            }
+            $log_tail.WaitForExit()
+        } catch {
+            Write-Warning "Stopping the diagnostic log reader failed: $_"
+        }
+    }
+    if ($null -ne $diagnostics_job) {
+        try {
+            $null = Wait-Job $diagnostics_job
+            Receive-Job $diagnostics_job -ErrorAction Continue | Write-Host
+            Remove-Job $diagnostics_job
+        } catch {
+            Write-Warning "Backing-device diagnostics cleanup failed: $_"
+        }
+    }
+    if ($null -ne $log_tail) {
+        $log_tail.Dispose()
+    }
     if ($null -ne $ready_pipe) {
         $ready_pipe.Dispose()
     }

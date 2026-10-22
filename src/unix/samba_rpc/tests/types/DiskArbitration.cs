@@ -2,11 +2,36 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 namespace DeviceFs.Tests;
 
 public static class DiskArbitration {
+    private sealed class MediaHandle : SafeHandle {
+        public MediaHandle(string bsdName) : base(IntPtr.Zero, true) {
+            SetHandle((IntPtr)IOServiceGetMatchingService(0,
+                IOBSDNameMatching(0, 0, bsdName)));
+            if (IsInvalid) {
+                throw new InvalidOperationException(
+                    $"failed to find IOMedia for '{bsdName}'");
+            }
+        }
+
+        public uint Value => (uint)handle;
+        public override bool IsInvalid => handle == IntPtr.Zero;
+        protected override bool ReleaseHandle() => IOObjectRelease(Value) == 0;
+    }
+
+    private sealed class CFObject : SafeHandle {
+        public CFObject() : base(IntPtr.Zero, true) {}
+        public override bool IsInvalid => handle == IntPtr.Zero;
+        protected override bool ReleaseHandle() {
+            CFRelease(handle);
+            return true;
+        }
+    }
+
     private const string DiskArbitrationLibrary =
         "/System/Library/Frameworks/DiskArbitration.framework/DiskArbitration";
     private const string CoreFoundationLibrary =
@@ -67,6 +92,21 @@ public static class DiskArbitration {
         IntPtr[] keys, IntPtr[] values, nint count,
         IntPtr keyCallbacks, IntPtr valueCallbacks);
 
+    [DllImport(CoreFoundationLibrary)]
+    private static extern CFObject CFStringCreateWithCString(IntPtr allocator,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string text, uint encoding);
+
+    [DllImport(CoreFoundationLibrary)]
+    private static extern nuint CFGetTypeID(CFObject value);
+
+    [DllImport(CoreFoundationLibrary)]
+    private static extern nuint CFNumberGetTypeID();
+
+    [DllImport(CoreFoundationLibrary)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    private static extern bool CFNumberGetValue(
+        CFObject number, nint type, out long value);
+
     [DllImport(IOKitLibrary)]
     private static extern IntPtr IOBSDNameMatching(uint mainPort, uint options,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string bsdName);
@@ -85,6 +125,51 @@ public static class DiskArbitration {
     [DllImport(IOKitLibrary)]
     private static extern int IOObjectRelease(uint entry);
 
+    [DllImport(IOKitLibrary)]
+    private static extern CFObject IORegistryEntrySearchCFProperty(
+        uint entry, [MarshalAs(UnmanagedType.LPUTF8Str)] string plane,
+        CFObject key, IntPtr allocator, uint options);
+
+    public static IEnumerable<string> DescribeDisk(string bsdName) {
+        using var media = new MediaHandle(bsdName);
+        var error = IORegistryEntryGetRegistryEntryID(media.Value, out var id);
+        yield return error == 0
+            ? $"IOMedia BSD name '{bsdName}', registry ID=0x{id:x}"
+            : $"failed to get IOMedia registry ID: IOKit error 0x{error:x8}";
+
+        // The major/minor numbers identify the device node. `IOStorageFamily`
+        // searches the `IOMedia` and its `IOService` parents for `owner-*` when
+        // creating that node, so those values can be compared with `stat`.
+        const uint kCFStringEncodingUTF8 = 0x08000100;
+        const nint kCFNumberSInt64Type = 4;
+        const uint kIORegistryIterateRecursively = 1;
+        const uint kIORegistryIterateParents = 2;
+        foreach (var name in new[] {
+                "BSD Major", "BSD Minor",
+                "owner-uid", "owner-gid", "owner-mode"}) {
+            using var key = CFStringCreateWithCString(
+                IntPtr.Zero, name, kCFStringEncodingUTF8);
+            if (key.IsInvalid) {
+                throw new OutOfMemoryException();
+            }
+            using var property = IORegistryEntrySearchCFProperty(
+                media.Value, "IOService", key, IntPtr.Zero,
+                kIORegistryIterateRecursively | kIORegistryIterateParents);
+            if (property.IsInvalid) {
+                yield return $"{name}=unavailable";
+            } else if (CFGetTypeID(property) != CFNumberGetTypeID() ||
+                !CFNumberGetValue(
+                    property, kCFNumberSInt64Type, out var value)) {
+                yield return $"{name}=unavailable numeric value " +
+                    $"(CF type {CFGetTypeID(property)})";
+            } else {
+                yield return name == "owner-mode"
+                    ? $"{name}=0{Convert.ToString(value, 8)}"
+                    : $"{name}={value}";
+            }
+        }
+    }
+
     public static void WaitForDisk(string bsdName) {
         var runLoop = CFRunLoopGetCurrent();
         var diskAppeared = false;
@@ -98,17 +183,13 @@ public static class DiskArbitration {
         // BSD names can be reused while Disk Arbitration still has the old
         // disk in its list. Matching the current IOMedia's registry ID prevents
         // that old disk's appearance notification from satisfying this wait.
-        var media = IOServiceGetMatchingService(0,
-            IOBSDNameMatching(0, 0, bsdName));
-        if (media == 0) {
-            throw new InvalidOperationException(
-                $"failed to find IOMedia for '{bsdName}'");
-        }
+        using var media = new MediaHandle(bsdName);
         var mediaMatch = IntPtr.Zero;
         var match = IntPtr.Zero;
         var session = IntPtr.Zero;
         try {
-            var error = IORegistryEntryGetRegistryEntryID(media, out var entryId);
+            var error = IORegistryEntryGetRegistryEntryID(
+                media.Value, out var entryId);
             if (error != 0) {
                 throw new InvalidOperationException(
                     $"failed to get IOMedia registry ID for '{bsdName}' " +
@@ -151,7 +232,6 @@ public static class DiskArbitration {
             if (mediaMatch != IntPtr.Zero) {
                 CFRelease(mediaMatch);
             }
-            IOObjectRelease(media);
             GC.KeepAlive(appeared);
             GC.KeepAlive(idle);
         }

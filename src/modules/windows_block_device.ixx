@@ -609,41 +609,6 @@ struct WindowsBlockDevice {
     }
 };
 
-// A filesystem exposing known-data maps contains both volume images and bitmap
-// files. This device type serves those two kinds of file; ordinary mounts use
-// `WindowsBlockDevice` directly.
-struct WindowsDeviceOrBitmap {
-    const std::uint64_t length;
-    std::variant<WindowsBlockDevice, std::vector<BYTE>> contents;
-
-    [[nodiscard]] static auto FromBlockDevice(WindowsBlockDevice device) noexcept {
-        return WindowsDeviceOrBitmap{
-            .length = device.length,
-            .contents = std::move(device),
-        };
-    }
-
-    template <typename... Observers>
-    _Success_(return == STATUS_SUCCESS)
-    auto Read(
-        _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
-        _In_range_(0, length - 1) const std::uint64_t offset,
-        _In_range_(1, length - offset) const ULONG wanted,
-        _Pre_equal_to_(0) ULONG &transferred,
-        Observers &...observers) const noexcept -> NTSTATUS {
-        if (const auto *const device = std::get_if<WindowsBlockDevice>(&contents)) [[likely]] {
-            [[msvc::forceinline_calls]]
-            return device->Read(
-                buffer, offset, wanted, transferred, observers...);
-        }
-        const auto &bitmap = std::get<std::vector<BYTE>>(contents);
-        std::ranges::copy(std::span{bitmap}.subspan(offset, wanted),
-            std::span{static_cast<BYTE *>(buffer), wanted}.begin());
-        transferred = wanted;
-        return STATUS_SUCCESS;
-    }
-};
-
 } // namespace devicefs
 
 namespace devicefs::filesystem_internal {
@@ -657,7 +622,7 @@ namespace devicefs::filesystem_internal {
         if (!GetVolumeInformationByHandleW(device, nullptr, 0, nullptr, nullptr,
             nullptr, file_system.data(),
             CompileTimeCast<DWORD, std::size(file_system)>())) {
-            WinError("could not identify the filesystem for '{}' ({})",
+            WinError("failed to identify the filesystem for '{}' ({})",
                 std::wstring_view{filename.native()}, description);
         }
         return file_system;
@@ -841,7 +806,7 @@ auto WindowsBlockDevice::FromHandle(
     const std::string_view description) -> WindowsBlockDevice {
     const auto alignment = QueryBufferAlignment(handle.get());
     if (!alignment) {
-        WinError("could not query buffer alignment for block device '{}' ({})",
+        WinError("failed to query buffer alignment for block device '{}' ({})",
             std::wstring_view{filename.native()}, description);
     }
 
@@ -887,7 +852,7 @@ auto WindowsBlockDevice::FromHandle(
         auto file_system_flags = DWORD{};
         if (!GetVolumeInformationByHandleW(handle.get(), nullptr, 0, nullptr,
                 nullptr, &file_system_flags, nullptr, 0)) {
-            WinError("could not query filesystem flags for '{}' ({})",
+            WinError("failed to query filesystem flags for '{}' ({})",
                 std::wstring_view{filename.native()}, description);
         }
         if ((file_system_flags & FILE_READ_ONLY_VOLUME) == 0) {

@@ -40,9 +40,9 @@ import devicefs.terminal.transcoding;
 
 using devicefs::terminal::Transcode;
 
-export namespace devicefs {
+namespace devicefs {
 
-template <typename DeviceType>
+export template <typename DeviceType>
 concept BlockDevice = requires(
     const DeviceType &device,
     _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
@@ -54,6 +54,103 @@ concept BlockDevice = requires(
     { device.Read(buffer, offset, wanted, transferred) }
         noexcept -> std::same_as<NTSTATUS>;
 };
+
+// `std::conditional_t` needs both type arguments to be valid. An incomplete
+// primary template lets the alias name `VariantMultiBlockDevice<T>` without
+// defining a one-type wrapper.
+template <typename... DeviceTypes>
+struct VariantMultiBlockDevice;
+
+template <BlockDevice... DeviceTypes>
+    requires (sizeof...(DeviceTypes) > 1)
+struct VariantMultiBlockDevice<DeviceTypes...> {
+    const std::uint64_t length;
+    std::variant<DeviceTypes...> contents;
+
+    // Precondition: `contents` holds a device, rather than being valueless.
+    // `std::visit` can then throw only if `visitor` throws.
+    auto Visit(this auto &self, auto &&visitor)
+        noexcept((std::is_nothrow_invocable_v<decltype(visitor),
+            decltype(std::get<DeviceTypes>(self.contents))> && ...))
+        -> decltype(auto) {
+        if constexpr (
+            (std::same_as<DeviceTypes, WindowsBlockDevice> || ...)) {
+            if (auto *const device = std::get_if<WindowsBlockDevice>(
+                    &self.contents)) [[likely]] {
+                return std::invoke(
+                    std::forward<decltype(visitor)>(visitor), *device);
+            }
+        }
+        return std::visit(
+            [&visitor](auto &device)
+                noexcept(std::is_nothrow_invocable_v<
+                    decltype(visitor), decltype(device)>)
+                -> std::invoke_result_t<decltype(visitor), decltype(device)> {
+                if constexpr (std::same_as<
+                    std::remove_cvref_t<decltype(device)>,
+                    WindowsBlockDevice>) {
+                    std::unreachable();
+                } else {
+                    return std::invoke(
+                        std::forward<decltype(visitor)>(visitor), device);
+                }
+            }, self.contents);
+    }
+
+    template <typename... Observers>
+    _Success_((return >= 0) && (return != STATUS_PENDING))
+    auto Read(
+        _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
+        _In_range_(0, length - 1) const std::uint64_t offset,
+        _In_range_(1, length - offset) const ULONG wanted,
+        _Pre_equal_to_(0) ULONG &transferred,
+        Observers &...observers) const noexcept -> NTSTATUS {
+        return Visit(
+            [buffer, offset, wanted, &transferred, &observers...](
+                const auto &device) noexcept {
+                [[msvc::forceinline_calls]]
+                return device.Read(
+                    buffer, offset, wanted, transferred, observers...);
+            });
+    }
+};
+
+template <BlockDevice... DeviceTypes>
+    requires (sizeof...(DeviceTypes) > 0)
+using VariantBlockDevice = std::conditional_t<
+    sizeof...(DeviceTypes) == 1,
+    std::tuple_element_t<0, std::tuple<DeviceTypes...>>,
+    VariantMultiBlockDevice<DeviceTypes...>>;
+
+template <BlockDevice Destination, BlockDevice Source>
+[[nodiscard]] auto VariantFromBlockDevice(Source source) noexcept
+    -> Destination {
+    if constexpr (std::same_as<Destination, Source>) {
+        return source;
+    } else {
+        return Destination{
+            .length = source.length,
+            .contents = std::move(source),
+        };
+    }
+}
+
+auto VisitBlockDevice(BlockDevice auto &device, auto &&visitor)
+    noexcept(std::is_nothrow_invocable_v<
+        decltype(visitor), decltype(device)>)
+    -> decltype(auto) {
+    return std::invoke(std::forward<decltype(visitor)>(visitor), device);
+}
+
+auto VisitBlockDevice(BlockDevice auto &device, auto &&visitor)
+    noexcept(noexcept(device.Visit(
+        std::forward<decltype(visitor)>(visitor))))
+    -> decltype(auto)
+    requires requires {
+        device.Visit(std::forward<decltype(visitor)>(visitor));
+    } {
+    return device.Visit(std::forward<decltype(visitor)>(visitor));
+}
 
 } // namespace devicefs
 
@@ -115,7 +212,7 @@ auto FurtherHardenProcess() {
     child_processes.NoChildProcessCreation = 1;
     if (!SetProcessMitigationPolicy(
             ProcessChildProcessPolicy, &child_processes, sizeof(child_processes))) {
-        WinError("could not prohibit child process creation");
+        WinError("failed to prohibit child process creation");
     }
 }
 
@@ -137,7 +234,7 @@ private:
     auto buffer = std::array<char, UNLEN + 1>{};
     auto length = CompileTimeCast<DWORD, buffer.size()>();
     if (!GetUserNameA(buffer.data(), &length)) {
-        WinError("could not obtain the current user name");
+        WinError("failed to obtain the current user name");
     }
     return std::string{buffer.data(), length - 1};
 }
@@ -257,17 +354,6 @@ auto Usage(const auto output) noexcept {
             register_name(mapping.name + kKnownDataMapSuffix, i + 1);
         }
     }
-    if (!result.mappings.empty()) {
-        const auto rpc = rpc_client::IsRpcDevice(result.mappings.front());
-        if (!std::ranges::all_of(result.mappings,
-                [rpc](const auto &mapping) {
-                    return rpc_client::IsRpcDevice(mapping) == rpc;
-                })) {
-            throw std::invalid_argument(
-                "all --map devices must use RPC when any one does");
-        }
-    }
-
     if ((result.mount.value.size() == 2) && (result.mount.value[1] == L':')) {
         result.mount.value = std::format(L"\\\\.\\{}", result.mount.value);
     }
@@ -292,7 +378,7 @@ auto Usage(const auto output) noexcept {
     auto use = SID_NAME_USE{};
     LookupAccountNameA(nullptr, account.c_str(), nullptr, &sid_size, nullptr, &domain_size, &use);
     if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
-        WinError("could not resolve --read-user account '{}'", account);
+        WinError("failed to resolve --read-user account '{}'", account);
     }
 
     const auto sid = NEW_MALLOCA_BUFFER(BYTE, sid_size);
@@ -302,12 +388,12 @@ auto Usage(const auto output) noexcept {
     }
     if (!LookupAccountNameA(nullptr, account.c_str(), sid.get(), &sid_size,
             domain.get(), &domain_size, &use)) {
-        WinError("could not resolve --read-user account '{}'", account);
+        WinError("failed to resolve --read-user account '{}'", account);
     }
 
     auto sid_text = wil::unique_hlocal_ansistring{};
     if (!ConvertSidToStringSidA(sid.get(), sid_text.addressof())) {
-        WinError("could not format the SID for --read-user account '{}'", account);
+        WinError("failed to format the SID for --read-user account '{}'", account);
     }
 
     // Administrators own the filesystem and mount directory, allowing an
@@ -321,17 +407,38 @@ auto Usage(const auto output) noexcept {
                 "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;{})",
                 sid_text.get()).c_str(),
             SDDL_REVISION_1, descriptor.addressof(), nullptr)) {
-        WinError("could not create the filesystem ACL for --read-user account '{}'",
+        WinError("failed to create the filesystem ACL for --read-user account '{}'",
             account);
     }
     return descriptor;
 }
 
 using devicefs::WindowsBlockDevice;
-using devicefs::WindowsDeviceOrBitmap;
+using devicefs::VariantBlockDevice;
+using devicefs::VisitBlockDevice;
+using devicefs::VariantFromBlockDevice;
 using devicefs::VhdxViewer;
 using devicefs::BlockDevice;
 using rpc_client::RPCBlockDevice;
+
+struct MemoryBlockDevice {
+    const std::uint64_t length;
+    std::vector<BYTE> contents;
+
+    template <typename... Observers>
+    _Success_(return == STATUS_SUCCESS)
+    auto Read(
+        _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
+        _In_range_(0, length - 1) const std::uint64_t offset,
+        _In_range_(1, length - offset) const ULONG wanted,
+        _Pre_equal_to_(0) ULONG &transferred,
+        Observers &...) const noexcept -> NTSTATUS {
+        std::ranges::copy(std::span{contents}.subspan(offset, wanted),
+            std::span{static_cast<BYTE *>(buffer), wanted}.begin());
+        transferred = wanted;
+        return STATUS_SUCCESS;
+    }
+};
 
 template <typename DeviceType>
 struct DeviceFile {
@@ -357,39 +464,47 @@ using DeviceFiles = std::map<std::wstring, DeviceFile<DeviceType>, FilenameLess>
     return wil::unique_hfile{std::bit_cast<HANDLE>(handle)};
 }
 
-template <BlockDevice DeviceType>
+template <BlockDevice... DeviceTypes>
 [[nodiscard]] auto OpenSource(
     const internal::Mapping &mapping, const bool extended_dasd,
     const bool cache, const bool synthetic_free_clusters,
     const UINT64 map_number,
-    const std::string_view rpc_password) {
-    if constexpr ((std::same_as<DeviceType, RPCBlockDevice>) ||
-        (std::same_as<DeviceType, VhdxViewer<RPCBlockDevice>>)) {
-        const auto tcp = rpc_client::IsTcpDevice(mapping);
-        return RPCBlockDevice::FromSymbol(
-            tcp
-                ? rpc_client::MakeTcpRpcBinding(mapping, rpc_password)
-                : rpc_client::LocalRpcBinding(),
-            tcp
-                ? std::string_view{}
-                : std::string_view{mapping.device}.substr(
-                    std::string_view{
-                        devicefs::rpc::kDeviceSourcePrefix}.size()));
-    } else {
+    const std::string_view rpc_password)
+    -> VariantBlockDevice<DeviceTypes...> {
+    using SourceType = VariantBlockDevice<DeviceTypes...>;
+    if constexpr ((std::same_as<DeviceTypes, RPCBlockDevice> || ...)) {
+        if (rpc_client::IsRpcDevice(mapping)) {
+            const auto tcp = rpc_client::IsTcpDevice(mapping);
+            return VariantFromBlockDevice<SourceType>(
+                RPCBlockDevice::FromSymbol(
+                    tcp
+                        ? rpc_client::MakeTcpRpcBinding(mapping, rpc_password)
+                        : rpc_client::LocalRpcBinding(),
+                    tcp
+                        ? std::string_view{}
+                        : std::string_view{mapping.device}.substr(
+                            std::string_view{
+                                devicefs::rpc::kDeviceSourcePrefix}.size())));
+        }
+    }
+    if constexpr ((std::same_as<DeviceTypes, WindowsBlockDevice> || ...)) {
         const auto source = std::string_view{mapping.device};
         const auto description = std::format("--map #{}", map_number);
-        return [source, &description](auto &&...arguments) {
-            if (source.starts_with(devicefs::kHandleDevicePrefix)) {
-                return WindowsBlockDevice::FromHandle(
-                    ParseInheritedHandle(
-                        source.substr(devicefs::kHandleDevicePrefix.size()),
-                        description),
+        return VariantFromBlockDevice<SourceType>(
+            [source, &description](auto &&...arguments) {
+                if (source.starts_with(devicefs::kHandleDevicePrefix)) {
+                    return WindowsBlockDevice::FromHandle(
+                        ParseInheritedHandle(
+                            source.substr(devicefs::kHandleDevicePrefix.size()),
+                            description),
+                        std::forward<decltype(arguments)>(arguments)...);
+                }
+                return WindowsBlockDevice::FromFilename(
                     std::forward<decltype(arguments)>(arguments)...);
-            }
-            return WindowsBlockDevice::FromFilename(
-                std::forward<decltype(arguments)>(arguments)...);
-        }(std::filesystem::path{mapping.device}, extended_dasd,
-            cache, synthetic_free_clusters, description);
+            }(std::filesystem::path{mapping.device}, extended_dasd,
+                cache, synthetic_free_clusters, description));
+    } else {
+        std::unreachable();
     }
 }
 
@@ -448,7 +563,7 @@ public:
             ? L"" FSP_FSCTL_NET_DEVICE_NAME
             : L"" FSP_FSCTL_DISK_DEVICE_NAME};
         internal::CheckNt(FspFileSystemCreate(device.data(), &params, &interface_, fs_.put()),
-            "could not create WinFsp filesystem");
+            "failed to create WinFsp filesystem");
         fs_.get()->UserContext = this;
         if (!mount_.network) {
             // The Windows mount directory has its own security descriptor.
@@ -458,10 +573,10 @@ public:
                 justification: "WinFsp copies the mount point despite accepting a mutable pointer.")]]
             internal::CheckNt(FspFileSystemSetMountPointEx(
                 fs_.get(), const_cast<PWSTR>(mount_.value.c_str()), security_.get()),
-                "could not mount filesystem");
+                "failed to mount filesystem");
         }
         internal::CheckNt(FspFileSystemStartDispatcher(fs_.get(), 0),
-            "could not start WinFsp dispatcher");
+            "failed to start WinFsp dispatcher");
     }
 
     DeviceFs(const DeviceFs &) = delete;
@@ -606,7 +721,7 @@ private:
             "The function signature must match the requirement of the "
             "corresponding WinFsp callback. The `_Out_` annotation reflects "
             "that `transferred` cannot be null.")]]
-    _Success_(return == STATUS_SUCCESS)
+    _Success_((return >= 0) && (return != STATUS_PENDING))
     static auto Read([[maybe_unused]] FSP_FILE_SYSTEM *const fs,
         _In_opt_ void *const context,
         _Out_writes_bytes_to_(length, *transferred) void *const buffer,
@@ -698,21 +813,18 @@ private:
         [[maybe_unused]] FSP_FILE_SYSTEM *const fs,
         const BOOLEAN normally) noexcept {
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
-        if constexpr ((std::same_as<DeviceType, WindowsBlockDevice>) ||
-                (std::same_as<DeviceType, WindowsDeviceOrBitmap>)) {
-            for (const auto &entry : Self(fs).files_) {
-                const auto &file = entry.second;
-                const auto *const device = [&file] {
-                    if constexpr (std::same_as<DeviceType, WindowsBlockDevice>) {
-                        return &file.device;
-                    } else {
-                        return std::get_if<WindowsBlockDevice>(&file.device.contents);
+        for (const auto &entry : Self(fs).files_) {
+            const auto &file = entry.second;
+            VisitBlockDevice(file.device, [&file](const auto &device) {
+                if constexpr (std::same_as<
+                    std::remove_cvref_t<decltype(device)>,
+                    WindowsBlockDevice>) {
+                    if (device.allocation_bitmap.measurement) {
+                        device.allocation_bitmap.measurement->Report(
+                            file.name);
                     }
-                }();
-                if (device && device->allocation_bitmap.measurement) {
-                    device->allocation_bitmap.measurement->Report(file.name);
                 }
-            }
+            });
         }
 #endif
 #if DEVICEFS_MEASURE_READ_PATH
@@ -817,34 +929,57 @@ auto RunWithDevices(const Options &options, DeviceFiles<DeviceType> files) {
     return EXIT_SUCCESS;
 }
 
-template <BlockDevice DeviceType>
+template <bool AsVhdx, bool ExposeKnownDataMap, BlockDevice... SourceTypes>
 [[nodiscard]] auto OpenDevices(
     const Options &options,
     wil::secure_string rpc_password = {}) {
+    using SourceType = VariantBlockDevice<SourceTypes...>;
+    using DeviceType = std::conditional_t<AsVhdx,
+        VhdxViewer<SourceType>,
+        std::conditional_t<ExposeKnownDataMap,
+            VariantBlockDevice<SourceTypes..., MemoryBlockDevice>,
+            SourceType>>;
     auto sources = std::views::iota(0uz, options.mappings.size())
         | std::views::transform([&](const auto i) {
-            return OpenSource<DeviceType>(options.mappings[i], options.extended_dasd,
+            return OpenSource<SourceTypes...>(
+                options.mappings[i], options.extended_dasd,
                 options.cache, options.synthetic_free_clusters,
                 i + 1, std::string_view{rpc_password});
         }) | std::ranges::to<std::vector>();
-    if constexpr (std::same_as<typename decltype(sources)::value_type, WindowsBlockDevice>) {
+    if constexpr ((std::same_as<SourceTypes, WindowsBlockDevice> || ...)) {
         // `VhdxViewer::FromBlockDevice` reads NTFS metadata from its source and
         // can therefore allocate a thread's retained read buffer. The maximum
         // alignment must already be known before that first read, so all sources
         // are opened before any VHDX views are constructed.
         WindowsBlockDevice::read_buffer_alignment = std::ranges::max(
-            sources | std::views::transform(&WindowsBlockDevice::buffer_alignment));
+            sources | std::views::transform([](const auto &source) static {
+                return VisitBlockDevice(source, [](const auto &device) static {
+                    if constexpr (std::same_as<
+                        std::remove_cvref_t<decltype(device)>,
+                        WindowsBlockDevice>) {
+                        return device.buffer_alignment;
+                    } else {
+                        return std::align_val_t{1};
+                    }
+                });
+            }));
     }
     auto next_index = kRootInfo.IndexNumber + 1;
     auto files = DeviceFiles<DeviceType>{};
     for (const auto i : std::views::iota(0uz, options.mappings.size())) {
         const auto &mapping = options.mappings[i];
         auto &source = sources[i];
-        auto device = [&source] -> DeviceType {
-            if constexpr (std::same_as<DeviceType, std::remove_cvref_t<decltype(source)>>) {
+        auto device = [&source] {
+            if constexpr (AsVhdx) {
+                return VhdxViewer<SourceType>::FromBlockDevice(
+                    std::move(source));
+            } else if constexpr (std::same_as<DeviceType, SourceType>) {
                 return std::move(source);
             } else {
-                return DeviceType::FromBlockDevice(std::move(source));
+                return VisitBlockDevice(source, [](auto &device) static {
+                    return VariantFromBlockDevice<DeviceType>(
+                        std::move(device));
+                });
             }
         }();
         files.emplace(
@@ -860,14 +995,15 @@ template <BlockDevice DeviceType>
                 .device = std::move(device),
             });
     }
-    if constexpr (std::same_as<DeviceType, WindowsDeviceOrBitmap>) {
+    if constexpr (ExposeKnownDataMap) {
         for (const auto &mapping : options.mappings) {
-            const auto &device = std::get<WindowsBlockDevice>(
-                files.at(mapping.name).device.contents);
-            if (!device.allocation_bitmap.storage) {
+            const auto *const device = std::get_if<WindowsBlockDevice>(
+                &files.at(mapping.name).device.contents);
+            if (!device || !device->allocation_bitmap.storage) {
                 continue;
             }
-            auto bitmap = device.MakeKnownDataMap(*options.known_data_map_cluster_size);
+            auto bitmap = device->MakeKnownDataMap(
+                *options.known_data_map_cluster_size);
             const auto name = mapping.name + kKnownDataMapSuffix;
             files.emplace(name, DeviceFile<DeviceType>{
                 .name = name,
@@ -877,52 +1013,84 @@ template <BlockDevice DeviceType>
                     .FileSize = bitmap.size(),
                     .IndexNumber = next_index++,
                 },
-                .device = {
-                    .length = bitmap.size(),
-                    .contents = std::move(bitmap),
-                },
+                .device = VariantFromBlockDevice<DeviceType>(
+                    MemoryBlockDevice{
+                        .length = bitmap.size(),
+                        .contents = std::move(bitmap),
+                    }),
             });
         }
     }
     return files;
 }
 
+// Precondition: `needed` selects at least one candidate type.
+template <BlockDevice... Candidates>
+auto DispatchDeviceTypes(
+    const std::array<bool, sizeof...(Candidates)> &needed,
+    const auto &run) -> int {
+    return [&]<std::size_t Index = 0, class... Selected>(
+               this auto &&self) -> int {
+        if constexpr (Index == sizeof...(Candidates)) {
+            if constexpr (sizeof...(Selected) == 0) {
+                std::unreachable();
+            } else {
+                return run.template operator()<Selected...>();
+            }
+        } else {
+            using Next = std::tuple_element_t<Index,
+                std::tuple<Candidates...>>;
+            if (needed[Index]) {
+                return self.template operator()<
+                    Index + 1, Selected..., Next>();
+            }
+            return self.template operator()<Index + 1, Selected...>();
+        }
+    }();
+}
+
 auto Run(const Options &options) {
     devicefs::winfsp_loader::LoadWinFspLibrary();
-    const auto run = [&]<BlockDevice DeviceType = WindowsBlockDevice>(
-            wil::secure_string password = {}) {
+    auto password = [&options] {
+        auto password = wil::secure_string{};
+        if (std::ranges::any_of(options.mappings, rpc_client::IsTcpDevice)) {
+            ClearCrtIoError();
+            std::getline(std::cin, password);
+            if (std::ferror(stdin) || std::cin.bad()) {
+                WinError("failed to read the RPC password from standard input",
+                    ExplicitCrtIoError{});
+            }
+            if (!std::cin) {
+                WinError("failed to read the RPC password from standard input",
+                    ExplicitWin32Error{std::cin.eof()
+                        ? CompileTimeCast<DWORD, ERROR_HANDLE_EOF>()
+                        : CompileTimeCast<DWORD, ERROR_INSUFFICIENT_BUFFER>()});
+            }
+        }
+        return password;
+    }();
+    const auto run = [&options, &password]<BlockDevice... SourceTypes> {
         if (options.vhdx) {
             return RunWithDevices(options,
-                OpenDevices<VhdxViewer<DeviceType>>(
+                OpenDevices<true, false, SourceTypes...>(
                     options, std::move(password)));
         }
-        return RunWithDevices(options,
-            OpenDevices<DeviceType>(options, std::move(password)));
-    };
-    if (rpc_client::IsRpcDevice(options.mappings.front())) {
-        return run.operator()<RPCBlockDevice>([&] {
-            auto password = wil::secure_string{};
-            if (std::ranges::any_of(options.mappings, rpc_client::IsTcpDevice)) {
-                ClearCrtIoError();
-                std::getline(std::cin, password);
-                if (std::ferror(stdin) || std::cin.bad()) {
-                    WinError("could not read the RPC password from standard input",
-                        ExplicitCrtIoError{});
-                }
-                if (!std::cin) {
-                    WinError("could not read the RPC password from standard input",
-                        ExplicitWin32Error{std::cin.eof()
-                            ? CompileTimeCast<DWORD, ERROR_HANDLE_EOF>()
-                            : CompileTimeCast<DWORD, ERROR_INSUFFICIENT_BUFFER>()});
-                }
+        if constexpr ((std::same_as<SourceTypes, WindowsBlockDevice> || ...)) {
+            if (options.known_data_map_cluster_size) {
+                return RunWithDevices(options,
+                    OpenDevices<false, true, SourceTypes...>(
+                        options, std::move(password)));
             }
-            return password;
-        }());
-    }
-    if (options.known_data_map_cluster_size) {
-        return RunWithDevices(options, OpenDevices<WindowsDeviceOrBitmap>(options));
-    }
-    return run();
+        }
+        return RunWithDevices(options,
+            OpenDevices<false, false, SourceTypes...>(
+                options, std::move(password)));
+    };
+    const auto rpc_devices =
+        std::ranges::count_if(options.mappings, rpc_client::IsRpcDevice);
+    return DispatchDeviceTypes<WindowsBlockDevice, RPCBlockDevice>(
+        {std::cmp_less(rpc_devices, options.mappings.size()), rpc_devices != 0},
+        run);
 }
 
 } // namespace

@@ -461,11 +461,27 @@ target_link_libraries(backup-supervisor PRIVATE
     "${DISM_LIBRARY}"
     advapi32 bcrypt crypt32 msi netapi32 ntdll ole32 pathcch secur32 shell32 userenv virtdisk windowsapp ws2_32
 )
-# These delay-loaded DLLs are used only by the installer.
+# The filesystem child shares this executable with the supervisor. Delaying
+# optional feature dependencies avoids loading and initializing them merely
+# because they are linked into the same executable.
 target_link_options(backup-supervisor PRIVATE
+    /DELAYLOAD:bcrypt.dll
+    /DELAYLOAD:CRYPT32.dll
     /DELAYLOAD:DismApi.dll
     /DELAYLOAD:msi.dll
+    /DELAYLOAD:NETAPI32.dll
+    /DELAYLOAD:ole32.dll
+    /DELAYLOAD:OLEAUT32.dll
+    /DELAYLOAD:RPCRT4.dll
+    /DELAYLOAD:Secur32.dll
+    /DELAYLOAD:SHELL32.dll
+    /DELAYLOAD:USER32.dll
+    /DELAYLOAD:USERENV.dll
+    /DELAYLOAD:VERSION.dll
+    /DELAYLOAD:VirtDisk.dll
+    /DELAYLOAD:VSSAPI.DLL
     /DELAYLOAD:wintrust.dll
+    /DELAYLOAD:WS2_32.dll
 )
 
 devicefs_add_native_code_analysis_check()

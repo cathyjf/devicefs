@@ -43,13 +43,15 @@ constexpr auto kHandleDevicePrefix = std::string_view{R"(\\\handle:)"};
 // On arm64, MSVC 14.51's implementation of `std::countr_zero` uses a software
 // loop instead of the `RBIT` and `CLZ` instructions emitted by this intrinsic.
 [[nodiscard, msvc::forceinline]]
+_Post_satisfies_(return < 64)
 auto CountTrailingZeros(_Pre_satisfies_(value != 0) const std::uint64_t value)
-    noexcept -> int {
-    // The nonzero-input precondition ensures `_BitScanForward64` writes
-    // `bit_index`.
+    noexcept {
+    // The nonzero-input precondition ensures that `_BitScanForward64` writes
+    // to `bit_index`.
     [[assume(value != 0)]];
     /* [[indeterminate]] */ unsigned long bit_index;
     std::ignore = _BitScanForward64(&bit_index, value);
+    [[assume(bit_index < 64)]];
     return bit_index;
 }
 
@@ -182,7 +184,7 @@ auto LoadBitmapWord(_In_reads_bytes_(byte_count) const BYTE *const bytes,
 // initialized bitmap.
 struct AllocationBitmap {
     UINT32 cluster_size = 0;
-    int cluster_shift = 0;
+    decltype(CountTrailingZeros(1)) cluster_shift = 0;
     UINT64 cluster_count = 0;
     std::unique_ptr<BYTE[]> storage;
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA

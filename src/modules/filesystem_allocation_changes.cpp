@@ -164,8 +164,7 @@ auto ReadAllocationChangeBlocks(
             const auto cluster =
                 devicefs::terminal::FailFastMaybeCast<std::uint64_t>(
                     byte_index) * filesystem_internal::kBitsPerByte +
-                devicefs::terminal::FailFastCast<std::uint64_t>(
-                    CountTrailingZeros(changed));
+                CountTrailingZeros(changed);
             if (cluster >= previous_bitmap.cluster_count) {
                 break;
             }

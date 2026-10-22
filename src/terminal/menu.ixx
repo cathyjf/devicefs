@@ -142,7 +142,8 @@ public:
         if (entries_.empty()) {
             return false;
         }
-        const std::size_t repeat = input.repeat;
+        const auto repeat =
+            devicefs::terminal::FailFastMaybeCast<std::size_t>(input.repeat);
         switch (input.key) {
         case MenuKey::Up:
             selected_entry_ -= std::min(selected_entry_, repeat);
@@ -186,7 +187,8 @@ public:
             (input.key == MenuKey::PageUp ? -1 : 0);
         if (paging != 0) {
             Scroll<Policy>(terminal, viewport, paging,
-                input.repeat * FailFastCast<std::size_t>(viewport.rows));
+                devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                    input.repeat) * FailFastCast<std::size_t>(viewport.rows));
         }
         const auto reveal_selection = (input.key == MenuKey::Up) ||
             (input.key == MenuKey::Down) || (input.key == MenuKey::Resize) ||

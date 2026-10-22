@@ -431,7 +431,8 @@ template <std::uint32_t Polynomial>
     const auto bat_length = AlignUp(
         entry_count * sizeof(std::uint64_t), kOneMiB);
     const auto payload_offset = kBatOffset + bat_length;
-    auto result = std::vector<std::byte>(bat_length);
+    auto result = std::vector<std::byte>(
+        devicefs::terminal::FailFastMaybeCast<std::size_t>(bat_length));
 
     // Fixed VHDX payload blocks are fully present. Sector-bitmap entries are
     // interleaved but remain zero. See VHDX Format Specification v1.00,
@@ -441,7 +442,9 @@ template <std::uint32_t Polynomial>
         const auto bat_index = payload + (payload / chunk_ratio);
         const auto file_offset = payload_offset + payload * kPayloadBlockSize;
         const auto entry = ((file_offset / kOneMiB) << 20) | 6u;
-        SerializeObject(result, bat_index * sizeof(entry), entry);
+        SerializeObject(result,
+            devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                bat_index * sizeof(entry)), entry);
     }
     return result;
 }
@@ -546,11 +549,16 @@ struct VhdxLayout {
     }
 
     auto gpt = MakeGpt(source_length);
-    const auto virtual_disk_length =
-        gpt.prefix.size() + source_length + gpt.suffix.size();
+    const auto virtual_disk_length = source_length +
+        devicefs::terminal::FailFastMaybeCast<std::uint64_t>(
+            gpt.prefix.size()) +
+        devicefs::terminal::FailFastMaybeCast<std::uint64_t>(
+            gpt.suffix.size());
     auto bat = MakeBat(virtual_disk_length);
-    const auto payload_offset = kBatOffset + bat.size();
-    auto prefix = std::vector<std::byte>(payload_offset);
+    const auto payload_offset = kBatOffset +
+        devicefs::terminal::FailFastMaybeCast<std::uint64_t>(bat.size());
+    auto prefix = std::vector<std::byte>(
+        devicefs::terminal::FailFastMaybeCast<std::size_t>(payload_offset));
 
     // The file identifier, duplicate headers, and duplicate region tables use
     // the fixed offsets defined by VHDX Format Specification v1.00,
@@ -564,7 +572,8 @@ struct VhdxLayout {
         MakeVhdxHeader(2, file_write_id, data_write_id);
     CopyBytes(prefix, 64 * 1024, first_header);
     CopyBytes(prefix, 128 * 1024, second_header);
-    const auto region_table = MakeRegionTable(bat.size());
+    const auto region_table = MakeRegionTable(
+        devicefs::terminal::FailFastMaybeCast<std::uint64_t>(bat.size()));
     CopyBytes(prefix, 192 * 1024, region_table);
     CopyBytes(prefix, 256 * 1024, region_table);
 
@@ -675,18 +684,24 @@ auto ApplyNtfsIdentityOverlay(
     if (!overlay) {
         return;
     }
-    const auto source_end = source_offset + output.size();
+    const auto source_end = source_offset +
+        devicefs::terminal::FailFastMaybeCast<std::uint64_t>(output.size());
     for (const auto &patch : overlay->patches) {
-        const auto patch_end = patch.offset + patch.bytes.size();
+        const auto patch_end = patch.offset +
+            CompileTimeCast<std::uint64_t, patch.bytes.size()>();
         const auto overlap_begin = std::max(source_offset, patch.offset);
         const auto overlap_end = std::min(source_end, patch_end);
         if (overlap_begin >= overlap_end) {
             continue;
         }
-        const auto count = overlap_end - overlap_begin;
-        CopyBytes(output, overlap_begin - source_offset,
+        const auto count = devicefs::terminal::FailFastMaybeCast<std::size_t>(
+            overlap_end - overlap_begin);
+        CopyBytes(output,
+            devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                overlap_begin - source_offset),
             std::span{patch.bytes}.subspan(
-                overlap_begin - patch.offset, count));
+                devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                    overlap_begin - patch.offset), count));
     }
 }
 
@@ -718,7 +733,9 @@ public:
         auto output = std::span{
             static_cast<std::byte *>(buffer), wanted};
         const auto copy_generated = [&](const std::span<const std::byte> source,
-                                        const std::uint64_t source_position) {
+                                        const std::uint64_t position) {
+            const auto source_position =
+                devicefs::terminal::FailFastMaybeCast<std::size_t>(position);
             const auto count = std::min<std::size_t>(
                 output.size(), source.size() - source_position);
             vhdx_detail::CopyBytes(
@@ -739,12 +756,16 @@ public:
             return copy_generated(prefix_, offset);
         }
 
-        const auto virtual_position = offset - prefix_.size();
+        const auto virtual_position = offset -
+            devicefs::terminal::FailFastMaybeCast<std::uint64_t>(
+                prefix_.size());
         if (virtual_position < gpt_prefix_.size()) {
             return copy_generated(gpt_prefix_, virtual_position);
         }
 
-        const auto source_begin = gpt_prefix_.size();
+        const auto source_begin =
+            devicefs::terminal::FailFastMaybeCast<std::uint64_t>(
+                gpt_prefix_.size());
         const auto source_end = source_begin + source_.length;
         if (virtual_position < source_end) {
             const auto source_offset = virtual_position - source_begin;

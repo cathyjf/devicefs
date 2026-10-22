@@ -1021,18 +1021,21 @@ template <bool AsVhdx, bool ExposeKnownDataMap, BlockDevice... SourceTypes>
             }
             auto bitmap = device->MakeKnownDataMap(
                 *options.known_data_map_cluster_size);
+            const auto bitmap_length =
+                devicefs::terminal::FailFastMaybeCast<std::uint64_t>(
+                    bitmap.size());
             const auto name = mapping.name + kKnownDataMapSuffix;
             files.emplace(name, DeviceFile<DeviceType>{
                 .name = name,
                 .info = {
                     .FileAttributes = FILE_ATTRIBUTE_READONLY,
-                    .AllocationSize = bitmap.size(),
-                    .FileSize = bitmap.size(),
+                    .AllocationSize = bitmap_length,
+                    .FileSize = bitmap_length,
                     .IndexNumber = next_index++,
                 },
                 .device = VariantFromBlockDevice<DeviceType>(
                     MemoryBlockDevice{
-                        .length = bitmap.size(),
+                        .length = bitmap_length,
                         .contents = std::move(bitmap),
                     }),
             });

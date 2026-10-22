@@ -790,7 +790,8 @@ auto AppendDifferingClusters(
     const std::uint64_t block_offset,
     const std::uint32_t cluster_size,
     std::vector<std::uint64_t> &clusters) -> void {
-    const auto block_end = block_offset + baseline.size();
+    const auto block_end = block_offset +
+        devicefs::terminal::FailFastMaybeCast<std::uint64_t>(baseline.size());
     const auto first_cluster = block_offset / cluster_size;
     const auto past_last_cluster =
         ((block_end - 1) / cluster_size) + 1;
@@ -800,8 +801,11 @@ auto AppendDifferingClusters(
         const auto cluster_end = cluster_start + cluster_size;
         const auto start = std::max(block_offset, cluster_start);
         const auto end = std::min(block_end, cluster_end);
-        const auto relative = start - block_offset;
-        const auto size = end - start;
+        const auto relative =
+            devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                start - block_offset);
+        const auto size = devicefs::terminal::FailFastMaybeCast<std::size_t>(
+            end - start);
         const auto baseline_cluster = baseline.subspan(relative, size);
         const auto mismatch = std::ranges::mismatch(
             baseline_cluster, payload.subspan(relative, size));
@@ -847,7 +851,8 @@ auto AppendDifferingClusters(
             continue;
         }
 
-        const auto block_offset = chunk_offset + relative;
+        const auto block_offset = chunk_offset +
+            devicefs::terminal::FailFastMaybeCast<std::uint64_t>(relative);
         while ((next_dirty != dirty_end) &&
             (*next_dirty < block_offset)) {
             ++next_dirty;
@@ -865,7 +870,9 @@ auto AppendDifferingClusters(
         if (!result.first_uncovered) {
             result.first_uncovered = UnexpectedDifference{
                 .block_offset = block_offset,
-                .byte_offset = chunk_offset + first_relative,
+                .byte_offset = chunk_offset +
+                    devicefs::terminal::FailFastMaybeCast<std::uint64_t>(
+                        first_relative),
                 .baseline = *mismatch.in1,
                 .payload = *mismatch.in2,
             };
@@ -914,8 +921,10 @@ auto VerifySnapshotRange(
                 wil::event_is_signaled(cancellation_event)) {
                 return;
             }
-            const auto size = std::min<std::uint64_t>(
-                kComparisonChunkSize, range_end - offset);
+            const auto size =
+                devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                    std::min<std::uint64_t>(
+                        kComparisonChunkSize, range_end - offset));
             const auto baseline_chunk =
                 std::span{baseline_storage.get(), kComparisonChunkSize}
                     .first(size);
@@ -934,11 +943,13 @@ auto VerifySnapshotRange(
                 baseline_chunk, offset);
             allocation.payload.SynthesizeFreeClusters(
                 payload_chunk, offset);
-            state.Record(size, CompareVerificationChunk(
-                baseline_chunk, payload_chunk, offset,
-                cluster_size,
-                volume.map.has_value(),
-                next_dirty, dirty_end));
+            state.Record(
+                devicefs::terminal::FailFastMaybeCast<std::uint64_t>(size),
+                CompareVerificationChunk(
+                    baseline_chunk, payload_chunk, offset,
+                    cluster_size,
+                    volume.map.has_value(),
+                    next_dirty, dirty_end));
         }
     } catch (const std::runtime_error &error) {
         state.Fail(error.what());
@@ -956,10 +967,12 @@ struct VerificationRange {
     const auto chunk_count =
         volume_size / kComparisonChunkSize +
         ((volume_size % kComparisonChunkSize) != 0);
+    const auto worker_index =
+        devicefs::terminal::FailFastMaybeCast<std::uint64_t>(worker);
     const auto first_chunk =
-        (chunk_count * worker) / kVerificationWorkerCount;
+        (chunk_count * worker_index) / kVerificationWorkerCount;
     const auto past_last_chunk =
-        (chunk_count * (worker + 1)) / kVerificationWorkerCount;
+        (chunk_count * (worker_index + 1)) / kVerificationWorkerCount;
     return VerificationRange{
         .start = first_chunk * kComparisonChunkSize,
         .end = std::min<std::uint64_t>(

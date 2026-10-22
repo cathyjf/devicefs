@@ -341,7 +341,8 @@ class RawSource {
         const auto buffer_size = devicefs::vss::kBlockSize +
             ((sector_size_ == 0) ? 0 : (2 * (std::uint64_t{sector_size_} - 1)));
         auto buffer = NewAlignedBuffer<std::byte>(
-            buffer_size, buffer_alignment);
+            devicefs::terminal::FailFastMaybeCast<std::size_t>(buffer_size),
+            buffer_alignment);
         if (!buffer) {
             WinError("failed to allocate a {}-byte VSS metadata buffer "
                 "with {}-byte alignment", buffer_size,

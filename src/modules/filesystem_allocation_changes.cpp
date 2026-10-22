@@ -115,10 +115,7 @@ auto ReadAllocationChangeBlocks(
             current_bitmap.cluster_count, current_bitmap.cluster_size));
     }
 
-    const auto bitmap_size =
-        previous_bitmap.cluster_count / filesystem_internal::kBitsPerByte +
-        ((previous_bitmap.cluster_count %
-            filesystem_internal::kBitsPerByte) != 0);
+    const auto bitmap_size = previous_bitmap.BitmapByteCount();
     const auto previous_bits = std::as_bytes(std::span{
         previous_bitmap.storage.get() +
             filesystem_internal::kVolumeBitmapHeaderSize,
@@ -165,7 +162,8 @@ auto ReadAllocationChangeBlocks(
         }
         while (changed != 0) {
             const auto cluster =
-                byte_index * filesystem_internal::kBitsPerByte +
+                devicefs::terminal::FailFastMaybeCast<std::uint64_t>(
+                    byte_index) * filesystem_internal::kBitsPerByte +
                 devicefs::terminal::FailFastCast<std::uint64_t>(
                     CountTrailingZeros(changed));
             if (cluster >= previous_bitmap.cluster_count) {

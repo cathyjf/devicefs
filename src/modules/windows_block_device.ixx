@@ -196,8 +196,9 @@ struct AllocationBitmap {
 
     [[nodiscard, msvc::forceinline]]
     constexpr auto BitmapByteCount() const noexcept -> std::size_t {
-        return cluster_count / kBitsPerByte +
-            ((cluster_count % kBitsPerByte) != 0);
+        return devicefs::terminal::FailFastMaybeCast<std::size_t>(
+            cluster_count / kBitsPerByte +
+            ((cluster_count % kBitsPerByte) != 0));
     }
 
     // Search [first, limit) for an allocated cluster (a set bit) or a free
@@ -243,7 +244,9 @@ struct AllocationBitmap {
         constexpr auto nonmatching_word = allocated ? UINT64{} : MAXUINT64;
         const auto first_bit = first % bits_per_word;
         const auto first_word = first - first_bit;
-        const auto first_word_offset = first_word / kBitsPerByte;
+        const auto first_word_offset =
+            devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                first_word / kBitsPerByte);
         const auto first_matching =
             (LoadBitmapWord(bytes + first_word_offset,
                 byte_count - first_word_offset) ^
@@ -263,9 +266,12 @@ struct AllocationBitmap {
         std::conditional_t<std::same_as<Result, bool>, const UINT64, UINT64>
             word_begin = first_word + bits_per_word;
         const auto word_limit = limit - (limit % bits_per_word);
-        const auto complete_words_offset = word_begin / kBitsPerByte;
+        const auto complete_words_offset =
+            devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                word_begin / kBitsPerByte);
         const auto complete_words_size =
-            (word_limit - word_begin) / kBitsPerByte;
+            devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                (word_limit - word_begin) / kBitsPerByte);
         const auto *cursor = bytes + complete_words_offset;
         if constexpr (std::same_as<Result, bool>) {
             // PBS reads are usually about 2 MiB, but intervening layers may
@@ -313,7 +319,9 @@ struct AllocationBitmap {
             }
         }
         if (word_limit != limit) {
-            const auto final_word_offset = word_limit / kBitsPerByte;
+            const auto final_word_offset =
+                devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                    word_limit / kBitsPerByte);
             const auto mask =
                 MAXUINT64 >> (bits_per_word - (limit - word_limit));
             const auto matching =
@@ -371,7 +379,8 @@ struct AllocationBitmap {
         const auto *const bytes = BitmapData();
         const auto byte_count = BitmapByteCount();
         const auto shift = cluster_shift;
-        const auto end = offset + output_size;
+        const auto end = offset +
+            devicefs::terminal::FailFastMaybeCast<UINT64>(output_size);
         const auto first_cluster = offset >> shift;
         // Bytes beyond the volume's cluster count must retain their source contents.
         const auto limit = std::min(cluster_count, ((end - 1) >> shift) + 1);
@@ -390,7 +399,8 @@ struct AllocationBitmap {
             const auto free_begin = std::max(offset, free_cluster << shift);
             const auto free_end = std::min(end, cluster << shift);
             std::memset(output + (free_begin - offset), 0,
-                free_end - free_begin);
+                devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                    free_end - free_begin));
         }
     }
 };
@@ -519,7 +529,8 @@ struct WindowsBlockDevice
         constexpr auto bits_per_byte = filesystem_internal::kBitsPerByte;
         const auto chunks = length / chunk_size + ((length % chunk_size) != 0);
         const auto bytes = chunks / bits_per_byte + ((chunks % bits_per_byte) != 0);
-        auto result = std::vector<unsigned char>(bytes);
+        auto result = std::vector<unsigned char>(
+            devicefs::terminal::FailFastMaybeCast<std::size_t>(bytes));
         for (auto chunk = std::uint64_t{}; chunk < chunks; ++chunk) {
             const auto offset = chunk * chunk_size;
             // For a nonempty device, the last chunk index is `(length - 1) / chunk_size`.
@@ -537,7 +548,8 @@ struct WindowsBlockDevice
             // Thus, `count <= (length - offset)` implies `count <= (MAXUINT64 - offset)`.
             _Analysis_assume_(count <= (MAXUINT64 - offset));
             if (allocation_bitmap.HasAllocatedClusters(offset, count)) {
-                result.at(chunk / bits_per_byte) |=
+                result.at(devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                    chunk / bits_per_byte)) |=
                     devicefs::terminal::FailFastCast<unsigned char>(
                         1u << (chunk % bits_per_byte));
             }

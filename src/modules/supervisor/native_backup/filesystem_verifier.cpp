@@ -458,7 +458,8 @@ public:
         const VerificationEndpoint endpoint,
         const std::size_t count) noexcept -> void {
         Inventory(endpoint).tasks_discovered.fetch_add(
-            count, std::memory_order_relaxed);
+            devicefs::terminal::FailFastMaybeCast<std::uint64_t>(count),
+            std::memory_order_relaxed);
     }
 
     auto SetPhase(const VerificationPhase phase) noexcept -> void {
@@ -472,7 +473,8 @@ public:
         auto &inventory = Inventory(endpoint);
         inventory.objects.fetch_add(1, std::memory_order_relaxed);
         inventory.streams.fetch_add(
-            stream_count, std::memory_order_relaxed);
+            devicefs::terminal::FailFastMaybeCast<std::uint64_t>(stream_count),
+            std::memory_order_relaxed);
         AddSaturating(inventory.stream_bytes, stream_bytes);
     }
 
@@ -512,7 +514,9 @@ public:
     }
 
     auto RecordCompared(const std::size_t bytes) noexcept -> void {
-        observation_.compared_bytes.fetch_add(bytes, std::memory_order_relaxed);
+        observation_.compared_bytes.fetch_add(
+            devicefs::terminal::FailFastMaybeCast<std::uint64_t>(bytes),
+            std::memory_order_relaxed);
     }
 
     auto CompleteComparison() noexcept -> void {
@@ -1847,7 +1851,9 @@ public:
             state_.RecordContentMismatch(
                 synthetic_object.relative_path,
                 synthetic_stream.name,
-                task.offset + first_relative,
+                task.offset +
+                    devicefs::terminal::FailFastMaybeCast<std::int64_t>(
+                        first_relative),
                 *first.in1, *first.in2, differing_bytes);
         }
         state_.RecordCompared(compared_length);

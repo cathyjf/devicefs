@@ -17,6 +17,7 @@
 export module devicefs.filesystem_measurement;
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import devicefs.stream_writer;
 
@@ -30,7 +31,9 @@ export class FreeClusterMeasurement {
         const std::span<const unsigned char> bitmap,
         const std::uint64_t cluster_count) noexcept {
         auto allocated_clusters = std::uint64_t{};
-        const auto full_bytes = cluster_count / kBitsPerByte;
+        const auto full_bytes =
+            devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                cluster_count / kBitsPerByte);
         for (auto i = 0uz; i < full_bytes; ++i) {
             allocated_clusters += std::popcount(bitmap[i]);
         }
@@ -46,12 +49,15 @@ export class FreeClusterMeasurement {
         if (cluster >= cluster_count_) {
             return true;
         }
-        return (bitmap_[cluster / kBitsPerByte] &
+        return (bitmap_[devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                    cluster / kBitsPerByte)] &
             (1u << (cluster % kBitsPerByte))) != 0;
     }
 
     [[nodiscard]] auto Claim(const std::uint64_t cluster) noexcept {
-        const auto word_index = cluster / kClustersPerClaimWord;
+        const auto word_index =
+            devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                cluster / kClustersPerClaimWord);
         const auto mask = 1ULL << (cluster % kClustersPerClaimWord);
         return (claims_[word_index].fetch_or(
             mask, std::memory_order_relaxed) & mask) == 0;
@@ -66,8 +72,9 @@ public:
           cluster_size_(cluster_size),
           cluster_count_(cluster_count),
           claims_(std::make_unique<std::atomic<std::uint64_t>[]>(
-              cluster_count / kClustersPerClaimWord +
-              ((cluster_count % kClustersPerClaimWord) != 0))),
+              devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                  cluster_count / kClustersPerClaimWord +
+                  ((cluster_count % kClustersPerClaimWord) != 0)))),
           total_free_clusters_(CountFreeClusters(bitmap, cluster_count)) {
     }
 
@@ -78,7 +85,8 @@ public:
             return;
         }
 
-        const auto end = offset + data.size();
+        const auto end = offset +
+            devicefs::terminal::FailFastMaybeCast<std::uint64_t>(data.size());
         const auto first_cluster = offset / cluster_size_;
         const auto last_cluster = (end - 1) / cluster_size_;
         auto fully_examined_clusters = std::uint64_t{};
@@ -97,7 +105,10 @@ public:
             ++fully_examined_clusters;
             auto cluster_nonzero_bytes = std::uint64_t{};
             const auto cluster_data = data.subspan(
-                cluster_begin - offset, cluster_size_);
+                devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                    cluster_begin - offset),
+                devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                    cluster_size_));
             for (const auto value : cluster_data) {
                 cluster_nonzero_bytes += value != 0;
             }

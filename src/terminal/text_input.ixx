@@ -156,6 +156,8 @@ public:
             std::ranges::lower_bound(positions_, cursor_, {}, &Position::offset) - positions_.begin());
         const auto &position = positions_.at(index);
         const auto before = cursor_;
+        const auto repeat_count =
+            devicefs::terminal::FailFastMaybeCast<std::size_t>(input.repeat);
         switch (input.key) {
         case MenuKey::Text:
         case MenuKey::Newline: {
@@ -169,14 +171,16 @@ public:
             return true;
         }
         case MenuKey::Left:
-            cursor_ = positions_.at(index - std::min<std::size_t>(index, input.repeat)).offset;
+            cursor_ = positions_.at(
+                index - std::min(index, repeat_count)).offset;
             break;
         case MenuKey::Right:
             cursor_ = positions_.at(index +
-                std::min<std::size_t>(positions_.size() - index - 1, input.repeat)).offset;
+                std::min(positions_.size() - index - 1, repeat_count)).offset;
             break;
         case MenuKey::Backspace: {
-            const auto begin = positions_.at(index - std::min<std::size_t>(index, input.repeat)).offset;
+            const auto begin = positions_.at(
+                index - std::min(index, repeat_count)).offset;
             value_.erase(begin, cursor_ - begin);
             cursor_ = begin;
             preferred_column_.reset();
@@ -184,7 +188,7 @@ public:
         }
         case MenuKey::Delete: {
             const auto end = positions_.at(index +
-                std::min<std::size_t>(positions_.size() - index - 1, input.repeat)).offset;
+                std::min(positions_.size() - index - 1, repeat_count)).offset;
             value_.erase(cursor_, end - cursor_);
             preferred_column_.reset();
             return end != cursor_;
@@ -199,9 +203,12 @@ public:
             if (vertical && !preferred_column_) {
                 preferred_column_ = position.column;
             }
-            const auto distance = std::min<std::int64_t>(positions_.back().row,
-                std::int64_t{input.repeat} *
-                    (((input.key == MenuKey::PageUp) || (input.key == MenuKey::PageDown)) ? height_ : 1));
+            const auto distance = std::min<std::int64_t>(
+                positions_.back().row,
+                devicefs::terminal::FailFastMaybeCast<std::int64_t>(
+                    input.repeat) *
+                    (((input.key == MenuKey::PageUp) ||
+                        (input.key == MenuKey::PageDown)) ? height_ : 1));
             const auto row = FailFastCast<int>(std::clamp<std::int64_t>(position.row +
                 (((input.key == MenuKey::Up) || (input.key == MenuKey::PageUp)) ? -distance :
                     (vertical ? distance : 0)), 0, positions_.back().row));

@@ -22,7 +22,7 @@ export namespace devicefs::terminal {
 // target type. A value outside that range violates the caller's invariant, so
 // failure terminates the process. The constraint admits only conversions for
 // which the source type's full range does not fit in the target; conversions
-// already safe for every source value use ordinary initialization instead.
+// already safe for every source value are excluded.
 template <std::integral Target, std::integral Source>
     requires ((std::numeric_limits<Target>::digits <
         std::numeric_limits<Source>::digits) ||
@@ -54,7 +54,8 @@ template <class Target, auto... Constant, class... Source>
     requires ((sizeof...(Constant) + sizeof...(Source)) == 1)
 [[nodiscard]]
 ATTRIBUTE_FORCEINLINE
-constexpr decltype(auto) CompileTimeCast(Source &&...input) {
+constexpr decltype(auto) CompileTimeCast(Source &&...input)
+    noexcept(noexcept(Target{Constant..., std::forward<Source>(input)...})) {
     GSL_SUPPRESS("26493",
         "C26493 misidentifies this braced initialization as a C-style "
         "cast. The language rejects narrowing conversions here, including "
@@ -62,6 +63,20 @@ constexpr decltype(auto) CompileTimeCast(Source &&...input) {
         "centralized helper function allows the suppression to exist in "
         "only one place.")
     return Target{Constant..., std::forward<Source>(input)...};
+}
+
+// Convert an integer, checking its range only when the source type can hold
+// values outside the target type's range. This supports conversions whose
+// need for a check depends on implementation-defined integer widths.
+template <std::integral Target, std::integral Source>
+[[nodiscard]]
+ATTRIBUTE_FORCEINLINE
+constexpr auto FailFastMaybeCast(const Source input) noexcept -> Target {
+    if constexpr (requires { FailFastCast<Target>(input); }) {
+        return FailFastCast<Target>(input);
+    } else {
+        return CompileTimeCast<Target>(input);
+    }
 }
 
 }

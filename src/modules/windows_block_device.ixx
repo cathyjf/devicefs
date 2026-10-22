@@ -267,15 +267,16 @@ struct AllocationBitmap {
             (word_limit - word_begin) / kBitsPerByte;
         const auto *cursor = bytes + complete_words_offset;
         if constexpr (std::same_as<Result, bool>) {
-            // PBS reads are usually about 2 MiB, but intervening layers may combine
-            // requests. A 128-byte reference lets the complete-word bitmap scan for a
-            // 4 MiB read use one `memcmp` call at the common 4 KiB cluster size.
-            // Shorter scans compare only the required prefix, so the extra capacity
-            // adds no comparison work to those reads.
+            // PBS reads are usually about 2 MiB, but intervening layers may
+            // combine requests. A 128-byte reference lets the complete-word
+            // bitmap scan for a 4 MiB read use one `std::mismatch` call at the
+            // common 4 KiB cluster size. Shorter scans compare only the required
+            // prefix, so the extra capacity adds no comparison work to those
+            // reads.
             //
-            // This capacity is chosen for the expected workload. NTFS permits clusters
-            // as small as 512 bytes; their longer bitmap scans reuse the reference
-            // over multiple comparisons.
+            // This capacity is chosen for the expected workload. NTFS permits
+            // clusters as small as 512 bytes; their longer bitmap scans reuse
+            // the reference over multiple comparisons.
             alignas(std::hardware_constructive_interference_size)
             static constexpr auto nonmatching_bytes = [] {
                 auto result = std::array<BYTE, 128>{};
@@ -287,7 +288,13 @@ struct AllocationBitmap {
             while (remaining != 0) {
                 const auto count = std::min<decltype(remaining)>(
                     remaining, nonmatching_bytes.size());
-                if (std::memcmp(cursor, nonmatching_bytes.data(), count) != 0) {
+                const auto *const end = cursor + count;
+                [[gsl::suppress("26459", justification:
+                    "`std::mismatch` examines at most `end - cursor` elements "
+                    "of the second range. That length is `count`, which is "
+                    "bounded by `nonmatching_bytes.size()`.")]]
+                if (std::mismatch(cursor, end,
+                        nonmatching_bytes.data()).first != end) {
                     return true;
                 }
                 cursor += count;

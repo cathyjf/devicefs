@@ -802,9 +802,10 @@ auto AppendDifferingClusters(
         const auto relative = wil::safe_cast_failfast<std::size_t>(
             start - block_offset);
         const auto size = wil::safe_cast_failfast<std::size_t>(end - start);
-        if (!std::ranges::equal(
-                baseline.subspan(relative, size),
-                payload.subspan(relative, size))) {
+        const auto baseline_cluster = baseline.subspan(relative, size);
+        const auto mismatch = std::ranges::mismatch(
+            baseline_cluster, payload.subspan(relative, size));
+        if (mismatch.in1 != baseline_cluster.end()) {
             clusters.push_back(cluster);
         }
     }

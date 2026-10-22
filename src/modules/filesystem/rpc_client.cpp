@@ -21,6 +21,7 @@ module;
 module devicefs.filesystem:rpc_client;
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import <devicefs/rpc_block_device.h>;
 import :internal;
@@ -131,11 +132,12 @@ constexpr auto kTcpUsername = "devicefs"sv;
             password.begin(), password.end()};
     auto identity = SEC_WINNT_AUTH_IDENTITY_A{
         .User = username.data(),
-        .UserLength = wil::safe_cast_failfast<ULONG>(username.size()),
+        .UserLength = devicefs::terminal::FailFastCast<ULONG>(username.size()),
         .Domain = nullptr,
         .DomainLength = 0,
         .Password = encoded_password.data(),
-        .PasswordLength = wil::safe_cast_failfast<ULONG>(encoded_password.size()),
+        .PasswordLength = devicefs::terminal::FailFastCast<ULONG>(
+            encoded_password.size()),
         .Flags = SEC_WINNT_AUTH_IDENTITY_ANSI,
     };
     const auto error = RpcBindingSetAuthInfoA(

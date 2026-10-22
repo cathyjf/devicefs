@@ -21,6 +21,7 @@ module;
 export module devicefs.windows_block_device;
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import devicefs.allocation;
 import <devicefs/common.h>;
@@ -518,8 +519,7 @@ struct WindowsBlockDevice
         constexpr auto bits_per_byte = filesystem_internal::kBitsPerByte;
         const auto chunks = length / chunk_size + ((length % chunk_size) != 0);
         const auto bytes = chunks / bits_per_byte + ((chunks % bits_per_byte) != 0);
-        auto result = std::vector<unsigned char>(
-            wil::safe_cast_failfast<std::size_t>(bytes));
+        auto result = std::vector<unsigned char>(bytes);
         for (auto chunk = std::uint64_t{}; chunk < chunks; ++chunk) {
             const auto offset = chunk * chunk_size;
             // For a nonempty device, the last chunk index is `(length - 1) / chunk_size`.
@@ -538,7 +538,8 @@ struct WindowsBlockDevice
             _Analysis_assume_(count <= (MAXUINT64 - offset));
             if (allocation_bitmap.HasAllocatedClusters(offset, count)) {
                 result.at(chunk / bits_per_byte) |=
-                    wil::safe_cast_failfast<unsigned char>(1u << (chunk % bits_per_byte));
+                    devicefs::terminal::FailFastCast<unsigned char>(
+                        1u << (chunk % bits_per_byte));
             }
         }
         return result;
@@ -699,7 +700,8 @@ namespace devicefs::filesystem_internal {
                 ExplicitWin32Error{error});
         }
         return std::pair{
-            wil::safe_cast_failfast<UINT64>(volume.TotalClusters.QuadPart),
+            devicefs::terminal::FailFastCast<UINT64>(
+                volume.TotalClusters.QuadPart),
             volume.BytesPerCluster};
     };
     const auto [cluster_count, cluster_size] =
@@ -888,7 +890,7 @@ auto WindowsBlockDevice<HasAllocationBitmap>::FromHandle(
     }
 
     const auto size =
-        wil::safe_cast_failfast<UINT64>(length.Length.QuadPart);
+        devicefs::terminal::FailFastCast<UINT64>(length.Length.QuadPart);
     if ((size % kAdvertisedSectorSize) != 0) {
         throw std::runtime_error(std::format(
             "block device '{}' has a {}-byte length that is not a multiple of "

@@ -21,6 +21,7 @@ module;
 export module devicefs.filesystem;
 
 import std;
+import devicefs.terminal.safecast;
 import :internal;
 import :rpc_client;
 import :winfsp_loader;
@@ -809,8 +810,9 @@ private:
                 const auto name_bytes = file.name.size() * sizeof(wchar_t);
                 // Filename validation bounds the record by
                 // kMaxDirectoryInfoSize, which is asserted to fit this field.
-                info->Size = wil::safe_cast_failfast<decltype(info->Size)>(
-                    sizeof(FSP_FSCTL_DIR_INFO) + name_bytes);
+                info->Size = devicefs::terminal::FailFastCast<
+                    decltype(info->Size)>(
+                        sizeof(FSP_FSCTL_DIR_INFO) + name_bytes);
                 info->FileInfo = file.info;
                 std::memcpy(info->FileNameBuf, file.name.data(), name_bytes);
                 if (!FspFileSystemAddDirInfo(info, buffer, length, transferred)) {

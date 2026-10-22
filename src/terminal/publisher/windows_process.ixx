@@ -8,12 +8,12 @@ module;
 // WIL's shared resource owners require `<memory>` before `<wil/resource.h>`.
 #include <memory>
 #include <wil/resource.h>
-#include <wil/safecast.h>
 #include <wil/win32_helpers.h>
 
 export module devicefs.publisher.windows_process;
 
 import std;
+import devicefs.terminal.safecast;
 export import devicefs.publisher.base_process;
 import devicefs.terminal.scope_exit;
 
@@ -177,9 +177,10 @@ public:
                     const std::string input) {
                     auto remaining = std::string_view{input};
                     while (!remaining.empty()) {
-                        const auto requested = wil::safe_cast_failfast<DWORD>(
-                            std::min(remaining.size(),
-                                windows_detail::kIoChunkSize));
+                        const auto requested =
+                            devicefs::terminal::FailFastCast<DWORD>(
+                                std::min(remaining.size(),
+                                    windows_detail::kIoChunkSize));
                         const auto count = windows_detail::Transfer(writer,
                             [&writer, remaining, requested](auto *const count,
                                 auto *const pending) {
@@ -245,7 +246,8 @@ private:
             const auto count = windows_detail::Transfer(source,
                 [&source, &buffer](auto *const count, auto *const pending) {
                     return ReadFile(source.pipe.get(), buffer.data(),
-                        wil::safe_cast_failfast<DWORD>(buffer.size()),
+                        devicefs::terminal::CompileTimeCast<
+                            DWORD, buffer.size()>(),
                         count, pending);
                 }, true);
             if (!count) {

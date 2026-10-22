@@ -21,6 +21,7 @@ module;
 export module devicefs.svi_extents;
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import devicefs.vss_block_descriptors;
@@ -130,8 +131,8 @@ private:
             const auto lcn = output.Extents[0].Lcn.QuadPart;
             if (lcn >= 0) {
                 AddRange(
-                    wil::safe_cast_failfast<std::uint64_t>(lcn),
-                    wil::safe_cast_failfast<std::uint64_t>(
+                    devicefs::terminal::FailFastCast<std::uint64_t>(lcn),
+                    devicefs::terminal::FailFastCast<std::uint64_t>(
                         next_vcn - current_vcn));
             }
 

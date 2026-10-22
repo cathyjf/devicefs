@@ -14,6 +14,7 @@
 #include <devicefs/strsafe_compat.h>
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import devicefs.allocation;
 import <devicefs/common.h>;
@@ -165,7 +166,8 @@ auto CheckBitmap(const std::span<const BYTE> bits,
 // uniform and alternating regions, isolated differing bits, and random ranges.
 auto TestBitmaps() -> void {
     for (auto pattern = 0u; pattern <= 255; ++pattern) {
-        const auto bits = std::array{wil::safe_cast_failfast<BYTE>(pattern)};
+        const auto bits = std::array{
+            devicefs::terminal::FailFastCast<BYTE>(pattern)};
         CheckBitmap(bits, 8);
     }
     std::println("PASS: all 256 one-byte bitmap patterns match the per-bit search and zeroing.");
@@ -189,7 +191,8 @@ auto TestBitmaps() -> void {
     for (auto bit = 0uz; bit < 129; ++bit) {
         for (const auto pattern : {BYTE{0}, BYTE{0xff}}) {
             auto bits = std::vector<BYTE>((129 + 7) / 8, pattern);
-            bits.at(bit / 8) ^= wil::safe_cast_failfast<BYTE>(1u << (bit % 8));
+            bits.at(bit / 8) ^=
+                devicefs::terminal::FailFastCast<BYTE>(1u << (bit % 8));
             CheckBitmap(bits, 129);
         }
     }
@@ -206,7 +209,7 @@ auto TestBitmaps() -> void {
         for (auto bit = 0uz; bit <= comparison_clusters; ++bit) {
             if (bit != comparison_clusters) {
                 bits.at(bit >> 3) ^=
-                    wil::safe_cast_failfast<BYTE>(1u << (bit & 7));
+                    devicefs::terminal::FailFastCast<BYTE>(1u << (bit & 7));
             }
             const auto bitmap = MakeBitmap(bits, comparison_clusters, 1);
             for (const auto first : {0uz, 1uz, 7uz, 8uz, 63uz, 64uz, 65uz}) {
@@ -220,7 +223,7 @@ auto TestBitmaps() -> void {
             }
             if (bit != comparison_clusters) {
                 bits.at(bit >> 3) ^=
-                    wil::safe_cast_failfast<BYTE>(1u << (bit & 7));
+                    devicefs::terminal::FailFastCast<BYTE>(1u << (bit & 7));
             }
         }
     }
@@ -238,7 +241,7 @@ auto TestBitmaps() -> void {
         const auto cluster_size = std::uint32_t{1} << (random() % 13);
         auto bits = std::vector<BYTE>((clusters + 7) / 8);
         std::ranges::generate(bits, [&random, &octet] {
-            return wil::safe_cast_failfast<BYTE>(octet(random));
+            return devicefs::terminal::FailFastCast<BYTE>(octet(random));
         });
         const auto bitmap = MakeBitmap(bits, clusters, cluster_size);
         const auto end = (clusters + 2) * cluster_size;
@@ -264,7 +267,7 @@ auto TestReads() -> void {
     // Including higher offset bits prevents the contents from repeating every
     // 256 bytes, which could conceal a read from the wrong sector.
     for (auto index = 0uz; index < contents.size(); ++index) {
-        contents.at(index) = wil::safe_cast_failfast<BYTE>(
+        contents.at(index) = devicefs::terminal::FailFastCast<BYTE>(
             (index ^ (index >> 8) ^ (index >> 16)) & 0xff);
     }
     const auto filename = std::filesystem::temp_directory_path() /
@@ -293,7 +296,8 @@ auto TestReads() -> void {
     Device::read_buffer_alignment = device.buffer_alignment;
     auto operation = OVERLAPPED{};
     if (!WriteFile(device.handle.get(), contents.data(),
-            wil::safe_cast_failfast<DWORD>(contents.size()), nullptr, &operation)) {
+            devicefs::terminal::FailFastCast<DWORD>(contents.size()),
+            nullptr, &operation)) {
         const auto error = GetLastError();
         if (error != ERROR_IO_PENDING) {
             WinError("could not write read-test file '{}'",
@@ -318,7 +322,7 @@ auto TestReads() -> void {
     }
     const auto check = [&device, &contents, &allocation_bits](const std::uint64_t offset,
                            const std::size_t count) {
-        const auto wanted = wil::safe_cast_failfast<ULONG>(count);
+        const auto wanted = devicefs::terminal::FailFastCast<ULONG>(count);
         if ((wanted == 0) || (offset >= device.length) ||
             (wanted > (device.length - offset))) {
             throw std::invalid_argument(std::format(

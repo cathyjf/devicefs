@@ -92,7 +92,7 @@ using namespace wil::literals;
     auto label = std::array<wchar_t, MAX_PATH + 1>{};
     if (!GetVolumeInformationW(
             volume.c_str(), label.data(),
-            wil::safe_cast_failfast<DWORD>(label.size()),
+            CompileTimeCast<DWORD, label.size()>(),
             nullptr, nullptr, nullptr, nullptr, 0)) {
         return std::wstring{};
     }

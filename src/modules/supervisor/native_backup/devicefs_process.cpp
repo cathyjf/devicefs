@@ -21,6 +21,7 @@ module;
 module devicefs.supervisor.native_backup:devicefs_process;
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import :internal;
 import <devicefs/common.h>;
@@ -145,7 +146,8 @@ struct DeviceFsStartRequest {
             if (value.empty()) {
                 return;
             }
-            const auto size = wil::safe_cast_failfast<DWORD>(value.size_bytes());
+            const auto size =
+                devicefs::terminal::FailFastCast<DWORD>(value.size_bytes());
             auto written = DWORD{};
             if (!WriteFile(output, value.data(), size, &written, nullptr)) {
                 WinError("could not write the devicefs RPC password");

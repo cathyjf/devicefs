@@ -21,6 +21,7 @@ module;
 module devicefs.supervisor.native_backup:s4u_logon;
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import devicefs.supervisor.process_privileges;
 import <devicefs/common.h>;
@@ -219,7 +220,7 @@ template <std::size_t Size>
                 };
                 std::ranges::copy(text, storage.begin());
                 storage.back() = L'\0';
-                const auto length = wil::safe_cast_failfast<USHORT>(
+                const auto length = devicefs::terminal::FailFastCast<USHORT>(
                     text.size() * sizeof(wchar_t));
                 next_string_storage += storage.size_bytes();
                 return UNICODE_STRING{
@@ -277,7 +278,7 @@ template <std::size_t Size>
     // <https://learn.microsoft.com/en-us/windows/win32/api/ntsecapi/nf-ntsecapi-lsaaddaccountrights>
     const auto logon = LsaLogonUser(
         lsa.get(), &lsa_name, Batch, authentication_package,
-        &request, wil::safe_cast_failfast<ULONG>(request_size),
+        &request, devicefs::terminal::FailFastCast<ULONG>(request_size),
         nullptr, &source, wil::out_param(profile), &profile_size,
         &logon_id, token.addressof(), &quotas, &substatus);
     if (logon != 0) {

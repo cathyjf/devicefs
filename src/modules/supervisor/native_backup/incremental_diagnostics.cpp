@@ -23,6 +23,7 @@ module;
 module devicefs.supervisor.native_backup;
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import :devicefs_process;
 import :filesystem_verifier;
@@ -750,7 +751,7 @@ auto SeekVerificationSnapshot(
     const std::string_view description,
     const std::string_view source) -> void {
     const auto position = LARGE_INTEGER{
-        .QuadPart = wil::safe_cast_failfast<LONGLONG>(offset),
+        .QuadPart = devicefs::terminal::FailFastCast<LONGLONG>(offset),
     };
     if (!SetFilePointerEx(snapshot, position, nullptr, FILE_BEGIN)) {
         WinError("could not seek {} '{}' to offset 0x{:x} for incremental verification",
@@ -765,7 +766,7 @@ auto ReadVerificationChunk(
     const std::string_view description,
     const std::string_view source) -> void {
     const auto requested =
-        wil::safe_cast_failfast<DWORD>(destination.size());
+        devicefs::terminal::FailFastCast<DWORD>(destination.size());
     auto completed = DWORD{};
     if (!ReadFile(snapshot, destination.data(), requested,
             &completed, nullptr)) {
@@ -799,9 +800,8 @@ auto AppendDifferingClusters(
         const auto cluster_end = cluster_start + cluster_size;
         const auto start = std::max(block_offset, cluster_start);
         const auto end = std::min(block_end, cluster_end);
-        const auto relative = wil::safe_cast_failfast<std::size_t>(
-            start - block_offset);
-        const auto size = wil::safe_cast_failfast<std::size_t>(end - start);
+        const auto relative = start - block_offset;
+        const auto size = end - start;
         const auto baseline_cluster = baseline.subspan(relative, size);
         const auto mismatch = std::ranges::mismatch(
             baseline_cluster, payload.subspan(relative, size));
@@ -828,8 +828,9 @@ auto AppendDifferingClusters(
         if (mismatch.in1 == baseline.end()) {
             break;
         }
-        const auto first_relative = wil::safe_cast_failfast<std::size_t>(
-            std::ranges::distance(baseline.begin(), mismatch.in1));
+        const auto first_relative =
+            devicefs::terminal::FailFastCast<std::size_t>(
+                std::ranges::distance(baseline.begin(), mismatch.in1));
         relative = first_relative - (first_relative % kMapBlockSize);
         const auto size = std::min(
             kMapBlockSize, baseline.size() - relative);
@@ -913,9 +914,8 @@ auto VerifySnapshotRange(
                 wil::event_is_signaled(cancellation_event)) {
                 return;
             }
-            const auto size = wil::safe_cast_failfast<std::size_t>(
-                std::min<std::uint64_t>(
-                    kComparisonChunkSize, range_end - offset));
+            const auto size = std::min<std::uint64_t>(
+                kComparisonChunkSize, range_end - offset);
             const auto baseline_chunk =
                 std::span{baseline_storage.get(), kComparisonChunkSize}
                     .first(size);
@@ -1018,7 +1018,7 @@ auto StartVerificationWorkers(
     const auto api_clusters = clusters |
         std::views::transform([](const auto cluster) {
             return LARGE_INTEGER{
-                .QuadPart = wil::safe_cast_failfast<LONGLONG>(cluster),
+                .QuadPart = devicefs::terminal::FailFastCast<LONGLONG>(cluster),
             };
         }) |
         std::ranges::to<std::vector<LARGE_INTEGER>>();
@@ -1038,7 +1038,7 @@ auto StartVerificationWorkers(
     const auto input_header = LOOKUP_STREAM_FROM_CLUSTER_INPUT{
         .Flags = 0,
         .NumberOfClusters =
-            wil::safe_cast_failfast<DWORD>(clusters.size()),
+            devicefs::terminal::FailFastCast<DWORD>(clusters.size()),
     };
     const auto input_storage = NEW_MALLOCA_BUFFER(std::byte, input_size);
     if (!input_storage) {
@@ -1103,7 +1103,7 @@ auto StartVerificationWorkers(
                 entries.data());
         const auto next_offset = entry->OffsetToNext;
         result.push_back({
-            .cluster = wil::safe_cast_failfast<std::uint64_t>(
+            .cluster = devicefs::terminal::FailFastCast<std::uint64_t>(
                 entry->Cluster.QuadPart),
             .flags = entry->Flags,
             .name = [next_offset, entries] {

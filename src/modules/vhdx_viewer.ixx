@@ -21,6 +21,7 @@ module;
 export module devicefs.vhdx_viewer;
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 
@@ -273,8 +274,6 @@ template <std::uint32_t Polynomial>
     return value + ((alignment - (value % alignment)) % alignment);
 }
 
-[[gsl::suppress("26447",
-    justification: "`wil::safe_cast_failfast` cannot throw.")]]
 [[nodiscard]] auto EncodeChs(const std::uint64_t lba) noexcept {
     // UEFI Specification 2.11, §5.2.3, p. 113 requires a protective-MBR CHS
     // address when it is representable and FF-FF-FF otherwise. Use the
@@ -291,10 +290,10 @@ template <std::uint32_t Polynomial>
     const auto head = (lba / sectors_per_track) % head_count;
     const auto sector = (lba % sectors_per_track) + 1;
     return std::array{
-        wil::safe_cast_failfast<std::uint8_t>(head),
-        wil::safe_cast_failfast<std::uint8_t>(
+        devicefs::terminal::FailFastCast<std::uint8_t>(head),
+        devicefs::terminal::FailFastCast<std::uint8_t>(
             sector | ((cylinder >> 2) & 0xc0)),
-        wil::safe_cast_failfast<std::uint8_t>(cylinder & 0xff)};
+        devicefs::terminal::FailFastCast<std::uint8_t>(cylinder & 0xff)};
 }
 
 [[nodiscard]] auto NewGuid() {
@@ -338,7 +337,7 @@ template <std::uint32_t Polynomial>
     SerializeObject(result, sizeof(header), RegionTableEntry{
         .id = kBatRegionId,
         .file_offset = kBatOffset,
-        .length = wil::safe_cast_failfast<std::uint32_t>(bat_length),
+        .length = devicefs::terminal::FailFastCast<std::uint32_t>(bat_length),
         .flags = 1,
     });
     SerializeObject(result, sizeof(header) + sizeof(RegionTableEntry),
@@ -432,8 +431,7 @@ template <std::uint32_t Polynomial>
     const auto bat_length = AlignUp(
         entry_count * sizeof(std::uint64_t), kOneMiB);
     const auto payload_offset = kBatOffset + bat_length;
-    auto result = std::vector<std::byte>(
-        wil::safe_cast_failfast<std::size_t>(bat_length));
+    auto result = std::vector<std::byte>(bat_length);
 
     // Fixed VHDX payload blocks are fully present. Sector-bitmap entries are
     // interleaved but remain zero. See VHDX Format Specification v1.00,
@@ -443,10 +441,7 @@ template <std::uint32_t Polynomial>
         const auto bat_index = payload + (payload / chunk_ratio);
         const auto file_offset = payload_offset + payload * kPayloadBlockSize;
         const auto entry = ((file_offset / kOneMiB) << 20) | 6u;
-        SerializeObject(result,
-            wil::safe_cast_failfast<std::size_t>(
-                bat_index * sizeof(entry)),
-            entry);
+        SerializeObject(result, bat_index * sizeof(entry), entry);
     }
     return result;
 }
@@ -510,7 +505,8 @@ struct GptLayout {
         .ending_chs = EncodeChs(backup_header_lba),
         .starting_lba = 1,
         .sector_count =
-            wil::safe_cast_failfast<std::uint32_t>(protective_sector_count),
+            devicefs::terminal::FailFastCast<std::uint32_t>(
+                protective_sector_count),
     });
     SerializeObject(prefix, 510, std::uint16_t{0xaa55});
     const auto primary_header = make_header(1, backup_header_lba, 2);
@@ -598,7 +594,7 @@ auto ReadExact(
     auto transferred = ULONG{};
     const auto status = source.Read(
         output.data(), offset,
-        wil::safe_cast_failfast<ULONG>(output.size()), transferred);
+        devicefs::terminal::FailFastCast<ULONG>(output.size()), transferred);
     if (!NT_SUCCESS(status)) {
         WinError("could not read {}", description,
             ExplicitHresult{HRESULT_FROM_NT(status)});
@@ -672,8 +668,6 @@ template <typename DeviceType>
     };
 }
 
-[[gsl::suppress("26447",
-    justification: "`wil::safe_cast_failfast` cannot throw.")]]
 auto ApplyNtfsIdentityOverlay(
     const std::span<std::byte> output,
     const std::uint64_t source_offset,
@@ -690,13 +684,9 @@ auto ApplyNtfsIdentityOverlay(
             continue;
         }
         const auto count = overlap_end - overlap_begin;
-        CopyBytes(output,
-            wil::safe_cast_failfast<std::size_t>(
-                overlap_begin - source_offset),
+        CopyBytes(output, overlap_begin - source_offset,
             std::span{patch.bytes}.subspan(
-                wil::safe_cast_failfast<std::size_t>(
-                    overlap_begin - patch.offset),
-                wil::safe_cast_failfast<std::size_t>(count)));
+                overlap_begin - patch.offset, count));
     }
 }
 
@@ -718,8 +708,6 @@ public:
     }
 
     template <typename... Observers>
-    [[gsl::suppress("26447",
-        justification: "`wil::safe_cast_failfast` cannot throw.")]]
     _Success_(return >= 0)
     auto Read(
         _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
@@ -730,9 +718,7 @@ public:
         auto output = std::span{
             static_cast<std::byte *>(buffer), wanted};
         const auto copy_generated = [&](const std::span<const std::byte> source,
-                                        const std::uint64_t position) {
-            const auto source_position =
-                wil::safe_cast_failfast<std::size_t>(position);
+                                        const std::uint64_t source_position) {
             const auto count = std::min<std::size_t>(
                 output.size(), source.size() - source_position);
             vhdx_detail::CopyBytes(

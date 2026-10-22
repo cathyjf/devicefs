@@ -21,6 +21,7 @@ module;
 module devicefs.windows_block_device;
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 
 namespace devicefs {
@@ -114,16 +115,10 @@ auto ReadAllocationChangeBlocks(
             current_bitmap.cluster_count, current_bitmap.cluster_size));
     }
 
-    const auto bitmap_byte_count =
+    const auto bitmap_size =
         previous_bitmap.cluster_count / filesystem_internal::kBitsPerByte +
         ((previous_bitmap.cluster_count %
             filesystem_internal::kBitsPerByte) != 0);
-    // LoadAllocationBitmap bounds its complete output by DWORD, so the bitmap
-    // byte count is representable by size_t on every Windows target.
-    static_assert(std::numeric_limits<DWORD>::max() <=
-        std::numeric_limits<std::size_t>::max());
-    const auto bitmap_size =
-        wil::safe_cast_failfast<std::size_t>(bitmap_byte_count);
     const auto previous_bits = std::as_bytes(std::span{
         previous_bitmap.storage.get() +
             filesystem_internal::kVolumeBitmapHeaderSize,
@@ -163,15 +158,15 @@ auto ReadAllocationChangeBlocks(
             const auto remaining = previous_bits.subspan(next_byte);
             const auto mismatch = std::ranges::mismatch(
                 remaining, current_bits.subspan(next_byte));
-            byte_index = next_byte + wil::safe_cast_failfast<std::size_t>(
-                std::ranges::distance(remaining.begin(), mismatch.in1));
+            byte_index = next_byte +
+                devicefs::terminal::FailFastCast<std::size_t>(
+                    std::ranges::distance(remaining.begin(), mismatch.in1));
             continue;
         }
         while (changed != 0) {
             const auto cluster =
-                wil::safe_cast_failfast<std::uint64_t>(byte_index) *
-                    filesystem_internal::kBitsPerByte +
-                wil::safe_cast_failfast<std::uint64_t>(
+                byte_index * filesystem_internal::kBitsPerByte +
+                devicefs::terminal::FailFastCast<std::uint64_t>(
                     CountTrailingZeros(changed));
             if (cluster >= previous_bitmap.cluster_count) {
                 break;

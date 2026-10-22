@@ -118,7 +118,7 @@ constexpr auto kWslRegistration =
     for (auto attempt = 0; attempt < kArbitraryAttemptBound; ++attempt) {
         const auto status = BCryptGenRandom(
             nullptr, random.data(),
-            wil::safe_cast_failfast<ULONG>(random.size()),
+            CompileTimeCast<ULONG, random.size()>(),
             BCRYPT_USE_SYSTEM_PREFERRED_RNG);
         if (!BCRYPT_SUCCESS(status)) {
             WinError("could not generate the backup account password",

@@ -145,7 +145,7 @@ private:
         wil::SecureZeroMemory_scope_exit(random.data(), random.size());
     const auto status = BCryptGenRandom(
         nullptr, random.data(),
-        wil::safe_cast_failfast<ULONG>(random.size()),
+        CompileTimeCast<ULONG, random.size()>(),
         BCRYPT_USE_SYSTEM_PREFERRED_RNG);
     if (!BCRYPT_SUCCESS(status)) {
         WinError("could not generate the view RPC password",

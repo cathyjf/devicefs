@@ -21,6 +21,7 @@ module;
 export module devicefs.supervisor.materialize_oci;
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import <devicefs/winrt_imports.h>;
@@ -119,7 +120,8 @@ auto SetDefaultTokenAcl() {
             distribution, ExplicitHresult{result});
     }
     const auto requested = Transcode<std::wstring>(distribution);
-    const auto requested_length = wil::safe_cast_failfast<int>(requested.length());
+    const auto requested_length =
+        devicefs::terminal::FailFastCast<int>(requested.length());
     auto iterator = wil::reg::key_heap_string_nothrow_iterator{registrations.get()};
     for (; !iterator.at_end(); ++iterator) {
         auto name = wil::unique_cotaskmem_string{};

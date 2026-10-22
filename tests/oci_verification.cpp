@@ -4,6 +4,7 @@
 #include <devicefs/strsafe_compat.h>
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import <io.h>;
@@ -159,12 +160,14 @@ auto RequireFailure(const auto &operation) -> void {
 [[nodiscard]] auto Encode(const std::span<const BYTE> bytes) -> std::string {
     auto size = DWORD{};
     constexpr auto flags = CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF;
-    if (!CryptBinaryToStringA(bytes.data(), wil::safe_cast_failfast<DWORD>(bytes.size()),
+    if (!CryptBinaryToStringA(bytes.data(),
+            devicefs::terminal::FailFastCast<DWORD>(bytes.size()),
             flags, nullptr, &size)) {
         WinError("could not measure the Base64 encoding of the test signature");
     }
     auto result = std::string(size, '\0');
-    if (!CryptBinaryToStringA(bytes.data(), wil::safe_cast_failfast<DWORD>(bytes.size()),
+    if (!CryptBinaryToStringA(bytes.data(),
+            devicefs::terminal::FailFastCast<DWORD>(bytes.size()),
             flags, result.data(), &size)) {
         WinError("could not encode the test signature as Base64");
     }
@@ -309,8 +312,8 @@ auto VerifySignatures(const std::filesystem::path &supervisor,
     // inspect; a count above 521 exceeds the P-521 scalar range.
     for (const auto bits : {0u, 522u}) {
         auto altered = packet;
-        altered[79] = wil::safe_cast_failfast<BYTE>(bits >> 8);
-        altered[80] = wil::safe_cast_failfast<BYTE>(bits & 0xff);
+        altered[79] = devicefs::terminal::FailFastCast<BYTE>(bits >> 8);
+        altered[80] = devicefs::terminal::FailFastCast<BYTE>(bits & 0xff);
         const auto encoded = Encode(altered);
         verify_rejection(kAmd64Digest, encoded);
     }

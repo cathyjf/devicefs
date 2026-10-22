@@ -62,6 +62,7 @@ module;
 export module devicefs.vss_block_descriptors;
 
 import std;
+import devicefs.terminal.safecast;
 import devicefs.guid_formatter;
 import <devicefs/windows_imports.h>;
 import devicefs.allocation;
@@ -281,7 +282,7 @@ class RawSource {
         if (DeviceIoControl(handle_.get(), IOCTL_DISK_GET_LENGTH_INFO,
                 nullptr, 0, &device_length, sizeof(device_length),
                 &returned, nullptr)) {
-            size_ = wil::safe_cast_failfast<std::uint64_t>(
+            size_ = devicefs::terminal::FailFastCast<std::uint64_t>(
                 device_length.Length.QuadPart);
 
             // The parser requests arbitrary byte ranges, but Windows requires
@@ -330,7 +331,8 @@ class RawSource {
                 WinError("failed to obtain the length of VSS descriptor image '{}'",
                     std::wstring_view{normalized_path});
             }
-            size_ = wil::safe_cast_failfast<std::uint64_t>(file_size.QuadPart);
+            size_ = devicefs::terminal::FailFastCast<std::uint64_t>(
+                file_size.QuadPart);
         }
 
         // A raw read can include up to one sector minus one byte before and
@@ -373,7 +375,7 @@ public:
 private:
     void Seek(const std::uint64_t offset) const {
         const auto position = LARGE_INTEGER{
-            .QuadPart = wil::safe_cast_failfast<LONGLONG>(offset),
+            .QuadPart = devicefs::terminal::FailFastCast<LONGLONG>(offset),
         };
         if (!SetFilePointerEx(handle_.get(), position, nullptr, FILE_BEGIN)) {
             WinError("could not seek to VSS metadata at offset 0x{:x}", offset);

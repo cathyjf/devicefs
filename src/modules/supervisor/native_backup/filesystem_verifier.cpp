@@ -21,6 +21,7 @@ module;
 export module devicefs.supervisor.native_backup:filesystem_verifier;
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import :devicefs_process;
 import :internal;
@@ -615,7 +616,7 @@ public:
         const auto lock = std::scoped_lock{mutex_};
         auto result = std::vector<MismatchDetail>{
             mismatches_.begin() +
-                wil::safe_cast_failfast<std::ptrdiff_t>(cursor),
+                devicefs::terminal::FailFastCast<std::ptrdiff_t>(cursor),
             mismatches_.end()};
         cursor = mismatches_.size();
         return result;
@@ -626,7 +627,7 @@ public:
         const auto lock = std::scoped_lock{mutex_};
         auto result = std::vector<OperationComparison>{
             operation_comparison_records_.begin() +
-                wil::safe_cast_failfast<std::ptrdiff_t>(cursor),
+                devicefs::terminal::FailFastCast<std::ptrdiff_t>(cursor),
             operation_comparison_records_.end()};
         cursor = operation_comparison_records_.size();
         return result;
@@ -927,7 +928,7 @@ private:
             auto returned = DWORD{};
             if (DeviceIoControl(volume.get(), FSCTL_QUERY_FILE_LAYOUT,
                     &query, sizeof(query), buffer.data(),
-                    wil::safe_cast_failfast<DWORD>(buffer.size()),
+                    devicefs::terminal::FailFastCast<DWORD>(buffer.size()),
                     &returned, nullptr)) {
                 auto output = QUERY_FILE_LAYOUT_OUTPUT{};
                 std::memcpy(std::addressof(output), buffer.data(),
@@ -1179,7 +1180,7 @@ private:
             [](const std::uint64_t total, const StreamRecord &stream) {
                 return stream.length > 0
                     ? SaturatingSum(total,
-                        wil::safe_cast_failfast<std::uint64_t>(
+                        devicefs::terminal::FailFastCast<std::uint64_t>(
                             stream.length))
                     : total;
             });
@@ -1550,7 +1551,7 @@ auto AppendStreamTasks(
                     synthetic_entry.length - offset;
                 const auto length = std::min(
                     kReadChunkSize,
-                    wil::safe_cast_failfast<std::size_t>(remaining));
+                    devicefs::terminal::FailFastCast<std::size_t>(remaining));
                 add_task(ReadTask{
                     .synthetic_object = synthetic_object_index,
                     .real_object = real_object_index,
@@ -1559,7 +1560,8 @@ auto AppendStreamTasks(
                     .offset = offset,
                     .length = length,
                 });
-                offset += wil::safe_cast_failfast<std::int64_t>(length);
+                offset +=
+                    devicefs::terminal::FailFastCast<std::int64_t>(length);
             }
         }
         ++synthetic_stream;
@@ -1727,11 +1729,11 @@ auto AppendStreamTasks(
 
 [[nodiscard]] auto TryReadStreamChunk(
     const HANDLE stream,
-    const std::span<unsigned char> destination)
+    const std::span<unsigned char> destination) noexcept
     -> std::optional<OperationFailure> {
     static_assert(kReadChunkSize <= std::numeric_limits<DWORD>::max());
     const auto wanted =
-        wil::safe_cast_failfast<DWORD>(destination.size());
+        devicefs::terminal::FailFastCast<DWORD>(destination.size());
     auto transferred = DWORD{};
     if (!ReadFile(stream, destination.data(), wanted,
             &transferred, nullptr)) {
@@ -1817,7 +1819,7 @@ public:
         if (synthetic_read || real_read) {
             RecordOperation(task, synthetic_object, synthetic_stream,
                 FilesystemOperation::ReadStream,
-                wil::safe_cast_failfast<DWORD>(task.length),
+                devicefs::terminal::FailFastCast<DWORD>(task.length),
                 synthetic_read, real_read);
             if (!synthetic_read || !real_read ||
                 (*synthetic_read != *real_read)) {

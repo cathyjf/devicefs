@@ -21,19 +21,17 @@ module;
 export module devicefs.supervisor.process_launch;
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import <devicefs/malloca.h>;
 import devicefs.supervisor.process_attribute_list;
 
-export
-[[gsl::suppress("26447",
-    justification: "`wil::safe_cast_failfast` cannot throw.")]]
-[[nodiscard]] auto WaitForProcess(
+export [[nodiscard]] auto WaitForProcess(
     const HANDLE process,
     const std::chrono::milliseconds timeout) noexcept -> bool {
     return wil::handle_wait(
-        process, wil::safe_cast_failfast<DWORD>(timeout.count()));
+        process, devicefs::terminal::FailFastCast<DWORD>(timeout.count()));
 }
 
 export [[nodiscard]] auto ProcessExitCode(const HANDLE process) {
@@ -181,16 +179,11 @@ export template <typename Consumer>
 export struct ForwardPipeOutput {
     HANDLE destination;
 
-    [[gsl::suppress("26447",
-        justification:
-            "The span cannot exceed the 4096-byte read buffer, so the conversion "
-            "cannot fail. safe_cast_failfast terminates rather than throws if that "
-            "invariant is violated.")]]
     [[nodiscard]] auto operator()(
         const std::span<const char8_t> data) const noexcept
         -> PipeOutputConsumption {
         const auto size =
-            wil::safe_cast_failfast<DWORD>(data.size_bytes());
+            devicefs::terminal::FailFastCast<DWORD>(data.size_bytes());
         auto consumed = DWORD{};
         if (!WriteFile(destination, data.data(), size, &consumed, nullptr)) {
             return std::unexpected{GetLastError()};

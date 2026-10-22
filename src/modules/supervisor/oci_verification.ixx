@@ -8,6 +8,7 @@ module;
 export module devicefs.supervisor.oci_verification;
 
 import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import devicefs.supervisor.math;
@@ -108,7 +109,8 @@ private:
     if (signature.empty()) {
         InvalidSignature(digest, "missing Base64 signature");
     }
-    const auto length = wil::safe_cast_failfast<DWORD>(signature.size());
+    const auto length =
+        devicefs::terminal::FailFastCast<DWORD>(signature.size());
     auto bytes = DWORD{};
     constexpr auto flags = CRYPT_STRING_BASE64 | CRYPT_STRING_STRICT;
     if (!CryptStringToBinaryA(signature.data(), length, flags,
@@ -145,7 +147,8 @@ auto HashData(const BCRYPT_HASH_HANDLE hash, const std::span<const UCHAR> data,
         "parameter's non-const pointer type.")]]
     auto *const input = const_cast<PUCHAR>(data.data());
     if (const auto status = BCryptHashData(hash, input,
-            wil::safe_cast_failfast<ULONG>(data.size()), 0); !BCRYPT_SUCCESS(status)) {
+            devicefs::terminal::FailFastCast<ULONG>(data.size()), 0);
+        !BCRYPT_SUCCESS(status)) {
         WinError("could not hash data to verify OCI layer '{}'",
             digest, ExplicitHresult{HRESULT_FROM_NT(status)});
     }
@@ -310,7 +313,8 @@ export auto VerifyOciLayerSignature(const std::string_view digest,
     // That length excludes both the original message and the outer packet
     // header. The 0xff masks below select individual bytes of that length.
     // https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.4
-    const auto length = wil::safe_cast_failfast<std::uint32_t>(signed_fields.size());
+    const auto length = devicefs::terminal::FailFastCast<std::uint32_t>(
+        signed_fields.size());
     [[gsl::suppress("26472",
         justification: "n & 0xff ∈ [0, 255] ∀n ∈ ℤ such that n ≥ 0")]]
     const auto trailer = std::to_array<UCHAR>({

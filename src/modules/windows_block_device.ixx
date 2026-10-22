@@ -576,11 +576,12 @@ struct WindowsBlockDevice
         const auto read = [&](void *__restrict const output,
             const UINT64 position, const auto count,
             auto *__restrict const done) {
-            auto operation = OVERLAPPED{};
             const auto parts = ULARGE_INTEGER{.QuadPart = position};
-            operation.Offset = parts.LowPart;
-            operation.OffsetHigh = parts.HighPart;
-            operation.hEvent = read_resources.event.get();
+            auto operation = OVERLAPPED{
+                .Offset = parts.LowPart,
+                .OffsetHigh = parts.HighPart,
+                .hEvent = read_resources.event.get(),
+            };
             (observers.BeginSourceRead(), ...);
             // GetOverlappedResult supplies the byte count for either completion path.
             if (!ReadFile(handle.get(), output, count, nullptr, &operation)) {

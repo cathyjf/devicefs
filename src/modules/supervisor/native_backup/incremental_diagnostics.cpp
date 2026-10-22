@@ -328,7 +328,7 @@ auto PrintStatistics(const std::span<const VolumeReport> reports) {
 
 using SyntheticBackupDevice =
     devicefs::SyntheticBackupBlockDevice<
-        devicefs::WindowsBlockDevice,
+        devicefs::WindowsBlockDevice<true>,
         devicefs::vss::kBlockSize>;
 using SyntheticBackupServer =
     devicefs::RpcBlockDeviceServer<SyntheticBackupDevice>;
@@ -359,15 +359,17 @@ enum class BackupViewPreparation {
 
     auto synthetic = [&] -> std::optional<SyntheticBackupDevice> {
         try {
-            auto baseline = devicefs::WindowsBlockDevice::FromFilename(
+            auto baseline = devicefs::WindowsBlockDevice<true>::FromFilename(
                 std::filesystem::path{report.interval.baseline_device},
-                true, true, true, kBaselineDescription);
-            auto payload = devicefs::WindowsBlockDevice::FromFilename(
+                true, true, kBaselineDescription);
+            auto payload = devicefs::WindowsBlockDevice<true>::FromFilename(
                 std::filesystem::path{report.interval.payload_device},
-                true, true, true, kPayloadDescription);
+                true, true, kPayloadDescription);
             const auto alignment = std::max(baseline.buffer_alignment, payload.buffer_alignment);
-            devicefs::WindowsBlockDevice::read_buffer_alignment = devices.empty()
-                ? alignment : std::max(devicefs::WindowsBlockDevice::read_buffer_alignment, alignment);
+            devicefs::WindowsBlockDevice<>::read_buffer_alignment = devices.empty()
+                ? alignment : std::max(
+                    devicefs::WindowsBlockDevice<>::read_buffer_alignment,
+                    alignment);
             return SyntheticBackupDevice::FromBlockDevices(
                 std::move(baseline), std::move(payload),
                 report.map->block_offsets);

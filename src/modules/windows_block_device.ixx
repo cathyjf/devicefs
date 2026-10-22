@@ -44,6 +44,9 @@ constexpr auto kHandleDevicePrefix = std::string_view{R"(\\\handle:)"};
 [[nodiscard, msvc::forceinline]]
 auto CountTrailingZeros(_Pre_satisfies_(value != 0) const std::uint64_t value)
     noexcept -> int {
+    // The nonzero-input precondition ensures `_BitScanForward64` writes
+    // `bit_index`.
+    [[assume(value != 0)]];
     /* [[indeterminate]] */ unsigned long bit_index;
     std::ignore = _BitScanForward64(&bit_index, value);
     return bit_index;
@@ -173,6 +176,8 @@ auto LoadBitmapWord(const std::span<const std::byte> bytes) noexcept {
     return word;
 }
 
+// Precondition for the non-static methods: this object contains a properly
+// initialized bitmap.
 struct AllocationBitmap {
     UINT32 cluster_size = 0;
     int cluster_shift = 0;
@@ -183,32 +188,38 @@ struct AllocationBitmap {
 #endif
 
     [[nodiscard, msvc::forceinline]]
-    _Pre_satisfies_(cluster_size != 0)
     constexpr auto BitmapData() const noexcept -> std::span<const BYTE> {
-        // The bitmap loader and test fixture set `cluster_size` together
-        // with an allocated `storage` buffer. The nonzero `cluster_size`
-        // precondition identifies that initialized state, so `storage`
-        // is non-null.
+        // The initialized-bitmap precondition includes an allocated `storage`
+        // buffer containing the volume-bitmap header and its cluster bits.
         [[assume(storage.get() != nullptr)]];
         return {storage.get() + kVolumeBitmapHeaderSize,
             cluster_count / kBitsPerByte +
                 ((cluster_count % kBitsPerByte) != 0)};
     }
 
-    // Search the nonempty range [first, limit) for an allocated cluster (a
-    // set bit) or a free cluster (a clear bit). `bytes` begins at cluster zero
-    // and covers the searched range. A `UINT64` result is the first matching
-    // index, or `limit` if none exists. A `bool` result reports whether a match
+    // Search [first, limit) for an allocated cluster (a set bit) or a free
+    // cluster (a clear bit). A `UINT64` result is the first matching index,
+    // or `limit` if none exists. A `bool` result reports whether a match
     // exists; it can return as soon as a word or block comparison establishes
     // that.
+    //
+    // Preconditions: `first < limit`; `bytes` begins with the bits for cluster
+    // zero and contains every bit in the searched range.
     template <bool allocated, class Result>
         requires (std::same_as<Result, UINT64> || std::same_as<Result, bool>)
     [[nodiscard, msvc::forceinline]]
     _Pre_satisfies_(first < limit)
     static auto FindCluster(const std::span<const BYTE> bytes,
         const UINT64 first, const UINT64 limit) noexcept -> Result {
-        // The caller supplies `bytes` covering the searched cluster range,
-        // so the byte containing cluster `limit - 1` is within the span.
+        // The nonempty-range precondition gives `first < limit`. The coverage
+        // precondition places the byte for cluster `limit - 1` within `bytes`.
+        //
+        // MSVC does not accept the presence of `kBitsPerByte` within the
+        // [[assume]] statement. However, defining a local `kBitsPerByte_`
+        // works.
+        [[assume(first < limit)]];
+        constexpr auto kBitsPerByte_ = kBitsPerByte;
+        [[assume(((limit - 1) / kBitsPerByte_) < bytes.size())]];
         _Analysis_assume_(
             ((limit - 1) / kBitsPerByte) < bytes.size());
         const auto no_match = [limit] -> Result {
@@ -317,20 +328,22 @@ struct AllocationBitmap {
     _Post_satisfies_((first <= return) && (return <= limit))
     [[nodiscard]] auto FindNextCluster(
         const UINT64 first, const UINT64 limit) const noexcept {
+        // The declared search-range precondition implies both inequalities.
+        [[assume(first <= limit)]];
+        [[assume(limit <= cluster_count)]];
         if (first == limit) {
             return limit;
         }
         return FindCluster<allocated, UINT64>(BitmapData(), first, limit);
     }
 
-    _Pre_satisfies_((cluster_count == 0) || (cluster_size != 0))
     [[nodiscard]] auto HasAllocatedClusters(
         const UINT64 offset,
         _In_range_(1, MAXUINT64 - offset) const UINT64 length) const noexcept {
-        if (!storage) {
-            return true;
-        }
-
+        // The declared byte-range precondition makes the range nonempty and
+        // keeps its exclusive endpoint representable by `UINT64`.
+        [[assume(length > 0)]];
+        [[assume(length <= (MAXUINT64 - offset))]];
         const auto first_cluster = offset >> cluster_shift;
         const auto last_cluster =
             (offset + (length - 1)) >> cluster_shift;
@@ -341,21 +354,22 @@ struct AllocationBitmap {
             BitmapData(), first_cluster, last_cluster + 1);
     }
 
-    // Precondition: the caller supplies a buffer that does not overlap
-    // `*this` or the bitmap storage owned by `storage`. `__restrict` lets
-    // the compiler rely on that promise when optimizing buffer writes.
-    _Pre_satisfies_((cluster_count == 0) || (cluster_size != 0))
+    // Preconditions: the output byte range is nonempty, its exclusive end
+    // `offset + output_size` is representable by `UINT64`, and its buffer does
+    // not overlap `*this` or the bitmap storage owned by `storage`.
+    // `__restrict` expresses the non-overlap condition to the optimizer.
+    _Pre_satisfies_((output_size > 0) &&
+        (output_size <= (MAXUINT64 - offset)))
     auto SynthesizeFreeClusters(
-        _When_(output_size != 0,
-            _Out_writes_bytes_(output_size)
-            _When_(DEVICEFS_MEASURE_FREE_CLUSTER_DATA, _Inout_))
+        _Out_writes_bytes_(output_size)
+        _When_(DEVICEFS_MEASURE_FREE_CLUSTER_DATA, _Inout_)
         BYTE *__restrict const output,
         const std::size_t output_size,
         const UINT64 offset) const noexcept {
-        if (!storage || (output_size == 0)) {
-            return;
-        }
-
+        // The byte-range preconditions imply a positive size and a
+        // non-wrapping exclusive endpoint.
+        [[assume(output_size > 0)]];
+        [[assume(output_size <= (MAXUINT64 - offset))]];
         const auto bytes = BitmapData();
         const auto shift = cluster_shift;
         const auto end = offset + output_size;
@@ -386,16 +400,7 @@ struct AllocationBitmap {
     const std::filesystem::path &filename,
     std::string_view description) -> AllocationBitmap;
 
-} // namespace devicefs::filesystem_internal
-
-export namespace devicefs {
-
-[[nodiscard]] auto OpenBlockDevice(
-    const std::filesystem::path &filename,
-    std::string_view description,
-    bool inherit_handle = false) -> wil::unique_hfile;
-
-struct WindowsBlockDevice {
+struct WindowsBlockDeviceSettings {
     // A thread reuses its retained read buffer across devices, so that buffer
     // must satisfy every device's alignment requirement. The default is the
     // system page size; device initialization replaces it with the maximum
@@ -409,13 +414,29 @@ struct WindowsBlockDevice {
     static constexpr auto kAdvertisedSectorSize = UINT16{512};
     static constexpr auto kMeasureFreeClusterData =
         DEVICEFS_MEASURE_FREE_CLUSTER_DATA != 0;
+};
+
+} // namespace devicefs::filesystem_internal
+
+export namespace devicefs {
+
+[[nodiscard]] auto OpenBlockDevice(
+    const std::filesystem::path &filename,
+    std::string_view description,
+    bool inherit_handle = false) -> wil::unique_hfile;
+
+template <bool HasAllocationBitmap = false>
+struct WindowsBlockDevice
+    : filesystem_internal::WindowsBlockDeviceSettings {
 
     const std::uint64_t length;
     std::filesystem::path filename;
     wil::unique_hfile handle;
     const std::align_val_t buffer_alignment = std::align_val_t{1};
     UINT32 sector_size = 0;
-    filesystem_internal::AllocationBitmap allocation_bitmap;
+    [[msvc::no_unique_address]] std::conditional_t<HasAllocationBitmap,
+        filesystem_internal::AllocationBitmap, std::monostate>
+        allocation_bitmap;
 
     [[nodiscard]] static auto FromFilename(
         std::filesystem::path filename, auto &&...arguments)
@@ -431,7 +452,7 @@ struct WindowsBlockDevice {
     // source in diagnostics.
     [[nodiscard]] static auto FromHandle(
         wil::unique_hfile handle, std::filesystem::path filename,
-        bool extended_dasd, bool cache, bool synthetic_free_clusters,
+        bool extended_dasd, bool cache,
         std::string_view description) -> WindowsBlockDevice;
 
     // Return a bitmap that lets a backup client skip reading chunks that `Read`
@@ -442,7 +463,8 @@ struct WindowsBlockDevice {
     // The first eight chunks use bits 0 through 7 of the first byte, where
     // bit 0 is the least significant bit. The next eight use the second byte.
     [[nodiscard]] auto MakeKnownDataMap(const std::uint64_t chunk_size) const
-        -> std::vector<unsigned char> {
+        -> std::vector<unsigned char>
+        requires HasAllocationBitmap {
         if (chunk_size == 0) {
             throw std::invalid_argument("known-data map chunk size must be nonzero");
         }
@@ -484,7 +506,7 @@ struct WindowsBlockDevice {
         _Pre_equal_to_(0) ULONG &transferred,
         Observers &...observers) const noexcept -> NTSTATUS {
         const auto output = std::span<BYTE>{static_cast<BYTE *>(buffer), wanted};
-        if constexpr (!kMeasureFreeClusterData) {
+        if constexpr (HasAllocationBitmap && !kMeasureFreeClusterData) {
             if (!allocation_bitmap.HasAllocatedClusters(offset, wanted)) {
                 (observers.RecordSynthetic(), ...);
                 // MSVC 19.52's `std::ranges::fill` misses its `memset`
@@ -559,8 +581,10 @@ struct WindowsBlockDevice {
             if (!NT_SUCCESS(status)) {
                 return status;
             }
-            allocation_bitmap.SynthesizeFreeClusters(
-                output.data(), output.size(), offset);
+            if constexpr (HasAllocationBitmap) {
+                allocation_bitmap.SynthesizeFreeClusters(
+                    output.data(), output.size(), offset);
+            }
             return STATUS_SUCCESS;
         }
 
@@ -577,8 +601,10 @@ struct WindowsBlockDevice {
             transferred = wanted;
             std::ranges::copy(bounce.subspan(offset - read_offset, wanted),
                 output.begin());
-            allocation_bitmap.SynthesizeFreeClusters(
-                output.data(), output.size(), offset);
+            if constexpr (HasAllocationBitmap) {
+                allocation_bitmap.SynthesizeFreeClusters(
+                    output.data(), output.size(), offset);
+            }
             (observers.RecordBounce(), ...);
             return STATUS_SUCCESS;
         };
@@ -799,10 +825,10 @@ export [[nodiscard]] auto QueryMountManagerId(const HANDLE device)
         length} | std::ranges::to<std::vector<BYTE>>();
 }
 
-auto WindowsBlockDevice::FromHandle(
+template <bool HasAllocationBitmap>
+auto WindowsBlockDevice<HasAllocationBitmap>::FromHandle(
     wil::unique_hfile handle, std::filesystem::path filename,
     const bool extended_dasd, const bool cache,
-    const bool synthetic_free_clusters,
     const std::string_view description) -> WindowsBlockDevice {
     const auto alignment = QueryBufferAlignment(handle.get());
     if (!alignment) {
@@ -848,7 +874,7 @@ auto WindowsBlockDevice::FromHandle(
             TryConstructWinError("", ExplicitWin32Error{dasd_error}));
     }
 
-    if (cache || synthetic_free_clusters) {
+    if (cache || HasAllocationBitmap) {
         auto file_system_flags = DWORD{};
         if (!GetVolumeInformationByHandleW(handle.get(), nullptr, 0, nullptr,
                 nullptr, &file_system_flags, nullptr, 0)) {
@@ -862,16 +888,24 @@ auto WindowsBlockDevice::FromHandle(
                 option, Transcode<std::string>(filename.native()), description));
         }
     }
-    auto allocation_bitmap = synthetic_free_clusters
-        ? LoadAllocationBitmap(handle.get(), filename, description)
-        : AllocationBitmap{};
+    std::conditional_t<HasAllocationBitmap, AllocationBitmap, const std::monostate>
+        allocation_bitmap_ = [&handle, &filename, description] {
+            if constexpr (HasAllocationBitmap) {
+                return LoadAllocationBitmap(handle.get(), filename, description);
+            } else {
+                std::ignore = handle;
+                std::ignore = filename;
+                std::ignore = description;
+                return std::monostate{};
+            }
+        }();
     return WindowsBlockDevice{
         .length = size,
         .filename = std::move(filename),
         .handle = std::move(handle),
         .buffer_alignment = *alignment,
         .sector_size = geometry.BytesPerSector,
-        .allocation_bitmap = std::move(allocation_bitmap),
+        .allocation_bitmap = std::move(allocation_bitmap_),
     };
 }
 

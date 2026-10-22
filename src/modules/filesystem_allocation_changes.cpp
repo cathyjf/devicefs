@@ -58,6 +58,9 @@ auto SnapshotAllocationBitmap::ClusterSize() const noexcept
 auto SnapshotAllocationBitmap::SynthesizeFreeClusters(
     const std::span<unsigned char> output,
     const std::uint64_t offset) const noexcept -> void {
+    if (output.empty()) {
+        return;
+    }
     state_->bitmap.SynthesizeFreeClusters(
         output.data(), output.size(), offset);
 }
@@ -65,8 +68,8 @@ auto SnapshotAllocationBitmap::SynthesizeFreeClusters(
 auto LoadSnapshotAllocationBitmap(
     const std::string_view snapshot,
     const std::string_view description) -> SnapshotAllocationBitmap {
-    auto device = WindowsBlockDevice::FromFilename(
-        std::filesystem::path{snapshot}, false, false, true, description);
+    auto device = WindowsBlockDevice<true>::FromFilename(
+        std::filesystem::path{snapshot}, false, false, description);
     return SnapshotAllocationBitmap{std::make_unique<
         SnapshotAllocationBitmap::State>(
         SnapshotAllocationBitmap::State{
@@ -83,12 +86,12 @@ auto ReadAllocationChangeBlocks(
         "the previous snapshot"sv;
     constexpr auto current_description =
         "the current snapshot"sv;
-    const auto previous = WindowsBlockDevice::FromFilename(
+    const auto previous = WindowsBlockDevice<true>::FromFilename(
         std::filesystem::path{previous_snapshot},
-        false, false, true, previous_description);
-    const auto current = WindowsBlockDevice::FromFilename(
+        false, false, previous_description);
+    const auto current = WindowsBlockDevice<true>::FromFilename(
         std::filesystem::path{current_snapshot},
-        false, false, true, current_description);
+        false, false, current_description);
     const auto previous_size = previous.length;
     const auto current_size = current.length;
     if (previous_size != current_size) {

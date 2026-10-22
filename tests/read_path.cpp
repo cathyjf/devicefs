@@ -56,7 +56,8 @@ auto TestAlignedAllocations() -> void {
 //
 // Supplying the bitmap directly lets the tests choose exact allocation patterns
 // and partial final words without having to arrange those allocations on NTFS.
-template <typename Bitmap = decltype(devicefs::WindowsBlockDevice::allocation_bitmap)>
+template <typename Bitmap =
+    decltype(devicefs::WindowsBlockDevice<true>::allocation_bitmap)>
 [[nodiscard]] auto MakeBitmap(const std::span<const BYTE> bits,
     const std::uint64_t cluster_count, const std::uint32_t cluster_size) {
     constexpr auto header_size = offsetof(VOLUME_BITMAP_BUFFER, Buffer);
@@ -86,7 +87,9 @@ template <typename Bitmap = decltype(devicefs::WindowsBlockDevice::allocation_bi
 auto CheckRange(const auto &bitmap, const std::span<const BYTE> bits,
     const std::size_t offset, const std::size_t count) -> void {
     auto actual = std::vector<BYTE>(count + 2, kSentinelByte);
-    bitmap.SynthesizeFreeClusters(actual.data() + 1, count, offset);
+    if (count != 0) {
+        bitmap.SynthesizeFreeClusters(actual.data() + 1, count, offset);
+    }
     if ((actual.front() != kSentinelByte) || (actual.back() != kSentinelByte)) {
         throw std::runtime_error("bitmap synthesis wrote outside the output span");
     }
@@ -254,7 +257,9 @@ auto TestBitmaps() -> void {
 // selection for both sector sizes, independently of the test volume's geometry.
 // Each read must return the exact requested bytes and leave the adjacent sentinel
 // bytes unchanged. The file is deleted when the device handle closes.
+template <bool HasAllocationBitmap>
 auto TestReads() -> void {
+    using Device = devicefs::WindowsBlockDevice<HasAllocationBitmap>;
     auto contents = std::vector<BYTE>(8uz * 1024 * 1024);
     // Including higher offset bits prevents the contents from repeating every
     // 256 bytes, which could conceal a read from the wrong sector.
@@ -265,7 +270,7 @@ auto TestReads() -> void {
     const auto filename = std::filesystem::temp_directory_path() /
         std::format("devicefs-read-path-{}.tmp", GetCurrentProcessId());
     auto device = [&filename, length = contents.size()] {
-        auto handle = decltype(devicefs::WindowsBlockDevice::handle){CreateFileW(
+        auto handle = decltype(Device::handle){CreateFileW(
             filename.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
             nullptr, CREATE_NEW,
             FILE_FLAG_OVERLAPPED | FILE_FLAG_DELETE_ON_CLOSE | FILE_ATTRIBUTE_TEMPORARY,
@@ -278,14 +283,14 @@ auto TestReads() -> void {
         if (!alignment) {
             WinError("could not query read-test buffer alignment");
         }
-        return devicefs::WindowsBlockDevice{
+        return Device{
             .length = length,
             .filename = filename,
             .handle = std::move(handle),
             .buffer_alignment = *alignment
         };
     }();
-    devicefs::WindowsBlockDevice::read_buffer_alignment = device.buffer_alignment;
+    Device::read_buffer_alignment = device.buffer_alignment;
     auto operation = OVERLAPPED{};
     if (!WriteFile(device.handle.get(), contents.data(),
             wil::safe_cast_failfast<DWORD>(contents.size()), nullptr, &operation)) {
@@ -306,6 +311,11 @@ auto TestReads() -> void {
 
     auto allocation_bits = std::vector<BYTE>{};
     constexpr auto cluster_size = 4096u;
+    if constexpr (HasAllocationBitmap) {
+        allocation_bits.assign((contents.size() / cluster_size) / 8, BYTE{0xff});
+        device.allocation_bitmap = MakeBitmap(allocation_bits,
+            contents.size() / cluster_size, cluster_size);
+    }
     const auto check = [&device, &contents, &allocation_bits](const std::uint64_t offset,
                            const std::size_t count) {
         const auto wanted = wil::safe_cast_failfast<ULONG>(count);
@@ -361,21 +371,26 @@ auto TestReads() -> void {
         std::println("PASS: reads ending at the file's final byte match the source "
             "with {}-byte sectors.", sector_size);
     }
-    for (const auto pattern : {BYTE{0}, BYTE{0xff}, BYTE{0xaa}}) {
-        allocation_bits.assign((contents.size() / cluster_size) / 8, pattern);
-        device.allocation_bitmap = MakeBitmap(allocation_bits,
-            contents.size() / cluster_size, cluster_size);
-        for (const auto sector_size : {512u, 4096u}) {
-            device.sector_size = sector_size;
-            for (const auto offset : {0uz, 1uz, 4095uz}) {
-                for (const auto count : {1uz, 4097uz, 8192uz, (5uz * 1024 * 1024) + 1}) {
-                    check(offset, count);
+    if constexpr (HasAllocationBitmap) {
+        for (const auto pattern : {BYTE{0}, BYTE{0xff}, BYTE{0xaa}}) {
+            allocation_bits.assign((contents.size() / cluster_size) / 8,
+                pattern);
+            device.allocation_bitmap = MakeBitmap(allocation_bits,
+                contents.size() / cluster_size, cluster_size);
+            for (const auto sector_size : {512u, 4096u}) {
+                device.sector_size = sector_size;
+                for (const auto offset : {0uz, 1uz, 4095uz}) {
+                    for (const auto count : {1uz, 4097uz, 8192uz,
+                             (5uz * 1024 * 1024) + 1}) {
+                        check(offset, count);
+                    }
                 }
             }
         }
+        std::println("PASS: bitmap-backed reads zero free clusters, retain "
+            "allocated contents, report exact counts, and leave surrounding "
+            "sentinels unchanged.");
     }
-    std::println("PASS: bitmap-backed reads zero free clusters, retain allocated "
-        "contents, report exact counts, and leave surrounding sentinels unchanged.");
 }
 
 } // namespace
@@ -383,7 +398,8 @@ auto TestReads() -> void {
 auto main() -> int try {
     TestAlignedAllocations();
     TestBitmaps();
-    TestReads();
+    TestReads<false>();
+    TestReads<true>();
     return 0;
 } catch (const std::exception &error) {
     std::println("FAIL: {}", error.what());

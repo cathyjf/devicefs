@@ -55,6 +55,15 @@ concept BlockDevice = requires(
         noexcept -> std::same_as<NTSTATUS>;
 };
 
+template <typename DeviceType>
+concept WindowsDevice =
+    std::same_as<std::remove_cvref_t<DeviceType>, WindowsBlockDevice<false>> ||
+    std::same_as<std::remove_cvref_t<DeviceType>, WindowsBlockDevice<true>>;
+
+template <typename... DeviceTypes>
+using SelectedWindowsBlockDevice = WindowsBlockDevice<
+    (std::same_as<DeviceTypes, WindowsBlockDevice<true>> || ...)>;
+
 // `std::conditional_t` needs both type arguments to be valid. An incomplete
 // primary template lets the alias name `VariantMultiBlockDevice<T>` without
 // defining a one-type wrapper.
@@ -73,9 +82,10 @@ struct VariantMultiBlockDevice<DeviceTypes...> {
         noexcept((std::is_nothrow_invocable_v<decltype(visitor),
             decltype(std::get<DeviceTypes>(self.contents))> && ...))
         -> decltype(auto) {
+        using WindowsType = SelectedWindowsBlockDevice<DeviceTypes...>;
         if constexpr (
-            (std::same_as<DeviceTypes, WindowsBlockDevice> || ...)) {
-            if (auto *const device = std::get_if<WindowsBlockDevice>(
+            (std::same_as<DeviceTypes, WindowsType> || ...)) {
+            if (auto *const device = std::get_if<WindowsType>(
                     &self.contents)) [[likely]] {
                 return std::invoke(
                     std::forward<decltype(visitor)>(visitor), *device);
@@ -88,7 +98,7 @@ struct VariantMultiBlockDevice<DeviceTypes...> {
                 -> std::invoke_result_t<decltype(visitor), decltype(device)> {
                 if constexpr (std::same_as<
                     std::remove_cvref_t<decltype(device)>,
-                    WindowsBlockDevice>) {
+                    WindowsType>) {
                     std::unreachable();
                 } else {
                     return std::invoke(
@@ -414,6 +424,8 @@ auto Usage(const auto output) noexcept {
 }
 
 using devicefs::WindowsBlockDevice;
+using devicefs::WindowsDevice;
+using devicefs::SelectedWindowsBlockDevice;
 using devicefs::VariantBlockDevice;
 using devicefs::VisitBlockDevice;
 using devicefs::VariantFromBlockDevice;
@@ -467,7 +479,7 @@ using DeviceFiles = std::map<std::wstring, DeviceFile<DeviceType>, FilenameLess>
 template <BlockDevice... DeviceTypes>
 [[nodiscard]] auto OpenSource(
     const internal::Mapping &mapping, const bool extended_dasd,
-    const bool cache, const bool synthetic_free_clusters,
+    const bool cache,
     const UINT64 map_number,
     const std::string_view rpc_password)
     -> VariantBlockDevice<DeviceTypes...> {
@@ -487,22 +499,23 @@ template <BlockDevice... DeviceTypes>
                                 devicefs::rpc::kDeviceSourcePrefix}.size())));
         }
     }
-    if constexpr ((std::same_as<DeviceTypes, WindowsBlockDevice> || ...)) {
+    if constexpr ((WindowsDevice<DeviceTypes> || ...)) {
+        using WindowsType = SelectedWindowsBlockDevice<DeviceTypes...>;
         const auto source = std::string_view{mapping.device};
         const auto description = std::format("--map #{}", map_number);
         return VariantFromBlockDevice<SourceType>(
             [source, &description](auto &&...arguments) {
                 if (source.starts_with(devicefs::kHandleDevicePrefix)) {
-                    return WindowsBlockDevice::FromHandle(
+                    return WindowsType::FromHandle(
                         ParseInheritedHandle(
                             source.substr(devicefs::kHandleDevicePrefix.size()),
                             description),
                         std::forward<decltype(arguments)>(arguments)...);
                 }
-                return WindowsBlockDevice::FromFilename(
+                return WindowsType::FromFilename(
                     std::forward<decltype(arguments)>(arguments)...);
             }(std::filesystem::path{mapping.device}, extended_dasd,
-                cache, synthetic_free_clusters, description));
+                cache, description));
     } else {
         std::unreachable();
     }
@@ -543,7 +556,7 @@ public:
         : files_(std::move(files)), security_(std::move(security)), mount_(std::move(mount)) {
         auto params = FSP_FSCTL_VOLUME_PARAMS{
             .Version = sizeof(FSP_FSCTL_VOLUME_PARAMS),
-            .SectorSize = WindowsBlockDevice::kAdvertisedSectorSize,
+            .SectorSize = WindowsBlockDevice<>::kAdvertisedSectorSize,
             .SectorsPerAllocationUnit = 1,
             .MaxComponentLength = kMaxNameLength,
             .FileInfoTimeout = cache ? MAXUINT32 : 0,
@@ -818,7 +831,7 @@ private:
             VisitBlockDevice(file.device, [&file](const auto &device) {
                 if constexpr (std::same_as<
                     std::remove_cvref_t<decltype(device)>,
-                    WindowsBlockDevice>) {
+                    WindowsBlockDevice<true>>) {
                     if (device.allocation_bitmap.measurement) {
                         device.allocation_bitmap.measurement->Report(
                             file.name);
@@ -902,7 +915,7 @@ auto RunWithDevices(const Options &options, DeviceFiles<DeviceType> files) {
     if (!SetConsoleCtrlHandler(signal_handler, TRUE)) {
         WinError("failed to install console application signal handler");
     }
-    if constexpr (WindowsBlockDevice::kMeasureFreeClusterData) {
+    if constexpr (WindowsBlockDevice<>::kMeasureFreeClusterData) {
         if (options.synthetic_free_clusters) {
             devicefs::WriteToStream(
                 devicefs::stderr,
@@ -943,20 +956,18 @@ template <bool AsVhdx, bool ExposeKnownDataMap, BlockDevice... SourceTypes>
         | std::views::transform([&](const auto i) {
             return OpenSource<SourceTypes...>(
                 options.mappings[i], options.extended_dasd,
-                options.cache, options.synthetic_free_clusters,
+                options.cache,
                 i + 1, std::string_view{rpc_password});
         }) | std::ranges::to<std::vector>();
-    if constexpr ((std::same_as<SourceTypes, WindowsBlockDevice> || ...)) {
+    if constexpr ((WindowsDevice<SourceTypes> || ...)) {
         // `VhdxViewer::FromBlockDevice` reads NTFS metadata from its source and
         // can therefore allocate a thread's retained read buffer. The maximum
         // alignment must already be known before that first read, so all sources
         // are opened before any VHDX views are constructed.
-        WindowsBlockDevice::read_buffer_alignment = std::ranges::max(
+        WindowsBlockDevice<>::read_buffer_alignment = std::ranges::max(
             sources | std::views::transform([](const auto &source) static {
                 return VisitBlockDevice(source, [](const auto &device) static {
-                    if constexpr (std::same_as<
-                        std::remove_cvref_t<decltype(device)>,
-                        WindowsBlockDevice>) {
+                    if constexpr (WindowsDevice<decltype(device)>) {
                         return device.buffer_alignment;
                     } else {
                         return std::align_val_t{1};
@@ -997,9 +1008,9 @@ template <bool AsVhdx, bool ExposeKnownDataMap, BlockDevice... SourceTypes>
     }
     if constexpr (ExposeKnownDataMap) {
         for (const auto &mapping : options.mappings) {
-            const auto *const device = std::get_if<WindowsBlockDevice>(
+            const auto *const device = std::get_if<WindowsBlockDevice<true>>(
                 &files.at(mapping.name).device.contents);
-            if (!device || !device->allocation_bitmap.storage) {
+            if (!device) {
                 continue;
             }
             auto bitmap = device->MakeKnownDataMap(
@@ -1075,7 +1086,8 @@ auto Run(const Options &options) {
                 OpenDevices<true, false, SourceTypes...>(
                     options, std::move(password)));
         }
-        if constexpr ((std::same_as<SourceTypes, WindowsBlockDevice> || ...)) {
+        if constexpr ((std::same_as<
+                SourceTypes, WindowsBlockDevice<true>> || ...)) {
             if (options.known_data_map_cluster_size) {
                 return RunWithDevices(options,
                     OpenDevices<false, true, SourceTypes...>(
@@ -1088,9 +1100,15 @@ auto Run(const Options &options) {
     };
     const auto rpc_devices =
         std::ranges::count_if(options.mappings, rpc_client::IsRpcDevice);
-    return DispatchDeviceTypes<WindowsBlockDevice, RPCBlockDevice>(
-        {std::cmp_less(rpc_devices, options.mappings.size()), rpc_devices != 0},
-        run);
+    const auto dispatch = [&options, rpc_devices, &run]<bool HasBitmap> {
+        return DispatchDeviceTypes<WindowsBlockDevice<HasBitmap>,
+            RPCBlockDevice>(
+                {std::cmp_less(rpc_devices, options.mappings.size()),
+                    rpc_devices != 0}, run);
+    };
+    return options.synthetic_free_clusters
+        ? dispatch.template operator()<true>()
+        : dispatch.template operator()<false>();
 }
 
 } // namespace

@@ -35,10 +35,14 @@ public:
         std::vector<std::pair<
             std::basic_string<unsigned char>, DeviceType>>;
 
+    // Precondition: `devices` is nonempty.
     [[nodiscard]] static auto Start(
         std::wstring endpoint,
         const DWORD client_process_identifier,
         Devices devices) {
+        if (devices.empty()) [[unlikely]] {
+            __fastfail(FAST_FAIL_INVALID_ARG);
+        }
         return RpcBlockDeviceServer{
             std::move(endpoint), client_process_identifier,
             std::move(devices)};
@@ -118,10 +122,15 @@ private:
             active_->get().client_process_identifier_;
     }
 
+    [[gsl::suppress("26429", justification:
+        "A nullable pointer `cursor` (as opposed to a reference) is required "
+        "to perform pointer arithmetic.")]]
     [[nodiscard]] auto FindDevice(
         _In_z_ const unsigned char *const symbol) const noexcept
-        -> const DeviceType * {
-        for (const auto &[candidate, device] : devices_) {
+        -> const DeviceType & {
+        const auto last = devices_.data() + devices_.size() - 1;
+        for (auto cursor = devices_.data(); cursor != last; ++cursor) {
+            const auto &[candidate, device] = *cursor;
             // `strcmp` compares the null-terminated names directly, avoiding
             // the preliminary length scan needed to construct a string view.
             [[gsl::suppress("26490",
@@ -131,10 +140,11 @@ private:
             if (std::strcmp(
                     reinterpret_cast<const char *>(candidate.c_str()),
                     reinterpret_cast<const char *>(symbol)) == 0) {
-                return std::addressof(device);
+                return device;
             }
         }
-        return nullptr;
+        // An unrecognized name selects the last source.
+        return last->second;
     }
 
     [[gsl::suppress("26429",
@@ -148,11 +158,8 @@ private:
         if (!ClientAuthorized(binding)) {
             return STATUS_ACCESS_DENIED;
         }
-        const auto device = active_->get().FindDevice(symbol);
-        if (device == nullptr) {
-            return STATUS_INVALID_PARAMETER;
-        }
-        *length = device->length;
+        const auto &device = active_->get().FindDevice(symbol);
+        *length = device.length;
         return STATUS_SUCCESS;
     }
 
@@ -171,11 +178,8 @@ private:
         if (!ClientAuthorized(binding)) {
             return STATUS_ACCESS_DENIED;
         }
-        const auto device = active_->get().FindDevice(symbol);
-        if (device == nullptr) {
-            return STATUS_INVALID_PARAMETER;
-        }
-        return device->Read(
+        const auto &device = active_->get().FindDevice(symbol);
+        return device.Read(
             buffer, offset, wanted, *transferred);
     }
 

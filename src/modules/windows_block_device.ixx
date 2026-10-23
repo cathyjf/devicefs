@@ -41,6 +41,8 @@ using devicefs::terminal::Transcode;
 export namespace devicefs {
 
 constexpr auto kHandleDevicePrefix = std::string_view{R"(\\\handle:)"};
+constexpr auto kFileHandleDevicePrefix =
+    std::string_view{R"(\\\file-handle:)"};
 
 class SnapshotAllocationBitmap {
 public:
@@ -469,6 +471,62 @@ struct WindowsBlockDeviceSettings {
     }
 };
 
+[[nodiscard, msvc::forceinline]]
+auto MakeErrorClosure(
+    const std::filesystem::path &filename, const std::uint64_t offset,
+    const ULONG wanted) noexcept {
+    // Read failures are not expected during normal operation. `noinline`
+    // prevents `flatten` from enlarging the read callback with diagnostic
+    // code that successful reads never execute.
+    return [&filename, offset, wanted]
+        [[msvc::noinline]] (const DWORD error) noexcept {
+        devicefs::WriteToStream(
+            devicefs::stderr,
+            L"devicefs: read failed for '{}' at offset 0x{:x} "
+            L"for {} bytes: {}\n",
+            std::wstring_view{filename.native()}, offset, wanted,
+            TryConstructWinError("", ExplicitWin32Error{error}));
+        return FspNtStatusFromWin32(error);
+    };
+}
+
+// Read exactly `count` bytes at `position`, waiting for completion. Call
+// `failure` with the Win32 error if the read fails or completes short.
+// Precondition: `event` is a manual-reset event that is not being used by
+// another pending operation.
+[[nodiscard, msvc::forceinline]]
+_Success_(return == STATUS_SUCCESS)
+auto ReadFromFile(
+    const HANDLE file, const HANDLE event,
+    _Out_writes_bytes_to_(count, done) void *__restrict const output,
+    const UINT64 position, const auto count,
+    _Out_ auto &__restrict done,
+    const auto &failure, auto &...observers) noexcept -> NTSTATUS {
+    const auto parts = ULARGE_INTEGER{.QuadPart = position};
+    auto operation = OVERLAPPED{
+        .Offset = parts.LowPart,
+        .OffsetHigh = parts.HighPart,
+        .hEvent = event,
+    };
+    (observers.BeginSourceRead(), ...);
+    // GetOverlappedResult supplies the byte count for either completion path.
+    if (!ReadFile(file, output, count, nullptr, &operation)) {
+        const auto error = GetLastError();
+        if (error != ERROR_IO_PENDING) {
+            return failure(error);
+        }
+        (observers.RecordSourcePending(), ...);
+    }
+    if (!GetOverlappedResult(file, &operation, &done, TRUE)) {
+        return failure(GetLastError());
+    }
+    if (done != count) {
+        return failure(ERROR_READ_FAULT);
+    }
+    (observers.FinishSourceRead(done), ...);
+    return STATUS_SUCCESS;
+}
+
 } // namespace devicefs::filesystem_internal
 
 export namespace devicefs {
@@ -557,7 +615,6 @@ struct WindowsBlockDevice
     // contained in `[0, length)`. The destination buffer does not overlap this
     // object, its owned storage, or `transferred`; `__restrict` expresses that
     // non-overlap condition to the optimizer.
-    template <typename... Observers>
     _Success_(return == STATUS_SUCCESS)
     auto Read(
         _Out_writes_bytes_to_(wanted, transferred)
@@ -565,7 +622,7 @@ struct WindowsBlockDevice
         _In_range_(0, length - 1) const std::uint64_t offset,
         _In_range_(1, length - offset) const ULONG wanted,
         _Pre_equal_to_(0) ULONG &transferred,
-        Observers &...observers) const noexcept -> NTSTATUS {
+        auto &...observers) const noexcept -> NTSTATUS {
         if constexpr (HasAllocationBitmap && !kMeasureFreeClusterData) {
             if (!allocation_bitmap.HasAllocatedClusters(offset, wanted)) {
                 (observers.RecordSynthetic(), ...);
@@ -574,46 +631,15 @@ struct WindowsBlockDevice
                 return STATUS_SUCCESS;
             }
         }
-        // Read failures are not expected during normal operation. `noinline`
-        // prevents `flatten` from enlarging the read callback with diagnostic
-        // code that successful reads never execute.
-        const auto failure = [&filename = filename, offset, wanted]
-            [[msvc::noinline]] (const DWORD error) noexcept {
-            devicefs::WriteToStream(
-                devicefs::stderr,
-                L"devicefs: read failed for '{}' at offset 0x{:x} "
-                L"for {} bytes: {}\n",
-                std::wstring_view{filename.native()}, offset, wanted,
-                TryConstructWinError("", ExplicitWin32Error{error}));
-            return FspNtStatusFromWin32(error);
-        };
+        const auto failure = filesystem_internal::MakeErrorClosure(
+            filename, offset, wanted);
         auto &read_resources = GetReadResources();
-        const auto read = [&](void *__restrict const output,
-            const UINT64 position, const auto count,
-            auto *__restrict const done) {
-            const auto parts = ULARGE_INTEGER{.QuadPart = position};
-            auto operation = OVERLAPPED{
-                .Offset = parts.LowPart,
-                .OffsetHigh = parts.HighPart,
-                .hEvent = read_resources.event.get(),
-            };
-            (observers.BeginSourceRead(), ...);
-            // GetOverlappedResult supplies the byte count for either completion path.
-            if (!ReadFile(handle.get(), output, count, nullptr, &operation)) {
-                const auto error = GetLastError();
-                if (error != ERROR_IO_PENDING) {
-                    return failure(error);
-                }
-                (observers.RecordSourcePending(), ...);
-            }
-            if (!GetOverlappedResult(handle.get(), &operation, done, TRUE)) {
-                return failure(GetLastError());
-            }
-            if (*done != count) {
-                return failure(ERROR_READ_FAULT);
-            }
-            (observers.FinishSourceRead(*done), ...);
-            return STATUS_SUCCESS;
+        const auto read = [this, &read_resources, &failure, &observers...](
+            void *__restrict const output, const UINT64 position,
+            const auto count, auto &__restrict done) {
+            return filesystem_internal::ReadFromFile(
+                handle.get(), read_resources.event.get(), output, position,
+                count, done, failure, observers...);
         };
 
         // Windows documents sector sizes as powers of two, so these masks round
@@ -631,7 +657,7 @@ struct WindowsBlockDevice
             "This cast is proved safe by the range check above.")]]
         const auto read_length = static_cast<LengthType>(read_end - read_offset);
         if ((read_offset == offset) && (read_length == wanted)) {
-            const auto status = read(buffer, offset, wanted, &transferred);
+            const auto status = read(buffer, offset, wanted, transferred);
             if (!NT_SUCCESS(status)) {
                 return status;
             }
@@ -646,7 +672,7 @@ struct WindowsBlockDevice
             [&](BYTE *__restrict const bounce_storage) {
             auto device_transferred = LengthType{};
             const auto status = read(
-                bounce_storage, read_offset, read_length, &device_transferred);
+                bounce_storage, read_offset, read_length, device_transferred);
             if (!NT_SUCCESS(status)) {
                 return status;
             }
@@ -673,6 +699,52 @@ struct WindowsBlockDevice
         }
         return read_into_bounce_buffer_and_copy_to_destination(
             newly_allocated_memory.get());
+    }
+};
+
+struct OrdinaryFileBlockDevice {
+    const std::uint64_t length;
+    std::filesystem::path filename;
+    wil::unique_hfile handle;
+
+    // Take ownership of a buffered read handle, opened for either synchronous
+    // or overlapped I/O. `filename` identifies the source in read diagnostics;
+    // `description` identifies it in setup errors.
+    [[nodiscard]] static auto FromHandle(
+        wil::unique_hfile handle, std::filesystem::path filename,
+        const std::string_view description) -> OrdinaryFileBlockDevice {
+        auto size = LARGE_INTEGER{};
+        if (!GetFileSizeEx(handle.get(), &size)) {
+            WinError("failed to query the length of file '{}' ({})",
+                std::wstring_view{filename.native()}, description);
+        }
+        return OrdinaryFileBlockDevice{
+            .length = devicefs::terminal::FailFastCast<std::uint64_t>(
+                size.QuadPart),
+            .filename = std::move(filename),
+            .handle = std::move(handle),
+        };
+    }
+
+    [[msvc::noinline]]
+    _Success_(return == STATUS_SUCCESS)
+    auto Read(
+        _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
+        _In_range_(0, length - 1) const std::uint64_t offset,
+        _In_range_(1, length - offset) const ULONG wanted,
+        _Pre_equal_to_(0) ULONG &transferred,
+        auto &...observers) const noexcept -> NTSTATUS {
+        const auto failure = filesystem_internal::MakeErrorClosure(
+            filename, offset, wanted);
+        thread_local auto event = wil::unique_event_nothrow{};
+        [[gsl::suppress("26447",
+            justification: "This invocation of `try_create` cannot throw.")]]
+        if (!event && !event.try_create(
+                wil::EventOptions::ManualReset, nullptr)) {
+            return failure(GetLastError());
+        }
+        return filesystem_internal::ReadFromFile(handle.get(), event.get(),
+            buffer, offset, wanted, transferred, failure, observers...);
     }
 };
 

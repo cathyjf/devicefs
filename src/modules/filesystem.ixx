@@ -218,6 +218,16 @@ struct Options {
     bool help = false;
 };
 
+[[nodiscard]] auto IsFileHandleDevice(
+    const internal::Mapping &mapping) noexcept {
+    return mapping.device.starts_with(devicefs::kFileHandleDevicePrefix);
+}
+
+[[nodiscard]] auto IsWindowsDevice(
+    const internal::Mapping &mapping) noexcept {
+    return !rpc_client::IsRpcDevice(mapping) && !IsFileHandleDevice(mapping);
+}
+
 auto FurtherHardenProcess() {
     auto child_processes = PROCESS_MITIGATION_CHILD_PROCESS_POLICY{};
     child_processes.NoChildProcessCreation = 1;
@@ -361,7 +371,7 @@ auto Usage(const auto output) noexcept {
     for (auto i = 0uz; i < result.mappings.size(); ++i) {
         const auto &mapping = result.mappings[i];
         register_name(mapping.name, i + 1);
-        if (result.known_data_map_cluster_size && !rpc_client::IsRpcDevice(mapping)) {
+        if (result.known_data_map_cluster_size && IsWindowsDevice(mapping)) {
             register_name(mapping.name + kKnownDataMapSuffix, i + 1);
         }
     }
@@ -475,7 +485,7 @@ using DeviceFiles = std::map<std::wstring, DeviceFile<DeviceType>, FilenameLess>
         value.data(), value.data() + value.size(), handle);
     if ((error != std::errc{}) || (end != std::to_address(value.end()))) {
         throw std::invalid_argument(std::format(
-            "invalid inherited block-device handle '{}' for {}; "
+            "invalid inherited handle '{}' for {}; "
             "expected an unsigned decimal integer", value, description));
     }
     return wil::unique_hfile{std::bit_cast<HANDLE>(handle)};
@@ -489,6 +499,25 @@ template <BlockDevice... DeviceTypes>
     const std::string_view rpc_password)
     -> VariantBlockDevice<DeviceTypes...> {
     using SourceType = VariantBlockDevice<DeviceTypes...>;
+    const auto description = std::format("--map #{}", map_number);
+    [[maybe_unused]] const auto open_inherited_source =
+        [&mapping, &description]<typename Device, const auto &Prefix>(
+            auto &&...options) {
+        return VariantFromBlockDevice<SourceType>(Device::FromHandle(
+            ParseInheritedHandle(
+                std::string_view{mapping.device}.substr(Prefix.size()),
+                description),
+            std::filesystem::path{mapping.device},
+            std::forward<decltype(options)>(options)..., description));
+    };
+    if constexpr ((std::same_as<
+            DeviceTypes, devicefs::OrdinaryFileBlockDevice> || ...)) {
+        if (IsFileHandleDevice(mapping)) {
+            return open_inherited_source.template operator()<
+                devicefs::OrdinaryFileBlockDevice,
+                devicefs::kFileHandleDevicePrefix>();
+        }
+    }
     if constexpr ((std::same_as<DeviceTypes, RPCBlockDevice> || ...)) {
         if (rpc_client::IsRpcDevice(mapping)) {
             const auto tcp = rpc_client::IsTcpDevice(mapping);
@@ -506,21 +535,14 @@ template <BlockDevice... DeviceTypes>
     }
     if constexpr ((WindowsDevice<DeviceTypes> || ...)) {
         using WindowsType = SelectedWindowsBlockDevice<DeviceTypes...>;
-        const auto source = std::string_view{mapping.device};
-        const auto description = std::format("--map #{}", map_number);
-        return VariantFromBlockDevice<SourceType>(
-            [source, &description](auto &&...arguments) {
-                if (source.starts_with(devicefs::kHandleDevicePrefix)) {
-                    return WindowsType::FromHandle(
-                        ParseInheritedHandle(
-                            source.substr(devicefs::kHandleDevicePrefix.size()),
-                            description),
-                        std::forward<decltype(arguments)>(arguments)...);
-                }
-                return WindowsType::FromFilename(
-                    std::forward<decltype(arguments)>(arguments)...);
-            }(std::filesystem::path{mapping.device}, extended_dasd,
-                cache, description));
+        if (mapping.device.starts_with(devicefs::kHandleDevicePrefix)) {
+            return open_inherited_source.template operator()<
+                WindowsType, devicefs::kHandleDevicePrefix>(
+                    extended_dasd, cache);
+        }
+        return VariantFromBlockDevice<SourceType>(WindowsType::FromFilename(
+            std::filesystem::path{mapping.device}, extended_dasd, cache,
+            description));
     } else {
         std::unreachable();
     }
@@ -1107,13 +1129,14 @@ auto Run(const Options &options) {
             OpenDevices<false, false, SourceTypes...>(
                 options, std::move(password)));
     };
-    const auto rpc_devices =
-        std::ranges::count_if(options.mappings, rpc_client::IsRpcDevice);
-    const auto dispatch = [&options, rpc_devices, &run]<bool HasBitmap> {
+    const auto needed = std::array{
+        std::ranges::any_of(options.mappings, IsWindowsDevice),
+        std::ranges::any_of(options.mappings, rpc_client::IsRpcDevice),
+        std::ranges::any_of(options.mappings, IsFileHandleDevice),
+    };
+    const auto dispatch = [&needed, &run]<bool HasBitmap> {
         return DispatchDeviceTypes<WindowsBlockDevice<HasBitmap>,
-            RPCBlockDevice>(
-                {std::cmp_less(rpc_devices, options.mappings.size()),
-                    rpc_devices != 0}, run);
+            RPCBlockDevice, devicefs::OrdinaryFileBlockDevice>(needed, run);
     };
     return options.synthetic_free_clusters
         ? dispatch.template operator()<true>()

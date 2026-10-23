@@ -7,6 +7,95 @@ import std;
 import <devicefs/windows_imports.h>;
 import devicefs.terminal.safecast;
 
+namespace devicefs::bitmap_set_detail {
+
+const auto free_deleter = [](auto *const buffer) static noexcept {
+    [[gsl::suppress("26408", justification:
+        "`free` is required to free memory allocated with `realloc` below.")]]
+    std::free(buffer);
+};
+
+// Constraint on `T`: an all-zero object representation must be valid.
+template <class T>
+    requires (std::is_implicit_lifetime_v<T> &&
+        std::is_trivially_copyable_v<T> &&
+        (alignof(T) <= alignof(std::max_align_t)))
+class ReallocVector {
+    constexpr static auto max_size =
+        std::numeric_limits<std::size_t>::max() / sizeof(T);
+
+public:
+    _Pre_satisfies_(new_size <= max_size)
+    auto resize(const std::size_t new_size) -> void {
+        if (new_size == 0) {
+            clear();
+            return;
+        }
+        if (std::cmp_greater(new_size, max_size)) {
+            throw std::bad_alloc();
+        }
+        if ((new_size > reservation_) || (new_size < size_)) {
+            const auto new_reservation = new_reservation_size(new_size);
+            [[gsl::suppress("26408", justification:
+                "`realloc` is required to resize a memory allocation.")]]
+            auto *const buffer = static_cast<T *>(std::realloc(
+                storage_.get(), new_reservation * sizeof(T)));
+            if (!buffer) {
+                throw std::bad_alloc();
+            }
+            storage_.release();
+            storage_.reset(buffer);
+            if (std::cmp_greater(new_reservation, reservation_)) {
+                std::memset(buffer + reservation_, 0,
+                    (new_reservation - reservation_) * sizeof(T));
+            }
+            reservation_ = new_reservation;
+        }
+        size_ = new_size;
+    }
+
+    constexpr auto clear() noexcept -> void {
+        size_ = reservation_ = 0;
+        storage_.reset();
+    }
+
+    auto operator[](const std::size_t index) noexcept -> T & {
+        return storage_[index];
+    }
+
+    auto operator[](const std::size_t index) const noexcept -> const T & {
+        return storage_[index];
+    }
+
+    operator std::span<const T>() const noexcept {
+        return {storage_.get(), size_};
+    }
+
+    auto size() const noexcept -> std::size_t {
+        return size_;
+    }
+
+private:
+    auto new_reservation_size(const std::size_t new_size) const noexcept
+        -> std::size_t {
+        if (new_size < size_) {
+            return new_size;
+        }
+        constexpr auto minimum_reservation = std::min(10uz, max_size);
+        constexpr auto geometric_factor = 2uz;
+        constexpr auto fraction_max_size = max_size / geometric_factor;
+        const auto proposed_max = (reservation_ > fraction_max_size) ?
+            max_size : (reservation_ * geometric_factor);
+        return std::max({minimum_reservation, new_size, proposed_max});
+    }
+
+    std::size_t size_{};
+    std::size_t reservation_{};
+    std::unique_ptr<T[], std::remove_cv_t<decltype(free_deleter)>> storage_{};
+};
+
+}
+
 export namespace devicefs {
 
 // Store a set of byte offsets using one bit per `BlockSize` bytes.
@@ -192,7 +281,7 @@ private:
         return std::uint64_t{1} << (bit & (kBitsPerWord - 1));
     }
 
-    std::vector<std::uint64_t> words_;
+    bitmap_set_detail::ReallocVector<std::uint64_t> words_;
     size_type size_ = 0;
 };
 

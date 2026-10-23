@@ -358,7 +358,8 @@ enum class BackupViewPreparation {
         return BackupViewPreparation::OptimizationUnavailable;
     }
 
-    auto synthetic = [&] -> std::optional<SyntheticBackupDevice> {
+    auto synthetic = [&report, &devices, &volume_identifier, output]
+        -> std::optional<SyntheticBackupDevice> {
         try {
             auto baseline = devicefs::WindowsBlockDevice<true>::FromFilename(
                 std::filesystem::path{report.interval.baseline_device},
@@ -373,7 +374,7 @@ enum class BackupViewPreparation {
                     alignment);
             return SyntheticBackupDevice::FromBlockDevices(
                 std::move(baseline), std::move(payload),
-                report.map->block_offsets);
+                report.map->block_offsets.storage());
         } catch (const std::runtime_error &error) {
             devicefs::WriteToStream(output,
                 "\n  Volume ID: {}\n",
@@ -429,6 +430,9 @@ enum class BackupViewPreparation {
     return BackupViewPreparation::Ready;
 }
 
+// Run the mounted-view diagnostics and stop their RPC server before returning.
+// Precondition: the maps in `reports` must remain alive and unchanged until
+// this call returns; the RPC devices borrow their bitmap storage.
 [[nodiscard]] auto RunBackupViewDiagnostics(
     const HANDLE cancellation_event,
     const std::span<const VolumeReport> reports,
@@ -781,9 +785,6 @@ auto ReadVerificationChunk(
     }
 }
 
-using DirtyBlockIterator =
-    std::set<std::uint64_t>::const_iterator;
-
 auto AppendDifferingClusters(
     const std::span<const unsigned char> baseline,
     const std::span<const unsigned char> payload,
@@ -815,14 +816,24 @@ auto AppendDifferingClusters(
     }
 }
 
+// Return counts of differing bytes and `kMapBlockSize`-byte blocks in the
+// two buffers. If `dirty_map` contains a map, the result also includes counts
+// and cluster indices for differences outside that map, plus the offset and
+// both byte values of the first such difference.
+//
+// Precondition: the chunks have equal lengths.
+_Pre_satisfies_((chunk_offset % kMapBlockSize) == 0)
+// Suppression justification: parameter `dirty_map` is not a smart pointer or
+// a shared pointer. It is a reference to an `std::expected` object.
+#pragma warning(push)
+#pragma warning(disable : 26415 26418)
 [[nodiscard]] auto CompareVerificationChunk(
     const std::span<const unsigned char> baseline,
     const std::span<const unsigned char> payload,
     const std::uint64_t chunk_offset,
-    const std::uint32_t cluster_size,
-    const bool verify_coverage,
-    DirtyBlockIterator &next_dirty,
-    const DirtyBlockIterator dirty_end) {
+    _Pre_satisfies_(cluster_size != 0) const std::uint32_t cluster_size,
+    const std::expected<DirtyBlockMap, std::string> &dirty_map) {
+#pragma warning(pop)
     auto result = ComparisonObservation{};
     for (auto relative = 0uz; relative < baseline.size();
         relative += kMapBlockSize) {
@@ -847,19 +858,13 @@ auto AppendDifferingClusters(
             std::not_equal_to{});
         result.differing_bytes += differing_bytes;
         ++result.differing_blocks;
-        if (!verify_coverage) {
+        if (!dirty_map) {
             continue;
         }
 
         const auto block_offset = chunk_offset +
             devicefs::terminal::FailFastMaybeCast<std::uint64_t>(relative);
-        while ((next_dirty != dirty_end) &&
-            (*next_dirty < block_offset)) {
-            ++next_dirty;
-        }
-        if ((next_dirty != dirty_end) &&
-            (*next_dirty == block_offset)) {
-            ++next_dirty;
+        if (dirty_map->block_offsets.contains(block_offset)) {
             continue;
         }
         result.uncovered_bytes += differing_bytes;
@@ -907,14 +912,6 @@ auto VerifySnapshotRange(
             volume.interval.payload_device);
 
         const auto cluster_size = allocation.baseline.ClusterSize();
-        // `CompareVerificationChunk` uses the coverage iterators only when
-        // `volume.map` is present.
-        auto next_dirty = volume.map
-            ? volume.map->block_offsets.lower_bound(range_start)
-            : DirtyBlockIterator{};
-        const auto dirty_end = volume.map
-            ? volume.map->block_offsets.end()
-            : DirtyBlockIterator{};
         for (auto offset = range_start; offset < range_end;
             offset += kComparisonChunkSize) {
             if (state.Failed() ||
@@ -947,9 +944,7 @@ auto VerifySnapshotRange(
                 devicefs::terminal::FailFastMaybeCast<std::uint64_t>(size),
                 CompareVerificationChunk(
                     baseline_chunk, payload_chunk, offset,
-                    cluster_size,
-                    volume.map.has_value(),
-                    next_dirty, dirty_end));
+                    cluster_size, volume.map));
         }
     } catch (const std::runtime_error &error) {
         state.Fail(error.what());

@@ -17,6 +17,7 @@
 export module devicefs.vss_block_descriptors.cli;
 
 import std;
+import devicefs.count_zeros;
 import devicefs.guid_formatter;
 import devicefs.svi_extents;
 import devicefs.stream_writer;
@@ -136,16 +137,27 @@ auto Usage(const auto output) noexcept {
     return output;
 }
 
+// Return SVI extent schema text with one record per block, in increasing
+// byte-offset order.
 [[nodiscard]] auto FormatSviExtents(
-    const std::set<std::uint64_t> &offsets) {
+    const devicefs::vss::BlockOffsetSet &offsets) {
     auto output = std::format(
         "schema-version\t1\n"
         "block-size\t{}\n"
         "block-count\t{}\n",
         devicefs::vss::kBlockSize, offsets.size());
-    for (const auto offset : offsets) {
-        std::format_to(
-            std::back_inserter(output), "block\t{:016x}\n", offset);
+    constexpr auto bits_per_word = std::numeric_limits<std::uint64_t>::digits;
+    auto first_block = std::uint64_t{};
+    for (auto word : offsets.storage()) {
+        while (word != 0) {
+            const auto offset =
+                (first_block + devicefs::CountTrailingZeros(word)) *
+                devicefs::vss::kBlockSize;
+            std::format_to(
+                std::back_inserter(output), "block\t{:016x}\n", offset);
+            word &= word - 1;
+        }
+        first_block += bits_per_word;
     }
     return output;
 }

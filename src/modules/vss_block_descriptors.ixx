@@ -62,6 +62,7 @@ module;
 export module devicefs.vss_block_descriptors;
 
 import std;
+import devicefs.bitmap_set;
 import devicefs.terminal.safecast;
 import devicefs.guid_formatter;
 import <devicefs/windows_imports.h>;
@@ -79,6 +80,8 @@ export namespace devicefs::vss {
 // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_io_handle.c#L51-L108
 inline constexpr auto kBlockSize = std::uint64_t{0x4000};
 
+using BlockOffsetSet = BitmapSet<kBlockSize>;
+
 // These are raw descriptor flag bits, not VSS snapshot-attribute flags from
 // the Windows SDK. They are exported because the CLI and eventual supervisor
 // must classify the records returned by ReadBlockDescriptors.
@@ -93,6 +96,11 @@ struct BlockDescriptor {
     std::uint64_t store_offset;
     std::uint32_t flags;
     std::uint32_t bitmap;
+};
+
+struct BlockDescriptorCounts {
+    std::uint64_t list_block_count;
+    std::size_t descriptor_count;
 };
 
 struct StoreBlockDescriptors {
@@ -117,14 +125,17 @@ struct CatalogStore {
     std::optional<GUID> snapshot_identifier;
 };
 
-// Read the catalog and store headers in catalog traversal order. The result
+// Open the device or flat NTFS volume image named by the UTF-8 path `source`,
+// and read its catalog and store headers in catalog traversal order. The result
 // includes snapshot IDs and creation times so diagnostics can compare catalog
 // order with snapshot creation order. Descriptor lists are read separately by
 // `ReadBlockDescriptors`.
 [[nodiscard]] auto ReadStoreCatalog(std::string_view source)
     -> std::vector<CatalogStore>;
 
-// Select the store for an exact snapshot ID. A missing or ambiguous match throws.
+// Select the store for an exact snapshot ID. The function throws on a missing
+// or ambiguous match; the diagnostic includes the supplied source-path text
+// `source`.
 [[nodiscard]] auto SelectCatalogStore(std::span<const CatalogStore> stores,
     const GUID &snapshot_identifier, std::string_view source)
     -> CatalogStore;
@@ -139,24 +150,28 @@ struct CatalogInterval {
     std::vector<CatalogStore> stores;
 };
 
-// Select contributing stores from the exact baseline inclusive to the exact
-// payload exclusive, in creation-time order. The payload entry is returned
-// separately. This reads store headers but not descriptor lists. A failed
-// read or selection throws; no partial interval is returned.
+// Open the device or flat NTFS volume image named by the UTF-8 path `source`.
+// The function selects contributing stores from the exact baseline inclusive
+// to the exact payload exclusive, in creation-time order. The payload entry is
+// returned separately. The function reads store headers but not descriptor
+// lists, and throws if a read or selection fails; no partial interval is returned.
 [[nodiscard]] auto ReadBlockDescriptorIntervalCatalog(std::string_view source,
     const GUID &baseline_identifier, const GUID &payload_identifier)
     -> CatalogInterval;
 
-// Read every supplied store's descriptor list, in supplied order. `source`
-// exposes NTFS volume byte zero at offset zero and may be a volume device or a
-// flat image. The result preserves descriptor traversal order and multiplicity.
+// Open the volume device or flat image named by the UTF-8 path `source`, and
+// read every supplied store's descriptor list. The result groups records by
+// store, preserving supplied-store order, descriptor traversal order, and
+// duplicates.
+// Precondition: byte zero of the opened device or image is byte zero of the
+// NTFS volume.
 // Read failures throw; no partial result is returned.
 [[nodiscard]] auto ReadBlockDescriptors(std::string_view source,
     std::span<const CatalogStore> stores) -> std::vector<CatalogStoreDescriptors>;
 
 } // namespace devicefs::vss
 
-namespace {
+namespace devicefs::vss::detail {
 
 using namespace std::string_view_literals;
 
@@ -587,19 +602,21 @@ struct CatalogType3 {
     std::uint64_t header_offset;
 };
 
-using devicefs::vss::CatalogStore;
-
+// Round the volume-relative byte offset `offset` down to a VSS block boundary
+// and insert that byte offset into `visited`. The function throws if that block
+// has already been recorded, including through a different offset within it.
+//
+// Precondition: a complete metadata block starting at `offset` lies within
+// the opened source. This bounds the visited bitmap's growth by the source size.
 auto VisitMetadataBlock(
-    std::unordered_set<std::uint64_t> &visited,
+    BlockOffsetSet &visited,
     const std::uint64_t offset,
     const std::string_view description) {
-    // libvshadow_io_handle_check_if_block_first_read records the containing
-    // 16-KiB block-tree leaf, rather than the literal pointer. Use the same key
-    // so a chain that aliases an already visited block through a different
-    // interior offset is rejected instead of looping; no alignment rule is
-    // inferred from that behavior.
+    // Grouping offsets by their containing 16-KiB block matches the leaf lookup
+    // in libvshadow_io_handle_check_if_block_first_read. This rejects cycles
+    // and aliases while allowing unaligned metadata pointers.
     // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_block_tree_node.c#L442-L610
-    if (!visited.insert(offset / devicefs::vss::kBlockSize).second) {
+    if (!visited.insert(offset & ~(devicefs::vss::kBlockSize - 1))) {
         throw std::runtime_error(std::format(
             "{} repeated the 16-KiB metadata block containing offset 0x{:x}",
             description, offset));
@@ -608,7 +625,7 @@ auto VisitMetadataBlock(
 
 [[nodiscard]] auto ReadCatalog(const RawSource &source, std::uint64_t offset) {
     auto stores = std::vector<CatalogStore>{};
-    auto visited = std::unordered_set<std::uint64_t>{};
+    auto visited = BlockOffsetSet{};
 
     // libvshadow_io_handle_read_catalog follows the root and +40 links,
     // libvshadow_io_handle_read_catalog_header_data validates each block, and
@@ -619,8 +636,8 @@ auto VisitMetadataBlock(
     // diagnostic builds and does not make them acceptance conditions.
     // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_io_handle.c#L613-L879
     while (offset != 0) {
-        VisitMetadataBlock(visited, offset, "the VSS catalog chain");
         const auto data = source.Read<devicefs::vss::kBlockSize>(offset);
+        VisitMetadataBlock(visited, offset, "the VSS catalog chain");
         if (!HasIdentifier(data, 8)) {
             throw std::runtime_error(std::format(
                 "the VSS catalog block at 0x{:x} had an invalid identifier",
@@ -685,7 +702,7 @@ auto VisitMetadataBlock(
                 // the direct repair of that defect.
                 // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_store_descriptor.c#L581-L837
                 const auto matching = std::ranges::find_if(stores,
-                    [&](const auto &store) {
+                    [&type3](const auto &store) {
                         return InlineIsEqualGUID(store.store_identifier,
                             type3.store_identifier) != FALSE;
                     });
@@ -763,11 +780,10 @@ auto ReadStoreHeaders(const RawSource &source, std::vector<CatalogStore> &stores
     }
 }
 
-struct NormalizedDescriptor {
-    devicefs::vss::BlockDescriptor value;
-    std::shared_ptr<NormalizedDescriptor> overlay;
-};
-
+// `DescriptorState` validates descriptor offsets using the preceding records
+// from one store. It retains the block membership needed by those checks,
+// without constructing the normalized descriptors that libvshadow uses to read
+// snapshot data.
 class DescriptorState {
 public:
     explicit DescriptorState(const std::uint64_t volume_size)
@@ -775,8 +791,8 @@ public:
         // libvshadow_store_descriptor_read_block_descriptors passes the
         // selected type-2 catalog entry's volume size to
         // libvshadow_block_tree_initialize, whose root node rejects zero and
-        // values not representable by std::int64_t. Express that domain
-        // directly before using any descriptor offset as a tree key.
+        // values not representable by std::int64_t. This constructor applies
+        // the same bounds before accepting descriptors.
         // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_block_tree_node.c#L34-L88
         if ((volume_size_ == 0) ||
             !std::in_range<std::int64_t>(volume_size_)) {
@@ -788,94 +804,62 @@ public:
         }
     }
 
-    void Insert(const devicefs::vss::BlockDescriptor &raw) {
-        // libvshadow_store_descriptor_read_store_block_list calls
-        // libvshadow_block_tree_insert before appending a raw descriptor to the
-        // list printed by vshadowinfo. Reproduce that forward/reverse state
-        // machine so malformed descriptor sequences fail at the same point,
-        // while two keyed maps replace libyal's generic multi-level tree.
-        // std::shared_ptr preserves the source algorithm's dual-tree object
-        // lifetime without copying its manual index and conditional-free
-        // bookkeeping.
+    // Check the next descriptor's offsets and update the validation state.
+    // Precondition: calls follow descriptor traversal order for this store.
+    // Successful return means the record passed the offset checks performed by
+    // libvshadow's tree insertion for this sequence.
+    auto Insert(const devicefs::vss::BlockDescriptor &raw) -> void {
+        // libvshadow_block_tree_insert stores descriptors by original offset
+        // in a forward tree, and forwarders by relative offset in a reverse
+        // tree. A reverse lookup replaces an incoming original with one
+        // already in the forward tree. For validation, finding that reverse
+        // entry is enough: its original has already passed the bounds check
+        // and needs no new forward insertion.
+        //
+        // This method records the forward tree's keys in `forward_` and reverse
+        // keys in `reverse_`. Reverse resolution can make a forwarder point back to
+        // its own original, in which case libvshadow ignores it. This method
+        // can still record its relative key because that key is already in
+        // `forward_`. A later match therefore skips only a forward insertion
+        // whose key already exists, preserving the same bounds checks with
+        // one bit of storage per key.
         // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_block_tree.c#L567-L1089
         if ((raw.flags & devicefs::vss::kNotUsedFlag) != 0) {
             return;
         }
-
-        auto resolved_original = raw.original_offset;
-        if ((raw.flags & devicefs::vss::kOverlayFlag) == 0) {
-            const auto reverse = reverse_.find(Key(raw.original_offset,
-                "a VSS reverse descriptor offset"));
-            if (reverse != reverse_.end()) {
-                resolved_original =
-                    reverse->second->value.original_offset;
-                const auto reverse_target =
-                    reverse->second->value.relative_offset;
-                const auto erased = reverse_.erase(
-                    Key(reverse_target,
-                        "a VSS reverse descriptor target"));
-                if (erased != 1) {
-                    throw std::runtime_error(
-                        "the VSS reverse descriptor state was inconsistent");
-                }
-            }
-        }
-
-        if (((raw.flags & devicefs::vss::kForwarderFlag) != 0) &&
-            (resolved_original == raw.relative_offset)) {
+        const auto overlay =
+            (raw.flags & devicefs::vss::kOverlayFlag) != 0;
+        const auto forwarder =
+            (raw.flags & devicefs::vss::kForwarderFlag) != 0;
+        const auto self_forwarder =
+            forwarder && (raw.original_offset == raw.relative_offset);
+        if (overlay && self_forwarder) {
             return;
         }
-
-        auto normalized = std::make_shared<NormalizedDescriptor>(
-            NormalizedDescriptor{
-                .value = raw,
-                .overlay = nullptr,
-            });
-        normalized->value.original_offset = resolved_original;
-
-        const auto forward_key = Key(
-            normalized->value.original_offset,
-            "a VSS forward descriptor offset");
-        const auto existing = forward_.find(forward_key);
-        if (existing == forward_.end()) {
-            forward_.emplace(forward_key, normalized);
-        } else if ((normalized->value.flags &
-                devicefs::vss::kOverlayFlag) != 0) {
-            const auto &overlay = ((existing->second->value.flags &
-                    devicefs::vss::kOverlayFlag) != 0)
-                ? existing->second
-                : existing->second->overlay;
-            if (overlay) {
-                overlay->value.bitmap |= normalized->value.bitmap;
-            } else {
-                existing->second->overlay = normalized;
+        const auto original = Key(raw.original_offset, overlay
+            ? "a VSS forward descriptor offset"
+            : "a VSS reverse descriptor offset");
+        const auto reverse_found =
+            !overlay && (reverse_.erase(original) != 0);
+        if (!reverse_found) {
+            if (self_forwarder) {
+                return;
             }
-            return;
-        } else {
-            const auto replaced =
-                std::exchange(existing->second, normalized);
-            if ((replaced->value.flags &
-                    devicefs::vss::kOverlayFlag) != 0) {
-                if (replaced->overlay) {
-                    throw std::runtime_error(
-                        "the VSS overlay descriptor state was inconsistent");
-                }
-                normalized->overlay = replaced;
-            } else {
-                normalized->overlay = std::move(replaced->overlay);
+            const auto inserted = forward_.insert(original);
+            if (overlay && !inserted) {
+                return;
             }
         }
-
-        if ((normalized->value.flags & devicefs::vss::kForwarderFlag) != 0) {
-            reverse_[Key(normalized->value.relative_offset,
-                "a VSS forwarder target")] = normalized;
+        if (forwarder) {
+            reverse_.insert(Key(raw.relative_offset,
+                "a VSS forwarder target"));
         }
     }
 
 private:
-    using Map = std::unordered_map<
-        std::uint64_t, std::shared_ptr<NormalizedDescriptor>>;
-
+    // Reject an offset outside the store's volume, then return the byte offset
+    // of its containing VSS block. The function accepts unaligned offsets by
+    // grouping them into blocks, as the reference tree's leaf lookup does.
     [[nodiscard]] auto Key(
         const std::uint64_t offset,
         const std::string_view description) const -> std::uint64_t {
@@ -884,25 +868,22 @@ private:
                 "{} 0x{:x} was outside the {}-byte VSS volume",
                 description, offset, volume_size_));
         }
-        return offset / devicefs::vss::kBlockSize;
+        return offset & ~(devicefs::vss::kBlockSize - 1);
     }
 
     std::uint64_t volume_size_;
-    Map forward_;
-    Map reverse_;
+    BlockOffsetSet forward_;
+    BlockOffsetSet reverse_;
 };
 
+// Follow one store's descriptor-list links and pass each accepted nonempty
+// raw record to `consume`. The result contains the list-block and descriptor
+// counts.
 [[nodiscard]] auto ReadDescriptorList(
-    const RawSource &source, const CatalogStore &store) {
-    auto result = devicefs::vss::StoreBlockDescriptors{
-        .store_identifier = store.store_identifier,
-        .snapshot_identifier = *store.snapshot_identifier,
-        .volume_size = store.volume_size,
-        .list_block_count = 0,
-        .descriptors = {},
-    };
+    const RawSource &source, const CatalogStore &store, auto &&consume) {
+    auto result = devicefs::vss::BlockDescriptorCounts{};
     auto state = DescriptorState{store.volume_size};
-    auto visited = std::unordered_set<std::uint64_t>{};
+    auto visited = BlockOffsetSet{};
     auto offset = store.list_offset;
 
     // libvshadow_store_descriptor_read_block_descriptors also reads VSS store
@@ -914,17 +895,19 @@ private:
     // chain refers to the same physical 16-KiB block.
     // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_store_descriptor.c#L1948-L2215
     //
-    // libvshadow_store_descriptor_read_store_block_list scans all 508 slots in
-    // every linked block, and libvshadow_block_descriptor_read_data treats only
-    // an entirely zero 32-byte record as empty and rejects a forwarder with a
-    // nonzero store offset. Preserve that scan and append each accepted raw
-    // five-field record in traversal order, because that is the list exposed by
-    // vshadowinfo even when normalization ignores NOT_USED or self-forwarders.
+    // This function scans all 508 slots in each linked block, following
+    // libvshadow_store_descriptor_read_store_block_list. It treats only an
+    // entirely zero 32-byte record as empty and rejects forwarders with nonzero
+    // store offsets, as libvshadow_block_descriptor_read_data does.
+    //
+    // The function passes accepted raw records to `consume` in traversal order,
+    // including duplicates, NOT_USED records, and self-forwarders. vshadowinfo
+    // exposes those records even when its normalization step ignores them.
     // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_store_descriptor.c#L1569-L1752
     // https://github.com/libyal/libvshadow/blob/f5a7362/libvshadow/libvshadow_block_descriptor.c#L313-L450
     while (offset != 0) {
-        VisitMetadataBlock(visited, offset, "the VSS descriptor-list chain");
         const auto data = source.Read<devicefs::vss::kBlockSize>(offset);
+        VisitMetadataBlock(visited, offset, "the VSS descriptor-list chain");
         const auto header = ParseStoreBlockHeader(data, offset);
         if (header.record_type != kStoreIndexRecordType) {
             throw std::runtime_error(std::format(
@@ -964,7 +947,8 @@ private:
                     descriptor.flags));
             }
             state.Insert(descriptor);
-            result.descriptors.push_back(descriptor);
+            consume(descriptor);
+            ++result.descriptor_count;
         }
         offset = header.next_offset;
     }
@@ -1004,7 +988,7 @@ private:
     return stores;
 }
 
-} // namespace
+} // namespace devicefs::vss::detail
 
 namespace devicefs::vss {
 
@@ -1039,7 +1023,7 @@ auto SelectCatalogStore(const std::span<const CatalogStore> stores,
 
 auto ReadStoreCatalog(const std::string_view source_path)
     -> std::vector<CatalogStore> {
-    return ReadStores(RawSource{source_path}, source_path);
+    return detail::ReadStores(detail::RawSource{source_path}, source_path);
 }
 
 auto ReadBlockDescriptorIntervalCatalog(const std::string_view source_path,
@@ -1113,11 +1097,51 @@ auto ReadBlockDescriptorIntervalCatalog(const std::string_view source_path,
 
 auto ReadBlockDescriptors(const std::string_view source_path,
     const std::span<const CatalogStore> stores) -> std::vector<CatalogStoreDescriptors> {
-    const auto source = RawSource{source_path};
+    const auto source = detail::RawSource{source_path};
     return stores | std::views::transform([&source](const auto &store) {
+        auto descriptors = std::vector<BlockDescriptor>{};
+        const auto counts = detail::ReadDescriptorList(source, store,
+            [&descriptors](const auto &descriptor) {
+                descriptors.push_back(descriptor);
+            });
         return CatalogStoreDescriptors{
-            .catalog = store, .blocks = ReadDescriptorList(source, store)};
+            .catalog = store,
+            .blocks = {
+                .store_identifier = store.store_identifier,
+                .snapshot_identifier = *store.snapshot_identifier,
+                .volume_size = store.volume_size,
+                .list_block_count = counts.list_block_count,
+                .descriptors = std::move(descriptors),
+            },
+        };
     }) | std::ranges::to<std::vector>();
+}
+
+// Open the volume device or flat image named by the UTF-8 path `source_path`.
+// The function reads the supplied stores' descriptor lists and invokes
+// `consume` synchronously for each raw descriptor, preserving store order,
+// record order, and duplicates. The descriptor reference is valid only for
+// the duration of that call. The function returns the total descriptor and
+// list-block counts after reading all stores.
+//
+// Precondition: byte zero of the opened device or image is byte zero of the
+// NTFS volume.
+//
+// The function propagates read, validation, and consumer exceptions. If an
+// exception occurs, earlier consumer calls may have accumulated an incomplete
+// prefix of the input.
+export [[nodiscard]] auto EnumerateBlockDescriptors(
+    const std::string_view source_path,
+    const std::span<const CatalogStore> stores, auto &&consume)
+    -> BlockDescriptorCounts {
+    const auto source = detail::RawSource{source_path};
+    auto counts = BlockDescriptorCounts{};
+    for (const auto &store : stores) {
+        const auto current = detail::ReadDescriptorList(source, store, consume);
+        counts.list_block_count += current.list_block_count;
+        counts.descriptor_count += current.descriptor_count;
+    }
+    return counts;
 }
 
 } // namespace devicefs::vss

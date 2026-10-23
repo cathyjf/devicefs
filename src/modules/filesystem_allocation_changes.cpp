@@ -21,7 +21,10 @@ module;
 module devicefs.windows_block_device;
 
 import std;
+import devicefs.bitmap_set;
+import devicefs.count_zeros;
 import devicefs.terminal.safecast;
+import devicefs.vss_block_descriptors;
 import <devicefs/windows_imports.h>;
 
 namespace devicefs {
@@ -79,10 +82,10 @@ auto LoadSnapshotAllocationBitmap(
         })};
 }
 
+template <std::uint64_t BlockSize>
 auto ReadAllocationChangeBlocks(
     const std::string_view previous_snapshot,
-    const std::string_view current_snapshot,
-    const std::uint64_t block_size) -> AllocationChangeBlocks {
+    const std::string_view current_snapshot) -> AllocationChangeBlocks<BlockSize> {
     constexpr auto previous_description =
         "the previous snapshot"sv;
     constexpr auto current_description =
@@ -127,20 +130,16 @@ auto ReadAllocationChangeBlocks(
         bitmap_size,
     });
 
-    auto block_offsets = std::vector<std::uint64_t>{};
-    const auto add_cluster = [&](const std::uint64_t cluster) {
-        const auto start = cluster * previous_bitmap.cluster_size;
-        const auto end = start + previous_bitmap.cluster_size;
-        const auto first_block = start / block_size;
-        const auto past_last_block = ((end - 1) / block_size) + 1;
-        for (const auto block :
-            std::views::iota(first_block, past_last_block)) {
-            const auto offset = block * block_size;
-            if (block_offsets.empty() ||
-                (block_offsets.back() != offset)) {
-                block_offsets.push_back(offset);
-            }
-        }
+    auto block_offsets = BitmapSet<BlockSize>{};
+    const auto add_cluster = [&block_offsets,
+        cluster_size = previous_bitmap.cluster_size](const std::uint64_t cluster) {
+        const auto start = cluster * cluster_size;
+        const auto end = start + cluster_size;
+        const auto first_block = start / BlockSize;
+        const auto past_last_block = ((end - 1) / BlockSize) + 1;
+        block_offsets.insert_range(
+            first_block * BlockSize,
+            past_last_block * BlockSize);
     };
     for (auto byte_index = 0uz; byte_index < bitmap_size;) {
         auto changed = filesystem_internal::LoadBitmapWord(
@@ -178,5 +177,9 @@ auto ReadAllocationChangeBlocks(
         .block_offsets = std::move(block_offsets),
     };
 }
+
+template auto ReadAllocationChangeBlocks<vss::kBlockSize>(
+    std::string_view, std::string_view)
+    -> AllocationChangeBlocks<vss::kBlockSize>;
 
 } // namespace devicefs

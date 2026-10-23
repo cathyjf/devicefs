@@ -18,6 +18,7 @@ export module devicefs.synthetic_backup_block_device;
 
 import std;
 import <devicefs/windows_imports.h>;
+import devicefs.count_zeros;
 import devicefs.filesystem;
 
 export namespace devicefs {
@@ -28,9 +29,17 @@ class SyntheticBackupBlockDevice {
 public:
     const std::uint64_t length;
 
+    // Return a reader that takes each `BlockSize`-byte block from `payload`
+    // when its bit in `payload_bitmap` is set, and from `baseline` otherwise.
+    // The reader interprets each word from its least significant bit to its
+    // most significant bit, starting with block zero in the first word.
+    // The function throws if the two source lengths differ.
+    //
+    // Precondition: the bitmap's backing storage must remain alive and unchanged
+    // until the returned reader is destroyed and all its reads have completed.
     [[nodiscard]] static auto FromBlockDevices(
         DeviceType baseline, DeviceType payload,
-        std::set<std::uint64_t> payload_block_offsets) {
+        const std::span<const std::uint64_t> payload_bitmap) {
         if (baseline.length != payload.length) {
             throw std::runtime_error(std::format(
                 "the synthetic backup baseline is {} bytes, but the payload is {} bytes",
@@ -38,52 +47,41 @@ public:
         }
         return SyntheticBackupBlockDevice{
             std::move(baseline), std::move(payload),
-            std::move(payload_block_offsets)};
+            payload_bitmap};
     }
 
-    template <typename... Observers>
+    // Read the requested bytes, combining adjacent blocks from the same source
+    // into one source read. On a failed or short source read, the function
+    // returns its status. It sets `transferred` to the total number of bytes
+    // read, including any supplied by a failed or short final source read.
     _Success_(return >= 0)
     auto Read(
         _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
         _In_range_(0, length - 1) const std::uint64_t offset,
         _In_range_(1, length - offset) const ULONG wanted,
         _Pre_equal_to_(0) ULONG &transferred,
-        Observers &...observers) const noexcept -> NTSTATUS {
+        auto &...observers) const noexcept -> NTSTATUS {
         const auto output = std::span{
             static_cast<std::byte *>(buffer), wanted};
         const auto request_end = offset + wanted;
+        const auto block_limit = ((request_end - 1) / BlockSize) + 1;
         auto position = offset;
-        [[gsl::suppress("26447", justification:
-            "`lower_bound` is not declared `noexcept`, but this lookup only "
-            "traverses existing nodes and compares `std::uint64_t` values "
-            "with `std::less<std::uint64_t>`, so it cannot throw.")]]
-        auto next_payload = payload_block_offsets_.lower_bound(
-            offset - (offset % BlockSize));
+        auto block = offset / BlockSize;
+        const auto word = block / kBitsPerWord;
+        auto use_payload = (word < payload_bitmap_.size()) &&
+            ((payload_bitmap_.data()[word] &
+                (std::uint64_t{1} << (block % kBitsPerWord))) != 0);
 
         [[gsl::suppress("6001",
             justification:
                 "The `_Pre_equal_to_(0)` contract establishes that "
                 "`transferred` is initialized before this read.")]]
         while (transferred != wanted) {
-            const auto use_payload =
-                (next_payload != payload_block_offsets_.end()) &&
-                (*next_payload <= position);
-
-            auto segment_end = request_end;
-            if (use_payload) {
-                segment_end = position + std::min(
-                    BlockSize - (position % BlockSize),
-                    request_end - position);
-                while ((segment_end != request_end) &&
-                    (++next_payload != payload_block_offsets_.end()) &&
-                    (*next_payload == segment_end)) {
-                    segment_end += std::min(
-                        BlockSize, request_end - segment_end);
-                }
-            } else if (next_payload !=
-                payload_block_offsets_.end()) {
-                segment_end = std::min(request_end, *next_payload);
-            }
+            const auto next_block = use_payload
+                ? FindNextBlock<false>(block + 1, block_limit)
+                : FindNextBlock<true>(block + 1, block_limit);
+            const auto segment_end = next_block == block_limit
+                ? request_end : next_block * BlockSize;
 
             [[gsl::suppress("26472", justification:
                 "Each segment is contained in the original read request. The read "
@@ -99,9 +97,9 @@ public:
             // Construction requires both sources to have the exposed length.
             _Analysis_assume_(source.length == length);
             // Completed segments advance `position` and `transferred` equally,
-            // so another iteration has bytes remaining. Each selection branch
-            // ends at a later block boundary, a later payload offset, or the
-            // request end, and caps that endpoint at `request_end`.
+            // so another iteration has bytes remaining. The next transition
+            // is after the current block, and the search is bounded by the
+            // request's exclusive block limit.
             _Analysis_assume_((position < request_end) && (request_end <= length));
             _Analysis_assume_((segment_wanted > 0) &&
                 (segment_wanted <= (request_end - position)));
@@ -118,22 +116,59 @@ public:
                 return status;
             }
             position = segment_end;
+            block = next_block;
+            use_payload = !use_payload;
         }
         return STATUS_SUCCESS;
     }
 
 private:
+    static constexpr auto kBitsPerWord =
+        std::numeric_limits<std::uint64_t>::digits;
+
+    // Return the first block index in [first, limit) whose bitmap bit equals
+    // `payload`, or `limit` if no block matches.
+    template <bool payload>
+    _Pre_satisfies_(first <= limit)
+    _Post_satisfies_((first <= return) && (return <= limit))
+    [[nodiscard]] auto FindNextBlock(
+        const std::uint64_t first, const std::uint64_t limit) const noexcept
+        -> std::uint64_t {
+        if (first == limit) {
+            return limit;
+        }
+        constexpr auto all_bits = std::numeric_limits<std::uint64_t>::max();
+        constexpr auto nonmatching = payload ? std::uint64_t{} : all_bits;
+        const auto last_word = (limit - 1) / kBitsPerWord;
+        auto mask = all_bits << (first % kBitsPerWord);
+        for (auto word = first / kBitsPerWord; word <= last_word; ++word) {
+            const auto word_begin = word * kBitsPerWord;
+            if (word >= payload_bitmap_.size()) {
+                return payload ? limit : std::max(first, word_begin);
+            }
+            const auto matching =
+                (payload_bitmap_.data()[word] ^ nonmatching) & mask;
+            if (matching != 0) {
+                return std::min(limit,
+                    word_begin + CountTrailingZeros(matching));
+            }
+            mask = all_bits;
+        }
+        return limit;
+    }
+
     SyntheticBackupBlockDevice(
         DeviceType baseline, DeviceType payload,
-        std::set<std::uint64_t> payload_block_offsets)
+        const std::span<const std::uint64_t> payload_bitmap)
+        noexcept(std::is_nothrow_move_constructible_v<DeviceType>)
         : length{payload.length},
           baseline_{std::move(baseline)},
           payload_{std::move(payload)},
-          payload_block_offsets_{std::move(payload_block_offsets)} {}
+          payload_bitmap_{payload_bitmap} {}
 
     [[msvc::no_unique_address]] DeviceType baseline_;
     [[msvc::no_unique_address]] DeviceType payload_;
-    std::set<std::uint64_t> payload_block_offsets_;
+    std::span<const std::uint64_t> payload_bitmap_;
 };
 
 } // namespace devicefs

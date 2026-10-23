@@ -24,6 +24,9 @@ files' expected contents and unchanged allocation in A and B. It then checks
 whether the descriptors from A and the intermediate stores cover the changed
 blocks in the 12 MiB files.
 
+The workload also creates one file and deletes another between A and B,
+so the filesystem comparison exercises both changes.
+
 To demonstrate why intermediate stores are needed, the test counts changed
 blocks covered by intermediate descriptors but absent from A's descriptors,
 the allocation-change map, and System Volume Information extents. A nonadjacent
@@ -293,12 +296,15 @@ function Invoke-IntervalCase {
         Write-FilePattern (Join-Path $mount 'hot.bin') 0 (2 * $block_size) 0x11 -CreateNew
         Write-FilePattern (Join-Path $mount 'unchanged.bin') 0 $block_size 0x52 -CreateNew
         Write-FilePattern (Join-Path $mount 'after-b.bin') 0 $bulk_size 0x63 -CreateNew
+        Write-FilePattern (Join-Path $mount 'deleted.bin') 0 $bulk_size 0x73 -CreateNew
         $a = Add-Snapshot 'A'
         for ($i = 0; $i -le $IntermediateCount; ++$i) {
             Write-FilePattern (Join-Path $mount $witnesses[$i].File) 0 $bulk_size $witnesses[$i].After
             Write-FilePattern (Join-Path $mount 'hot.bin') ($block_size - 256) 512 ([byte](0xD0 + $i))
             if ($i -lt $IntermediateCount) { $null = Add-Snapshot "I$($i + 1)" }
         }
+        Write-FilePattern (Join-Path $mount 'created.bin') 0 $bulk_size 0x84 -CreateNew
+        Remove-Item -LiteralPath (Join-Path $mount 'deleted.bin') -Force
         $b = Add-Snapshot 'B'
         $null = Read-Catalog 'catalog-b-latest' $b.Device `
             -ExpectedFailure 'reading raw B while it is the latest snapshot'

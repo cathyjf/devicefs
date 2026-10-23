@@ -336,6 +336,8 @@ foreach(target IN ITEMS backup-supervisor devicefs-read-path-test)
             FILES
                 src/modules/stream_writer.ixx
                 src/modules/allocation.ixx
+                src/modules/bitmap_set.ixx
+                src/modules/count_zeros.ixx
                 src/modules/windows_block_device.ixx
         PRIVATE src/modules/stream_writer.cpp
     )
@@ -353,7 +355,6 @@ file(GENERATE OUTPUT "${ARTIFACT_RESOURCE_SCRIPT}" CONTENT
 )
 target_sources(backup-supervisor PRIVATE "${ARTIFACT_RESOURCE_SCRIPT}")
 target_module_interfaces(backup-supervisor PRIVATE
-    src/modules/bitmap_set.ixx
     src/modules/coherent_vector.ixx
     src/modules/file_reader.ixx
     src/modules/guid_formatter.ixx

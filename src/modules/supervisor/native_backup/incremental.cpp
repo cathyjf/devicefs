@@ -28,9 +28,13 @@ import devicefs.svi_extents;
 import devicefs.vss_block_descriptors;
 import devicefs.stream_writer;
 
+extern template auto devicefs::ReadAllocationChangeBlocks<
+    devicefs::vss::kBlockSize>(std::string_view, std::string_view)
+    -> devicefs::AllocationChangeBlocks<devicefs::vss::kBlockSize>;
+
 export struct DirtyBlockMap {
     std::uint64_t volume_size;
-    std::set<std::uint64_t> block_offsets;
+    devicefs::vss::BlockOffsetSet block_offsets;
     std::size_t descriptor_store_count;
     std::size_t descriptor_count;
     std::uint64_t descriptor_list_block_count;
@@ -39,34 +43,16 @@ export struct DirtyBlockMap {
     std::size_t svi_block_count;
 };
 
-namespace {
-
 using namespace std::string_view_literals;
 
-[[nodiscard]] auto CollectDescriptorBlockOffsets(
-    const std::span<const devicefs::vss::CatalogStoreDescriptors> stores) {
-    auto result = std::set<std::uint64_t>{};
-    for (const auto &store : stores) {
-        const auto add = [&result, volume_size = store.blocks.volume_size]
-            (const std::uint64_t offset) {
-            if (offset < volume_size) {
-                static_assert(std::has_single_bit(devicefs::vss::kBlockSize));
-                result.insert(offset & ~(devicefs::vss::kBlockSize - 1));
-            }
-        };
-        for (const auto &descriptor : store.blocks.descriptors) {
-            add(descriptor.original_offset);
-            add(descriptor.store_offset);
-            if ((descriptor.flags & devicefs::vss::kForwarderFlag) != 0) {
-                add(descriptor.relative_offset);
-            }
-        }
-    }
-    return result;
-}
-
-} // namespace
-
+// Build the candidate dirty-block map using the snapshot volume devices named
+// by the paths `baseline_device` and `payload_device`.
+// The result contains 16-KiB block-start byte offsets selected by descriptors
+// from every contributing store, allocation changes between the snapshots,
+// and SVI extents in both snapshots. It also reports descriptor and list-block
+// totals and each contribution's number of unique block offsets before the
+// final union. The function throws if a required input cannot be read or
+// validated.
 export [[nodiscard]] auto BuildDirtyBlockMap(
     const GUID &baseline_snapshot_identifier,
     const GUID &payload_snapshot_identifier,
@@ -79,8 +65,10 @@ export [[nodiscard]] auto BuildDirtyBlockMap(
         "Building the dirty map for an interval containing {} "
         "snapshot(s), including A and B.\n",
         catalog.stores.size() + 1);
-    const auto allocation_blocks = devicefs::ReadAllocationChangeBlocks(
-        baseline_device, payload_device, devicefs::vss::kBlockSize);
+    auto allocation_blocks = devicefs::ReadAllocationChangeBlocks<
+        devicefs::vss::kBlockSize>(
+        baseline_device, payload_device);
+    const auto allocation_block_count = allocation_blocks.block_offsets.size();
     if (catalog.payload.volume_size != allocation_blocks.volume_size) {
         throw std::runtime_error(std::format(
             "the VSS descriptors for '{}' report a {}-byte volume, but the "
@@ -100,26 +88,36 @@ export [[nodiscard]] auto BuildDirtyBlockMap(
     }();
     const auto svi_block_count = svi_blocks.size();
 
-    const auto stores = devicefs::vss::ReadBlockDescriptors(
-        payload_device, catalog.stores);
-    auto descriptor_blocks = CollectDescriptorBlockOffsets(stores);
+    auto descriptor_blocks = devicefs::vss::BlockOffsetSet{};
+    const auto counts = devicefs::vss::EnumerateBlockDescriptors(
+        payload_device, catalog.stores,
+        [&descriptor_blocks, volume_size = catalog.payload.volume_size](
+            const auto &descriptor) {
+            const auto add = [&descriptor_blocks, volume_size](
+                const std::uint64_t offset) {
+                if (offset < volume_size) {
+                    static_assert(std::has_single_bit(devicefs::vss::kBlockSize));
+                    descriptor_blocks.insert(
+                        offset & ~(devicefs::vss::kBlockSize - 1));
+                }
+            };
+            add(descriptor.original_offset);
+            add(descriptor.store_offset);
+            if ((descriptor.flags & devicefs::vss::kForwarderFlag) != 0) {
+                add(descriptor.relative_offset);
+            }
+        });
     const auto descriptor_block_count = descriptor_blocks.size();
-    descriptor_blocks.insert_range(allocation_blocks.block_offsets);
+    descriptor_blocks.merge(allocation_blocks.block_offsets);
     descriptor_blocks.merge(svi_blocks);
     return DirtyBlockMap{
         .volume_size = catalog.payload.volume_size,
         .block_offsets = std::move(descriptor_blocks),
-        .descriptor_store_count = stores.size(),
-        .descriptor_count = std::ranges::fold_left(stores, std::size_t{},
-            [](const auto count, const auto &store) {
-                return count + store.blocks.descriptors.size();
-            }),
-        .descriptor_list_block_count = std::ranges::fold_left(stores, std::uint64_t{},
-            [](const auto count, const auto &store) {
-                return count + store.blocks.list_block_count;
-            }),
+        .descriptor_store_count = catalog.stores.size(),
+        .descriptor_count = counts.descriptor_count,
+        .descriptor_list_block_count = counts.list_block_count,
         .descriptor_block_count = descriptor_block_count,
-        .allocation_block_count = allocation_blocks.block_offsets.size(),
+        .allocation_block_count = allocation_block_count,
         .svi_block_count = svi_block_count,
     };
 }

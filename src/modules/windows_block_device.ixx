@@ -24,6 +24,8 @@ import std;
 import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import devicefs.allocation;
+import devicefs.bitmap_set;
+import devicefs.count_zeros;
 import <devicefs/common.h>;
 import <devicefs/malloca.h>;
 import devicefs.stream_writer;
@@ -39,21 +41,6 @@ using devicefs::terminal::Transcode;
 export namespace devicefs {
 
 constexpr auto kHandleDevicePrefix = std::string_view{R"(\\\handle:)"};
-
-// On arm64, MSVC 14.51's implementation of `std::countr_zero` uses a software
-// loop instead of the `RBIT` and `CLZ` instructions emitted by this intrinsic.
-[[nodiscard, msvc::forceinline]]
-_Post_satisfies_(return < 64)
-auto CountTrailingZeros(_Pre_satisfies_(value != 0) const std::uint64_t value)
-    noexcept {
-    // The nonzero-input precondition ensures that `_BitScanForward64` writes
-    // to `bit_index`.
-    [[assume(value != 0)]];
-    /* [[indeterminate]] */ unsigned long bit_index;
-    std::ignore = _BitScanForward64(&bit_index, value);
-    [[assume(bit_index < 64)]];
-    return bit_index;
-}
 
 class SnapshotAllocationBitmap {
 public:
@@ -85,16 +72,22 @@ private:
     std::string_view snapshot,
     std::string_view description) -> SnapshotAllocationBitmap;
 
+template <std::uint64_t BlockSize>
 struct AllocationChangeBlocks {
     std::uint64_t volume_size = 0;
-    // Sorted, unique block starts intersecting an allocation-bit change.
-    std::vector<std::uint64_t> block_offsets;
+    BitmapSet<BlockSize> block_offsets;
 };
 
+// Open the snapshot volumes named by the paths `previous_snapshot` and
+// `current_snapshot`, and compare their allocation bitmaps. The result contains
+// the volume length in bytes and the volume-relative byte offsets of all
+// `BlockSize`-byte blocks intersecting a cluster whose allocation bit changed.
+// The function throws if a bitmap cannot be read or the snapshots differ in
+// length, cluster size, or cluster count.
+template <std::uint64_t BlockSize>
 [[nodiscard]] auto ReadAllocationChangeBlocks(
     std::string_view previous_snapshot,
-    std::string_view current_snapshot,
-    std::uint64_t block_size) -> AllocationChangeBlocks;
+    std::string_view current_snapshot) -> AllocationChangeBlocks<BlockSize>;
 
 } // namespace devicefs
 

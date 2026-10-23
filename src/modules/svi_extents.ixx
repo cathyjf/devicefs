@@ -72,7 +72,7 @@ class SviExtentReader {
 public:
     SviExtentReader(
         const std::uint64_t cluster_size,
-        std::set<std::uint64_t> &block_offsets) noexcept
+        devicefs::vss::BlockOffsetSet &block_offsets) noexcept
         : cluster_size_{cluster_size}, block_offsets_{block_offsets} {}
 
     auto ReadTreeBlockOffsets(const std::filesystem::path &root) -> void {
@@ -96,10 +96,8 @@ private:
         const auto past_last_block =
             ((end - 1) / devicefs::vss::kBlockSize) + 1;
         block_offsets_.insert_range(
-            std::views::iota(first_block, past_last_block) |
-            std::views::transform([](const auto block) {
-                return block * devicefs::vss::kBlockSize;
-            }));
+            first_block * devicefs::vss::kBlockSize,
+            past_last_block * devicefs::vss::kBlockSize);
     }
 
     auto ReadExtents(
@@ -213,17 +211,22 @@ private:
     }
 
     const std::uint64_t cluster_size_;
-    std::set<std::uint64_t> &block_offsets_;
+    devicefs::vss::BlockOffsetSet &block_offsets_;
 };
 
 } // namespace
 
 export namespace devicefs::svi {
 
-// The caller owns SeBackupPrivilege. Reparse-point objects and their named
-// streams are measured, but directory reparse targets are not followed.
+// Open the snapshot volume named by the path `snapshot_device` and walk its
+// System Volume Information directory, including named streams. The result
+// contains volume-relative byte offsets of VSS blocks intersecting allocated
+// extents. The function measures reparse objects themselves without following
+// directory reparse targets. It opens objects with backup semantics using the
+// caller's enabled privileges.
 [[nodiscard]] auto ReadBlockOffsets(
-    const std::string_view snapshot_device) -> std::set<std::uint64_t> {
+    const std::string_view snapshot_device)
+    -> devicefs::vss::BlockOffsetSet {
     const auto device_path = std::filesystem::path{snapshot_device};
     auto device = wil::unique_hfile{CreateFileW(
         device_path.c_str(), GENERIC_READ, kShareMode, nullptr, OPEN_EXISTING,
@@ -235,7 +238,7 @@ export namespace devicefs::svi {
 
     const auto cluster_size = QueryClusterSize(device.get(), device_path);
     const auto root = device_path / L"System Volume Information";
-    auto block_offsets = std::set<std::uint64_t>{};
+    auto block_offsets = devicefs::vss::BlockOffsetSet{};
     SviExtentReader{cluster_size, block_offsets}.ReadTreeBlockOffsets(root);
     return block_offsets;
 }

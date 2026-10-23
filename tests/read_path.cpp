@@ -17,6 +17,8 @@ import std;
 import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import devicefs.allocation;
+import devicefs.bitmap_set;
+import devicefs.count_zeros;
 import <devicefs/common.h>;
 import devicefs.windows_block_device;
 import devicefs.supervisor.math;
@@ -255,6 +257,69 @@ auto TestBitmaps() -> void {
         "cluster sizes from 1 to 4096 bytes.");
 }
 
+// Compare bitmap membership, cardinality, and stored bits against `std::set`
+// after insertion, range insertion, merge, and erasure. Three-byte blocks
+// exercise alignment that cannot be implemented with a power-of-two mask.
+auto TestBitmapSet() -> void {
+    constexpr auto block_size = std::uint64_t{3};
+    using Bitmap = devicefs::BitmapSet<block_size>;
+    const auto check = [](const auto &actual, const auto &expected) static {
+        if ((actual.size() != expected.size()) ||
+            (actual.empty() != expected.empty())) {
+            throw std::runtime_error("bitmap-set cardinality differs from the reference");
+        }
+        const auto words = actual.storage();
+        constexpr auto bits_per_word = std::numeric_limits<std::uint64_t>::digits;
+        const auto limit = expected.empty()
+            ? 0uz : ((*expected.rbegin() / block_size) + 1);
+        for (auto bit = 0uz; bit < limit; ++bit) {
+            const auto offset = bit * block_size;
+            const auto word = bit / bits_per_word;
+            const auto stored = (word < words.size()) &&
+                ((words[word] & (std::uint64_t{1} << (bit % bits_per_word))) != 0);
+            if ((actual.contains(offset) != expected.contains(offset)) ||
+                (stored != expected.contains(offset))) {
+                throw std::runtime_error(std::format(
+                    "bitmap-set membership differs at offset {}", offset));
+            }
+        }
+    };
+    auto actual = Bitmap{};
+    auto expected = std::set<std::uint64_t>{};
+    check(actual, expected);
+    for (const auto bit : {0uz, 63uz, 64uz, 65uz, 129uz, 64uz}) {
+        const auto offset = bit * block_size;
+        if (actual.insert(offset) != expected.insert(offset).second) {
+            throw std::runtime_error("bitmap-set insertion reported the wrong membership change");
+        }
+        check(actual, expected);
+    }
+    for (const auto [first, limit] :
+        {std::pair{62uz, 67uz}, std::pair{64uz, 128uz},
+            std::pair{129uz, 129uz}, std::pair{190uz, 385uz}}) {
+        actual.insert_range(first * block_size, limit * block_size);
+        for (auto bit = first; bit < limit; ++bit) {
+            expected.insert(bit * block_size);
+        }
+        check(actual, expected);
+    }
+    auto source = Bitmap{block_size, 64 * block_size, 130 * block_size};
+    auto reference_source = decltype(expected){
+        block_size, 64 * block_size, 130 * block_size};
+    actual.merge(source);
+    expected.merge(reference_source);
+    check(actual, expected);
+    check(source, reference_source);
+    for (const auto bit : {0uz, 64uz, 64uz, 130uz}) {
+        if (actual.erase(bit * block_size) != expected.erase(bit * block_size)) {
+            throw std::runtime_error("bitmap-set erasure reported the wrong membership change");
+        }
+        check(actual, expected);
+    }
+    std::println("PASS: compact candidate maps preserve membership, counts, "
+        "word boundaries, overlapping ranges, and merge intersections.");
+}
+
 // Check `WindowsBlockDevice::Read` against a file in the system temporary directory.
 // Assigning `sector_size` explicitly exercises the production rounding and buffer
 // selection for both sector sizes, independently of the test volume's geometry.
@@ -404,6 +469,7 @@ auto main() -> int try {
     TestBitmaps();
     TestReads<false>();
     TestReads<true>();
+    TestBitmapSet();
     return 0;
 } catch (const std::exception &error) {
     std::println("FAIL: {}", error.what());

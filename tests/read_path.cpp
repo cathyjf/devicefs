@@ -258,7 +258,7 @@ auto TestBitmaps() -> void {
 }
 
 // Compare bitmap membership, cardinality, and stored bits against `std::set`
-// after insertion, range insertion, merge, and erasure. Three-byte blocks
+// after insertion, range insertion, merge, erasure, and clearing. Three-byte blocks
 // exercise alignment that cannot be implemented with a power-of-two mask.
 auto TestBitmapSet() -> void {
     constexpr auto block_size = std::uint64_t{3};
@@ -287,12 +287,15 @@ auto TestBitmapSet() -> void {
     auto actual = Bitmap{};
     auto expected = std::set<std::uint64_t>{};
     check(actual, expected);
-    for (const auto bit : {0uz, 63uz, 64uz, 65uz, 129uz, 64uz}) {
+    const auto insert = [&actual, &expected, &check](const auto bit) {
         const auto offset = bit * block_size;
         if (actual.insert(offset) != expected.insert(offset).second) {
             throw std::runtime_error("bitmap-set insertion reported the wrong membership change");
         }
         check(actual, expected);
+    };
+    for (const auto bit : {0uz, 63uz, 64uz, 65uz, 129uz, 64uz}) {
+        insert(bit);
     }
     for (const auto [first, limit] :
         {std::pair{62uz, 67uz}, std::pair{64uz, 128uz},
@@ -316,8 +319,16 @@ auto TestBitmapSet() -> void {
         }
         check(actual, expected);
     }
+    for (const auto bit : {1024uz, 8192uz}) {
+        insert(bit);
+    }
+    actual.clear();
+    expected.clear();
+    check(actual, expected);
+    insert(8192uz);
     std::println("PASS: compact candidate maps preserve membership, counts, "
-        "word boundaries, overlapping ranges, and merge intersections.");
+        "word boundaries, overlapping ranges, merge intersections, "
+        "growth, and clear-and-reinsert behavior.");
 }
 
 // Check `WindowsBlockDevice::Read` against a file in the system temporary directory.

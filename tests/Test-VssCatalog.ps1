@@ -8,10 +8,12 @@ Tests the production VSS catalog diagnostic using small synthetic volume images.
 .DESCRIPTION
 Creates synthetic volume images in a temporary directory and checks catalog
 order, snapshot IDs, creation times, type-3 record association, and selection
-of every descriptor store between two snapshots. Malformed-image cases check
-that a failed parse produces no partial output. Each case runs independently
-so a failure does not prevent the remaining cases from running. The script
-runs without elevation and removes its temporary directory when finished.
+of every descriptor store between two snapshots. Descriptor cases check
+forwarder and overlay validation and preservation of raw records.
+Malformed-image cases check that a failed parse produces no partial output.
+Each case runs independently so a failure does not prevent the remaining cases
+from running. The script runs without elevation and removes its temporary
+directory when finished.
 #>
 [CmdletBinding()]
 param([string] $SupervisorPath)
@@ -144,6 +146,34 @@ try {
         }
         return $text
     }
+    $forwarder_flag = [uint32]1
+    $overlay_flag = [uint32]2
+    # Replace A's descriptor list and check its diagnostic output. Each row
+    # supplies the original offset, relative offset, store offset, flags, and
+    # bitmap, in that order. The helper compares successful dumps with those
+    # rows, including record order and duplicates.
+    function Assert-Descriptors {
+        param([array] $Descriptors, [switch] $Failure)
+        [Array]::Clear($image, 0x10000 + 128, 16KB - 128)
+        $expected = @(for ($i = 0; $i -lt $Descriptors.Count; ++$i) {
+            $record = $Descriptors[$i]
+            $offset = 0x10000 + 128 + $i * 32
+            Put-U64 $offset $record[0]
+            Put-U64 ($offset + 8) $record[1]
+            Put-U64 ($offset + 16) $record[2]
+            Put-U32 ($offset + 24) $record[3]
+            Put-U32 ($offset + 28) $record[4]
+            Format-VssDescriptorTuple @record
+        })
+        $text = Invoke-Fixture @('--snapshot-id', $copy_a.ToString()) -Failure:$Failure
+        if (-not $Failure) {
+            $result = ConvertFrom-VssDescriptorDumpOutput $text $copy_a 0 `
+                $forwarder_flag $overlay_flag $image.Length 16KB
+            Assert-Condition ([string]::Join(';', $result.Records) -ceq
+                [string]::Join(';', $expected)) `
+                'The dump did not preserve the supplied descriptor records in order.'
+        }
+    }
     $cases = [ordered]@{
         'catalog facts preserve physical order and equal times' = {
             $stores = ConvertFrom-VssCatalogOutput (Invoke-Fixture @('--catalog'))
@@ -264,6 +294,75 @@ try {
             Set-IntervalFixture
             Put-U64 (0x4080 + 8) ($image.Length - 512)
             Read-Interval -Failure
+        }
+        'forwarder chains preserve raw records' = {
+            Assert-Descriptors @(
+                (0x20000, 0x24000, 0, $forwarder_flag, 0),
+                (0x24000, 0x28000, 0, $forwarder_flag, 0),
+                (0x28000, 0, 0x30000, 0, 0)
+            )
+        }
+        'direct and resolved self-forwarders remain in the dump' = {
+            Assert-Descriptors @(
+                (0x20000, 0x20000, 0, $forwarder_flag, 0),
+                (0x20000, 0x24000, 0, $forwarder_flag, 0),
+                (0x24000, 0x20000, 0, $forwarder_flag, 0),
+                (0x20000, 0, 0x30000, 0, 0)
+            )
+        }
+        'overlays preserve individual bitmaps and duplicate records' = {
+            Assert-Descriptors @(
+                (0x20000, 0, 0x30000, 0, 0),
+                (0x20000, 1, 0x34000, $overlay_flag, 1),
+                (0x20000, 1, 0x38000, $overlay_flag, 2),
+                (0x20000, 1, 0x38000, $overlay_flag, 2),
+                (0x20000, 0, 0x3c000, 0, 0),
+                (0x20000, 1, 0x40000, $overlay_flag, 4)
+            )
+        }
+        'forwarder with a nonzero store offset fails without partial output' = {
+            Assert-Descriptors @(
+                (0x20000, 0, 0x30000, 0, 0),
+                (0x24000, 0x28000, 0x34000, $forwarder_flag, 0)
+            ) -Failure
+        }
+        'out-of-volume forwarder target fails after reverse resolution' = {
+            Assert-Descriptors @(
+                (0x20000, 0x24000, 0, $forwarder_flag, 0),
+                (0x24000, $image.Length, 0, $forwarder_flag, 0)
+            ) -Failure
+        }
+        'out-of-volume overlay original fails without partial output' = {
+            Assert-Descriptors @(
+                (0x20000, 0, 0x30000, 0, 0),
+                ($image.Length, 1, 0x34000, $overlay_flag, 1)
+            ) -Failure
+        }
+        # `libvshadow_block_tree_insert` accepts combined forwarder and overlay
+        # flags. It checks their relative target when inserting a new forward key,
+        # but returns before that check when attaching another overlay to an
+        # existing key.
+        # These paired cases check parser compatibility with that behavior.
+        # https://github.com/libyal/libvshadow/blob/f5a7362713a04491ee78d36ebdcc1781950f3a75/libvshadow/libvshadow_block_tree.c#L630-L988
+        'new overlay after reverse resolution rejects an out-of-volume target' = {
+            # Resolving the second record through the first retains 0x20000
+            # as its original. The final record introduces 0x24000 and must
+            # therefore undergo the forwarder-target bounds check.
+            Assert-Descriptors @(
+                (0x20000, 0x24000, 0, $forwarder_flag, 0),
+                (0x24000, 0, 0x30000, 0, 0),
+                (0x24000, $image.Length, 0, ($forwarder_flag -bor $overlay_flag), 1)
+            ) -Failure
+        }
+        'duplicate overlay accepts its unused out-of-volume relative field' = {
+            # The second record establishes 0x24000 as an overlay's original.
+            # The final record adds another overlay there, so its relative
+            # target is not used as a reverse-tree key or checked as an offset.
+            Assert-Descriptors @(
+                (0x20000, 0x24000, 0, $forwarder_flag, 0),
+                (0x24000, 1, 0x30000, $overlay_flag, 1),
+                (0x24000, $image.Length, 0, ($forwarder_flag -bor $overlay_flag), 2)
+            )
         }
     }
     foreach ($case in $cases.GetEnumerator()) {

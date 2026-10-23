@@ -196,4 +196,70 @@ private:
     size_type size_ = 0;
 };
 
+template <std::uint64_t BlockSize>
+class MaybeBitmapSet {
+    using value_type = std::uint64_t;
+    using set_type = std::set<value_type>;
+    using bitmap_set_type = BitmapSet<BlockSize>;
+    static_assert(std::is_same_v<
+        value_type, typename bitmap_set_type::value_type>);
+
+public:
+    [[nodiscard]]
+    _Pre_satisfies_((value % BlockSize) == 0)
+    auto insert(const value_type value) -> bool {
+        if (std::holds_alternative<bitmap_set_type>(set_)) {
+            return std::get<bitmap_set_type>(set_).insert(value);
+        }
+        if ((value % BlockSize) != 0) [[unlikely]] {
+            __fastfail(FAST_FAIL_INVALID_ARG);
+        }
+        auto &set = std::get<set_type>(set_);
+        if (!set.insert(value).second) {
+            return false;
+        }
+        maybe_convert_to_bitmap();
+        return true;
+    }
+
+private:
+    // Precondition: `set_` holds a non-empty `set_type`.
+    auto maybe_convert_to_bitmap() -> void {
+        constexpr auto magic_byte_threshold = 5242880u; // 5 MiB
+        constexpr auto approximate_bytes_per_node = 32u;
+        // This assertion allows most of the divisions in the calculation of
+        // `comparison_target` below to be replaced with a shift.
+        // If `BlockSize` is also a power of two, the entire calculation can
+        // be replaced with a bit shift.
+        static_assert(std::has_single_bit(approximate_bytes_per_node));
+        constexpr auto magic_size_threshold =
+            magic_byte_threshold / approximate_bytes_per_node;
+
+        auto &set = std::get<set_type>(set_);
+        if (std::cmp_less(set.size(), magic_size_threshold)) {
+            return;
+        }
+        // The precondition ensures that the set is not empty.
+        [[assume(set.rbegin() != set.rend())]];
+        const auto comparison_target =
+            *set.rbegin() / BlockSize /
+            std::numeric_limits<std::uint8_t>::digits /
+            approximate_bytes_per_node;
+        if (std::cmp_less(set.size(), comparison_target)) {
+            return;
+        }
+        convert_to_bitmap();
+    }
+
+    // Precondition: `set_` holds a `set_type`.
+    // Postcondition: `set_` holds a `bitmap_set_type`.
+    auto convert_to_bitmap() -> void {
+        auto &set = std::get<set_type>(set_);
+        set_.template emplace<bitmap_set_type>(
+            bitmap_set_type{set.rbegin(), set.rend()});
+    }
+
+    std::variant<set_type, bitmap_set_type> set_;
+};
+
 } // namespace devicefs

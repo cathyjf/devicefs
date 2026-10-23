@@ -602,6 +602,8 @@ struct CatalogType3 {
     std::uint64_t header_offset;
 };
 
+using VisitedBlockSet = MaybeBitmapSet<kBlockSize>;
+
 // Round the volume-relative byte offset `offset` down to a VSS block boundary
 // and insert that byte offset into `visited`. The function throws if that block
 // has already been recorded, including through a different offset within it.
@@ -609,7 +611,7 @@ struct CatalogType3 {
 // Precondition: a complete metadata block starting at `offset` lies within
 // the opened source. This bounds the visited bitmap's growth by the source size.
 auto VisitMetadataBlock(
-    BlockOffsetSet &visited,
+    VisitedBlockSet &visited,
     const std::uint64_t offset,
     const std::string_view description) {
     // Grouping offsets by their containing 16-KiB block matches the leaf lookup
@@ -625,7 +627,7 @@ auto VisitMetadataBlock(
 
 [[nodiscard]] auto ReadCatalog(const RawSource &source, std::uint64_t offset) {
     auto stores = std::vector<CatalogStore>{};
-    auto visited = BlockOffsetSet{};
+    auto visited = VisitedBlockSet{};
 
     // libvshadow_io_handle_read_catalog follows the root and +40 links,
     // libvshadow_io_handle_read_catalog_header_data validates each block, and
@@ -883,7 +885,7 @@ private:
     const RawSource &source, const CatalogStore &store, auto &&consume) {
     auto result = devicefs::vss::BlockDescriptorCounts{};
     auto state = DescriptorState{store.volume_size};
-    auto visited = BlockOffsetSet{};
+    auto visited = VisitedBlockSet{};
     auto offset = store.list_offset;
 
     // libvshadow_store_descriptor_read_block_descriptors also reads VSS store

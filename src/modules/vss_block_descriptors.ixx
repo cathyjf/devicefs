@@ -370,6 +370,10 @@ class RawSource {
 public:
     explicit RawSource(const std::string_view path) : buffer_(Open(path)) {}
 
+    [[nodiscard]] auto size() const noexcept -> std::uint64_t {
+        return size_;
+    }
+
     // The returned bytes are overwritten by the next read on this source.
     template <std::size_t Size>
         requires ((Size > 0) && (Size <= devicefs::vss::kBlockSize))
@@ -627,7 +631,7 @@ auto VisitMetadataBlock(
 
 [[nodiscard]] auto ReadCatalog(const RawSource &source, std::uint64_t offset) {
     auto stores = std::vector<CatalogStore>{};
-    auto visited = VisitedBlockSet{};
+    auto visited = VisitedBlockSet(source.size() - 1);
 
     // libvshadow_io_handle_read_catalog follows the root and +40 links,
     // libvshadow_io_handle_read_catalog_header_data validates each block, and
@@ -789,7 +793,8 @@ auto ReadStoreHeaders(const RawSource &source, std::vector<CatalogStore> &stores
 class DescriptorState {
 public:
     explicit DescriptorState(const std::uint64_t volume_size)
-        : volume_size_{volume_size} {
+        : volume_size_{volume_size},
+          forward_(volume_size - 1), reverse_(volume_size - 1) {
         // libvshadow_store_descriptor_read_block_descriptors passes the
         // selected type-2 catalog entry's volume size to
         // libvshadow_block_tree_initialize, whose root node rejects zero and
@@ -885,7 +890,7 @@ private:
     const RawSource &source, const CatalogStore &store, auto &&consume) {
     auto result = devicefs::vss::BlockDescriptorCounts{};
     auto state = DescriptorState{store.volume_size};
-    auto visited = VisitedBlockSet{};
+    auto visited = VisitedBlockSet(source.size() - 1);
     auto offset = store.list_offset;
 
     // libvshadow_store_descriptor_read_block_descriptors also reads VSS store

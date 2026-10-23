@@ -88,7 +88,8 @@ export [[nodiscard]] auto BuildDirtyBlockMap(
     }();
     const auto svi_block_count = svi_blocks.size();
 
-    auto descriptor_blocks = devicefs::vss::BlockOffsetSet{};
+    auto descriptor_blocks = devicefs::vss::BlockOffsetSet(
+        catalog.payload.volume_size - 1);
     const auto counts = devicefs::vss::EnumerateBlockDescriptors(
         payload_device, catalog.stores,
         [&descriptor_blocks, volume_size = catalog.payload.volume_size](

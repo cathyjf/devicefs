@@ -25,14 +25,18 @@ class ReallocVector {
         std::numeric_limits<std::size_t>::max() / sizeof(T);
 
 public:
-    _Pre_satisfies_(new_size <= max_size)
+    explicit constexpr ReallocVector(
+        const std::size_t maximum_size = max_size) noexcept
+        : max_size_{std::min(maximum_size, max_size)} {}
+
+    _Pre_satisfies_(new_size <= max_size_)
     auto resize(const std::size_t new_size) -> void {
         if (new_size == 0) {
             clear();
             return;
         }
-        if (std::cmp_greater(new_size, max_size)) {
-            throw std::bad_alloc();
+        if (std::cmp_greater(new_size, max_size_)) {
+            throw std::bad_alloc{};
         }
         if ((new_size > reservation_) || (new_size < size_)) {
             const auto new_reservation = new_reservation_size(new_size);
@@ -41,7 +45,7 @@ public:
             auto *const buffer = static_cast<T *>(std::realloc(
                 storage_.get(), new_reservation * sizeof(T)));
             if (!buffer) {
-                throw std::bad_alloc();
+                throw std::bad_alloc{};
             }
             storage_.release();
             storage_.reset(buffer);
@@ -81,14 +85,15 @@ private:
         if (new_size < size_) {
             return new_size;
         }
-        constexpr auto minimum_reservation = std::min(10uz, max_size);
+        const auto minimum_reservation = std::min(10uz, max_size_);
         constexpr auto geometric_factor = 2uz;
-        constexpr auto fraction_max_size = max_size / geometric_factor;
+        const auto fraction_max_size = max_size_ / geometric_factor;
         const auto proposed_max = (reservation_ > fraction_max_size) ?
-            max_size : (reservation_ * geometric_factor);
+            max_size_ : (reservation_ * geometric_factor);
         return std::max({minimum_reservation, new_size, proposed_max});
     }
 
+    std::size_t max_size_;
     std::size_t size_{};
     std::size_t reservation_{};
     std::unique_ptr<T[], std::remove_cv_t<decltype(free_deleter)>> storage_{};
@@ -100,7 +105,7 @@ export namespace devicefs {
 
 // Store a set of byte offsets using one bit per `BlockSize` bytes.
 //
-// Precondition of each method that accepts an offset: each offset must be a
+// Precondition of insertion, erasure, and lookup: each offset must be a
 // multiple of `BlockSize`.
 //
 // Storage grows with the largest inserted offset, not the number of members.
@@ -117,6 +122,12 @@ public:
     using size_type = std::uint64_t;
 
     BitmapSet() = default;
+
+    // Bound reservation growth by the inclusive `maximum_offset`, which need
+    // not be block-aligned. Storage is still allocated only when needed.
+    explicit constexpr BitmapSet(const key_type maximum_offset)
+        : words_{devicefs::terminal::FailFastMaybeCast<std::size_t>(
+            ((maximum_offset / BlockSize) >> kWordShift) + 1)} {}
 
     constexpr BitmapSet(const std::initializer_list<value_type> values) {
         insert_range(values);
@@ -294,6 +305,9 @@ class MaybeBitmapSet {
         value_type, typename bitmap_set_type::value_type>);
 
 public:
+    explicit MaybeBitmapSet(const value_type maximum_offset)
+        : maximum_offset_{maximum_offset} {}
+
     [[nodiscard]]
     _Pre_satisfies_((value % BlockSize) == 0)
     auto insert(const value_type value) -> bool {
@@ -344,10 +358,12 @@ private:
     // Postcondition: `set_` holds a `bitmap_set_type`.
     auto convert_to_bitmap() -> void {
         auto &set = std::get<set_type>(set_);
-        set_.template emplace<bitmap_set_type>(
-            bitmap_set_type{set.rbegin(), set.rend()});
+        auto bitmap = bitmap_set_type(maximum_offset_);
+        bitmap.insert(set.rbegin(), set.rend());
+        set_.template emplace<bitmap_set_type>(std::move(bitmap));
     }
 
+    value_type maximum_offset_;
     std::variant<set_type, bitmap_set_type> set_;
 };
 

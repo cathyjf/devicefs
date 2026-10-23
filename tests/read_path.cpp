@@ -262,6 +262,8 @@ auto TestBitmaps() -> void {
 // exercise alignment that cannot be implemented with a power-of-two mask.
 auto TestBitmapSet() -> void {
     constexpr auto block_size = std::uint64_t{3};
+    constexpr auto maximum_bit = 8192uz;
+    constexpr auto maximum_offset = maximum_bit * block_size;
     using Bitmap = devicefs::BitmapSet<block_size>;
     const auto check = [](const auto &actual, const auto &expected) static {
         if ((actual.size() != expected.size()) ||
@@ -284,7 +286,14 @@ auto TestBitmapSet() -> void {
             }
         }
     };
-    auto actual = Bitmap{};
+    auto aligned_maximum = Bitmap(maximum_offset);
+    if (!aligned_maximum.insert(maximum_offset)) {
+        throw std::runtime_error(
+            "bitmap-set insertion rejected its aligned maximum offset");
+    }
+    check(aligned_maximum, std::set{maximum_offset});
+
+    auto actual = Bitmap(maximum_offset + block_size - 1);
     auto expected = std::set<std::uint64_t>{};
     check(actual, expected);
     const auto insert = [&actual, &expected, &check](const auto bit) {
@@ -319,13 +328,13 @@ auto TestBitmapSet() -> void {
         }
         check(actual, expected);
     }
-    for (const auto bit : {1024uz, 8192uz}) {
+    for (const auto bit : {1024uz, 4096uz, maximum_bit}) {
         insert(bit);
     }
     actual.clear();
     expected.clear();
     check(actual, expected);
-    insert(8192uz);
+    insert(maximum_bit);
     std::println("PASS: compact candidate maps preserve membership, counts, "
         "word boundaries, overlapping ranges, merge intersections, "
         "growth, and clear-and-reinsert behavior.");

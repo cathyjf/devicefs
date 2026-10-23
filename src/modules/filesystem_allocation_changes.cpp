@@ -130,7 +130,7 @@ auto ReadAllocationChangeBlocks(
         bitmap_size,
     });
 
-    auto block_offsets = BitmapSet<BlockSize>{};
+    auto block_offsets = BitmapSet<BlockSize>(previous_size - 1);
     const auto add_cluster = [&block_offsets,
         cluster_size = previous_bitmap.cluster_size](const std::uint64_t cluster) {
         const auto start = cluster * cluster_size;

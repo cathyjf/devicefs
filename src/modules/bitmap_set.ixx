@@ -7,6 +7,10 @@ import std;
 import <devicefs/windows_imports.h>;
 import devicefs.terminal.safecast;
 
+#ifdef _M_X64
+import <isa_availability.h>;
+#endif
+
 namespace devicefs::bitmap_set_detail {
 
 const auto free_deleter = [](auto *const buffer) static noexcept {
@@ -126,7 +130,52 @@ constexpr auto fast_fail_if_misaligned(const auto value) noexcept -> void {
     }
 }
 
+template <bool use_intrinsic>
+struct popcnt_invoker {
+    [[msvc::forceinline]]
+    constexpr static auto operator()(const std::uint64_t value) noexcept {
+        if constexpr (use_intrinsic) {
+            return __popcnt64(value);
+        } else {
+            return std::popcount(value);
+        }
+    }
+};
+
+// Examination of the generated code in the MSVC 14.51 x64 binary showed
+// that `std::popcount` tested CPU support for `POPCNT` on every word
+// iteration in the bitmap insertion and merge loops.
+//
+// For arm64 machines and those x64 machines that support the `__popcnt64`
+// intrinsic, the technique used here allows CPU support to be tested only
+// once per outer set operation, rather than once per inner loop iteration.
+[[msvc::forceinline]]
+constexpr auto invoke_with_popcnt(auto &&function)
+    -> decltype(auto) {
+    const auto use_popcnt_intrinsic = [] [[msvc::forceinline]]
+        constexpr static noexcept {
+        if consteval {
+            return false;
+        }
+#ifdef _M_ARM64
+        return true;
+#elifdef _M_X64
+        return __check_isa_support(__IA_SUPPORT_SSE42, 0);
+#else
+        return false;
+#endif
+    };
+    if (use_popcnt_intrinsic()) {
+        [[msvc::forceinline_calls]]
+        return std::forward<decltype(function)>(function).
+            template operator()<popcnt_invoker<true>>();
+    }
+    [[msvc::noinline_calls]]
+    return std::forward<decltype(function)>(function).
+        template operator()<popcnt_invoker<false>>();
 }
+
+} // namespace devicefs::bitmap_set_detail
 
 export namespace devicefs {
 
@@ -234,31 +283,35 @@ public:
             words_.resize(last_word + 1);
         }
 
-        const auto insert_bits = [words = std::addressof(words_[0])](
-            const std::size_t index, const std::uint64_t bits) {
-            // `words_` owns a separate allocation, so `word` cannot alias
-            // the membership count `size_`.
-            auto &__restrict word = words[index];
-            const auto count = std::popcount(bits & ~word);
-            word |= bits;
-            return count;
-        };
         constexpr auto all_bits = std::numeric_limits<std::uint64_t>::max();
         const auto first_mask =
             all_bits << (first_bit & (kBitsPerWord - 1));
         const auto last_mask = all_bits >>
             ((kBitsPerWord - 1) - (last_bit & (kBitsPerWord - 1)));
-        if (first_word == last_word) {
-            size_ += insert_bits(first_word, first_mask & last_mask);
-            return;
-        }
-        const auto inserted_count = std::ranges::fold_left(
-            std::views::iota(first_word + 1, last_word),
-            insert_bits(first_word, first_mask),
-            [&insert_bits](const size_type count, const std::size_t index) {
-                return count + insert_bits(index, all_bits);
+        size_ += bitmap_set_detail::invoke_with_popcnt(
+            [words = std::addressof(words_[0]), first_word, last_word,
+                first_mask, last_mask]<class Popcnt> -> size_type {
+                const auto insert_bits = [words](
+                    const std::size_t index, const std::uint64_t bits) {
+                    // `words_` owns a separate allocation, so `word` cannot
+                    // alias the membership count `size_`.
+                    auto &__restrict word = words[index];
+                    const auto count = Popcnt::operator()(bits & ~word);
+                    word |= bits;
+                    return count;
+                };
+                if (first_word == last_word) {
+                    return insert_bits(first_word, first_mask & last_mask);
+                }
+                const auto inserted_count = std::ranges::fold_left(
+                    std::views::iota(first_word + 1, last_word),
+                    insert_bits(first_word, first_mask),
+                    [&insert_bits](const size_type count,
+                        const std::size_t index) {
+                        return count + insert_bits(index, all_bits);
+                    });
+                return inserted_count + insert_bits(last_word, last_mask);
             });
-        size_ += inserted_count + insert_bits(last_word, last_mask);
     }
 
     constexpr auto erase(const key_type value) noexcept -> size_type {
@@ -279,9 +332,6 @@ public:
 
     // Move elements from `source` into this set. Elements that are already
     // present in this set remain in `source`, just as with `std::set::merge`.
-    [[gsl::suppress("26429", justification:
-        "Nullable pointers (as opposed to references) are required to perform "
-        "pointer arithmetic.")]]
     constexpr auto merge(BitmapSet &source) -> void {
         if ((this == std::addressof(source)) || source.empty()) {
             return;
@@ -290,21 +340,34 @@ public:
         if (words_.size() < word_count) {
             words_.resize(word_count);
         }
-        // Each set's bitmap words are stored in a separate heap allocation,
-        // outside either `BitmapSet` object. The self-merge check ensures that
-        // the two word arrays are also separate.
-        auto *__restrict const destination_words = std::addressof(words_[0]);
-        auto *__restrict const source_words = std::addressof(source.words_[0]);
-        auto transferred_count = size_type{};
-        for (auto index = 0uz; index < word_count; ++index) {
-            const auto source_word = source_words[index];
-            const auto destination_word = destination_words[index];
-            const auto transferred =
-                source_word & ~destination_word;
-            transferred_count += std::popcount(transferred);
-            destination_words[index] = destination_word | source_word;
-            source_words[index] = source_word & destination_word;
-        }
+        const auto transferred_count = bitmap_set_detail::invoke_with_popcnt(
+            [this, &source, word_count]<class Popcnt> {
+                // Each set's bitmap words are stored in a separate heap
+                // allocation, outside either `BitmapSet` object. The
+                // self-merge check ensures that the two word arrays are
+                // also separate.
+                __pragma(warning(push))
+                __pragma(warning(disable : 26429, justification :
+                    "Nullable pointers `destination_words` and `source_words` "
+                    "are required to perform pointer arithmetic."))
+                auto *__restrict const destination_words =
+                    std::addressof(words_[0]);
+                auto *__restrict const source_words =
+                    std::addressof(source.words_[0]);
+                __pragma(warning(pop))
+                auto count = size_type{};
+                for (auto index = 0uz; index < word_count; ++index) {
+                    const auto source_word = source_words[index];
+                    const auto destination_word = destination_words[index];
+                    const auto transferred =
+                        source_word & ~destination_word;
+                    count += Popcnt::operator()(transferred);
+                    destination_words[index] =
+                        destination_word | source_word;
+                    source_words[index] = source_word & destination_word;
+                }
+                return count;
+            });
         size_ += transferred_count;
         source.size_ -= transferred_count;
     }

@@ -90,7 +90,11 @@ private:
         const auto fraction_max_size = max_size_ / geometric_factor;
         const auto proposed_max = (reservation_ > fraction_max_size) ?
             max_size_ : (reservation_ * geometric_factor);
-        return std::max({minimum_reservation, new_size, proposed_max});
+        if (new_size > minimum_reservation) {
+            return (new_size > proposed_max) ? new_size : proposed_max;
+        }
+        return (minimum_reservation > proposed_max) ?
+            minimum_reservation : proposed_max;
     }
 
     std::size_t max_size_;

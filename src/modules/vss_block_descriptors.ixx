@@ -844,8 +844,8 @@ public:
             return;
         }
         const auto original = Key(raw.original_offset, overlay
-            ? "a VSS forward descriptor offset"
-            : "a VSS reverse descriptor offset");
+            ? "a VSS forward descriptor offset"sv
+            : "a VSS reverse descriptor offset"sv);
         const auto reverse_found =
             !overlay && (reverse_.erase(original) != 0);
         if (!reverse_found) {

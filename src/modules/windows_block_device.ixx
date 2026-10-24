@@ -471,15 +471,22 @@ struct WindowsBlockDeviceSettings {
     }
 };
 
-[[nodiscard, msvc::forceinline]]
-auto MakeErrorClosure(
-    const std::filesystem::path &filename, const std::uint64_t offset,
-    const ULONG wanted) noexcept {
+struct ErrorClosure {
+    const std::filesystem::path &filename;
+    const std::uint64_t offset;
+    const ULONG wanted;
+
     // Read failures are not expected during normal operation. `noinline`
     // prevents `flatten` from enlarging the read callback with diagnostic
     // code that successful reads never execute.
-    return [&filename, offset, wanted]
-        [[msvc::noinline]] (const DWORD error) noexcept {
+    //
+    // A previous version of this code used a factory function that returned
+    // a lambda to create an instance of the error closure. That formulation
+    // caused MSVC to inline the error formatting, despite the `noinline`
+    // annotation. By contrast, this named `ErrorClosure` type produces the
+    // desired out-of-line error formatting code.
+    [[msvc::noinline]]
+    auto operator()(const DWORD error) const noexcept -> NTSTATUS {
         devicefs::WriteToStream(
             devicefs::stderr,
             L"devicefs: read failed for '{}' at offset 0x{:x} "
@@ -487,8 +494,8 @@ auto MakeErrorClosure(
             std::wstring_view{filename.native()}, offset, wanted,
             TryConstructWinError("", ExplicitWin32Error{error}));
         return FspNtStatusFromWin32(error);
-    };
-}
+    }
+};
 
 // Read exactly `count` bytes at `position`, waiting for completion. Call
 // `failure` with the Win32 error if the read fails or completes short.
@@ -631,8 +638,8 @@ struct WindowsBlockDevice
                 return STATUS_SUCCESS;
             }
         }
-        const auto failure = filesystem_internal::MakeErrorClosure(
-            filename, offset, wanted);
+        const auto failure = filesystem_internal::ErrorClosure{
+            filename, offset, wanted};
         auto &read_resources = GetReadResources();
         const auto read = [this, &read_resources, &failure, &observers...](
             void *__restrict const output, const UINT64 position,
@@ -734,8 +741,8 @@ struct OrdinaryFileBlockDevice {
         _In_range_(1, length - offset) const ULONG wanted,
         _Pre_equal_to_(0) ULONG &transferred,
         auto &...observers) const noexcept -> NTSTATUS {
-        const auto failure = filesystem_internal::MakeErrorClosure(
-            filename, offset, wanted);
+        const auto failure = filesystem_internal::ErrorClosure{
+            filename, offset, wanted};
         thread_local auto event = wil::unique_event_nothrow{};
         [[gsl::suppress("26447",
             justification: "This invocation of `try_create` cannot throw.")]]

@@ -270,20 +270,19 @@ public:
         }
         // Each set's bitmap words are stored in a separate heap allocation,
         // outside either `BitmapSet` object. The self-merge check ensures that
-        // the two membership counts are also separate.
+        // the two word arrays are also separate.
         auto *__restrict const destination_words = std::addressof(words_[0]);
         auto *__restrict const source_words = std::addressof(source.words_[0]);
-        auto &__restrict destination_size = size_;
-        auto &__restrict source_size = source.size_;
+        auto transferred_count = size_type{};
         for (auto index = 0uz; index < source.words_.size(); ++index) {
             const auto transferred =
                 source_words[index] & ~destination_words[index];
-            const auto count = std::popcount(transferred);
-            destination_size += count;
+            transferred_count += std::popcount(transferred);
             destination_words[index] |= transferred;
             source_words[index] &= ~transferred;
-            source_size -= count;
         }
+        size_ += transferred_count;
+        source.size_ -= transferred_count;
     }
 
 private:

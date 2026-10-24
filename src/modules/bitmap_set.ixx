@@ -225,8 +225,9 @@ public:
             // `words_` owns a separate allocation, so `word` cannot alias
             // the membership count `size_`.
             auto &__restrict word = words_[index];
-            size_ += std::popcount(bits & ~word);
+            const auto count = std::popcount(bits & ~word);
             word |= bits;
+            return count;
         };
         constexpr auto all_bits = std::numeric_limits<std::uint64_t>::max();
         const auto first_mask =
@@ -234,14 +235,16 @@ public:
         const auto last_mask = all_bits >>
             ((kBitsPerWord - 1) - (last_bit & (kBitsPerWord - 1)));
         if (first_word == last_word) {
-            insert_bits(first_word, first_mask & last_mask);
+            size_ += insert_bits(first_word, first_mask & last_mask);
             return;
         }
-        insert_bits(first_word, first_mask);
-        for (auto index = first_word + 1; index < last_word; ++index) {
-            insert_bits(index, all_bits);
-        }
-        insert_bits(last_word, last_mask);
+        const auto inserted_count = std::ranges::fold_left(
+            std::views::iota(first_word + 1, last_word),
+            insert_bits(first_word, first_mask),
+            [&insert_bits](const size_type count, const std::size_t index) {
+                return count + insert_bits(index, all_bits);
+            });
+        size_ += inserted_count + insert_bits(last_word, last_mask);
     }
 
     constexpr auto erase(const key_type value) noexcept -> size_type {

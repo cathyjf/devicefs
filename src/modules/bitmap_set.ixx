@@ -234,11 +234,11 @@ public:
             words_.resize(last_word + 1);
         }
 
-        const auto insert_bits = [this](const std::size_t index,
-            const std::uint64_t bits) {
+        const auto insert_bits = [words = std::addressof(words_[0])](
+            const std::size_t index, const std::uint64_t bits) {
             // `words_` owns a separate allocation, so `word` cannot alias
             // the membership count `size_`.
-            auto &__restrict word = words_[index];
+            auto &__restrict word = words[index];
             const auto count = std::popcount(bits & ~word);
             word |= bits;
             return count;
@@ -286,8 +286,9 @@ public:
         if ((this == std::addressof(source)) || source.empty()) {
             return;
         }
-        if (words_.size() < source.words_.size()) {
-            words_.resize(source.words_.size());
+        const auto word_count = source.words_.size();
+        if (words_.size() < word_count) {
+            words_.resize(word_count);
         }
         // Each set's bitmap words are stored in a separate heap allocation,
         // outside either `BitmapSet` object. The self-merge check ensures that
@@ -295,12 +296,14 @@ public:
         auto *__restrict const destination_words = std::addressof(words_[0]);
         auto *__restrict const source_words = std::addressof(source.words_[0]);
         auto transferred_count = size_type{};
-        for (auto index = 0uz; index < source.words_.size(); ++index) {
+        for (auto index = 0uz; index < word_count; ++index) {
+            const auto source_word = source_words[index];
+            const auto destination_word = destination_words[index];
             const auto transferred =
-                source_words[index] & ~destination_words[index];
+                source_word & ~destination_word;
             transferred_count += std::popcount(transferred);
-            destination_words[index] |= transferred;
-            source_words[index] &= ~transferred;
+            destination_words[index] = destination_word | source_word;
+            source_words[index] = source_word & destination_word;
         }
         size_ += transferred_count;
         source.size_ -= transferred_count;
@@ -326,10 +329,11 @@ private:
             words_.resize(index + 1);
         }
         const auto bit_mask = mask(bit);
-        const auto inserted = (words_[index] & bit_mask) == 0;
+        const auto previous_word = words_[index];
+        const auto inserted = (previous_word & bit_mask) == 0;
         if (inserted) {
             ++size_;
-            words_[index] |= bit_mask;
+            words_[index] = previous_word | bit_mask;
         }
         return inserted;
     }
@@ -412,8 +416,9 @@ private:
         // Every offset in `set` already passed the alignment check in
         // `MaybeBitmapSet::insert`. Calling `insert_aligned` avoids
         // performing a duplicative alignment check.
-        for (const auto value : set | std::views::reverse) {
-            bitmap.insert_aligned(value);
+        const auto first = set.begin();
+        for (auto cursor = set.end(); cursor != first;) {
+            bitmap.insert_aligned(*--cursor);
         }
         set_.template emplace<bitmap_set_type>(std::move(bitmap));
     }

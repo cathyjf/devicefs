@@ -343,6 +343,7 @@ foreach(target IN ITEMS backup-supervisor devicefs-read-path-test)
             src/modules/noinline_invoker.ixx
             src/modules/allocation.ixx
             src/modules/bitmap_set.ixx
+            src/modules/byte_comparison.ixx
             src/modules/count_zeros.ixx
             src/modules/windows_block_device.ixx
         PRIVATE

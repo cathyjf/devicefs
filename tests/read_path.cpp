@@ -18,6 +18,7 @@ import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import devicefs.allocation;
 import devicefs.bitmap_set;
+import devicefs.byte_comparison;
 import devicefs.count_zeros;
 import <devicefs/common.h>;
 import devicefs.windows_block_device;
@@ -340,6 +341,68 @@ auto TestBitmapSet() -> void {
         "growth, and clear-and-reinsert behavior.");
 }
 
+// Check byte counts against a scalar reference, including independently
+// unaligned inputs, partial vectors, and totals larger than a byte can hold.
+auto TestDifferingByteCounts() -> void {
+    constexpr auto maximum_size = 4097uz;
+    constexpr auto alignment_count = 16uz;
+    constexpr auto boundary_size = 4 * alignment_count + 1;
+    auto left = std::vector<unsigned char>(maximum_size + alignment_count);
+    auto right = left;
+    auto random = std::mt19937{0x9c37};
+    for (auto index = 0uz; index < left.size(); ++index) {
+        left[index] = devicefs::terminal::FailFastCast<unsigned char>(
+            random() & 0xff);
+        right[index] = devicefs::terminal::FailFastCast<unsigned char>(
+            random() & 0xff);
+    }
+    const auto check = [&left, &right](const auto left_offset,
+        const auto right_offset, const auto size) {
+        __pragma(warning(push))
+        __pragma(warning(disable : 26429, justification :
+            "Nullable pointers `first` and `second` are required to perform "
+            "pointer arithmetic."))
+        const auto *const first = left.data() + left_offset;
+        const auto *const second = right.data() + right_offset;
+        __pragma(warning(pop))
+        auto expected = 0uz;
+        for (auto index = 0uz; index < size; ++index) {
+            expected += first[index] != second[index];
+        }
+        if (devicefs::CountDifferingBytes(first, second, size) != expected) {
+            throw std::runtime_error(std::format(
+                "differing-byte count is wrong for offsets {} and {}, "
+                "length {}", left_offset, right_offset, size));
+        }
+    };
+    for (auto left_offset = 0uz; left_offset < alignment_count;
+        ++left_offset) {
+        for (auto right_offset = 0uz; right_offset < alignment_count;
+            ++right_offset) {
+            for (auto size = 0uz; size <= boundary_size; ++size) {
+                check(left_offset, right_offset, size);
+            }
+            check(left_offset, right_offset, maximum_size);
+        }
+    }
+    right = left;
+    check(0uz, 0uz, maximum_size);
+    for (auto index = 0uz; index < boundary_size; ++index) {
+        right[index] ^= 0xff;
+        check(0uz, 0uz, boundary_size);
+        right[index] = left[index];
+    }
+    for (auto index = 0uz; index < right.size(); ++index) {
+        right[index] ^= 0xff;
+    }
+    check(0uz, 0uz, maximum_size);
+    left.assign(4uz * 1024 * 1024, 0);
+    right.assign(left.size(), 0xff);
+    check(0uz, 0uz, left.size());
+    std::println(
+        "PASS: SIMD differing-byte counts match the scalar reference.");
+}
+
 // Check `WindowsBlockDevice::Read` against a file in the system temporary directory.
 // Assigning `sector_size` explicitly exercises the production rounding and buffer
 // selection for both sector sizes, independently of the test volume's geometry.
@@ -490,6 +553,7 @@ auto main() -> int try {
     TestReads<false>();
     TestReads<true>();
     TestBitmapSet();
+    TestDifferingByteCounts();
     return 0;
 } catch (const std::exception &error) {
     std::println("FAIL: {}", error.what());

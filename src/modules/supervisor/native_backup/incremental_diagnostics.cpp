@@ -32,6 +32,7 @@ import :internal;
 import :manifest;
 import devicefs.allocation;
 import <devicefs/common.h>;
+import devicefs.byte_comparison;
 import <devicefs/malloca.h>;
 import devicefs.filesystem;
 import devicefs.guid_formatter;
@@ -852,10 +853,9 @@ _Pre_satisfies_((chunk_offset % kMapBlockSize) == 0)
         const auto baseline_block = baseline.subspan(relative, size);
         const auto payload_block = payload.subspan(relative, size);
 
-        const auto differing_bytes = std::transform_reduce(
-            mismatch.in1, baseline.begin() + (relative + size),
-            mismatch.in2, std::uint64_t{}, std::plus{},
-            std::not_equal_to{});
+        const auto differing_bytes = devicefs::CountDifferingBytes(
+            std::to_address(mismatch.in1), std::to_address(mismatch.in2),
+            (relative + size) - first_relative);
         result.differing_bytes += differing_bytes;
         ++result.differing_blocks;
         if (!dirty_map) {

@@ -29,6 +29,7 @@ import devicefs.supervisor.process_launch;
 import devicefs.supervisor.process_privileges;
 import :vhdx_attachment;
 import <devicefs/common.h>;
+import devicefs.byte_comparison;
 import devicefs.guid_formatter;
 import devicefs.stream_writer;
 import devicefs.terminal.transcoding;
@@ -1844,10 +1845,11 @@ public:
         if (first.in1 != synthetic_compared.end()) {
             const auto first_relative = std::ranges::distance(
                 synthetic_compared.begin(), first.in1);
-            const auto differing_bytes = std::transform_reduce(
-                first.in1, synthetic_compared.end(),
-                first.in2, std::uint64_t{}, std::plus{},
-                std::not_equal_to{});
+            const auto differing_bytes = devicefs::CountDifferingBytes(
+                std::to_address(first.in1), std::to_address(first.in2),
+                synthetic_compared.size() -
+                    devicefs::terminal::FailFastCast<std::size_t>(
+                        first_relative));
             state_.RecordContentMismatch(
                 synthetic_object.relative_path,
                 synthetic_stream.name,

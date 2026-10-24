@@ -103,9 +103,20 @@ private:
     std::unique_ptr<T[], std::remove_cv_t<decltype(free_deleter)>> storage_{};
 };
 
+template <std::uint64_t BlockSize>
+[[msvc::forceinline]]
+constexpr auto fast_fail_if_misaligned(const auto value) noexcept -> void {
+    if ((value % BlockSize) != 0) [[unlikely]] {
+        __fastfail(FAST_FAIL_INVALID_ARG);
+    }
+}
+
 }
 
 export namespace devicefs {
+
+template <std::uint64_t BlockSize>
+class MaybeBitmapSet;
 
 // Store a set of byte offsets using one bit per `BlockSize` bytes.
 //
@@ -168,20 +179,8 @@ public:
     }
 
     constexpr auto insert(const value_type value) -> bool {
-        const auto bit = block_index(value);
-        const auto index =
-            devicefs::terminal::FailFastMaybeCast<std::size_t>(
-                bit >> kWordShift);
-        if (index >= words_.size()) {
-            words_.resize(index + 1);
-        }
-        const auto bit_mask = mask(bit);
-        const auto inserted = (words_[index] & bit_mask) == 0;
-        if (inserted) {
-            ++size_;
-            words_[index] |= bit_mask;
-        }
-        return inserted;
+        bitmap_set_detail::fast_fail_if_misaligned<BlockSize>(value);
+        return insert_aligned(value);
     }
 
     template <std::input_iterator Iterator,
@@ -293,17 +292,36 @@ public:
     }
 
 private:
+    friend class MaybeBitmapSet<BlockSize>;
+
     static constexpr auto kBitsPerWord =
         std::numeric_limits<std::uint64_t>::digits;
     static constexpr auto kWordShift =
         std::countr_zero(devicefs::terminal::CompileTimeCast<
             std::uint64_t, kBitsPerWord>());
 
+    [[msvc::forceinline]]
+    _Pre_satisfies_((value % BlockSize) == 0)
+    constexpr auto insert_aligned(const value_type value) -> bool {
+        const auto bit = value / BlockSize;
+        const auto index =
+            devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                bit >> kWordShift);
+        if (index >= words_.size()) {
+            words_.resize(index + 1);
+        }
+        const auto bit_mask = mask(bit);
+        const auto inserted = (words_[index] & bit_mask) == 0;
+        if (inserted) {
+            ++size_;
+            words_[index] |= bit_mask;
+        }
+        return inserted;
+    }
+
     [[nodiscard]] static constexpr auto block_index(const key_type value)
         noexcept -> key_type {
-        if ((value % BlockSize) != 0) [[unlikely]] {
-            __fastfail(FAST_FAIL_INVALID_ARG);
-        }
+        bitmap_set_detail::fast_fail_if_misaligned<BlockSize>(value);
         return value / BlockSize;
     }
 
@@ -333,9 +351,7 @@ public:
         if (std::holds_alternative<bitmap_set_type>(set_)) {
             return std::get<bitmap_set_type>(set_).insert(value);
         }
-        if ((value % BlockSize) != 0) [[unlikely]] {
-            __fastfail(FAST_FAIL_INVALID_ARG);
-        }
+        bitmap_set_detail::fast_fail_if_misaligned<BlockSize>(value);
         auto &set = std::get<set_type>(set_);
         if (!set.insert(value).second) {
             return false;
@@ -378,7 +394,12 @@ private:
     auto convert_to_bitmap() -> void {
         auto &set = std::get<set_type>(set_);
         auto bitmap = bitmap_set_type(maximum_offset_);
-        bitmap.insert(set.rbegin(), set.rend());
+        // Every offset in `set` already passed the alignment check in
+        // `MaybeBitmapSet::insert`. Calling `insert_aligned` avoids
+        // performing a duplicative alignment check.
+        for (const auto value : set | std::views::reverse) {
+            bitmap.insert_aligned(value);
+        }
         set_.template emplace<bitmap_set_type>(std::move(bitmap));
     }
 

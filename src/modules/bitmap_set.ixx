@@ -126,6 +126,22 @@ constexpr auto fast_fail_if_misaligned(const auto value) noexcept -> void {
     }
 }
 
+[[msvc::forceinline]]
+constexpr auto popcnt64(const std::uint64_t value) noexcept {
+    // Examination of the generated code in the MSVC 14.51 x64 binary showed
+    // that `std::popcount` tested CPU support for `POPCNT` on every word
+    // iteration in the bitmap insertion and merge loops. Calling `__popcnt64`
+    // directly instead avoids those duplicative checks.
+    //
+    // Microsoft documents arm64 support for `__popcnt64` in the Visual Studio
+    // 2022 version 17.11 backend release notes:
+    // https://devblogs.microsoft.com/cppblog/msvc-backend-updates-in-visual-studio-2022-version-17-11/
+    //
+    // The intrinsic has also long been supported on modern x64 platforms:
+    // https://learn.microsoft.com/en-us/cpp/intrinsics/x64-amd64-intrinsics-list
+    return __popcnt64(value);
+}
+
 }
 
 export namespace devicefs {
@@ -239,7 +255,7 @@ public:
             // `words_` owns a separate allocation, so `word` cannot alias
             // the membership count `size_`.
             auto &__restrict word = words[index];
-            const auto count = std::popcount(bits & ~word);
+            const auto count = bitmap_set_detail::popcnt64(bits & ~word);
             word |= bits;
             return count;
         };
@@ -301,7 +317,7 @@ public:
             const auto destination_word = destination_words[index];
             const auto transferred =
                 source_word & ~destination_word;
-            transferred_count += std::popcount(transferred);
+            transferred_count += bitmap_set_detail::popcnt64(transferred);
             destination_words[index] = destination_word | source_word;
             source_words[index] = source_word & destination_word;
         }

@@ -29,33 +29,14 @@ public:
         const std::size_t maximum_size = max_size) noexcept
         : max_size_{std::min(maximum_size, max_size)} {}
 
+    [[msvc::forceinline]]
     _Pre_satisfies_(new_size <= max_size_)
     auto resize(const std::size_t new_size) -> void {
-        if (new_size == 0) {
-            clear();
-            return;
+        if ((new_size >= size_) && (new_size <= reservation_)) [[likely]] {
+            size_ = new_size;
+        } else {
+            resize_allocation(new_size);
         }
-        if (std::cmp_greater(new_size, max_size_)) {
-            throw std::bad_alloc{};
-        }
-        if ((new_size > reservation_) || (new_size < size_)) {
-            const auto new_reservation = new_reservation_size(new_size);
-            [[gsl::suppress("26408", justification:
-                "`realloc` is required to resize a memory allocation.")]]
-            auto *const buffer = static_cast<T *>(std::realloc(
-                storage_.get(), new_reservation * sizeof(T)));
-            if (!buffer) {
-                throw std::bad_alloc{};
-            }
-            storage_.release();
-            storage_.reset(buffer);
-            if (std::cmp_greater(new_reservation, reservation_)) {
-                std::memset(buffer + reservation_, 0,
-                    (new_reservation - reservation_) * sizeof(T));
-            }
-            reservation_ = new_reservation;
-        }
-        size_ = new_size;
     }
 
     constexpr auto clear() noexcept -> void {
@@ -80,6 +61,40 @@ public:
     }
 
 private:
+    [[msvc::noinline]]
+    _Pre_satisfies_(new_size <= max_size_)
+    auto resize_allocation(const std::size_t new_size) -> void {
+        // MSVC has been observed at times to prioritize the body of the first
+        // `if` statement within a function, regardless of whether it is
+        // annotated with an `[[unlikely]]` modifier. This is why the more
+        // common `new_size != 0` case appears first even though its source
+        // is much longer than the alternative case.
+        if (new_size != 0) [[likely]] {
+            if (std::cmp_greater(new_size, max_size_)) [[unlikely]] {
+                throw std::bad_alloc{};
+            }
+            const auto new_reservation = new_reservation_size(new_size);
+            [[gsl::suppress("26408", justification:
+                "`realloc` is required to resize a memory allocation.")]]
+            auto *const buffer = static_cast<T *>(std::realloc(
+                storage_.get(), new_reservation * sizeof(T)));
+            if (!buffer) {
+                throw std::bad_alloc{};
+            }
+            storage_.release();
+            storage_.reset(buffer);
+            if (std::cmp_greater(new_reservation, reservation_)) {
+                std::memset(buffer + reservation_, 0,
+                    (new_reservation - reservation_) * sizeof(T));
+            }
+            reservation_ = new_reservation;
+            size_ = new_size;
+        } else {
+            [[msvc::forceinline_calls]]
+            clear();
+        }
+    }
+
     auto new_reservation_size(const std::size_t new_size) const noexcept
         -> std::size_t {
         if (new_size < size_) {

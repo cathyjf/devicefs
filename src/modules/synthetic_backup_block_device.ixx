@@ -61,15 +61,15 @@ public:
         _In_range_(1, length - offset) const ULONG wanted,
         _Pre_equal_to_(0) ULONG &transferred,
         auto &...observers) const noexcept -> NTSTATUS {
-        const auto output = std::span{
-            static_cast<std::byte *>(buffer), wanted};
+        auto *const output = static_cast<std::byte *>(buffer);
+        const auto payload_bitmap = payload_bitmap_;
         const auto request_end = offset + wanted;
         const auto block_limit = ((request_end - 1) / BlockSize) + 1;
         auto position = offset;
         auto block = offset / BlockSize;
         const auto word = block / kBitsPerWord;
-        auto use_payload = (word < payload_bitmap_.size()) &&
-            ((payload_bitmap_.data()[word] &
+        auto use_payload = (word < payload_bitmap.size()) &&
+            ((payload_bitmap.data()[word] &
                 (std::uint64_t{1} << (block % kBitsPerWord))) != 0);
 
         [[gsl::suppress("6001",
@@ -78,8 +78,8 @@ public:
                 "`transferred` is initialized before this read.")]]
         while (transferred != wanted) {
             const auto next_block = use_payload
-                ? FindNextBlock<false>(block + 1, block_limit)
-                : FindNextBlock<true>(block + 1, block_limit);
+                ? FindNextBlock<false>(payload_bitmap, block + 1, block_limit)
+                : FindNextBlock<true>(payload_bitmap, block + 1, block_limit);
             const auto segment_end = next_block == block_limit
                 ? request_end : next_block * BlockSize;
 
@@ -103,10 +103,8 @@ public:
             _Analysis_assume_((position < request_end) && (request_end <= length));
             _Analysis_assume_((segment_wanted > 0) &&
                 (segment_wanted <= (request_end - position)));
-            const auto status = source.Read(
-                output.subspan(transferred).data(),
-                position, segment_wanted, segment_transferred,
-                observers...);
+            const auto status = source.Read(output + transferred,
+                position, segment_wanted, segment_transferred, observers...);
             transferred += segment_transferred;
 
             // The source owns short-read policy. Preserve its partial result
@@ -131,8 +129,9 @@ private:
     template <bool payload>
     _Pre_satisfies_(first <= limit)
     _Post_satisfies_((first <= return) && (return <= limit))
-    [[nodiscard]] auto FindNextBlock(
-        const std::uint64_t first, const std::uint64_t limit) const noexcept
+    [[nodiscard]] static auto FindNextBlock(
+        const std::span<const std::uint64_t> payload_bitmap,
+        const std::uint64_t first, const std::uint64_t limit) noexcept
         -> std::uint64_t {
         if (first == limit) {
             return limit;
@@ -143,11 +142,11 @@ private:
         auto mask = all_bits << (first % kBitsPerWord);
         for (auto word = first / kBitsPerWord; word <= last_word; ++word) {
             const auto word_begin = word * kBitsPerWord;
-            if (word >= payload_bitmap_.size()) {
+            if (word >= payload_bitmap.size()) {
                 return payload ? limit : std::max(first, word_begin);
             }
             const auto matching =
-                (payload_bitmap_.data()[word] ^ nonmatching) & mask;
+                (payload_bitmap.data()[word] ^ nonmatching) & mask;
             if (matching != 0) {
                 return std::min(limit,
                     word_begin + CountTrailingZeros(matching));

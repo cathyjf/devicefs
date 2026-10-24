@@ -218,7 +218,9 @@ public:
 
         const auto insert_bits = [this](const std::size_t index,
             const std::uint64_t bits) {
-            auto &word = words_[index];
+            // `words_` owns a separate allocation, so `word` cannot alias
+            // the membership count `size_`.
+            auto &__restrict word = words_[index];
             size_ += std::popcount(bits & ~word);
             word |= bits;
         };
@@ -256,6 +258,9 @@ public:
 
     // Move elements from `source` into this set. Elements that are already
     // present in this set remain in `source`, just as with `std::set::merge`.
+    [[gsl::suppress("26429", justification:
+        "Nullable pointers (as opposed to references) are required to perform "
+        "pointer arithmetic.")]]
     constexpr auto merge(BitmapSet &source) -> void {
         if ((this == std::addressof(source)) || source.empty()) {
             return;
@@ -263,13 +268,21 @@ public:
         if (words_.size() < source.words_.size()) {
             words_.resize(source.words_.size());
         }
+        // Each set's bitmap words are stored in a separate heap allocation,
+        // outside either `BitmapSet` object. The self-merge check ensures that
+        // the two membership counts are also separate.
+        auto *__restrict const destination_words = std::addressof(words_[0]);
+        auto *__restrict const source_words = std::addressof(source.words_[0]);
+        auto &__restrict destination_size = size_;
+        auto &__restrict source_size = source.size_;
         for (auto index = 0uz; index < source.words_.size(); ++index) {
-            const auto transferred = source.words_[index] & ~words_[index];
+            const auto transferred =
+                source_words[index] & ~destination_words[index];
             const auto count = std::popcount(transferred);
-            size_ += count;
-            words_[index] |= transferred;
-            source.words_[index] &= ~transferred;
-            source.size_ -= count;
+            destination_size += count;
+            destination_words[index] |= transferred;
+            source_words[index] &= ~transferred;
+            source_size -= count;
         }
     }
 

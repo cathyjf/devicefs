@@ -666,7 +666,7 @@ private:
         info->FreeSize = 0;
         info->VolumeLabelLength =
             CompileTimeCast<UINT16, kVolumeLabel.size() * sizeof(wchar_t)>();
-        std::ranges::copy(kVolumeLabel, info->VolumeLabel);
+        std::ranges::copy(kVolumeLabel, &info->VolumeLabel[0]);
         return STATUS_SUCCESS;
     }
 
@@ -836,7 +836,7 @@ private:
                     decltype(info->Size)>(
                         sizeof(FSP_FSCTL_DIR_INFO) + name_bytes);
                 info->FileInfo = file.info;
-                std::memcpy(info->FileNameBuf, file.name.data(), name_bytes);
+                std::memcpy(&info->FileNameBuf[0], file.name.data(), name_bytes);
                 if (!FspFileSystemAddDirInfo(info, buffer, length, transferred)) {
                     return STATUS_SUCCESS;
                 }

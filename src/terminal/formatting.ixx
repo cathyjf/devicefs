@@ -56,6 +56,11 @@ template <typename T>
     !std::convertible_to<T, std::string_view> ||
     std::is_nothrow_constructible_v<std::string_view, T>) -> decltype(auto) {
     if constexpr (std::convertible_to<T, std::string_view>) {
+        GSL_SUPPRESS("26485",
+            "For null-terminated character arrays, `std::string_view` "
+            "takes a pointer to the first character and determines the "
+            "length from the terminating null. The array-to-pointer "
+            "conversion supplies that pointer.")
         return TextArgument{std::string_view{std::forward<T>(argument)}};
     } else if constexpr (std::same_as<std::remove_cvref_t<T>, char>) {
         return TextArgument{std::string_view{std::addressof(argument), 1}};

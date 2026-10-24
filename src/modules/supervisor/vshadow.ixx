@@ -85,7 +85,7 @@ public:
     Backup(const HANDLE cancellation_event, const bool use_writers) :
         client_{
             use_writers ? VSS_CTX_APP_ROLLBACK : VSS_CTX_NAS_ROLLBACK,
-            L"", false, cancellation_event},
+            std::wstring{}, false, cancellation_event},
         use_writers_{use_writers} {}
 
     Backup(const Backup &) = delete;

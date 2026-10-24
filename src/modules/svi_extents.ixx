@@ -151,7 +151,7 @@ private:
         for (const auto &stream :
             wil::create_next_entry_offset_iterator(streams.get())) {
             const auto name = std::wstring_view{
-                stream.StreamName,
+                &stream.StreamName[0],
                 stream.StreamNameLength /
                     sizeof(std::wstring_view::value_type),
             };
@@ -183,7 +183,7 @@ private:
             for (const auto &entry :
                 wil::create_next_entry_offset_iterator(entries.get())) {
                 const auto name = std::wstring_view{
-                    entry.FileName,
+                    &entry.FileName[0],
                     entry.FileNameLength /
                         sizeof(std::wstring_view::value_type),
                 };

@@ -7,7 +7,5 @@
     <Rule Id="C26446" Action="None" />
     <!-- "Don't use pointer arithmetic. Use span instead." -->
     <Rule Id="C26481" Action="None" />
-    <!-- "Expression 'expr': No array to pointer decay." -->
-    <Rule Id="C26485" Action="None" />
   </Rules>
 </RuleSet>

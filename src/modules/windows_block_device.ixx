@@ -28,6 +28,7 @@ import devicefs.bitmap_set;
 import devicefs.count_zeros;
 import <devicefs/common.h>;
 import <devicefs/malloca.h>;
+import devicefs.noinline_invoker;
 import devicefs.stream_writer;
 
 #if DEVICEFS_MEASURE_FREE_CLUSTER_DATA
@@ -407,6 +408,14 @@ struct AllocationBitmap {
     const std::filesystem::path &filename,
     std::string_view description) -> AllocationBitmap;
 
+struct ThreadLocalResourceAggregate {
+    decltype(NewAlignedBuffer(1uz, std::align_val_t{1})) retained_buffer;
+    wil::unique_event_nothrow event;
+
+    [[msvc::noinline]]
+    ThreadLocalResourceAggregate() noexcept;
+};
+
 struct WindowsBlockDeviceSettings {
     // A thread shares its retained read buffer across local devices. Device
     // setup selects the maximum required alignment before reads begin. If no
@@ -428,45 +437,7 @@ struct WindowsBlockDeviceSettings {
         // `Read` specialization the same resource owner on each thread.
         // The event and retained buffer share one TLS object, initialized
         // on the thread's first source-backed read.
-        // `noinline` keeps the one-time initialization code out of read
-        // callbacks.
-        thread_local struct {
-            decltype(NewAlignedBuffer(kRetainedReadBufferSize,
-                read_buffer_alignment)) retained_buffer;
-            wil::unique_event_nothrow event;
-        } resources = {
-            .retained_buffer = [] [[msvc::noinline]] static noexcept {
-                static auto alignment_once = std::once_flag{};
-                std::call_once(alignment_once, [] static noexcept {
-                    if (read_buffer_alignment == std::align_val_t{}) {
-                        auto information = SYSTEM_INFO{};
-                        GetSystemInfo(&information);
-                        read_buffer_alignment =
-                            std::align_val_t{information.dwPageSize};
-                    }
-                });
-                auto buffer = NewAlignedBuffer(
-                    kRetainedReadBufferSize, read_buffer_alignment);
-                if (!buffer) {
-                    devicefs::WriteToStream(devicefs::stderr,
-                        "devicefs: failed to allocate retained read buffer "
-                        "of {} bytes\n", kRetainedReadBufferSize);
-                    std::_Exit(ERROR_NOT_ENOUGH_MEMORY);
-                }
-                return buffer;
-            }(),
-            .event = [] [[msvc::noinline]] static noexcept {
-                auto event = wil::unique_event_nothrow{};
-                if (!event.try_create(wil::EventOptions::ManualReset, nullptr)) {
-                    const auto error = GetLastError();
-                    devicefs::WriteToStream(devicefs::stderr,
-                        "devicefs: failed to create read completion event: {}\n",
-                        TryConstructWinError("", ExplicitWin32Error{error}));
-                    std::_Exit(error);
-                }
-                return event;
-            }(),
-        };
+        thread_local auto resources = ThreadLocalResourceAggregate{};
         return resources;
     }
 };
@@ -476,25 +447,8 @@ struct ErrorClosure {
     const std::uint64_t offset;
     const ULONG wanted;
 
-    // Read failures are not expected during normal operation. `noinline`
-    // prevents `flatten` from enlarging the read callback with diagnostic
-    // code that successful reads never execute.
-    //
-    // A previous version of this code used a factory function that returned
-    // a lambda to create an instance of the error closure. That formulation
-    // caused MSVC to inline the error formatting, despite the `noinline`
-    // annotation. By contrast, this named `ErrorClosure` type produces the
-    // desired out-of-line error formatting code.
     [[msvc::noinline]]
-    auto operator()(const DWORD error) const noexcept -> NTSTATUS {
-        devicefs::WriteToStream(
-            devicefs::stderr,
-            L"devicefs: read failed for '{}' at offset 0x{:x} "
-            L"for {} bytes: {}\n",
-            std::wstring_view{filename.native()}, offset, wanted,
-            TryConstructWinError("", ExplicitWin32Error{error}));
-        return FspNtStatusFromWin32(error);
-    }
+    auto operator()(const DWORD error) const noexcept -> NTSTATUS;
 };
 
 // Read exactly `count` bytes at `position`, waiting for completion. Call
@@ -733,7 +687,6 @@ struct OrdinaryFileBlockDevice {
         };
     }
 
-    [[msvc::noinline]]
     _Success_(return == STATUS_SUCCESS)
     auto Read(
         _Out_writes_bytes_to_(wanted, transferred) void *const buffer,
@@ -741,17 +694,22 @@ struct OrdinaryFileBlockDevice {
         _In_range_(1, length - offset) const ULONG wanted,
         _Pre_equal_to_(0) ULONG &transferred,
         auto &...observers) const noexcept -> NTSTATUS {
-        const auto failure = filesystem_internal::ErrorClosure{
-            filename, offset, wanted};
-        thread_local auto event = wil::unique_event_nothrow{};
-        [[gsl::suppress("26447",
-            justification: "This invocation of `try_create` cannot throw.")]]
-        if (!event && !event.try_create(
+        [[gsl::suppress("26447", justification: "This callable cannot throw.")]]
+        return InvokeOutOfLine(
+            [this, buffer, offset, wanted, &transferred, &observers...]
+            noexcept {
+            const auto failure = filesystem_internal::ErrorClosure{
+                filename, offset, wanted};
+            thread_local auto event = wil::unique_event_nothrow{};
+            [[gsl::suppress("26447", justification:
+                "This invocation of `try_create` cannot throw.")]]
+            if (!event && !event.try_create(
                 wil::EventOptions::ManualReset, nullptr)) {
-            return failure(GetLastError());
-        }
-        return filesystem_internal::ReadFromFile(handle.get(), event.get(),
-            buffer, offset, wanted, transferred, failure, observers...);
+                return failure(GetLastError());
+            }
+            return filesystem_internal::ReadFromFile(handle.get(), event.get(),
+                buffer, offset, wanted, transferred, failure, observers...);
+        });
     }
 };
 

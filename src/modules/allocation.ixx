@@ -43,6 +43,20 @@ export [[nodiscard]] auto QueryBufferAlignment(const HANDLE file) noexcept
     return std::align_val_t{std::size_t{information.AlignmentRequirement} + 1};
 }
 
+namespace devicefs::allocation_detail {
+
+struct AlignedDeleter {
+    std::align_val_t alignment;
+    auto operator()(auto *const allocation) const noexcept -> void {
+        [[gsl::suppress("26409", justification:
+            "Invoking `operator delete` is necessary to free the memory "
+            "allocated with `operator new` below.")]]
+        ::operator delete(allocation, alignment);
+    }
+};
+
+} // namespace devicefs::allocation_detail
+
 // Allocate a buffer of `size` bytes whose starting address is divisible by
 // `alignment`. This is useful for raw volume reads because such reads require
 // specially-aligned buffers.
@@ -56,17 +70,12 @@ template <class T = BYTE>
         std::same_as<T, std::byte>)
 [[nodiscard, msvc::forceinline]]
 auto NewAlignedBuffer(const std::size_t size, const std::align_val_t alignment) noexcept {
-    const auto deleter = [alignment](T *const allocation) noexcept {
-        [[gsl::suppress("26409",
-            justification:
-                "Invoking `operator delete` is necessary to free the memory "
-                "allocated below.")]]
-        ::operator delete(allocation, alignment);
-    };
+    using devicefs::allocation_detail::AlignedDeleter;
     [[gsl::suppress("26409",
         justification:
             "The analyzer suggests using `std::make_unique`, but that "
             "function cannot allocate an over-aligned byte array.")]]
-    return std::unique_ptr<T, decltype(deleter)>{static_cast<T *>(
-        ::operator new(size, alignment, std::nothrow)), deleter};
+    return std::unique_ptr<T, AlignedDeleter>{
+        static_cast<T *>(::operator new(size, alignment, std::nothrow)),
+        AlignedDeleter{alignment}};
 };

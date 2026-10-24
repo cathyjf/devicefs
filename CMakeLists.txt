@@ -330,16 +330,25 @@ target_link_libraries(backup-supervisor PRIVATE
     Version wintrust
 )
 
+set_source_files_properties(
+    src/modules/noinline_invoker.cpp
+    src/modules/windows_block_device/noinline_functions.cpp
+    PROPERTIES VS_SETTINGS "WholeProgramOptimization=false"
+)
+
 foreach(target IN ITEMS backup-supervisor devicefs-read-path-test)
     target_sources(${target}
-        PRIVATE FILE_SET CXX_MODULES
-            FILES
-                src/modules/stream_writer.ixx
-                src/modules/allocation.ixx
-                src/modules/bitmap_set.ixx
-                src/modules/count_zeros.ixx
-                src/modules/windows_block_device.ixx
-        PRIVATE src/modules/stream_writer.cpp
+        PRIVATE FILE_SET CXX_MODULES FILES
+            src/modules/stream_writer.ixx
+            src/modules/noinline_invoker.ixx
+            src/modules/allocation.ixx
+            src/modules/bitmap_set.ixx
+            src/modules/count_zeros.ixx
+            src/modules/windows_block_device.ixx
+        PRIVATE
+            src/modules/noinline_invoker.cpp
+            src/modules/stream_writer.cpp
+            src/modules/windows_block_device/noinline_functions.cpp
     )
 endforeach()
 

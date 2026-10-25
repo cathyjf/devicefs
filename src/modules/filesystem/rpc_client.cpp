@@ -202,10 +202,10 @@ struct RPCBlockDevice {
                 devicefs::WriteToStream(devicefs::stderr,
                     "devicefs: RPC read failed for '{:s}' at offset 0x{:x} "
                     "for {} bytes: {}\n",
-                    symbol_ | std::views::transform(
-                        [](const unsigned char byte) noexcept {
-                            return std::bit_cast<char>(byte);
-                        }), offset, wanted,
+                    std::string_view{
+                        ByteViewCast<const char *>(symbol_.c_str()),
+                        symbol_.length()
+                    }, offset, wanted,
                     TryConstructWinError("", ExplicitHresult{result}));
                 return FspNtStatusFromWin32(win32_error);
             }();

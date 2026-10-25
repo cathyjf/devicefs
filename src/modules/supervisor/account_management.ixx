@@ -178,14 +178,12 @@ constexpr auto kWslRegistration =
             .usri1_priv = USER_PRIV_USER,
             .usri1_flags = UF_SCRIPT | UF_NORMAL_ACCOUNT,
         };
-        [[gsl::suppress("26490",
-            justification:
-                "`NetUserAdd` receives the structure through its generic "
-                "`BYTE *` buffer parameter. The value 1 tells it to interpret "
-                "that buffer as a `USER_INFO_1` containing the new account's "
-                "name, initial password, and account settings.")]]
+        // `NetUserAdd` receives the structure through its generic `BYTE *`
+        // buffer parameter. The value 1 tells it to interpret that buffer as a
+        // `USER_INFO_1` containing the new account's name, initial password,
+        // and account settings.
         error = NetUserAdd(
-            nullptr, 1, reinterpret_cast<BYTE *>(&account), nullptr);
+            nullptr, 1, ByteViewCast<BYTE *>(&account), nullptr);
         return (error == NERR_PasswordTooShort) ||
             (error == ERROR_ILL_FORMED_PASSWORD);
     });
@@ -480,15 +478,12 @@ export [[nodiscard]] auto ResetBackupAccountPassword(
         auto account = USER_INFO_1003{
             .usri1003_password = candidate.data(),
         };
-        [[gsl::suppress("26490",
-            justification:
-                "`NetUserSetInfo` receives the structure through its generic "
-                "`BYTE *` buffer parameter. The value 1003 tells it to interpret "
-                "that buffer as a `USER_INFO_1003` containing the replacement "
-                "password.")]]
+        // `NetUserSetInfo` receives the structure through its generic `BYTE *`
+        // buffer parameter. The value 1003 tells it to interpret that buffer
+        // as a `USER_INFO_1003` containing the replacement password.
         error = NetUserSetInfo(
             nullptr, username.c_str(), 1003,
-            reinterpret_cast<BYTE *>(&account), nullptr);
+            ByteViewCast<BYTE *>(&account), nullptr);
         return (error == NERR_PasswordTooShort) ||
             (error == ERROR_ILL_FORMED_PASSWORD);
     });

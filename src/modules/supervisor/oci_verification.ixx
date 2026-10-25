@@ -299,14 +299,8 @@ export auto VerifyOciLayerSignature(const std::string_view digest,
     fields.RequireEnd();
 
     const auto hash = CreateHash(BCRYPT_SHA512_ALG_HANDLE, digest);
-    // https://eel.is/c++draft/basic.lval#11
-    [[gsl::suppress("26490", justification:
-        "C++ [basic.lval] permits an object's stored value to be accessed through "
-        "an `unsigned char` glvalue. `UCHAR` is an alias for `unsigned char`, so "
-        "the `reinterpret_cast` allows the message bytes to be read through "
-        "the pointer type required by `BCryptHashData`.")]]
     HashData(hash.get(), std::span{
-        reinterpret_cast<const UCHAR *>(digest.data()), digest.size()}, digest);
+        ByteViewCast<const UCHAR *>(digest.data()), digest.size()}, digest);
     HashData(hash.get(), signed_fields, digest);
     // V4 hashes the message, then the signed fields, then a six-byte trailer:
     // version 4, marker 0xff, and the four-byte big-endian signed-fields length.

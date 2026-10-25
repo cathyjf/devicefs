@@ -24,6 +24,10 @@ import <devicefs/common.h>;
 import devicefs.windows_block_device;
 import devicefs.supervisor.math;
 
+#ifdef _M_X64
+import <isa_availability.h>;
+#endif
+
 namespace {
 
 // Output buffers begin with this nonzero marker so that missed zeroing is
@@ -341,11 +345,20 @@ auto TestBitmapSet() -> void {
         "growth, and clear-and-reinsert behavior.");
 }
 
+template <unsigned Feature>
+struct IsaSupportFor {
+    constexpr static auto operator()(const unsigned feature, const unsigned)
+        noexcept -> bool {
+        return feature == Feature;
+    }
+};
+
 // Check byte counts against a scalar reference, including independently
 // unaligned inputs, partial vectors, and totals larger than a byte can hold.
-auto TestDifferingByteCounts() -> void {
+auto TestDifferingByteCounts(const auto &count_differing_bytes,
+    const std::string_view implementation) -> void {
     constexpr auto maximum_size = 4097uz;
-    constexpr auto alignment_count = 16uz;
+    constexpr auto alignment_count = 64uz;
     constexpr auto boundary_size = 4 * alignment_count + 1;
     auto left = std::vector<unsigned char>(maximum_size + alignment_count);
     auto right = left;
@@ -356,8 +369,8 @@ auto TestDifferingByteCounts() -> void {
         right[index] = devicefs::terminal::FailFastCast<unsigned char>(
             random() & 0xff);
     }
-    const auto check = [&left, &right](const auto left_offset,
-        const auto right_offset, const auto size) {
+    const auto check = [&left, &right, &count_differing_bytes, implementation](
+        const auto left_offset, const auto right_offset, const auto size) {
         __pragma(warning(push))
         __pragma(warning(disable : 26429, justification :
             "Nullable pointers `first` and `second` are required to perform "
@@ -369,10 +382,10 @@ auto TestDifferingByteCounts() -> void {
         for (auto index = 0uz; index < size; ++index) {
             expected += first[index] != second[index];
         }
-        if (devicefs::CountDifferingBytes(first, second, size) != expected) {
+        if (count_differing_bytes(first, second, size) != expected) {
             throw std::runtime_error(std::format(
-                "differing-byte count is wrong for offsets {} and {}, "
-                "length {}", left_offset, right_offset, size));
+                "{} differing-byte count is wrong for offsets {} and {}, "
+                "length {}", implementation, left_offset, right_offset, size));
         }
     };
     for (auto left_offset = 0uz; left_offset < alignment_count;
@@ -400,7 +413,8 @@ auto TestDifferingByteCounts() -> void {
     right.assign(left.size(), 0xff);
     check(0uz, 0uz, left.size());
     std::println(
-        "PASS: SIMD differing-byte counts match the scalar reference.");
+        "PASS: {} differing-byte counts match the scalar reference.",
+        implementation);
 }
 
 // Check `WindowsBlockDevice::Read` against a file in the system temporary directory.
@@ -553,7 +567,23 @@ auto main() -> int try {
     TestReads<false>();
     TestReads<true>();
     TestBitmapSet();
-    TestDifferingByteCounts();
+    TestDifferingByteCounts(devicefs::CountDifferingBytes<>, "default");
+#ifdef _M_X64
+    const auto test_supported = []<unsigned Feature>(
+        const std::string_view implementation) static {
+        if (__check_isa_support(Feature, 0)) {
+            TestDifferingByteCounts(
+                devicefs::CountDifferingBytes<IsaSupportFor<Feature>>,
+                implementation);
+        } else {
+            std::println("SKIP: {} is not supported on this machine.",
+                implementation);
+        }
+    };
+    test_supported.operator()<__IA_SUPPORT_VECTOR128>("SSE2");
+    test_supported.operator()<__IA_SUPPORT_VECTOR256>("AVX2");
+    test_supported.operator()<__IA_SUPPORT_VECTOR512>("AVX-512BW");
+#endif
     return 0;
 } catch (const std::exception &error) {
     std::println("FAIL: {}", error.what());

@@ -222,3 +222,27 @@ constexpr decltype(auto) CompileTimeCast(Source &&...input) {
             "only one place.")]]
     return Target{Constant..., std::forward<Source>(input)...};
 }
+
+namespace {
+
+template <class T>
+concept ByteType =
+    std::same_as<T, char> ||
+    std::same_as<T, unsigned char> ||
+    std::same_as<T, std::byte>;
+
+} // namespace
+
+template <class Target, class Source>
+    requires ((std::is_pointer_v<Target> || std::is_reference_v<Target>) &&
+        ByteType<std::remove_cv_t<std::remove_all_extents_t<
+            std::conditional_t<std::is_reference_v<Target>,
+                std::remove_reference_t<Target>,
+                std::remove_pointer_t<Target>>>>>)
+[[nodiscard, msvc::forceinline]]
+auto ByteViewCast(Source &&input) noexcept -> Target {
+    [[gsl::suppress("26490", justification:
+        "C++ permits viewing any object as bytes. "
+        "See C++23 [basic.lval]/11.3.")]]
+    return reinterpret_cast<Target>(std::forward<Source>(input));
+}

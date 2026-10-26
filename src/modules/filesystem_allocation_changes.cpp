@@ -131,15 +131,23 @@ auto ReadAllocationChangeBlocks(
     });
 
     auto block_offsets = BitmapSet<BlockSize>(previous_size - 1);
-    const auto add_cluster = [&block_offsets,
+    auto range_first = std::uint64_t{};
+    auto range_limit = std::uint64_t{};
+    const auto add_cluster = [&block_offsets, &range_first, &range_limit,
         cluster_size = previous_bitmap.cluster_size](const std::uint64_t cluster) {
         const auto start = cluster * cluster_size;
         const auto end = start + cluster_size;
         const auto first_block = start / BlockSize;
         const auto past_last_block = ((end - 1) / BlockSize) + 1;
-        block_offsets.insert_range(
-            first_block * BlockSize,
-            past_last_block * BlockSize);
+        const auto first = first_block * BlockSize;
+        const auto limit = past_last_block * BlockSize;
+        // Clusters arrive in increasing order. Overlapping or adjacent block
+        // ranges therefore need only one insertion, even across bitmap words.
+        if (first > range_limit) {
+            block_offsets.insert_range(range_first, range_limit);
+            range_first = first;
+        }
+        range_limit = limit;
     };
     for (auto byte_index = 0uz; byte_index < bitmap_size;) {
         auto changed = filesystem_internal::LoadBitmapWord(
@@ -172,6 +180,7 @@ auto ReadAllocationChangeBlocks(
         }
         byte_index = next_byte;
     }
+    block_offsets.insert_range(range_first, range_limit);
     return {
         .volume_size = previous_size,
         .block_offsets = std::move(block_offsets),

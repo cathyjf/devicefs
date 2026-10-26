@@ -157,14 +157,15 @@ struct RPCBlockDevice {
     [[nodiscard]] static auto FromSymbol(
         const wil::shared_rpc_binding &binding,
         const std::string_view symbol) {
-        auto stored_symbol = std::basic_string<unsigned char>{
-            symbol.begin(), symbol.end()};
+        auto stored_symbol = std::string{symbol};
         const auto length = [binding_ = binding.get(), &stored_symbol, symbol] {
             auto rpc_length = std::uint64_t{};
             auto status = NTSTATUS{};
             const auto result = wil::invoke_rpc_result_nothrow(
                 status, DeviceFsRpcClient_GetLength,
-                binding_, stored_symbol.c_str(), &rpc_length);
+                binding_,
+                ByteViewCast<const unsigned char *>(stored_symbol.c_str()),
+                &rpc_length);
             if (FAILED(result)) {
                 WinError("could not query the length of RPC block device '{}'",
                     symbol,
@@ -190,8 +191,9 @@ struct RPCBlockDevice {
         (observers.BeginSourceRead(), ...);
         const auto result = wil::invoke_rpc_result_nothrow(
             status, DeviceFsRpcClient_Read,
-            binding_.get(), symbol_.c_str(), offset, wanted,
-            &rpc_transferred, static_cast<BYTE *>(buffer));
+            binding_.get(),
+            ByteViewCast<const unsigned char *>(symbol_.c_str()), offset,
+            wanted, &rpc_transferred, static_cast<BYTE *>(buffer));
         if (FAILED(result)) {
             // Read failures are not expected during normal operation. `noinline`
             // prevents `flatten` from enlarging the read callback with diagnostic
@@ -202,10 +204,7 @@ struct RPCBlockDevice {
                 devicefs::WriteToStream(devicefs::stderr,
                     "devicefs: RPC read failed for '{:s}' at offset 0x{:x} "
                     "for {} bytes: {}\n",
-                    std::string_view{
-                        ByteViewCast<const char *>(symbol_.c_str()),
-                        symbol_.length()
-                    }, offset, wanted,
+                    symbol_, offset, wanted,
                     TryConstructWinError("", ExplicitHresult{result}));
                 return FspNtStatusFromWin32(win32_error);
             }();
@@ -220,12 +219,12 @@ struct RPCBlockDevice {
 private:
     RPCBlockDevice(
         const std::uint64_t length,
-        std::basic_string<unsigned char> symbol,
+        std::string symbol,
         wil::shared_rpc_binding binding) noexcept
         : length(length), symbol_(std::move(symbol)),
           binding_(std::move(binding)) {}
 
-    std::basic_string<unsigned char> symbol_;
+    std::string symbol_;
     wil::shared_rpc_binding binding_;
 };
 

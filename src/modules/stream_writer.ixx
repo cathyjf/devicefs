@@ -17,6 +17,7 @@
 export module devicefs.stream_writer;
 
 import std;
+import <devicefs/common.h>;
 import devicefs.terminal.transcoding;
 
 namespace devicefs::stream_writer_detail {
@@ -38,18 +39,6 @@ auto Write(
     } catch (...) {
         return false;
     }
-}
-
-template <typename Output>
-auto WriteUtf8(
-    Output output,
-    const std::u8string_view text) -> Output {
-    return std::ranges::transform(
-        text,
-        output,
-        [](const char8_t value) noexcept {
-            return std::bit_cast<char>(value);
-        }).out;
 }
 
 } // namespace devicefs::stream_writer_detail
@@ -127,15 +116,16 @@ using WFormatString = BasicFormatString<
 constexpr auto stdout = stream_writer_detail::Stdout{};
 constexpr auto stderr = stream_writer_detail::Stderr{};
 
-template <typename Output>
+template <class Text>
+    requires requires(const Text &text) {
+        text.size();
+        requires (sizeof(*text.data()) == 1);
+    }
 auto WriteToStream(
-    const Output output,
-    const std::u8string_view text) noexcept -> bool {
-    return stream_writer_detail::Write(
-        output,
-        [text](const auto destination) {
-            return stream_writer_detail::WriteUtf8(destination, text);
-        });
+    const auto output,
+    const Text &text) noexcept -> bool {
+    return stream_writer_detail::Print(output, std::string_view{
+        ByteViewCast<const char *>(text.data()), text.size()});
 }
 
 template <typename Output, typename... Arguments>

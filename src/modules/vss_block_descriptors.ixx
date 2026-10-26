@@ -928,11 +928,6 @@ private:
              descriptor_offset += kDescriptorSize) {
             const auto bytes = data.subspan(
                 descriptor_offset, kDescriptorSize);
-            if (std::ranges::all_of(bytes, [](const auto value) {
-                    return value == std::byte{};
-                })) {
-                continue;
-            }
             const auto descriptor = devicefs::vss::BlockDescriptor{
                 .original_offset =
                     ReadField<std::uint64_t>(bytes, 0),
@@ -943,6 +938,11 @@ private:
                 .flags = ReadField<std::uint32_t>(bytes, 24),
                 .bitmap = ReadField<std::uint32_t>(bytes, 28),
             };
+            if ((descriptor.original_offset | descriptor.relative_offset |
+                    descriptor.store_offset | descriptor.flags |
+                    descriptor.bitmap) == 0) {
+                continue;
+            }
             if (((descriptor.flags & devicefs::vss::kForwarderFlag) != 0) &&
                 (descriptor.store_offset != 0)) {
                 throw std::runtime_error(std::format(

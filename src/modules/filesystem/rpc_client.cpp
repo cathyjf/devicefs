@@ -30,15 +30,6 @@ import devicefs.rpc_constants;
 import devicefs.stream_writer;
 import devicefs.terminal.transcoding;
 
-#pragma warning(push)
-#pragma warning(disable : 5244, \
-    justification : \
-        "The symbols defined in the `midl_compat.h` header have `C` linkage " \
-        "and therefore are not attached to the named module declared in " \
-        "this file.")
-#include <devicefs/midl_compat.h>
-#pragma warning(pop)
-
 using devicefs::terminal::Transcode;
 
 namespace internal {
@@ -229,3 +220,36 @@ private:
 };
 
 } // namespace rpc_client
+
+namespace {
+
+// According to Microsoft, the `midl_user_allocate` function "should return an
+// 8-byte aligned pointer".
+//
+// https://learn.microsoft.com/en-us/windows/win32/rpc/the-midl-user-allocate-function
+constexpr auto kMidlAllocationAlignment = std::align_val_t{8};
+
+} // namespace
+
+extern "C" {
+
+__pragma(warning(push))
+__pragma(warning(disable : 26409, justification :
+    "The `midl_user_allocate` and `midl_user_free` functions are required to "
+    "allocate and free raw 8-byte-aligned memory for their callers. The "
+    "primitives `operator new` and `operator delete` provide an idiomatic way "
+    "to implement this facility in C++."))
+
+_Use_decl_annotations_
+auto __RPC_USER midl_user_allocate(const size_t size) -> void __RPC_FAR * {
+    return ::operator new(size, kMidlAllocationAlignment, std::nothrow);
+}
+
+_Use_decl_annotations_
+auto __RPC_USER midl_user_free(void __RPC_FAR *const memory) -> void {
+    ::operator delete(memory, kMidlAllocationAlignment);
+}
+
+__pragma(warning(pop))
+
+}

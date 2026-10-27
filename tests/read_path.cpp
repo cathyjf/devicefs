@@ -483,18 +483,19 @@ auto TestBitmapReductions(const auto &reduce_bitmap,
                 check(words, bits_per_region, 1);
             }
         }
-        // Each source bit in a complete SIMD batch must affect the right output
-        // bit, including bits in every lane of each of its four source groups.
-        auto words = std::vector<std::uint64_t>(4 * words_per_region);
-        for (auto bit = 0uz; bit < words.size() * word_bits; ++bit) {
-            words[bit / word_bits] = std::uint64_t{1} << (bit % word_bits);
-            check(words, bits_per_region);
-            words[bit / word_bits] = 0;
-        }
-        words.front() = 1;
-        words.back() = std::uint64_t{1} << (word_bits - 1);
-        for (const auto minimum_length : {0uz, 1uz, 4096uz}) {
-            check(words, bits_per_region, minimum_length);
+        // Check every source bit in partial and complete output bytes.
+        for (const auto regions : {4uz, 8uz}) {
+            auto words = std::vector<std::uint64_t>(regions * words_per_region);
+            for (auto bit = 0uz; bit < words.size() * word_bits; ++bit) {
+                words[bit / word_bits] = std::uint64_t{1} << (bit % word_bits);
+                check(words, bits_per_region);
+                words[bit / word_bits] = 0;
+            }
+            words.front() = 1;
+            words.back() = std::uint64_t{1} << (word_bits - 1);
+            for (const auto minimum_length : {0uz, 1uz, 4096uz}) {
+                check(words, bits_per_region, minimum_length);
+            }
         }
     }
     std::println("PASS: {} bitmap reductions match the scalar reference.",

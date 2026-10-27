@@ -417,6 +417,90 @@ auto TestDifferingByteCounts(const auto &count_differing_bytes,
         implementation);
 }
 
+// Compare each meaningful output bit with a scalar projection of the input.
+// Subspans and partial final groups determine which source bits participate;
+// padding bits and additional reserved bytes have no required values.
+auto TestBitmapReductions(const auto &reduce_bitmap,
+    const std::string_view implementation) -> void {
+    constexpr auto word_bits = std::numeric_limits<std::uint64_t>::digits;
+    constexpr auto original_resolution = 16uz * 1024;
+    const auto check = [&reduce_bitmap, implementation](
+        const std::span<const std::uint64_t> words,
+        const std::size_t bits_per_region,
+        const std::size_t minimum_length = 0) {
+        const auto input_bits = words.size() * word_bits;
+        const auto output_bits = input_bits / bits_per_region +
+            ((input_bits % bits_per_region) != 0);
+        auto expected = std::vector<unsigned char>(
+            (output_bits / 8) + ((output_bits % 8) != 0));
+        for (auto bit = 0uz; bit < input_bits; ++bit) {
+            if (((words[bit / word_bits] >> (bit % word_bits)) & 1) != 0) {
+                const auto output_bit = bit / bits_per_region;
+                expected[output_bit / 8] |= 1u << (output_bit % 8);
+            }
+        }
+        const auto result = reduce_bitmap(words, original_resolution,
+            bits_per_region * original_resolution, minimum_length);
+        auto matches = result.size() == std::max(expected.size(), minimum_length);
+        for (auto bit = 0uz; matches && (bit < output_bits); ++bit) {
+            matches = ((result[bit / 8] ^ expected[bit / 8]) &
+                (1u << (bit % 8))) == 0;
+        }
+        if (!matches) {
+            throw std::runtime_error(std::format(
+                "{} bitmap reduction is wrong for {} source words, "
+                "resolution ratio {}, minimum length {}",
+                implementation, words.size(), bits_per_region, minimum_length));
+        }
+    };
+    auto random = std::mt19937{0x5e17};
+    for (const auto bits_per_region : {128uz, 256uz, 384uz, 512uz, 768uz}) {
+        const auto words_per_region = bits_per_region / word_bits;
+        for (const auto regions : {1uz, 3uz, 4uz, 5uz, 7uz, 8uz, 9uz,
+                 15uz, 16uz, 17uz, 31uz, 32uz, 33uz, 63uz, 64uz, 65uz}) {
+            for (const auto remainder :
+                 std::views::iota(1uz, words_per_region + 1)) {
+                const auto word_count = (regions - 1) * words_per_region + remainder;
+                const auto input_bits = word_count * word_bits;
+                auto storage = std::vector<std::uint64_t>(word_count + 1);
+                // Offset the source by one word to exercise unaligned SIMD loads.
+                auto words = std::span{storage}.subspan(1);
+                check(words, bits_per_region);
+                for (const auto region : std::views::iota(0uz, regions)) {
+                    if ((random() & 1) != 0) {
+                        const auto first = region * bits_per_region;
+                        const auto bit = first + random() %
+                            std::min(bits_per_region, input_bits - first);
+                        words[bit / word_bits] |=
+                            std::uint64_t{1} << (bit % word_bits);
+                    }
+                }
+                for (const auto prefix : {1uz, 3uz, 4uz, 5uz,
+                         (word_count + 1) / 2, word_count}) {
+                    check(words.first(std::min(prefix, word_count)), bits_per_region);
+                }
+                std::ranges::fill(words, ~std::uint64_t{});
+                check(words, bits_per_region, 1);
+            }
+        }
+        // Each source bit in a complete SIMD batch must affect the right output
+        // bit, including bits in every lane of each of its four source groups.
+        auto words = std::vector<std::uint64_t>(4 * words_per_region);
+        for (auto bit = 0uz; bit < words.size() * word_bits; ++bit) {
+            words[bit / word_bits] = std::uint64_t{1} << (bit % word_bits);
+            check(words, bits_per_region);
+            words[bit / word_bits] = 0;
+        }
+        words.front() = 1;
+        words.back() = std::uint64_t{1} << (word_bits - 1);
+        for (const auto minimum_length : {0uz, 1uz, 4096uz}) {
+            check(words, bits_per_region, minimum_length);
+        }
+    }
+    std::println("PASS: {} bitmap reductions match the scalar reference.",
+        implementation);
+}
+
 // Check `WindowsBlockDevice::Read` against a file in the system temporary directory.
 // Assigning `sector_size` explicitly exercises the production rounding and buffer
 // selection for both sector sizes, independently of the test volume's geometry.
@@ -568,6 +652,7 @@ auto main() -> int try {
     TestReads<true>();
     TestBitmapSet();
     TestDifferingByteCounts(devicefs::CountDifferingBytes<>, "default");
+    TestBitmapReductions(devicefs::ReduceBitmap<const std::uint64_t>, "default");
 #ifdef _M_X64
     const auto test_supported = []<unsigned Feature>(
         const std::string_view implementation) static {
@@ -575,6 +660,11 @@ auto main() -> int try {
             TestDifferingByteCounts(
                 devicefs::CountDifferingBytes<IsaSupportFor<Feature>>,
                 implementation);
+            if constexpr (Feature != __IA_SUPPORT_VECTOR512) {
+                TestBitmapReductions(
+                    devicefs::ReduceBitmap<const std::uint64_t,
+                        IsaSupportFor<Feature>>, implementation);
+            }
         } else {
             std::println("SKIP: {} is not supported on this machine.",
                 implementation);

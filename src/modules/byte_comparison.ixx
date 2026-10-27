@@ -288,6 +288,9 @@ template auto CountDifferingBytes<>(
     const unsigned char *, const unsigned char *, std::size_t)
     noexcept -> std::size_t;
 
+constexpr auto kDefaultBitmapResolution = 4uz * 1024 * 1024;
+using ReducedBitmap = ReallocVector<unsigned char>;
+
 // Reduce a bitmap whose bits each describe `original_resolution` volume bytes
 // to one whose bits each describe `new_resolution` bytes. Both maps use the
 // low bit of each byte first. Every bit in `storage` participates in the
@@ -295,36 +298,35 @@ template auto CountDifferingBytes<>(
 // The result contains at least `bitmap_minimum_length` bytes. Bits and bytes
 // beyond the reduced bitmap have unspecified values.
 // Precondition: `storage` is nonempty.
-export template <std::integral T,
+export template <std::integral T, std::size_t original_resolution,
+    std::size_t new_resolution = kDefaultBitmapResolution,
     class IsaSupport = byte_comparison_detail::IsaSupportInvoker>
+    requires ((original_resolution != 0) && (new_resolution != 0) &&
+        ((new_resolution % original_resolution) == 0) &&
+        (((new_resolution / original_resolution) % 128) == 0))
 [[nodiscard]]
-_Pre_satisfies_(original_resolution != 0)
-_Pre_satisfies_(new_resolution != 0)
-_Pre_satisfies_((new_resolution % original_resolution) == 0)
-_Pre_satisfies_(((new_resolution / original_resolution) % 128) == 0)
 auto ReduceBitmap(const std::span<T> storage,
-    const std::size_t original_resolution, const std::size_t new_resolution,
     const std::size_t bitmap_minimum_length = 0)
-    -> ReallocVector<unsigned char> {
+    -> ReducedBitmap {
     constexpr auto bits_per_byte = std::numeric_limits<unsigned char>::digits;
     static_assert(bits_per_byte == 8);
     static_assert(std::endian::native == std::endian::little);
-    const auto resolution_ratio = new_resolution / original_resolution;
-    const auto words_per_bit =
+    constexpr auto resolution_ratio = new_resolution / original_resolution;
+    static constexpr auto words_per_bit =
         resolution_ratio / (sizeof(T) * bits_per_byte);
     const auto bits = storage.size() / words_per_bit +
         ((storage.size() % words_per_bit) != 0);
     const auto output_size =
         bits / bits_per_byte + ((bits % bits_per_byte) != 0);
-    auto result = ReallocVector<unsigned char>{};
+    auto result = ReducedBitmap{};
     result.resize(std::max(output_size, bitmap_minimum_length));
     auto *const output = std::addressof(result[0]);
     const auto *const input =
         ByteViewCast<const unsigned char *>(storage.data());
 
-    const auto reduce = [input, storage, output, words_per_bit]<class Vector>
+    const auto reduce = [input, storage, output]<class Vector>
         [[msvc::noinline]] {
-        const auto group = [input, words_per_bit] [[msvc::forceinline]] (
+        const auto group = [input] [[msvc::forceinline]] (
             const std::size_t first) {
             constexpr auto vector_words = sizeof(Vector) / sizeof(T);
             auto value = byte_comparison_detail::LoadVector<Vector>(
@@ -341,7 +343,7 @@ auto ReduceBitmap(const std::span<T> storage,
         const auto complete_bits = storage.size() / words_per_bit;
         for (; (complete_bits - bit) >= bits_per_byte; bit += bits_per_byte) {
             const auto packed =
-                [&group, bit, words_per_bit]<std::size_t... Index>
+                [&group, bit]<std::size_t... Index>
                     [[msvc::forceinline]] (std::index_sequence<Index...>) {
                     return byte_comparison_detail::ReduceVectorsToBitmapByte(
                         group((bit + Index) * words_per_bit)...);
@@ -349,8 +351,7 @@ auto ReduceBitmap(const std::span<T> storage,
             std::memcpy(output + bit / bits_per_byte, &packed, 1);
         }
         // The last incomplete eight-region batch compares only the remaining
-        // bytes.
-        // The result allocation initializes these tail bits to zero.
+        // bytes. The result allocation initializes these tail bits to zero.
         for (auto first = bit * words_per_bit; first < storage.size();
              first += words_per_bit, ++bit) {
             [[gsl::suppress("26429", justification:
@@ -378,7 +379,40 @@ auto ReduceBitmap(const std::span<T> storage,
     return result;
 }
 
-template auto ReduceBitmap<>(std::span<const std::uint64_t>,
-    std::size_t, std::size_t, std::size_t) -> ReallocVector<unsigned char>;
+// Select a reduction for a source resolution of 512, 1024, 2048, 4096,
+// 8192, 16384, or 32768 bytes. Other source resolutions return `std::nullopt`.
+// `new_resolution` must be a multiple of 4 MiB so that all seven source
+// resolutions satisfy the SIMD reduction's requirement that the number of
+// source bits per output bit is a multiple of 128. The input and output
+// contracts of `ReduceBitmap` also apply here.
+export template <std::integral T,
+    std::size_t new_resolution = kDefaultBitmapResolution,
+    class IsaSupport = byte_comparison_detail::IsaSupportInvoker>
+    requires ((new_resolution != 0) &&
+        ((new_resolution % kDefaultBitmapResolution) == 0))
+[[nodiscard]]
+auto DispatchReduceBitmap(const std::span<T> storage,
+    const std::size_t original_resolution,
+    const std::size_t bitmap_minimum_length = 0)
+    -> std::optional<ReducedBitmap> {
+    const auto dispatch = [storage, original_resolution, bitmap_minimum_length]
+        <std::size_t resolution_> [[msvc::forceinline]]
+        (this const auto &self) -> std::optional<ReducedBitmap> {
+        if (original_resolution == resolution_) {
+            return ReduceBitmap<T, resolution_, new_resolution, IsaSupport>(
+                storage, bitmap_minimum_length);
+        }
+        if constexpr (resolution_ < 32768) {
+            return self.template operator()<resolution_ * 2>();
+        }
+        return std::nullopt;
+    };
+    return dispatch.template operator()<512>();
+}
+
+// Compile the 4 MiB dispatcher and its reductions here for byte-backed maps.
+template auto DispatchReduceBitmap<const unsigned char>(
+    std::span<const unsigned char>, std::size_t, std::size_t)
+    -> std::optional<ReducedBitmap>;
 
 } // namespace devicefs

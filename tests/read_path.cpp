@@ -420,27 +420,27 @@ auto TestDifferingByteCounts(const auto &count_differing_bytes,
 // Compare each meaningful output bit with a scalar projection of the input.
 // Subspans and partial final groups determine which source bits participate;
 // padding bits and additional reserved bytes have no required values.
+template <std::size_t new_resolution>
 auto TestBitmapReductions(const auto &reduce_bitmap,
+    const auto &dispatch_reduce_bitmap,
     const std::string_view implementation) -> void {
     constexpr auto word_bits = std::numeric_limits<std::uint64_t>::digits;
-    constexpr auto original_resolution = 16uz * 1024;
-    const auto check = [&reduce_bitmap, implementation](
-        const std::span<const std::uint64_t> words,
-        const std::size_t bits_per_region,
-        const std::size_t minimum_length = 0) {
-        const auto input_bits = words.size() * word_bits;
+    const auto check = [implementation](const auto &words,
+        const std::size_t bits_per_region, const auto &result,
+        const std::size_t minimum_length) {
+        constexpr auto element_bits = sizeof(words[0]) *
+            std::numeric_limits<unsigned char>::digits;
+        const auto input_bits = words.size() * element_bits;
         const auto output_bits = input_bits / bits_per_region +
             ((input_bits % bits_per_region) != 0);
         auto expected = std::vector<unsigned char>(
             (output_bits / 8) + ((output_bits % 8) != 0));
         for (auto bit = 0uz; bit < input_bits; ++bit) {
-            if (((words[bit / word_bits] >> (bit % word_bits)) & 1) != 0) {
+            if (((words[bit / element_bits] >> (bit % element_bits)) & 1) != 0) {
                 const auto output_bit = bit / bits_per_region;
                 expected[output_bit / 8] |= 1u << (output_bit % 8);
             }
         }
-        const auto result = reduce_bitmap(words, original_resolution,
-            bits_per_region * original_resolution, minimum_length);
         auto matches = result.size() == std::max(expected.size(), minimum_length);
         for (auto bit = 0uz; matches && (bit < output_bits); ++bit) {
             matches = ((result[bit / 8] ^ expected[bit / 8]) &
@@ -448,14 +448,22 @@ auto TestBitmapReductions(const auto &reduce_bitmap,
         }
         if (!matches) {
             throw std::runtime_error(std::format(
-                "{} bitmap reduction is wrong for {} source words, "
+                "{} bitmap reduction is wrong for {} source elements, "
                 "resolution ratio {}, minimum length {}",
                 implementation, words.size(), bits_per_region, minimum_length));
         }
     };
     auto random = std::mt19937{0x5e17};
-    for (const auto bits_per_region : {128uz, 256uz, 384uz, 512uz, 768uz}) {
-        const auto words_per_region = bits_per_region / word_bits;
+    const auto test_resolution = [&reduce_bitmap, &check, &random]
+        <std::size_t bits_per_region> {
+        const auto check_result = [&reduce_bitmap, &check](
+            const std::span<const std::uint64_t> words,
+            const std::size_t minimum_length = 0) {
+            const auto result = reduce_bitmap.template operator()<bits_per_region>(
+                words, minimum_length);
+            check(words, bits_per_region, result, minimum_length);
+        };
+        constexpr auto words_per_region = bits_per_region / word_bits;
         for (const auto regions : {1uz, 3uz, 4uz, 5uz, 7uz, 8uz, 9uz,
                  15uz, 16uz, 17uz, 31uz, 32uz, 33uz, 63uz, 64uz, 65uz}) {
             for (const auto remainder :
@@ -465,7 +473,7 @@ auto TestBitmapReductions(const auto &reduce_bitmap,
                 auto storage = std::vector<std::uint64_t>(word_count + 1);
                 // Offset the source by one word to exercise unaligned SIMD loads.
                 auto words = std::span{storage}.subspan(1);
-                check(words, bits_per_region);
+                check_result(words);
                 for (const auto region : std::views::iota(0uz, regions)) {
                     if ((random() & 1) != 0) {
                         const auto first = region * bits_per_region;
@@ -477,10 +485,10 @@ auto TestBitmapReductions(const auto &reduce_bitmap,
                 }
                 for (const auto prefix : {1uz, 3uz, 4uz, 5uz,
                          (word_count + 1) / 2, word_count}) {
-                    check(words.first(std::min(prefix, word_count)), bits_per_region);
+                    check_result(words.first(std::min(prefix, word_count)));
                 }
                 std::ranges::fill(words, ~std::uint64_t{});
-                check(words, bits_per_region, 1);
+                check_result(words, 1);
             }
         }
         // Check every source bit in partial and complete output bytes.
@@ -488,15 +496,53 @@ auto TestBitmapReductions(const auto &reduce_bitmap,
             auto words = std::vector<std::uint64_t>(regions * words_per_region);
             for (auto bit = 0uz; bit < words.size() * word_bits; ++bit) {
                 words[bit / word_bits] = std::uint64_t{1} << (bit % word_bits);
-                check(words, bits_per_region);
+                check_result(words);
                 words[bit / word_bits] = 0;
             }
             words.front() = 1;
             words.back() = std::uint64_t{1} << (word_bits - 1);
             for (const auto minimum_length : {0uz, 1uz, 4096uz}) {
-                check(words, bits_per_region, minimum_length);
+                check_result(words, minimum_length);
             }
         }
+    };
+    test_resolution.template operator()<128>();
+    test_resolution.template operator()<256>();
+    test_resolution.template operator()<384>();
+    test_resolution.template operator()<512>();
+    test_resolution.template operator()<768>();
+
+    for (const auto original_resolution :
+         {512uz, 1024uz, 2048uz, 4096uz, 8192uz, 16384uz, 32768uz}) {
+        const auto bits_per_region =
+            new_resolution / original_resolution;
+        const auto bytes_per_region = bits_per_region / 8;
+        auto storage = std::vector<unsigned char>(9 * bytes_per_region + 2);
+        const auto input = std::span{storage}.subspan(1);
+        for (const auto region : std::views::iota(0uz, 10uz)) {
+            const auto first = region * bytes_per_region;
+            const auto last = std::min(first + bytes_per_region, input.size()) - 1;
+            input[first] = 1;
+            input[last] |= 0x80;
+            for (const auto minimum_length : {0uz, 1uz, 4096uz}) {
+                const auto result = dispatch_reduce_bitmap(
+                    std::span<const unsigned char>{input}, original_resolution,
+                    minimum_length);
+                if (!result) {
+                    throw std::runtime_error(std::format(
+                        "{} bitmap dispatch rejected source resolution {}",
+                        implementation, original_resolution));
+                }
+                check(input, bits_per_region, *result, minimum_length);
+            }
+            input[first] = input[last] = 0;
+        }
+    }
+    const auto input = std::to_array<unsigned char>({1});
+    if (dispatch_reduce_bitmap(std::span{input}, 65536, 0)) {
+        throw std::runtime_error(std::format(
+            "{} bitmap dispatch accepted unsupported source resolution 65536",
+            implementation));
     }
     std::println("PASS: {} bitmap reductions match the scalar reference.",
         implementation);
@@ -653,7 +699,13 @@ auto main() -> int try {
     TestReads<true>();
     TestBitmapSet();
     TestDifferingByteCounts(devicefs::CountDifferingBytes<>, "default");
-    TestBitmapReductions(devicefs::ReduceBitmap<const std::uint64_t>, "default");
+    constexpr auto kBitmapReductionResolution = 4uz * 1024 * 1024;
+    TestBitmapReductions<kBitmapReductionResolution>(
+        []<std::size_t Ratio>(auto &&...arguments) static {
+            return devicefs::ReduceBitmap<const std::uint64_t,
+                16uz * 1024, Ratio * 16uz * 1024>(
+                std::forward<decltype(arguments)>(arguments)...);
+        }, devicefs::DispatchReduceBitmap<const unsigned char>, "default");
 #ifdef _M_X64
     const auto test_supported = []<unsigned Feature>(
         const std::string_view implementation) static {
@@ -662,9 +714,15 @@ auto main() -> int try {
                 devicefs::CountDifferingBytes<IsaSupportFor<Feature>>,
                 implementation);
             if constexpr (Feature != __IA_SUPPORT_VECTOR512) {
-                TestBitmapReductions(
-                    devicefs::ReduceBitmap<const std::uint64_t,
-                        IsaSupportFor<Feature>>, implementation);
+                TestBitmapReductions<kBitmapReductionResolution>(
+                    []<std::size_t Ratio>(auto &&...arguments) static {
+                        return devicefs::ReduceBitmap<const std::uint64_t,
+                            16uz * 1024, Ratio * 16uz * 1024,
+                            IsaSupportFor<Feature>>(
+                                std::forward<decltype(arguments)>(arguments)...);
+                    }, devicefs::DispatchReduceBitmap<const unsigned char,
+                        kBitmapReductionResolution, IsaSupportFor<Feature>>,
+                    implementation);
             }
         } else {
             std::println("SKIP: {} is not supported on this machine.",

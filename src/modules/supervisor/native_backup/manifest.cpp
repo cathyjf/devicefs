@@ -299,13 +299,19 @@ export [[nodiscard]] auto ReadBackupVolumeDescriptions(const std::u8string_view 
 
 // Without a snapshot, PBS selects the current host's latest backup. An explicit
 // snapshot identifies the exact backup whose manifest should be restored.
+// With `include_backup_time`, select the latest completed backup in the group
+// and add its timestamp as a `pbs-backup-time` string in the returned JSON.
 export [[nodiscard]] auto RetrieveBackupManifest(
     const HANDLE cancellation_event,
     const std::optional<std::u8string> &namespace_override,
-    const std::optional<std::string_view> snapshot = std::nullopt)
+    const std::optional<std::string_view> snapshot = std::nullopt,
+    const bool include_backup_time = false)
     -> PreviousBackupManifestResult {
-    const auto arguments =
-        std::array{"--print-manifest"sv, "--"sv, snapshot.value_or(""sv)};
+    auto arguments = std::vector{"--print-manifest"sv, "--"sv};
+    if (include_backup_time) {
+        arguments.push_back("--timestamp"sv);
+    }
+    arguments.append_range(std::array{"--"sv, snapshot.value_or(""sv)});
     auto result = internal::RunPbsFish(
         cancellation_event,
         namespace_override,

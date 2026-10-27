@@ -192,20 +192,70 @@ function run_backup --argument-names parallel_images
     supervise_pbs $last_pid unmount_vss
 end
 
+function print_default_backup_group
+    echo -- host/{$backup_id}
+end
+
+function start_manifest_request_and_wait
+    timeout --kill-after=5s 60s $argv &
+    wait_for_published_child $last_pid
+end
+
 # Restore the DeviceFs manifest to standard output, using the encryption key
-# from standard input. An empty `snapshot` selects the latest backup in
-# `host/$backup_id`; otherwise the supplied PBS group or snapshot is used.
-# The retrieval has a deadline, and its exit status reaches the caller so an
-# optional-manifest consumer can continue when the archive is unavailable.
-function print_manifest --argument-names snapshot
-    if test -z "$snapshot"
-        set snapshot host/{$backup_id}
-    end
-    cancel_before_start true
-    timeout --kill-after=5s 60s \
+# from standard input.
+function restore_manifest_to_stdout -a snapshot
+    start_manifest_request_and_wait \
         $DEVICEFS_PBS_CLIENT restore --keyfd 0 \
-        $snapshot {$pbs_manifest_filename}.blob - &
-    supervise_pbs $last_pid true
+        $snapshot {$pbs_manifest_filename}.blob -
+end
+
+# Print the latest completed snapshot's path and Unix timestamp, one per line.
+# PBS supplies `size` only when it can read the snapshot's own manifest, so
+# unfinished snapshots are excluded before selecting the latest backup.
+function query_latest_backup -a group
+    set -l listing (
+        start_manifest_request_and_wait \
+            $DEVICEFS_PBS_CLIENT snapshot list $group --output-format json
+    ) || return
+
+    # The client's `BackupPart` parser requires an RFC 3339 date in a snapshot
+    # path. `backup-time` contains Unix seconds; `todate` converts those seconds
+    # to the required UTC date before it is appended to the backup group.
+    # https://github.com/proxmox/proxmox-rs/blob/master/pbs-api-types/src/datastore.rs#L1360-L1374
+    echo -- $listing | jq -er --arg group $group '
+        map(select(.size != null)) |
+        max_by(.["backup-time"]) |
+        if . == null then
+            error("no completed backup is available for " + $group)
+        else
+            .["backup-time"] | ($group + "/" + todate), tostring
+        end'
+end
+
+# Print the DeviceFs manifest from the supplied group or snapshot. An empty
+# `snapshot` selects the configured host's latest backup.
+# With `--timestamp`, select the latest completed backup explicitly
+# and add its PBS backup time to the returned JSON.
+function query_and_print_manifest
+    function remove_manifest_stop_file -e fish_exit -V stop_file
+        rm -f -- $stop_file
+    end
+    argparse /timestamp -- $argv || return
+    set -l snapshot $argv[1]
+    if test -z "$snapshot"
+        set snapshot (print_default_backup_group)
+    end
+    if ! set -q _flag_timestamp
+        restore_manifest_to_stdout $snapshot
+        return
+    end
+
+    set -l backup (query_latest_backup $snapshot) || return
+    restore_manifest_to_stdout $backup[1] |
+        jq --arg backup_time $backup[2] '.["pbs-backup-time"] = $backup_time'
+    for code in $pipestatus
+        test $code -eq 0 || return $code
+    end
 end
 
 # Start a PBS catalog query with the arguments after `output`, writing its JSON
@@ -449,7 +499,7 @@ function run_view --argument-names snapshot_override archive address port rpc_he
     set -g view_root (mktemp -d -t devicefs-view.XXXXXXXXXX) || return
     cancel_before_start finish_view
 
-    set -l snapshot host/{$backup_id}
+    set -l snapshot (print_default_backup_group)
     if test -n "$snapshot_override"
         set snapshot $snapshot_override
     end
@@ -587,7 +637,7 @@ set -l operation run_backup $_flag_parallel_images
 if set -q _flag_view
     set operation run_view
 else if set -q _flag_print_manifest
-    set operation print_manifest
+    set operation query_and_print_manifest
 else if set -q _flag_list_backups
     set operation list_backups
 else if set -q _flag_run_fish_program

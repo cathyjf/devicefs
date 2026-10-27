@@ -246,18 +246,14 @@ struct SelectiveViewOptions {
 }
 
 [[nodiscard]] auto ParseNamespaceOverride(
-    const std::span<const std::string_view> arguments,
-    const std::string_view mode)
+    const std::span<const std::string_view> arguments)
     -> std::optional<std::u8string> {
-    if (arguments.empty()) {
+    const auto option = std::ranges::find(arguments, "--namespace");
+    const auto value = std::ranges::next(option, 1, arguments.end());
+    if (value == arguments.end()) {
         return std::nullopt;
     }
-    if ((arguments.size() != 2) ||
-        (arguments[0] != "--namespace")) {
-        throw std::invalid_argument(std::format(
-            "{} accepts only --namespace NAMESPACE", mode));
-    }
-    return std::u8string{arguments[1].begin(), arguments[1].end()};
+    return std::u8string{value->begin(), value->end()};
 }
 
 [[nodiscard]] auto RunForeground(ForegroundOptions options) {
@@ -328,16 +324,22 @@ struct SelectiveViewOptions {
 }
 
 [[nodiscard]] auto RunQueryManifest(
-    std::optional<std::u8string> namespace_override) {
+    const std::span<const std::string_view> arguments) {
     return RunForegroundOperation(
-        [namespace_override = std::move(namespace_override)](
+        [namespace_override = ParseNamespaceOverride(arguments),
+            query_vss = std::ranges::contains(arguments, "--vss"),
+            include_backup_time = std::ranges::contains(arguments, "--timestamp")](
             const HANDLE cancellation_event) {
             const auto result = RetrieveBackupManifest(
-                cancellation_event, namespace_override);
+                cancellation_event, namespace_override, std::nullopt,
+                include_backup_time);
             if (result.exit_code != 0) {
                 return result.exit_code;
             }
             devicefs::WriteToStream(devicefs::stdout, result.manifest);
+            if (!query_vss) {
+                return 0;
+            }
 
             const auto snapshot_volumes =
                 result.ParseManifest().QuerySnapshotVolumes();
@@ -689,7 +691,7 @@ auto PrintHelp() noexcept {
         "[--volumes VOLUME[,VOLUME...]]\n"
         "      --namespace and --volumes override configured values.\n"
         "  backup-supervisor.exe --query-manifest "
-        "[--namespace NAMESPACE]\n"
+        "[--vss] [--timestamp] [--namespace NAMESPACE]\n"
         "  backup-supervisor.exe --list-backups [--namespace NAMESPACE]\n"
         "      Print the namespace's full backup catalog as JSON.\n"
         "  backup-supervisor.exe --browse [--namespace NAMESPACE]\n"
@@ -789,16 +791,14 @@ export extern "C++" auto BackupSupervisorMain(
     case "--list-backups"_h:
         return RunListBackups(
             ParseNamespaceOverride(
-                std::span{arguments}.subspan(1), "--list-backups"));
+                std::span{arguments}.subspan(1)));
     case "--browse"_h:
         devicefs::WriteToStream(devicefs::stdout,
             "Loading the backup catalog...\n");
         return RunBrowseMode(ParseNamespaceOverride(
-            std::span{arguments}.subspan(1), "--browse"));
+            std::span{arguments}.subspan(1)));
     case "--query-manifest"_h:
-        return RunQueryManifest(
-            ParseNamespaceOverride(
-                std::span{arguments}.subspan(1), "--query-manifest"));
+        return RunQueryManifest(std::span{arguments}.subspan(1));
     case "--inventory-vhdx"_h:
         if (arguments.size() != 2) {
             throw std::invalid_argument(

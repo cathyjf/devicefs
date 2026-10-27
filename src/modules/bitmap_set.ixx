@@ -11,16 +11,10 @@ import devicefs.terminal.safecast;
 import <isa_availability.h>;
 #endif
 
-namespace devicefs::bitmap_set_detail {
-
-const auto free_deleter = [](auto *const buffer) static noexcept {
-    [[gsl::suppress("26408", justification:
-        "`free` is required to free memory allocated with `realloc` below.")]]
-    std::free(buffer);
-};
+namespace devicefs {
 
 // Constraint on `T`: an all-zero object representation must be valid.
-template <class T>
+export template <class T>
     requires (std::is_implicit_lifetime_v<T> &&
         std::is_trivially_copyable_v<T> &&
         (alignof(T) <= alignof(std::max_align_t)))
@@ -119,8 +113,16 @@ private:
     std::size_t max_size_;
     std::size_t size_{};
     std::size_t reservation_{};
-    std::unique_ptr<T[], std::remove_cv_t<decltype(free_deleter)>> storage_{};
+    std::unique_ptr<T[], decltype([](auto *const buffer) static noexcept {
+        [[gsl::suppress("26408", justification:
+            "`free` releases memory allocated with `realloc` above.")]]
+        std::free(buffer);
+    })> storage_{};
 };
+
+} // namespace devicefs
+
+namespace devicefs::bitmap_set_detail {
 
 template <std::uint64_t BlockSize>
 [[msvc::forceinline]]
@@ -411,7 +413,7 @@ private:
         return std::uint64_t{1} << (bit & (kBitsPerWord - 1));
     }
 
-    bitmap_set_detail::ReallocVector<std::uint64_t> words_;
+    ReallocVector<std::uint64_t> words_;
     size_type size_ = 0;
 };
 

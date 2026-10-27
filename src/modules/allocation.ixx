@@ -17,6 +17,7 @@
 export module devicefs.allocation;
 
 import std;
+import <devicefs/common.h>;
 import <devicefs/windows_imports.h>;
 
 // Query the alignment required for I/O buffers used with `file`. Returns the
@@ -63,11 +64,7 @@ struct AlignedDeleter {
 // https://learn.microsoft.com/en-us/windows/win32/fileio/file-buffering#alignment-and-file-access-requirements
 //
 // The function returns `std::unique_ptr{nullptr}` on allocation failure.
-export
-template <class T = BYTE>
-    requires (std::same_as<T, char> ||
-        std::same_as<T, unsigned char> ||
-        std::same_as<T, std::byte>)
+export template <devicefs::ByteType T = BYTE>
 [[nodiscard, msvc::forceinline]]
 auto NewAlignedBuffer(const std::size_t size, const std::align_val_t alignment) noexcept {
     using devicefs::allocation_detail::AlignedDeleter;

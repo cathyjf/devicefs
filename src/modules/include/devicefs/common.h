@@ -223,7 +223,7 @@ constexpr decltype(auto) CompileTimeCast(Source &&...input) {
     return Target{Constant..., std::forward<Source>(input)...};
 }
 
-namespace {
+namespace devicefs {
 
 template <class T>
 concept ByteType =
@@ -231,11 +231,11 @@ concept ByteType =
     std::same_as<T, unsigned char> ||
     std::same_as<T, std::byte>;
 
-} // namespace
+} // namespace devicefs
 
 template <class Target, class Source>
     requires ((std::is_pointer_v<Target> || std::is_reference_v<Target>) &&
-        ByteType<std::remove_cv_t<std::remove_all_extents_t<
+        devicefs::ByteType<std::remove_cv_t<std::remove_all_extents_t<
             std::conditional_t<std::is_reference_v<Target>,
                 std::remove_reference_t<Target>,
                 std::remove_pointer_t<Target>>>>>)

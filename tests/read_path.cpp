@@ -511,6 +511,7 @@ auto TestBitmapReductions(const auto &reduce_bitmap,
     test_resolution.template operator()<384>();
     test_resolution.template operator()<512>();
     test_resolution.template operator()<768>();
+    test_resolution.template operator()<1024>();
 
     for (const auto original_resolution :
          {512uz, 1024uz, 2048uz, 4096uz, 8192uz, 16384uz, 32768uz}) {

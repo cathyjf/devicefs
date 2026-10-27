@@ -73,6 +73,13 @@ auto VectorBitwiseOr(const Vector left, const Vector right) noexcept {
 #endif
 }
 
+struct VectorBitwiseOrInvoker {
+    [[msvc::forceinline]]
+    static auto operator()(const auto left, const auto right) noexcept {
+        return VectorBitwiseOr(left, right);
+    }
+};
+
 template <class Comparator, class... T>
     requires ((sizeof...(T) >= 2) &&
         std::has_single_bit(sizeof...(T)))
@@ -329,15 +336,36 @@ auto ReduceBitmap(const std::span<T> storage,
         const auto group = [input] [[msvc::forceinline]] (
             const std::size_t first) {
             constexpr auto vector_words = sizeof(Vector) / sizeof(T);
-            auto value = byte_comparison_detail::LoadVector<Vector>(
-                input + first * sizeof(T));
-            for (auto word = vector_words; word < words_per_bit;
-                 word += vector_words) {
-                const auto next = byte_comparison_detail::LoadVector<Vector>(
-                    input + (first + word) * sizeof(T));
-                value = byte_comparison_detail::VectorBitwiseOr(value, next);
+            constexpr auto vector_count = words_per_bit / vector_words;
+            if constexpr (vector_count == 1) {
+                return byte_comparison_detail::LoadVector<Vector>(
+                    input + first * sizeof(T));
+            } else if constexpr ((words_per_bit * sizeof(T) <= 128) &&
+                std::has_single_bit(vector_count)) {
+                // A 4 MiB output bit covers at most 128 bitmap bytes when
+                // source units are 4 KiB or larger. Expanding these short
+                // groups removes the fixed-bound loops retained by MSVC;
+                // the pairwise OR tree also shortens their dependency chains.
+                return [input, first]<std::size_t... Index>
+                    [[msvc::forceinline]] (std::index_sequence<Index...>) {
+                    return byte_comparison_detail::ReducePairwise<
+                        byte_comparison_detail::VectorBitwiseOrInvoker>(
+                        byte_comparison_detail::LoadVector<Vector>(
+                            input + first * sizeof(T) +
+                                Index * sizeof(Vector))...);
+                }(std::make_index_sequence<vector_count>{});
+            } else {
+                auto value = byte_comparison_detail::LoadVector<Vector>(
+                    input + first * sizeof(T));
+                for (auto word = vector_words; word < words_per_bit;
+                     word += vector_words) {
+                    const auto next = byte_comparison_detail::
+                        LoadVector<Vector>(input + (first + word) * sizeof(T));
+                    value = byte_comparison_detail::VectorBitwiseOr(
+                        value, next);
+                }
+                return value;
             }
-            return value;
         };
         auto bit = 0uz;
         const auto complete_bits = storage.size() / words_per_bit;
@@ -348,7 +376,13 @@ auto ReduceBitmap(const std::span<T> storage,
                     return byte_comparison_detail::ReduceVectorsToBitmapByte(
                         group((bit + Index) * words_per_bit)...);
                 }(std::make_index_sequence<bits_per_byte>{});
-            std::memcpy(output + bit / bits_per_byte, &packed, 1);
+            __pragma(warning(push))
+            __pragma(warning(disable : 4244, justification :
+                "Each mask is in [0, 15]. Combining the low mask with the "
+                "high mask shifted left by four produces a value in [0, 255], "
+                "which fits in the output byte."))
+            output[bit / bits_per_byte] = packed;
+            __pragma(warning(pop))
         }
         // The last incomplete eight-region batch compares only the remaining
         // bytes. The result allocation initializes these tail bits to zero.
@@ -369,12 +403,13 @@ auto ReduceBitmap(const std::span<T> storage,
 #ifdef _M_ARM64
     reduce.template operator()<uint8x16_t>();
 #elifdef _M_X64
-    if (((resolution_ratio % 256) == 0) &&
-        IsaSupport::operator()(__IA_SUPPORT_VECTOR256, 0)) {
-        reduce.template operator()<__m256i>();
-    } else {
-        reduce.template operator()<__m128i>();
+    if constexpr ((resolution_ratio % 256) == 0) {
+        if (IsaSupport::operator()(__IA_SUPPORT_VECTOR256, 0)) {
+            reduce.template operator()<__m256i>();
+            return result;
+        }
     }
+    reduce.template operator()<__m128i>();
 #endif
     return result;
 }

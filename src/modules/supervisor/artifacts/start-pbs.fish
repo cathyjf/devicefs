@@ -51,34 +51,21 @@ function enable_openssl_arm_crypto
     set --global --export OPENSSL_armcap $capabilities
 end
 
+# Return the first nonzero value in a list of arguments, unless all are zero,
+# in which case zero is returned.
+function return_summary
+    for i in $argv
+        test "$i" -eq 0 || return $i
+    end
+end
+
 # Unmount the DeviceFs snapshot images after PBS has finished reading them.
 # A busy mount is retried, with a timeout so cleanup cannot wait indefinitely.
 # The exit status reports whether unmounting succeeded or the timeout expired.
 function unmount_vss
-    timeout --kill-after=1s 5s fish --no-config -c 'while ! sudo -n umount $argv[1]; sleep 1; end' $vss_mount_point
-end
-
-# Complete operation-specific cleanup by calling `finalizer` without arguments,
-# then remove the supervisor's stop request. Return the finalizer's status;
-# callers decide whether an earlier operation failure takes precedence.
-function finish_operation --argument-names finalizer
-    $finalizer
-    set finalizer_exit_code $status
-    rm -f $stop_file
-    return $finalizer_exit_code
-end
-
-# Check for cancellation before launching the next child. If a stop request
-# exists, `finalizer` releases resources already acquired and this Fish process
-# exits. Successful cleanup yields status 143 (the conventional SIGTERM status).
-# A cleanup failure supplies its own status. Otherwise, return zero so startup
-# can proceed.
-function cancel_before_start --argument-names finalizer
-    if test ! -e $stop_file
-        return 0
-    end
-    finish_operation $finalizer || exit
-    exit 143
+    set -l fish (status fish-path)
+    timeout --kill-after=1s 5s $fish -N -c \
+        'while ! sudo -n umount $argv[1]; sleep 1; end' $vss_mount_point
 end
 
 # Make the supplied child PIDs available to `SendPbsFishSignal` in pbs.cpp,
@@ -87,9 +74,7 @@ end
 # that arrived before the supervisor could discover the children.
 function publish_children
     printf '%s\n' $argv >$pid_file
-    if test -e $stop_file
-        kill -TERM $argv
-    end
+    test ! -e $stop_file || kill -TERM $argv
 end
 
 # Write `child_pid` to the supervisor's PID file, wait for that process, and
@@ -120,12 +105,8 @@ function supervise_pbs --argument-names child_pid finalizer
     set --erase PBS_PASSWORD
     wait_for_published_child $child_pid
     set -l child_exit_code $status
-    finish_operation $finalizer
-    set finish_exit_code $status
-    if test $child_exit_code -ne 0
-        return $child_exit_code
-    end
-    return $finish_exit_code
+    $finalizer
+    return_summary $child_exit_code $status
 end
 
 # Print the version of the proxmox-backup-client installed in the image, as
@@ -151,7 +132,7 @@ function print_transformed_manifest --argument-names manifest
         jq --arg build (maybe_print_pbs_client_version) \
             'if $build == "" then . else .notes["pbs-client-build"] = $build end' |
         string collect)
-    if ! string match -q -r '[^0]' $pipestatus
+    if ! string match -qr '[^0]' $pipestatus
         echo -- $transformed_manifest
     else
         echo -- $manifest
@@ -173,7 +154,6 @@ function run_backup --argument-names parallel_images
     set DEVICEFS_MANIFEST (print_transformed_manifest $DEVICEFS_MANIFEST | string collect)
     echo -- $DEVICEFS_MANIFEST >$manifest_file || return
     sudo -n mount $vss_mount_point || exit
-    cancel_before_start unmount_vss
     set -l backup_argv backup --keyfd 0 --backup-id $backup_id $parallel_images
     for image_path in $vss_mount_point/*.img
         set -l image_filename (path basename $image_path)
@@ -237,14 +217,10 @@ end
 # With `--timestamp`, select the latest completed backup explicitly
 # and add its PBS backup time to the returned JSON.
 function query_and_print_manifest
-    function remove_manifest_stop_file -e fish_exit -V stop_file
-        rm -f -- $stop_file
-    end
     argparse /timestamp -- $argv || return
     set -l snapshot $argv[1]
-    if test -z "$snapshot"
-        set snapshot (print_default_backup_group)
-    end
+    test -n "$snapshot" || set snapshot (print_default_backup_group)
+
     if ! set -q _flag_timestamp
         restore_manifest_to_stdout $snapshot
         return
@@ -253,9 +229,7 @@ function query_and_print_manifest
     set -l backup (query_latest_backup $snapshot) || return
     restore_manifest_to_stdout $backup[1] |
         jq --arg backup_time $backup[2] '.["pbs-backup-time"] = $backup_time'
-    for code in $pipestatus
-        test $code -eq 0 || return $code
-    end
+    return_summary $pipestatus
 end
 
 # Start a PBS catalog query with the arguments after `output`, writing its JSON
@@ -263,8 +237,8 @@ end
 # Remove the file if the query fails so incomplete results are not consumed.
 function start_catalog_query --argument-names output
     $DEVICEFS_PBS_CLIENT $argv[2..] >$output &
-    function catalog_query_finished_$last_pid --on-process-exit $last_pid --inherit-variable output \
-            --argument-names event process_id exit_code
+    function catalog_query_finished_$last_pid -p $last_pid -V output \
+            -a event process_id exit_code
         test $exit_code -eq 0 || rm -f -- $output
     end
 end
@@ -277,41 +251,40 @@ end
 # Query `PBS_NAMESPACE` while discovering its child namespaces. If discovery
 # or parsing fails, the starting namespace is still queried. Snapshot requests
 # run concurrently; failed requests are omitted while their diagnostics remain
-# on standard error. Cancellation returns 143, and JSON assembly errors return
-# jq's failure status.
+# on standard error. JSON assembly errors return jq's failure status.
 function collect_backup_catalog --argument-names directory
     set -l namespaces $PBS_NAMESPACE
-    start_catalog_query $directory/query namespace list $PBS_NAMESPACE --output-format json
+    start_catalog_query $directory/query namespace list $PBS_NAMESPACE \
+        --output-format json
     set -l discovery $last_pid
     # Omitting the group lists every snapshot in this namespace in one request.
-    start_catalog_query $directory/1.json snapshot list --ns $PBS_NAMESPACE --output-format json
+    start_catalog_query $directory/1.json snapshot list \
+        --ns $PBS_NAMESPACE --output-format json
     set -l children $last_pid
     publish_children $discovery $children
     wait $discovery
-    if test ! -e $stop_file && test -f $directory/query
+    if test -f $directory/query
         if set -l discovered (jq -r --arg namespace $PBS_NAMESPACE \
                 '.data[].ns | select(. != $namespace)' $directory/query)
             set --append namespaces $discovered
         end
     end
     for index in (seq 2 (count $namespaces))
-        start_catalog_query $directory/$index.json snapshot list --ns $namespaces[$index] --output-format json
+        start_catalog_query $directory/$index.json snapshot list \
+            --ns $namespaces[$index] --output-format json
         set --append children $last_pid
         publish_children $children
     end
     wait $children
     rm -f -- $pid_file
-    if test -e $stop_file
-        return 143
-    end
     for index in (seq (count $namespaces))
-        if test -f $directory/$index.json
-            # PBS supplies `size` only when it can read the snapshot's own
-            # manifest. Exclude unfinished snapshots and unreadable manifests.
-            # https://github.com/proxmox/proxmox-backup/blob/master/src/tools/mod.rs
-            jq --arg namespace $namespaces[$index] '.[] | select(.size != null) | . + {namespace: $namespace}' \
-                $directory/$index.json >>$directory/snapshots || return
-        end
+        test -f $directory/$index.json || continue
+        # PBS supplies `size` only when it can read the snapshot's own
+        # manifest. Exclude unfinished snapshots and unreadable manifests.
+        # https://github.com/proxmox/proxmox-backup/blob/master/src/tools/mod.rs
+        jq --arg namespace $namespaces[$index] \
+            '.[] | select(.size != null) | . + {namespace: $namespace}' \
+            $directory/$index.json >>$directory/snapshots || return
     end
     jq --slurp --arg namespace $PBS_NAMESPACE \
         '{namespace: $namespace, snapshots: .}' $directory/snapshots
@@ -319,16 +292,15 @@ end
 
 # Retrieve the backup catalog and print it as JSON to standard output. Create
 # temporary files for the queries, remove them afterward, and return the
-# retrieval status. Keep `PBS_PASSWORD` available during collection because
-# each query needs to inherit it, then erase it before returning.
+# retrieval status. The function keeps `PBS_PASSWORD` available during
+# collection because each query needs to inherit it, but erases it before
+# returning.
 function list_backups
-    cancel_before_start true
     set -l directory (mktemp -d -t devicefs-catalog.XXXXXXXXXX) || return
-    printf '' >$directory/snapshots
+    touch -- $directory/snapshots
     collect_backup_catalog $directory
     set -l result $status
     set --erase PBS_PASSWORD
-    finish_operation true
     rm -rf -- $directory
     return $result
 end
@@ -372,40 +344,26 @@ function finish_view
         set map_output_exit_code $view_map_output_exit_code
     end
 
-    set -l remove_exit_code 0
-    if set --query view_root[1]
-        if test "$print_samba_logs" -eq 1
-            # Samba writes its diagnostics to files in `view_root`. These may
-            # explain why a view failed, but deleting the directory would
-            # discard them without showing them to the administrator.
-            #
-            # Reporting the logs only when Samba exits without a stop request
-            # would miss failures in DeviceFs: the supervisor responds to those
-            # failures by requesting shutdown, just as it does when the user
-            # ends a view. Consequently, we print all nonempty Samba logs
-            # before removing the directory, including after a requested
-            # shutdown.
-            for log in $view_root/log.*
-                if test -s $log
-                    printf "Samba log '%s':\n" $log 1>&2
-                    while read --line --local line
-                        printf '  %s\n' $line 1>&2
-                    end < $log
-                end
-            end
-        end
-        printf 'Removing temporary state: %s.\n' $view_root 1>&2
-        rm -rf -- $view_root
-        set remove_exit_code $status
+    if test "$print_samba_logs" -eq 1
+        # Samba writes its diagnostics to files in `view_root`. These may
+        # explain why a view failed, but deleting the directory would
+        # discard them without showing them to the administrator.
+        #
+        # Reporting the logs only when Samba exits without a stop request
+        # would miss failures in DeviceFs: the supervisor responds to those
+        # failures by requesting shutdown, just as it does when the user
+        # ends a view. Consequently, we print all nonempty Samba logs
+        # before removing the directory, including after a requested
+        # shutdown.
+        for log in $view_root/log.*
+            test -s $log || continue
+            printf "Samba log '%s':\n" $log
+            awk '{ print "    " $0 }' < $log
+        end 1>&2
     end
-
-    if test $map_exit_code -ne 0
-        return $map_exit_code
-    end
-    if test $map_output_exit_code -ne 0
-        return $map_output_exit_code
-    end
-    return $remove_exit_code
+    printf 'Removing temporary state: %s.\n' $view_root 1>&2
+    rm -rf -- $view_root
+    return_summary $map_exit_code $map_output_exit_code $status
 end
 
 # Read mapper output from the `output_path` FIFO and forward every line to
@@ -425,9 +383,8 @@ function read_view_map_output --argument-names output_path device_path
                 continue
             end
             for candidate in (
-                string match --regex --all --groups-only \
-                    '\s(/dev/loop[0-9]+)(?:\s|$)' $map_line
-            )
+                    string match --regex --all --groups-only \
+                    '\s(/dev/loop[0-9]+)(?:\s|$)' $map_line)
                 echo -- $candidate >$device_path
                 set map_ready 1
                 break
@@ -478,10 +435,7 @@ function prepare_view_samba --argument-names address port
             "--user=$unix_user" --password-from-stdin 1>&2
     set -l password_pipeline_status $pipestatus
     set --erase DEVICEFS_RPC_PASSWORD
-    if test $password_pipeline_status[1] -ne 0
-        return $password_pipeline_status[1]
-    end
-    return $password_pipeline_status[2]
+    return_summary $password_pipeline_status
 end
 
 # Make one PBS image `archive` available through the Samba block-device RPC
@@ -497,8 +451,6 @@ end
 # over cleanup failure; requested termination returns the cleanup result.
 function run_view --argument-names snapshot_override archive address port rpc_helper samba_dcerpcd timestamp
     set -g view_root (mktemp -d -t devicefs-view.XXXXXXXXXX) || return
-    cancel_before_start finish_view
-
     set -l snapshot (print_default_backup_group)
     if test -n "$snapshot_override"
         set snapshot $snapshot_override
@@ -514,7 +466,7 @@ function run_view --argument-names snapshot_override archive address port rpc_he
     mkfifo -- $map_output $mapped_device_output
     set -l output_exit_code $status
     if test $output_exit_code -ne 0
-        finish_operation finish_view
+        finish_view
         return $output_exit_code
     end
     set -l map_output_reader $view_root/read-map-output.fish
@@ -527,7 +479,7 @@ function run_view --argument-names snapshot_override archive address port rpc_he
     end >$map_output_reader
     set output_exit_code $status
     if test $output_exit_code -ne 0
-        finish_operation finish_view
+        finish_view
         return $output_exit_code
     end
     set -l fish (status fish-path)
@@ -565,25 +517,18 @@ function run_view --argument-names snapshot_override archive address port rpc_he
         set -g view_loop_device $mapped_device
     end
     if test -z "$mapped_device"
-        cancel_before_start finish_view
         printf 'Could not identify the mapped PBS loop device.\n' 1>&2
-        finish_operation finish_view
-        set -l finish_exit_code $status
-        if test $finish_exit_code -ne 0
-            return $finish_exit_code
-        end
-        return 1
+        finish_view
+        return (math max 1, $status)
     end
     printf 'Mapped PBS archive on %s.\n' $view_loop_device 1>&2
-    cancel_before_start finish_view
 
     prepare_view_samba $address $port
     set -l preparation_exit_code $status
     if test $preparation_exit_code -ne 0
-        finish_operation finish_view
+        finish_view
         return $preparation_exit_code
     end
-    cancel_before_start finish_view
 
     printf 'Starting Samba view endpoint on %s port %s.\n' $address $port 1>&2
     set --function --export DEVICEFS_SAMBA_RPC_DEVICE $view_loop_device
@@ -595,19 +540,15 @@ function run_view --argument-names snapshot_override archive address port rpc_he
     set --erase PBS_PASSWORD
     wait_for_published_child $last_pid
     set -l child_exit_code $status
-    set -l stop_requested 0
     if test -e $stop_file
-        set stop_requested 1
+        set child_exit_code 0
     end
-    finish_operation finish_view
-    set -l finish_exit_code $status
-    if test '(' $stop_requested -eq 0 ')' -a '(' $child_exit_code -ne 0 ')'
-        return $child_exit_code
-    end
-    return $finish_exit_code
+    finish_view
+    return_summary $child_exit_code $status
 end
 
-argparse /parallel-images /print-manifest /list-backups /view /run-fish-program -- $argv || exit
+argparse /parallel-images /print-manifest /list-backups /view \
+    /run-fish-program -- $argv || exit
 
 # The first three positional arguments are supervisor control-file paths and
 # the local backup ID. Remaining arguments belong to the selected operation.
@@ -615,6 +556,10 @@ set pid_file $argv[1]
 set stop_file $argv[2]
 set backup_id $argv[3]
 set -e argv[..3]
+
+function remove_stop_file --on-event fish_exit --inherit-variable stop_file
+    rm -f -- $stop_file
+end
 
 # `StartPbsFish` in pbs.cpp supplies every NUL-delimited record below, including
 # empty records for unused values. The remaining bytes are the encryption-key
@@ -645,7 +590,6 @@ else if set -q _flag_run_fish_program
 end
 $operation $argv
 set -l exit_status $status
-
 if ! set -q _flag_run_fish_program
     exit $exit_status
 end

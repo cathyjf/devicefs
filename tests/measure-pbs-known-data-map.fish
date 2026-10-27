@@ -37,7 +37,6 @@ if test $map_case = all-data
 end
 
 sudo -n mount $vss_mount_point || exit
-cancel_before_start unmount_vss
 set -l parallel_images false
 if test $uploader = parallel
     set parallel_images true

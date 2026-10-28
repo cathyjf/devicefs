@@ -10,6 +10,7 @@
 // This is the list of instantiations of the SVE reduction algorithm that are
 // currently needed by production callers. If more instantiations are needed
 // later, they can be added here.
+DEVICEFS_INSTANTIATE_SVE_REDUCTION(16);
 DEVICEFS_INSTANTIATE_SVE_REDUCTION(32);
 DEVICEFS_INSTANTIATE_SVE_REDUCTION(64);
 DEVICEFS_INSTANTIATE_SVE_REDUCTION(128);

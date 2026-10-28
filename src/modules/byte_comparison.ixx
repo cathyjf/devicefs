@@ -236,8 +236,8 @@ auto ReduceVectorsToBitmapByte(const Vector a, const Vector b,
 // `byte_comparison_sve.cpp` instead.
 [[nodiscard]] auto SveVectorBytes() noexcept -> std::size_t;
 
-// Reduce each source region to one output bit. Predicated loads keep every
-// read within its source region, including an incomplete final one.
+// Reduce each source region to one output bit. Predicated loads keep reads
+// within the supplied input, including an incomplete final region.
 //
 // This function returns false without modifying output if `svcntb()` returns
 // less than 16 or greater than 256 or a value that is not a multiple of 16.
@@ -512,21 +512,16 @@ auto ReduceBitmap(const std::span<T> storage,
         }
     };
 #ifdef _M_ARM64
-    // For 16-byte regions, wider SVE vectors do not reduce the number of
-    // loads, and NEON combines the eight results before extracting the
-    // output byte.
-    if constexpr ((words_per_bit * sizeof(T)) > 16) {
-        // At 128-bit width, the dispatcher selects NEON's expanded reductions
-        // for their balanced trees and combined packing. Otherwise, it selects
-        // SVE for wider loads or four independent accumulators.
-        if (IsaSupport::operator()(PF_ARM_SVE_INSTRUCTIONS_AVAILABLE) &&
-            (!byte_comparison_detail::kExpandBitmapReduction<
-                words_per_bit * sizeof(T), uint8x16_t> ||
-                (byte_comparison_detail::SveVectorBytes() > sizeof(uint8x16_t))) &&
-            byte_comparison_detail::ReduceBitmapUsingSve<words_per_bit * sizeof(T)>(
-                input, storage.size_bytes(), output)) {
-            return result;
-        }
+    // At 128-bit width, the dispatcher selects NEON's expanded reductions
+    // for their more compact packing. Otherwise, it selects SVE for wider
+    // loads or four independent accumulators.
+    if (IsaSupport::operator()(PF_ARM_SVE_INSTRUCTIONS_AVAILABLE) &&
+        (!byte_comparison_detail::kExpandBitmapReduction<
+            words_per_bit * sizeof(T), uint8x16_t> ||
+            (byte_comparison_detail::SveVectorBytes() > sizeof(uint8x16_t))) &&
+        byte_comparison_detail::ReduceBitmapUsingSve<words_per_bit * sizeof(T)>(
+            input, storage.size_bytes(), output)) {
+        return result;
     }
     reduce.template operator()<uint8x16_t>();
 #elifdef _M_X64

@@ -512,6 +512,7 @@ auto TestBitmapReductions(const auto &reduce_bitmap,
     test_resolution.template operator()<512>();
     test_resolution.template operator()<768>();
     test_resolution.template operator()<1024>();
+    test_resolution.template operator()<1536>();
 
     for (const auto original_resolution :
          {512uz, 1024uz, 2048uz, 4096uz, 8192uz, 16384uz, 32768uz}) {
@@ -714,17 +715,15 @@ auto main() -> int try {
             TestDifferingByteCounts(
                 devicefs::CountDifferingBytes<IsaSupportFor<Feature>>,
                 implementation);
-            if constexpr (Feature != __IA_SUPPORT_VECTOR512) {
-                TestBitmapReductions<kBitmapReductionResolution>(
-                    []<std::size_t Ratio>(auto &&...arguments) static {
-                        return devicefs::ReduceBitmap<const std::uint64_t,
-                            16uz * 1024, Ratio * 16uz * 1024,
-                            IsaSupportFor<Feature>>(
-                                std::forward<decltype(arguments)>(arguments)...);
-                    }, devicefs::DispatchReduceBitmap<const unsigned char,
-                        kBitmapReductionResolution, IsaSupportFor<Feature>>,
-                    implementation);
-            }
+            TestBitmapReductions<kBitmapReductionResolution>(
+                []<std::size_t Ratio>(auto &&...arguments) static {
+                    return devicefs::ReduceBitmap<const std::uint64_t,
+                        16uz * 1024, Ratio * 16uz * 1024,
+                        IsaSupportFor<Feature>>(
+                            std::forward<decltype(arguments)>(arguments)...);
+                }, devicefs::DispatchReduceBitmap<const unsigned char,
+                    kBitmapReductionResolution, IsaSupportFor<Feature>>,
+                implementation);
         } else {
             std::println("SKIP: {} is not supported on this machine.",
                 implementation);

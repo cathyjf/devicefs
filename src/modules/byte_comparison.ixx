@@ -63,7 +63,9 @@ auto VectorBitwiseOr(const Vector left, const Vector right) noexcept {
 #ifdef _M_ARM64
     return vorrq_u8(left, right);
 #elifdef _M_X64
-    if constexpr (std::same_as<Vector, __m256i>) {
+    if constexpr (std::same_as<Vector, __m512i>) {
+        return _mm512_or_si512(left, right);
+    } else if constexpr (std::same_as<Vector, __m256i>) {
         return _mm256_or_si256(left, right);
     } else {
         return _mm_or_si128(left, right);
@@ -110,9 +112,40 @@ struct ArmVectorMaxInvoker {
 };
 #endif
 
+#ifdef _M_X64
+template <class Vector>
+    requires (sizeof(Vector) == 64)
+[[msvc::forceinline]]
+auto ReduceVectorsToBitmapByte(const Vector a, const Vector b,
+    const Vector c, const Vector d, const Vector e, const Vector f,
+    const Vector g, const Vector h) noexcept {
+    const auto combine_adjacent_lanes = [] [[msvc::forceinline]] (
+        const Vector left, const Vector right) static noexcept {
+        return _mm512_or_si512(_mm512_unpacklo_epi64(left, right),
+            _mm512_unpackhi_epi64(left, right));
+    };
+    const auto interleave_and_or = [] [[msvc::forceinline]] (
+        const Vector left, const Vector right) static noexcept {
+        return _mm512_or_si512(
+            _mm512_shuffle_i64x2(left, right, _MM_SHUFFLE(2, 0, 2, 0)),
+            _mm512_shuffle_i64x2(left, right, _MM_SHUFFLE(3, 1, 3, 1)));
+    };
+    // Each stage combines pairs of lanes while interleaving the source
+    // vectors. The final eight 64-bit lanes each contain the OR of one
+    // source vector, in source order.
+    const auto groups = interleave_and_or(
+        interleave_and_or(combine_adjacent_lanes(a, b),
+            combine_adjacent_lanes(c, d)),
+        interleave_and_or(combine_adjacent_lanes(e, f),
+            combine_adjacent_lanes(g, h)));
+    return _mm512_cmpneq_epi64_mask(groups, _mm512_setzero_si512());
+}
+#endif
+
 // Return eight bitmap bits in source order, with one set bit for each nonzero
 // vector. Bit zero describes `a`.
 template <class Vector>
+    requires (sizeof(Vector) < 64)
 [[msvc::forceinline]]
 auto ReduceVectorsToBitmapByte(const Vector a, const Vector b,
     const Vector c, const Vector d, const Vector e, const Vector f,
@@ -403,6 +436,12 @@ auto ReduceBitmap(const std::span<T> storage,
 #ifdef _M_ARM64
     reduce.template operator()<uint8x16_t>();
 #elifdef _M_X64
+    if constexpr ((resolution_ratio % 512) == 0) {
+        if (IsaSupport::operator()(__IA_SUPPORT_VECTOR512, 0)) {
+            reduce.template operator()<__m512i>();
+            return result;
+        }
+    }
     if constexpr ((resolution_ratio % 256) == 0) {
         if (IsaSupport::operator()(__IA_SUPPORT_VECTOR256, 0)) {
             reduce.template operator()<__m256i>();

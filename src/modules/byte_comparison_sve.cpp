@@ -23,18 +23,16 @@ auto SveVectorBytes() noexcept -> std::size_t {
     return svcntb();
 }
 
-template <std::size_t source_bytes_per_output_bit>
+// Precondition: `vector_bytes == svcntb()`.
+template <std::size_t source_bytes_per_output_bit, std::size_t vector_bytes>
 [[msvc::noinline]]
 [[gsl::suppress("26429", justification:
-    "The SAL preconditions on this function's declaration require the `output` "
-    "parameter to be non-null.")]]
-_Use_decl_annotations_
-auto ReduceBitmapUsingSve(
+    "The `output` parameter is used for pointer arithmetic.")]]
+auto ReduceBitmapUsingSveImpl(
     const unsigned char *const input,
     const std::size_t size,
     unsigned char *const output) noexcept -> void {
-    const auto vector_bytes = svcntb();
-    const auto reduce_regions = [input, vector_bytes]<std::size_t... Index>
+    const auto reduce_regions = [input]<std::size_t... Index>
         [[msvc::forceinline]] (const std::size_t first_byte,
         const std::size_t region_bytes,
         std::index_sequence<Index...>) noexcept {
@@ -86,9 +84,33 @@ auto ReduceBitmapUsingSve(
     }
 }
 
+// Dispatch over SVE vector byte widths in [16, 256] in 16-byte steps.
+template <std::size_t source_bytes_per_output_bit>
+_Use_decl_annotations_
+auto ReduceBitmapUsingSve(
+    const unsigned char *const input,
+    const std::size_t size,
+    unsigned char *const output) noexcept -> bool {
+    const auto dispatch = [input, size, output, vector_bytes = svcntb()]
+        <std::size_t width> [[msvc::forceinline]]
+        (this const auto &self) noexcept -> bool {
+        if (vector_bytes == width) {
+            ReduceBitmapUsingSveImpl<source_bytes_per_output_bit, width>(
+                input, size, output);
+            return true;
+        }
+        if constexpr (width < 256) {
+            return self.template operator()<width + 16>();
+        } else {
+            return false;
+        }
+    };
+    return dispatch.template operator()<16>();
+}
+
 #define DEVICEFS_INSTANTIATE_SVE_REDUCTION(Bytes) \
     template auto ReduceBitmapUsingSve<Bytes>( \
-        const unsigned char *, std::size_t, unsigned char *) noexcept -> void
+        const unsigned char *, std::size_t, unsigned char *) noexcept -> bool
 
 #include "byte_comparison_sve.h"
 

@@ -236,11 +236,16 @@ auto ReduceVectorsToBitmapByte(const Vector a, const Vector b,
 // `byte_comparison_sve.cpp` instead.
 [[nodiscard]] auto SveVectorBytes() noexcept -> std::size_t;
 
-// Reduce each source region to one output bit. The caller zero-initializes
-// output so the final batch can set its bits individually. Predicated loads
-// keep every read within its source region, including an incomplete final one.
+// Reduce each source region to one output bit. Predicated loads keep every
+// read within its source region, including an incomplete final one.
+//
+// This function returns false without modifying output if `svcntb()` returns
+// less than 16 or greater than 256 or a value that is not a multiple of 16.
+// Otherwise, this function returns true.
+//
+// Precondition: `output` is zero-initialized.
 template <std::size_t source_bytes_per_output_bit>
-[[msvc::noinline]]
+[[nodiscard, msvc::noinline]]
 _Pre_satisfies_(size > 0)
 auto ReduceBitmapUsingSve(
     _In_reads_bytes_(size) const unsigned char *const input,
@@ -249,11 +254,11 @@ auto ReduceBitmapUsingSve(
         std::numeric_limits<unsigned char>::digits) +
         ((size % (source_bytes_per_output_bit *
             std::numeric_limits<unsigned char>::digits)) != 0))
-    unsigned char *const output) noexcept -> void;
+    unsigned char *const output) noexcept -> bool;
 
 #define DEVICEFS_INSTANTIATE_SVE_REDUCTION(Bytes) \
     extern template auto ReduceBitmapUsingSve<Bytes>( \
-        const unsigned char *, std::size_t, unsigned char *) noexcept -> void
+        const unsigned char *, std::size_t, unsigned char *) noexcept -> bool
 
 #include "byte_comparison_sve.h"
 
@@ -507,20 +512,19 @@ auto ReduceBitmap(const std::span<T> storage,
         }
     };
 #ifdef _M_ARM64
-    // For 16- and 32-byte regions, MSVC emits substantially fewer instructions
-    // for NEON's combined reduction and packing than for SVE's separate
-    // per-region results, even when one SVE load covers a whole region.
-    if constexpr ((words_per_bit * sizeof(T)) > 32) {
-        // For larger regions, the dispatcher selects NEON for expanded reductions
-        // when SVE is 128 bits wide, avoiding SVE's inner loop and separate scalar
-        // result for each region. Otherwise, it selects SVE for wider vectors or
-        // for processing four independent regions per loop iteration.
+    // For 16-byte regions, wider SVE vectors do not reduce the number of
+    // loads, and NEON combines the eight results before extracting the
+    // output byte.
+    if constexpr ((words_per_bit * sizeof(T)) > 16) {
+        // At 128-bit width, the dispatcher selects NEON's expanded reductions
+        // for their balanced trees and combined packing. Otherwise, it selects
+        // SVE for wider loads or four independent accumulators.
         if (IsaSupport::operator()(PF_ARM_SVE_INSTRUCTIONS_AVAILABLE) &&
             (!byte_comparison_detail::kExpandBitmapReduction<
                 words_per_bit * sizeof(T), uint8x16_t> ||
-                (byte_comparison_detail::SveVectorBytes() > sizeof(uint8x16_t)))) {
+                (byte_comparison_detail::SveVectorBytes() > sizeof(uint8x16_t))) &&
             byte_comparison_detail::ReduceBitmapUsingSve<words_per_bit * sizeof(T)>(
-                input, storage.size_bytes(), output);
+                input, storage.size_bytes(), output)) {
             return result;
         }
     }

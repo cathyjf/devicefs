@@ -113,31 +113,54 @@ struct ArmVectorMaxInvoker {
 #endif
 
 #ifdef _M_X64
+// Compute the bitwise OR of each pair of adjacent 64-bit lanes in each
+// input. The results alternate between `left` and `right`.
+[[msvc::forceinline]]
+auto CombineAdjacentLanes(const auto left, const auto right) noexcept {
+    return _mm512_or_si512(_mm512_unpacklo_epi64(left, right),
+        _mm512_unpackhi_epi64(left, right));
+}
+
+// Compute the bitwise OR of each pair of adjacent 128-bit lanes in each
+// input. The results from `left` precede those from `right`.
+[[msvc::forceinline]]
+auto InterleaveAndBitwiseOr(const auto left, const auto right) noexcept {
+    return _mm512_or_si512(
+        _mm512_shuffle_i64x2(left, right, _MM_SHUFFLE(2, 0, 2, 0)),
+        _mm512_shuffle_i64x2(left, right, _MM_SHUFFLE(3, 1, 3, 1)));
+}
+
+// Return eight bitmap bits from four vectors containing two consecutive
+// 256-bit regions apiece. Each bit is set when its region is nonzero, with
+// bit zero describing the first region of `ab`.
+template <class Vector>
+    requires (sizeof(Vector) == 64)
+[[msvc::forceinline]]
+auto ReduceVectorsToBitmapByte(const Vector ab, const Vector cd,
+    const Vector ef, const Vector gh) noexcept {
+    const auto groups = InterleaveAndBitwiseOr(
+        CombineAdjacentLanes(ab, cd), CombineAdjacentLanes(ef, gh));
+    // The reduction orders the regions as a, c, b, d, e, g, f, h.
+    // Swapping the middle two lanes of each 256-bit half restores source order.
+    const auto ordered = _mm512_permutex_epi64(
+        groups, _MM_SHUFFLE(3, 1, 2, 0));
+    return _mm512_cmpneq_epi64_mask(ordered, _mm512_setzero_si512());
+}
+
 template <class Vector>
     requires (sizeof(Vector) == 64)
 [[msvc::forceinline]]
 auto ReduceVectorsToBitmapByte(const Vector a, const Vector b,
     const Vector c, const Vector d, const Vector e, const Vector f,
     const Vector g, const Vector h) noexcept {
-    const auto combine_adjacent_lanes = [] [[msvc::forceinline]] (
-        const Vector left, const Vector right) static noexcept {
-        return _mm512_or_si512(_mm512_unpacklo_epi64(left, right),
-            _mm512_unpackhi_epi64(left, right));
-    };
-    const auto interleave_and_or = [] [[msvc::forceinline]] (
-        const Vector left, const Vector right) static noexcept {
-        return _mm512_or_si512(
-            _mm512_shuffle_i64x2(left, right, _MM_SHUFFLE(2, 0, 2, 0)),
-            _mm512_shuffle_i64x2(left, right, _MM_SHUFFLE(3, 1, 3, 1)));
-    };
     // Each stage combines pairs of lanes while interleaving the source
     // vectors. The final eight 64-bit lanes each contain the OR of one
     // source vector, in source order.
-    const auto groups = interleave_and_or(
-        interleave_and_or(combine_adjacent_lanes(a, b),
-            combine_adjacent_lanes(c, d)),
-        interleave_and_or(combine_adjacent_lanes(e, f),
-            combine_adjacent_lanes(g, h)));
+    const auto groups = InterleaveAndBitwiseOr(
+        InterleaveAndBitwiseOr(CombineAdjacentLanes(a, b),
+            CombineAdjacentLanes(c, d)),
+        InterleaveAndBitwiseOr(CombineAdjacentLanes(e, f),
+            CombineAdjacentLanes(g, h)));
     return _mm512_cmpneq_epi64_mask(groups, _mm512_setzero_si512());
 }
 #endif
@@ -364,16 +387,20 @@ auto ReduceBitmap(const std::span<T> storage,
     const auto *const input =
         ByteViewCast<const unsigned char *>(storage.data());
 
-    const auto reduce = [input, storage, output]<class Vector>
+    // With two regions per group, one 512-bit load supplies two adjacent
+    // 256-bit regions. Other specializations reduce one region per group.
+    const auto reduce = [input, storage, output]<class Vector,
+        std::size_t regions_per_group = 1>
         [[msvc::noinline]] {
         const auto group = [input] [[msvc::forceinline]] (
             const std::size_t first) {
+            constexpr auto words_per_group = words_per_bit * regions_per_group;
             constexpr auto vector_words = sizeof(Vector) / sizeof(T);
-            constexpr auto vector_count = words_per_bit / vector_words;
+            constexpr auto vector_count = words_per_group / vector_words;
             if constexpr (vector_count == 1) {
                 return byte_comparison_detail::LoadVector<Vector>(
                     input + first * sizeof(T));
-            } else if constexpr ((words_per_bit * sizeof(T) <= 128) &&
+            } else if constexpr ((words_per_group * sizeof(T) <= 128) &&
                 std::has_single_bit(vector_count)) {
                 // A 4 MiB output bit covers at most 128 bitmap bytes when
                 // source units are 4 KiB or larger. Expanding these short
@@ -390,7 +417,7 @@ auto ReduceBitmap(const std::span<T> storage,
             } else {
                 auto value = byte_comparison_detail::LoadVector<Vector>(
                     input + first * sizeof(T));
-                for (auto word = vector_words; word < words_per_bit;
+                for (auto word = vector_words; word < words_per_group;
                      word += vector_words) {
                     const auto next = byte_comparison_detail::
                         LoadVector<Vector>(input + (first + word) * sizeof(T));
@@ -407,8 +434,10 @@ auto ReduceBitmap(const std::span<T> storage,
                 [&group, bit]<std::size_t... Index>
                     [[msvc::forceinline]] (std::index_sequence<Index...>) {
                     return byte_comparison_detail::ReduceVectorsToBitmapByte(
-                        group((bit + Index) * words_per_bit)...);
-                }(std::make_index_sequence<bits_per_byte>{});
+                        group((bit + Index * regions_per_group) *
+                            words_per_bit)...);
+                }(std::make_index_sequence<
+                    bits_per_byte / regions_per_group>{});
             __pragma(warning(push))
             __pragma(warning(disable : 4244, justification :
                 "Each mask is in [0, 15]. Combining the low mask with the "
@@ -436,9 +465,10 @@ auto ReduceBitmap(const std::span<T> storage,
 #ifdef _M_ARM64
     reduce.template operator()<uint8x16_t>();
 #elifdef _M_X64
-    if constexpr ((resolution_ratio % 512) == 0) {
+    if constexpr ((resolution_ratio == 256) || ((resolution_ratio % 512) == 0)) {
         if (IsaSupport::operator()(__IA_SUPPORT_VECTOR512, 0)) {
-            reduce.template operator()<__m512i>();
+            reduce.template operator()<__m512i,
+                (resolution_ratio == 256) ? 2 : 1>();
             return result;
         }
     }

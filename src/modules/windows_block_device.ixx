@@ -25,6 +25,7 @@ import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import devicefs.allocation;
 import devicefs.bitmap_set;
+import devicefs.byte_comparison;
 import devicefs.count_zeros;
 import <devicefs/common.h>;
 import <devicefs/malloca.h>;
@@ -197,6 +198,12 @@ struct AllocationBitmap {
         return devicefs::terminal::FailFastMaybeCast<std::size_t>(
             cluster_count / kBitsPerByte +
             ((cluster_count % kBitsPerByte) != 0));
+    }
+
+    [[nodiscard, msvc::forceinline]]
+    constexpr operator std::span<const decltype(storage)::element_type>()
+        const noexcept {
+        return {BitmapData(), BitmapByteCount()};
     }
 
     // Search [first, limit) for an allocated cluster (a set bit) or a free
@@ -534,17 +541,21 @@ struct WindowsBlockDevice
     // a bit value of 1 means the client must read the chunk from the image.
     // The first eight chunks use bits 0 through 7 of the first byte, where
     // bit 0 is the least significant bit. The next eight use the second byte.
-    [[nodiscard]] auto MakeKnownDataMap(const std::uint64_t chunk_size) const
-        -> std::vector<unsigned char>
+    [[nodiscard]] auto MakeKnownDataMap(
+        _In_range_(1, MAXUINT64) const std::uint64_t chunk_size) const
+        -> ReallocVector<unsigned char>
         requires HasAllocationBitmap {
-        if (chunk_size == 0) {
-            throw std::invalid_argument("known-data map chunk size must be nonzero");
-        }
         constexpr auto bits_per_byte = filesystem_internal::kBitsPerByte;
         const auto chunks = length / chunk_size + ((length % chunk_size) != 0);
-        const auto bytes = chunks / bits_per_byte + ((chunks % bits_per_byte) != 0);
-        auto result = std::vector<unsigned char>(
-            devicefs::terminal::FailFastMaybeCast<std::size_t>(bytes));
+        const auto bytes = devicefs::terminal::FailFastMaybeCast<std::size_t>(
+            chunks / bits_per_byte + ((chunks % bits_per_byte) != 0));
+        if (chunk_size == kSimdChunkSize) {
+            if (auto result = MakeKnownDataMapUsingSimd(chunks, bytes)) {
+                return std::move(*result);
+            }
+        }
+        auto result = ReallocVector<unsigned char>{};
+        result.resize(bytes);
         for (auto chunk = std::uint64_t{}; chunk < chunks; ++chunk) {
             const auto offset = chunk * chunk_size;
             // For a nonempty device, the last chunk index is `(length - 1) / chunk_size`.
@@ -552,8 +563,8 @@ struct WindowsBlockDevice
             // `offset` of at most `length - 1`. An empty device never enters the loop.
             _Analysis_assume_(length > offset);
             const auto count = std::min(chunk_size, length - offset);
-            // Both arguments to `std::min` are positive: zero `chunk_size` was
-            // rejected above, and `offset` is below `length`. Their minimum is
+            // Both arguments to `std::min` are positive: `chunk_size` is nonzero
+            // by precondition, and `offset` is below `length`. Their minimum is
             // therefore positive and cannot exceed the remaining device length.
             _Analysis_assume_((count > 0) && (count <= (length - offset)));
             // Because `length` is a `uint64_t`, its value cannot exceed `MAXUINT64`.
@@ -562,8 +573,8 @@ struct WindowsBlockDevice
             // Thus, `count <= (length - offset)` implies `count <= (MAXUINT64 - offset)`.
             _Analysis_assume_(count <= (MAXUINT64 - offset));
             if (allocation_bitmap.HasAllocatedClusters(offset, count)) {
-                result.at(devicefs::terminal::FailFastMaybeCast<std::size_t>(
-                    chunk / bits_per_byte)) |=
+                result[devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                    chunk / bits_per_byte)] |=
                     devicefs::terminal::FailFastCast<unsigned char>(
                         1u << (chunk % bits_per_byte));
             }
@@ -660,6 +671,45 @@ struct WindowsBlockDevice
         }
         return read_into_bounce_buffer_and_copy_to_destination(
             newly_allocated_memory.get());
+    }
+
+private:
+    static constexpr auto kSimdChunkSize = 4ull * 1024 * 1024;
+
+    [[nodiscard]] auto MakeKnownDataMapUsingSimd(
+        const std::uint64_t chunks, const std::size_t bytes) const
+        -> std::optional<ReallocVector<unsigned char>>
+        requires HasAllocationBitmap {
+        auto result = DispatchReduceBitmap<const BYTE, kSimdChunkSize>(
+            allocation_bitmap, allocation_bitmap.cluster_size, bytes);
+        if (!result) {
+            return result;
+        }
+        const auto complete_chunks = allocation_bitmap.cluster_count /
+            (kSimdChunkSize / allocation_bitmap.cluster_size);
+        if (complete_chunks >= chunks) {
+            return result;
+        }
+        // The allocation bitmap's final byte can contain set bits beyond
+        // `cluster_count`. Those bits can make the reducer report allocated data
+        // in the chunk containing the last represented cluster, even when all
+        // actual clusters there are free. `HasAllocatedClusters` supplies the
+        // correct result using the actual cluster count and device length.
+        //
+        // Later device chunks have no allocation information. Their output bits
+        // are set so that the backup client reads their contents.
+        constexpr auto bits_per_byte = filesystem_internal::kBitsPerByte;
+        const auto byte = devicefs::terminal::FailFastMaybeCast<std::size_t>(
+            complete_chunks / bits_per_byte);
+        auto &output = (*result)[byte];
+        output |= 0xffu << (complete_chunks % bits_per_byte);
+        const auto offset = complete_chunks * kSimdChunkSize;
+        if (!allocation_bitmap.HasAllocatedClusters(
+                offset, std::min(kSimdChunkSize, length - offset))) {
+            output &= ~(1u << (complete_chunks % bits_per_byte));
+        }
+        std::memset(&output + 1, 0xff, bytes - byte - 1);
+        return result;
     }
 };
 

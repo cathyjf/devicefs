@@ -450,7 +450,8 @@ using rpc_client::RPCBlockDevice;
 // `__restrict` expresses the non-overlap condition to the optimizer.
 struct MemoryBlockDevice {
     const std::uint64_t length;
-    std::vector<BYTE> contents;
+    decltype(std::declval<WindowsBlockDevice<true>>().MakeKnownDataMap(1))
+        contents;
 
     template <typename... Observers>
     _Success_(return == STATUS_SUCCESS)
@@ -461,7 +462,7 @@ struct MemoryBlockDevice {
         _In_range_(1, length - offset) const ULONG wanted,
         _Pre_equal_to_(0) ULONG &transferred,
         Observers &...) const noexcept -> NTSTATUS {
-        std::memcpy(buffer, contents.data() + offset, wanted);
+        std::memcpy(buffer, std::addressof(contents[0]) + offset, wanted);
         transferred = wanted;
         return STATUS_SUCCESS;
     }

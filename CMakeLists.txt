@@ -351,6 +351,9 @@ foreach(target IN ITEMS backup-supervisor devicefs-read-path-test)
             src/modules/stream_writer.cpp
             src/modules/windows_block_device/noinline_functions.cpp
     )
+    if(CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "ARM64")
+        target_sources(${target} PRIVATE src/modules/byte_comparison_sve.cpp)
+    endif()
 endforeach()
 
 set(START_PBS

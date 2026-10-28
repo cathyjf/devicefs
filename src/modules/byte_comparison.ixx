@@ -13,11 +13,16 @@ import <isa_availability.h>;
 #endif
 
 #ifdef _M_ARM64
+__pragma(warning(push))
+__pragma(warning(disable : 5244, justification:
+    "Including this header with C++ linkage attaches its symbols to the "
+    "global module, not the named module. Including this header after the "
+    "imports allows it to benefit from the symbols already defined in the "
+    "main Windows header unit."))
 extern "C++" {
-// Including this header after the imports allows it to benefit from the
-// symbols already defined in the main Windows header unit.
 #include <arm64_neon.h>
 }
+__pragma(warning(pop))
 #endif
 
 namespace devicefs::byte_comparison_detail {
@@ -81,6 +86,10 @@ struct VectorBitwiseOrInvoker {
         return VectorBitwiseOr(left, right);
     }
 };
+
+template <std::size_t group_bytes, class Vector>
+constexpr auto kExpandBitmapReduction = (group_bytes <= 128) &&
+    std::has_single_bit(group_bytes / sizeof(Vector));
 
 template <class Comparator, class... T>
     requires ((sizeof...(T) >= 2) &&
@@ -221,11 +230,46 @@ auto ReduceVectorsToBitmapByte(const Vector a, const Vector b,
     return packed;
 }
 
+#ifdef _M_ARM64
+// MSVC 19.51.36260 crashes while writing SVE types to an IFC, including in
+// private module fragments. The SVE definitions are compiled in
+// `byte_comparison_sve.cpp` instead.
+[[nodiscard]] auto SveVectorBytes() noexcept -> std::size_t;
+
+// Reduce each source region to one output bit. The caller zero-initializes
+// output so the final batch can set its bits individually. Predicated loads
+// keep every read within its source region, including an incomplete final one.
+template <std::size_t source_bytes_per_output_bit>
+[[msvc::noinline]]
+_Pre_satisfies_(size > 0)
+auto ReduceBitmapUsingSve(
+    _In_reads_bytes_(size) const unsigned char *const input,
+    const std::size_t size,
+    _Inout_updates_bytes_(size / (source_bytes_per_output_bit *
+        std::numeric_limits<unsigned char>::digits) +
+        ((size % (source_bytes_per_output_bit *
+            std::numeric_limits<unsigned char>::digits)) != 0))
+    unsigned char *const output) noexcept -> void;
+
+#define DEVICEFS_INSTANTIATE_SVE_REDUCTION(Bytes) \
+    extern template auto ReduceBitmapUsingSve<Bytes>( \
+        const unsigned char *, std::size_t, unsigned char *) noexcept -> void
+
+#include "byte_comparison_sve.h"
+
+#undef DEVICEFS_INSTANTIATE_SVE_REDUCTION
+#endif // #ifdef _M_ARM64
+
 struct IsaSupportInvoker {
     [[msvc::forceinline]]
     static auto operator()(auto &&...arguments) noexcept {
+#ifdef _M_ARM64
+        return IsProcessorFeaturePresent(
+            std::forward<decltype(arguments)>(arguments)...);
+#else
         return __check_isa_support(
             std::forward<decltype(arguments)>(arguments)...);
+#endif
     }
 };
 
@@ -400,8 +444,8 @@ auto ReduceBitmap(const std::span<T> storage,
             if constexpr (vector_count == 1) {
                 return byte_comparison_detail::LoadVector<Vector>(
                     input + first * sizeof(T));
-            } else if constexpr ((words_per_group * sizeof(T) <= 128) &&
-                std::has_single_bit(vector_count)) {
+            } else if constexpr (byte_comparison_detail::
+                kExpandBitmapReduction<words_per_group * sizeof(T), Vector>) {
                 // A 4 MiB output bit covers at most 128 bitmap bytes when
                 // source units are 4 KiB or larger. Expanding these short
                 // groups removes the fixed-bound loops retained by MSVC;
@@ -463,6 +507,23 @@ auto ReduceBitmap(const std::span<T> storage,
         }
     };
 #ifdef _M_ARM64
+    // For 16- and 32-byte regions, MSVC emits substantially fewer instructions
+    // for NEON's combined reduction and packing than for SVE's separate
+    // per-region results, even when one SVE load covers a whole region.
+    if constexpr ((words_per_bit * sizeof(T)) > 32) {
+        // For larger regions, the dispatcher selects NEON for expanded reductions
+        // when SVE is 128 bits wide, avoiding SVE's inner loop and separate scalar
+        // result for each region. Otherwise, it selects SVE for wider vectors or
+        // for processing four independent regions per loop iteration.
+        if (IsaSupport::operator()(PF_ARM_SVE_INSTRUCTIONS_AVAILABLE) &&
+            (!byte_comparison_detail::kExpandBitmapReduction<
+                words_per_bit * sizeof(T), uint8x16_t> ||
+                (byte_comparison_detail::SveVectorBytes() > sizeof(uint8x16_t)))) {
+            byte_comparison_detail::ReduceBitmapUsingSve<words_per_bit * sizeof(T)>(
+                input, storage.size_bytes(), output);
+            return result;
+        }
+    }
     reduce.template operator()<uint8x16_t>();
 #elifdef _M_X64
     if constexpr ((resolution_ratio == 256) || ((resolution_ratio % 512) == 0)) {

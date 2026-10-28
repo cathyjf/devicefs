@@ -347,7 +347,15 @@ auto TestBitmapSet() -> void {
 
 template <unsigned Feature>
 struct IsaSupportFor {
-    constexpr static auto operator()(const unsigned feature, const unsigned)
+    static auto IsSupported() noexcept {
+#ifdef _M_ARM64
+        return IsProcessorFeaturePresent(Feature);
+#else
+        return __check_isa_support(Feature, 0);
+#endif
+    }
+
+    constexpr static auto operator()(const unsigned feature, const auto...)
         noexcept -> bool {
         return feature == Feature;
     }
@@ -550,6 +558,19 @@ auto TestBitmapReductions(const auto &reduce_bitmap,
         implementation);
 }
 
+template <std::size_t new_resolution, unsigned Feature>
+auto TestBitmapReductions(const std::string_view implementation) -> void {
+    TestBitmapReductions<new_resolution>(
+        []<std::size_t Ratio>(auto &&...arguments) static {
+            return devicefs::ReduceBitmap<const std::uint64_t,
+                16uz * 1024, Ratio * 16uz * 1024,
+                IsaSupportFor<Feature>>(
+                    std::forward<decltype(arguments)>(arguments)...);
+        }, devicefs::DispatchReduceBitmap<const unsigned char,
+            new_resolution, IsaSupportFor<Feature>>,
+        implementation);
+}
+
 // Check `WindowsBlockDevice::Read` against a file in the system temporary directory.
 // Assigning `sector_size` explicitly exercises the production rounding and buffer
 // selection for both sector sizes, independently of the test volume's geometry.
@@ -708,27 +729,25 @@ auto main() -> int try {
                 16uz * 1024, Ratio * 16uz * 1024>(
                 std::forward<decltype(arguments)>(arguments)...);
         }, devicefs::DispatchReduceBitmap<const unsigned char>, "default");
-#ifdef _M_X64
     const auto test_supported = []<unsigned Feature>(
         const std::string_view implementation) static {
-        if (__check_isa_support(Feature, 0)) {
+        if (IsaSupportFor<Feature>::IsSupported()) {
+#ifdef _M_X64
             TestDifferingByteCounts(
                 devicefs::CountDifferingBytes<IsaSupportFor<Feature>>,
                 implementation);
-            TestBitmapReductions<kBitmapReductionResolution>(
-                []<std::size_t Ratio>(auto &&...arguments) static {
-                    return devicefs::ReduceBitmap<const std::uint64_t,
-                        16uz * 1024, Ratio * 16uz * 1024,
-                        IsaSupportFor<Feature>>(
-                            std::forward<decltype(arguments)>(arguments)...);
-                }, devicefs::DispatchReduceBitmap<const unsigned char,
-                    kBitmapReductionResolution, IsaSupportFor<Feature>>,
+#endif
+            TestBitmapReductions<kBitmapReductionResolution, Feature>(
                 implementation);
         } else {
             std::println("SKIP: {} is not supported on this machine.",
                 implementation);
         }
     };
+#ifdef _M_ARM64
+    test_supported.operator()<PF_ARM_V8_INSTRUCTIONS_AVAILABLE>("NEON");
+    test_supported.operator()<PF_ARM_SVE_INSTRUCTIONS_AVAILABLE>("SVE");
+#elifdef _M_X64
     test_supported.operator()<__IA_SUPPORT_VECTOR128>("SSE2");
     test_supported.operator()<__IA_SUPPORT_VECTOR256>("AVX2");
     test_supported.operator()<__IA_SUPPORT_VECTOR512>("AVX-512BW");

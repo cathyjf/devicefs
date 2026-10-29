@@ -49,8 +49,10 @@ export struct PreviousBackupManifestResult {
 
         GUID snapshot_set_identifier{};
         std::map<GUID, GUID, GuidLess> volumes;
+        std::optional<std::int64_t> backup_time;
 
-        [[nodiscard]] auto QuerySnapshotVolumes() const -> SnapshotVolumes;
+        [[nodiscard]] auto QuerySnapshotVolumes(const bool use_cache = false)
+            const -> SnapshotVolumes;
     };
 
     [[nodiscard]] auto ParseManifest() const -> SnapshotManifest;
@@ -150,6 +152,18 @@ using namespace wil::literals;
             snapshot_set.GetString().c_str(),
             "the backup manifest contains an invalid snapshot-set identifier"),
     };
+    if (const auto time = root.GetNamedValue(L"pbs-backup-time", nullptr)) {
+        const auto text = Transcode<std::string>(time.GetString());
+        auto seconds = std::int64_t{};
+        const auto [end, error] = std::from_chars(
+            text.data(), text.data() + text.size(), seconds);
+        if ((error != std::errc{}) || (end != text.data() + text.size())) {
+            throw std::runtime_error(std::format(
+                "the manifest query returned an invalid PBS backup time '{}'",
+                text));
+        }
+        result.backup_time = seconds;
+    }
     constexpr auto volume_prefix = L"volume-"sv;
     constexpr auto invalid_volume_identifier =
         "the backup manifest contains an invalid volume identifier"_zv;
@@ -197,27 +211,13 @@ auto PreviousBackupManifestResult::ParseManifest() const
     }
 }
 
-auto PreviousBackupManifestResult::SnapshotManifest::QuerySnapshotVolumes() const
-    -> SnapshotVolumes {
+auto PreviousBackupManifestResult::SnapshotManifest::QuerySnapshotVolumes(
+    const bool use_cache) const -> SnapshotVolumes {
     const auto snapshot_identifiers = volumes |
         std::views::values |
         std::ranges::to<std::vector<GUID>>();
-    auto snapshot_properties =
-        devicefs::vshadow::QuerySnapshotProperties(snapshot_identifiers);
-    const auto parse_volume_identifier = [](
-        const std::string_view volume) -> std::optional<GUID> {
-        constexpr auto prefix = R"(\\?\Volume)"sv;
-        if (!volume.starts_with(prefix) || !volume.ends_with('\\')) {
-            return std::nullopt;
-        }
-        const auto identifier = volume.substr(
-            prefix.size(), volume.size() - prefix.size() - 1);
-        try {
-            return winrt::guid{identifier};
-        } catch (const std::invalid_argument &) {
-            return std::nullopt;
-        }
-    };
+    auto snapshot_properties = devicefs::vshadow::QuerySnapshotProperties(
+        snapshot_identifiers, use_cache);
 
     auto result = SnapshotVolumes{};
     for (auto &&[volume, properties] :
@@ -230,7 +230,7 @@ auto PreviousBackupManifestResult::SnapshotManifest::QuerySnapshotVolumes() cons
             continue;
         }
         const auto original_volume_identifier =
-            parse_volume_identifier(properties->original_volume);
+            internal::ParseVolumeGuid(properties->original_volume);
         if (!original_volume_identifier ||
             (InlineIsEqualGUID(
                 *original_volume_identifier, volume_identifier) == FALSE)) {

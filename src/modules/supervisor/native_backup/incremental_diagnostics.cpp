@@ -146,8 +146,8 @@ struct SnapshotDiagnosticResult {
     }
     return {{
         .volume_identifier = [&snapshot] {
-            const auto identifier = ParseGuid(std::string_view{
-                snapshot->original_volume}.substr(10, 38));
+            const auto identifier =
+                internal::ParseVolumeGuid(snapshot->original_volume);
             if (!identifier) {
                 WinError("could not read the volume GUID from '{}'",
                     snapshot->original_volume, ExplicitHresult{identifier.error()});

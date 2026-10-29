@@ -53,6 +53,12 @@ concept SnapshotOperation = std::is_invocable_r_v<
 
 class VssClientOwner final : private VssClient {
 public:
+    static auto &SnapshotCache() {
+        static auto cache = std::map<
+            GUID, devicefs::vshadow::SnapshotProperties, GuidLess>{};
+        return cache;
+    }
+
     template <typename... Arguments>
         requires (sizeof...(Arguments) > 0)
     [[gsl::suppress("26455",
@@ -63,7 +69,16 @@ public:
     explicit VssClientOwner(Arguments &&...arguments) :
         VssClient{[](const std::wstring_view text) noexcept {
             devicefs::WriteToStream(devicefs::stdout, L"{}\n", text);
-        }, {}} {
+        }, [](const VssClient::SnapshotProperties &snapshot) static {
+            SnapshotCache().insert_or_assign(
+                snapshot.snapshotID, devicefs::vshadow::SnapshotProperties{
+                    .snapshot_set_identifier = snapshot.snapshotSetID,
+                    .original_volume = Transcode<std::string>(
+                        snapshot.originalVolumeName),
+                    .device = Transcode<std::string>(
+                        snapshot.snapshotDeviceObject),
+                });
+        }} {
         Initialize(std::forward<Arguments>(arguments)...);
     }
 
@@ -179,10 +194,26 @@ private:
 
 export namespace devicefs::vshadow {
 
+// When `use_cache` is true, results come from properties saved during
+// snapshot enumeration. An ID absent from the cache produces `std::nullopt`;
+// it does not trigger a VSS query.
 [[nodiscard]] auto QuerySnapshotProperties(
-    const std::span<const GUID> snapshot_identifiers) {
+    const std::span<const GUID> snapshot_identifiers,
+    const bool use_cache = false) {
     if (snapshot_identifiers.empty()) {
         return std::vector<std::optional<SnapshotProperties>>{};
+    }
+    if (use_cache) {
+        const auto &cache = VssClientOwner::SnapshotCache();
+        return snapshot_identifiers | std::views::transform(
+            [&cache](const GUID &identifier)
+                -> std::optional<SnapshotProperties> {
+                if (const auto entry = cache.find(identifier);
+                    entry != cache.end()) {
+                    return entry->second;
+                }
+                return std::nullopt;
+            }) | std::ranges::to<std::vector>();
     }
     auto client = [] -> std::optional<VssClientOwner> {
         try {

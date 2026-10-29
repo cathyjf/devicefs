@@ -80,6 +80,9 @@ export auto WriteEntireBuffer(const HANDLE file, const auto &contents) noexcept
 
 export struct FileWriteOptions {
     bool overwrite = true;
+    // If true, the file may also be opened for reading while the returned
+    // write handle remains open.
+    bool allow_readers = false;
     bool inheritable = false;
     bool delete_on_close = false;
     __pragma(warning(suppress : 26477, justification :
@@ -98,8 +101,9 @@ export auto WriteEntireFile(const std::filesystem::path &path,
         .lpSecurityDescriptor = options.security_descriptor,
         .bInheritHandle = options.inheritable,
     };
-    auto file = wil::unique_hfile{CreateFileW(path.c_str(), GENERIC_WRITE, 0,
-        &attributes, options.overwrite ? CREATE_ALWAYS : CREATE_NEW,
+    auto file = wil::unique_hfile{CreateFileW(path.c_str(), GENERIC_WRITE,
+        options.allow_readers ? FILE_SHARE_READ : 0, &attributes,
+        options.overwrite ? CREATE_ALWAYS : CREATE_NEW,
         options.delete_on_close
             ? FILE_FLAG_DELETE_ON_CLOSE : FILE_ATTRIBUTE_NORMAL,
         nullptr)};

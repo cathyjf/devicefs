@@ -145,7 +145,8 @@ end
 # The mount stays available until PBS exits; the result includes unmount failure
 # when the upload itself succeeded. PBS output and the printed manifest are
 # forwarded to the Windows supervisor.
-function run_backup --argument-names parallel_images
+function run_backup
+    argparse /parallel-images /previous-backup-time= -- $argv || return
     set -l manifest_file (mktemp -t devicefs-manifest.XXXXXXXXXX) || return
     # Remove the manifest when this Fish process exits, including after cancellation.
     function remove_backup_manifest --on-event fish_exit --inherit-variable manifest_file
@@ -154,7 +155,9 @@ function run_backup --argument-names parallel_images
     set DEVICEFS_MANIFEST (print_transformed_manifest $DEVICEFS_MANIFEST | string collect)
     echo -- $DEVICEFS_MANIFEST >$manifest_file || return
     sudo -n mount $vss_mount_point || exit
-    set -l backup_argv backup --keyfd 0 --backup-id $backup_id $parallel_images
+    set -l backup_argv backup --keyfd 0 --backup-id $backup_id \
+        $_flag_parallel_images
+    set -l dirty_map_found 0
     for image_path in $vss_mount_point/*.img
         set -l image_filename (path basename $image_path)
         set -a backup_argv {$image_filename}:{$image_path}
@@ -163,6 +166,14 @@ function run_backup --argument-names parallel_images
         if test -f $bitmap_filename
             set -a backup_argv --known-data-map {$image_filename}:$bitmap_filename
         end
+        set bitmap_filename {$image_path}.dirty.bitmap
+        if test -f $bitmap_filename
+            set -a backup_argv --dirty-bitmap {$image_filename}:$bitmap_filename
+            set dirty_map_found 1
+        end
+    end
+    if test $dirty_map_found -eq 1
+        set -a backup_argv --previous-backup-time $_flag_previous_backup_time
     end
     printf 'Backup manifest:\n%s\n' $DEVICEFS_MANIFEST
     set -a backup_argv {$pbs_manifest_filename}:$manifest_file

@@ -403,6 +403,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/supervisor/native_backup/manifest.cpp
     src/modules/supervisor/native_backup/pbs.cpp
     src/modules/supervisor/native_backup/port_selection.cpp
+    src/modules/supervisor/native_backup/production_incremental.cpp
     src/modules/supervisor/native_backup/s4u_logon.cpp
     src/modules/supervisor/native_backup/vhdx_attachment.cpp
     src/modules/supervisor/oci_signature_sandbox.ixx

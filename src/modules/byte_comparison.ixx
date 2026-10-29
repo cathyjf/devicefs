@@ -414,8 +414,8 @@ using ReducedBitmap = ReallocVector<unsigned char>;
 // to one whose bits each describe `new_resolution` bytes. Both maps use the
 // low bit of each byte first. Every bit in `storage` participates in the
 // reduction. A partial final group produces one output bit.
-// The result contains at least `bitmap_minimum_length` bytes. Bits and bytes
-// beyond the reduced bitmap have unspecified values.
+// The result contains at least `bitmap_minimum_length` bytes. The allocation
+// is zero-initialized, including any bytes added to meet that minimum.
 // Precondition: `storage` is nonempty.
 export template <std::integral T, std::size_t original_resolution,
     std::size_t new_resolution = kDefaultBitmapResolution,

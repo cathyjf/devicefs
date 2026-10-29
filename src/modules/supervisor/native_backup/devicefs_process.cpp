@@ -94,10 +94,6 @@ struct DeviceFsStartRequest {
     if (request.vhdx) {
         arguments.emplace_back("--vhdx");
     } else if (!request.rpc_endpoint && request.expose_known_data_map) {
-        // Our PBS invocation uses the default chunk size of 4 MiB.
-        // We generate the bitmap at that same resolution so that its bits
-        // will identify the chunks that PBS will read.
-        constexpr auto kPbsImageChunkSize = 4 * 1024 * 1024;
         arguments.emplace_back("--expose-known-data-map");
         arguments.emplace_back(std::to_string(kPbsImageChunkSize));
     }
@@ -180,11 +176,12 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
     const std::span<const devicefs::vshadow::Snapshot> snapshots,
     const std::string_view read_user,
     const bool use_known_data_map,
-    const SnapshotHandles &snapshot_handles) {
-    const auto inherited_handles = snapshot_handles | std::views::values |
+    const SnapshotHandles &snapshot_handles,
+    const std::span<const NamedFile> dirty_maps) {
+    auto inherited_handles = snapshot_handles | std::views::values |
         std::views::transform([](const auto &handle) { return handle.get(); }) |
         std::ranges::to<std::vector<HANDLE>>();
-    const auto sources = snapshots |
+    auto sources = snapshots |
         std::views::transform([&snapshot_handles](const auto &snapshot) {
             return DeviceFsSource{
                 .name = SnapshotImageName(snapshot),
@@ -194,6 +191,14 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
             };
         }) |
         std::ranges::to<std::vector<DeviceFsSource>>();
+    for (const auto &[name, handle] : dirty_maps) {
+        inherited_handles.push_back(handle.get());
+        sources.push_back({
+            .name = name,
+            .source = std::format("{}{}", devicefs::kFileHandleDevicePrefix,
+                std::bit_cast<std::uintptr_t>(handle.get())),
+        });
+    }
     return StartDeviceFs(DeviceFsStartRequest{
         .sources = sources,
         .inherited_handles = inherited_handles,

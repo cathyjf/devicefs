@@ -2797,10 +2797,8 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     }
     const auto synthetic_root = MountedVolumeRoot(synthetic_mount);
     const auto real_root = MountedVolumeRoot(real_mount);
-    // Windows returns `\\?\Volume{GUID}\`; the braced GUID follows the
-    // ten-character prefix and occupies 38 characters.
-    const auto volume_identifier = ParseGuid(
-        Transcode<std::string>(real_root).substr(10, 38));
+    const auto volume_identifier = internal::ParseVolumeGuid(
+        Transcode<std::string>(real_root));
     if (!volume_identifier) {
         WinError("failed to read the volume GUID from '{}'",
             std::wstring_view{real_root}, ExplicitHresult{volume_identifier.error()});

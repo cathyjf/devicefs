@@ -31,7 +31,17 @@ namespace internal {
 
 inline constexpr auto kCancelledExitCode = 130;
 
+// Our PBS invocation uses the default chunk size of 4 MiB.
+// We generate the bitmap at that same resolution so that its bits
+// will identify the chunks that PBS will read.
+inline constexpr auto kPbsImageChunkSize = 4uz * 1024 * 1024;
+
 using SnapshotHandles = std::map<GUID, wil::unique_hfile, GuidLess>;
+
+struct NamedFile {
+    std::string name;
+    wil::unique_hfile handle;
+};
 
 template <typename Operation>
 [[nodiscard]] auto RunVssOperation(
@@ -49,6 +59,12 @@ template <typename Operation>
         }
         throw;
     }
+}
+
+// Windows volume names have the form `\\?\Volume{GUID}\`. The braced
+// GUID starts at offset 10 and occupies 38 characters.
+[[nodiscard]] auto ParseVolumeGuid(const std::string_view volume) {
+    return ParseGuid(volume.substr(10, 38));
 }
 
 [[nodiscard]] auto VolumeImageName(

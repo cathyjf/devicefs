@@ -27,6 +27,7 @@ import :devicefs_process;
 export import :incremental_diagnostics;
 export import :manifest;
 import :pbs;
+import :production_incremental;
 import <devicefs/common.h>;
 import devicefs.file_reader;
 import devicefs.guid_formatter;
@@ -184,6 +185,8 @@ namespace internal {
         std::filesystem::remove(mount_target);
     }
 
+    const auto dirty_maps = PrepareDirtyMaps(
+        cancellation_event, snapshot_set, namespace_override);
     const auto snapshot_handles = snapshot_set.snapshots |
         std::views::transform([](const auto &snapshot) {
             return std::pair{snapshot.identifier,
@@ -192,15 +195,23 @@ namespace internal {
         }) | std::ranges::to<SnapshotHandles>();
     const auto devicefs = DeviceFsChild{StartDeviceFs(
         snapshot_set.snapshots, read_user, use_known_data_map,
-        snapshot_handles)};
+        snapshot_handles, dirty_maps.files)};
 
     if (!WaitForDeviceFs(devicefs.Process(), cancellation_event)) {
         return kCancelledExitCode;
     }
+    const auto previous_backup_time = dirty_maps.previous_backup_time
+        ? std::to_string(*dirty_maps.previous_backup_time) : std::string{};
+    const auto previous_arguments = std::array{
+        "--"sv, "--previous-backup-time"sv,
+        std::string_view{previous_backup_time}};
     return RunPbsFish(
         cancellation_event,
         namespace_override,
         PbsFishRequest{
+            .additional_arguments = std::span{previous_arguments}.first(
+                dirty_maps.previous_backup_time
+                    ? previous_arguments.size() : 0),
             .snapshot_manifest = [&snapshot_set, &snapshot_handles](
                 const std::string_view layer) {
                 return SerializeSnapshotManifest(

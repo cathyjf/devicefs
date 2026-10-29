@@ -667,24 +667,14 @@ export [[nodiscard]] auto MaterializeOci(
     // record this metadata does not invalidate the imported distribution.
     {
         const auto digest_path = installation / kOciLayerDigestFile;
-        ClearCrtIoError();
-        auto digest_file = std::ofstream{digest_path, std::ios::binary};
-        const auto test_io_success =
-            [&digest_file = std::as_const(digest_file), &digest_path] {
-            if (digest_file) {
-                return true;
-            }
+        if (const auto result = WriteEntireFile(digest_path, *digest)
+                .and_then([](const auto &file) static {
+                    return WriteEntireBuffer(file.get(), "\n"sv);
+                }); !result) {
             devicefs::WriteToStream(devicefs::stderr,
-                L"backup-supervisor: could not record OCI layer digest in '{}': {}\n",
-                digest_path.native(), TryConstructWinError("", ExplicitCrtIoError{}));
-            return false;
-        };
-        if (test_io_success()) {
-            std::println(digest_file, "{}", *digest);
-            if (test_io_success()) {
-                digest_file.flush();
-                test_io_success();
-            }
+                L"backup-supervisor: failed to record OCI layer digest "
+                L"in '{}': {}\n",
+                digest_path.native(), TryConstructWinError("", result.error()));
         }
     }
     if (previous) {

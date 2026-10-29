@@ -21,6 +21,7 @@ module;
 module devicefs.supervisor.native_backup:devicefs_process;
 
 import std;
+import devicefs.file_reader;
 import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import :internal;
@@ -142,25 +143,16 @@ struct DeviceFsStartRequest {
             WinError("could not create the devicefs password channel");
         }
         const auto write_password = [output = password_output.get()](
-            const std::span<const char> value) {
-            if (value.empty()) {
-                return;
-            }
-            const auto size =
-                devicefs::terminal::FailFastCast<DWORD>(value.size_bytes());
-            auto written = DWORD{};
-            if (!WriteFile(output, value.data(), size, &written, nullptr)) {
-                WinError("could not write the devicefs RPC password");
-            }
-            if (written != size) {
-                WinError("could not write the complete devicefs RPC password",
-                    ExplicitWin32Error{ERROR_WRITE_FAULT});
+            const auto &value) {
+            if (const auto result = WriteEntireBuffer(output, value);
+                !result) {
+                WinError("failed to write the devicefs RPC password",
+                    result.error());
             }
         };
-        write_password(std::span{
-            request.rpc_password->data(), request.rpc_password->size()});
+        write_password(*request.rpc_password);
         constexpr auto newline = std::array{'\n'};
-        write_password(std::span{newline});
+        write_password(newline);
         password_output.reset();
     }
     auto process = StartProcessWithHandles(ProcessLaunchOptions{

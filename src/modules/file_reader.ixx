@@ -47,3 +47,67 @@ export template <class String = std::string>
     }
     return contents;
 }
+
+// Write the entire buffer to a synchronous handle.
+// Precondition: `contents.data()` is not null.
+export auto WriteEntireBuffer(const HANDLE file, const auto &contents) noexcept
+    -> std::expected<void, ExplicitWin32Error> {
+    const auto size_in_bytes = [element_count = contents.size(),
+        element_size = sizeof(*contents.data())]<class ApiType = DWORD> noexcept
+        -> std::optional<ApiType> {
+        const auto max_element_count =
+            std::numeric_limits<ApiType>::max() / element_size;
+        if (element_count > max_element_count) {
+            return std::nullopt;
+        }
+        [[gsl::suppress("26472", justification:
+            "The preceding check establishes that the following product fits "
+            "in `ApiType`.")]]
+        return static_cast<ApiType>(element_count * element_size);
+    }();
+    if (!size_in_bytes) {
+        return std::unexpected{ExplicitWin32Error{ERROR_ARITHMETIC_OVERFLOW}};
+    }
+    auto written = DWORD{};
+    if (!WriteFile(file, contents.data(), *size_in_bytes, &written, nullptr)) {
+        return std::unexpected{ExplicitWin32Error{GetLastError()}};
+    }
+    if (written != *size_in_bytes) {
+        return std::unexpected{ExplicitWin32Error{ERROR_WRITE_FAULT}};
+    }
+    return {};
+}
+
+export struct FileWriteOptions {
+    bool overwrite = true;
+    bool inheritable = false;
+    bool delete_on_close = false;
+    __pragma(warning(suppress : 26477, justification :
+        "The following declaration already uses `nullptr`."))
+    void *security_descriptor = nullptr;
+};
+
+// Create or truncate a file and then write its complete contents.
+// On success, returns a `unique_hfile` containing a handle to the file.
+// Precondition: `contents.data()` is not null.
+export auto WriteEntireFile(const std::filesystem::path &path,
+    const auto &contents, const FileWriteOptions options = {}) noexcept
+    -> std::expected<wil::unique_hfile, ExplicitWin32Error> {
+    auto attributes = SECURITY_ATTRIBUTES{
+        .nLength = sizeof(SECURITY_ATTRIBUTES),
+        .lpSecurityDescriptor = options.security_descriptor,
+        .bInheritHandle = options.inheritable,
+    };
+    auto file = wil::unique_hfile{CreateFileW(path.c_str(), GENERIC_WRITE, 0,
+        &attributes, options.overwrite ? CREATE_ALWAYS : CREATE_NEW,
+        options.delete_on_close
+            ? FILE_FLAG_DELETE_ON_CLOSE : FILE_ATTRIBUTE_NORMAL,
+        nullptr)};
+    if (!file) {
+        return std::unexpected{ExplicitWin32Error{GetLastError()}};
+    }
+    if (const auto result = WriteEntireBuffer(file.get(), contents); !result) {
+        return std::unexpected{result.error()};
+    }
+    return file;
+}

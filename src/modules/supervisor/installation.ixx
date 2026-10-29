@@ -21,6 +21,7 @@ module;
 export module devicefs.supervisor.installation;
 
 import std;
+import devicefs.file_reader;
 import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
@@ -176,38 +177,16 @@ auto EnsureDirectory(
 auto CreateConfigurationTemplate(
     const std::filesystem::path &path,
     const SecurityDescriptor &security) {
-    auto attributes = security.Attributes();
-    auto file = wil::unique_hfile(CreateFileW(
-        path.c_str(), GENERIC_WRITE, 0,
-        &attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
-    if (!file) {
-        const auto error = GetLastError();
-        if (error == ERROR_FILE_EXISTS) {
-            return;
-        }
-        WinError("could not create the backup configuration '{}'",
-            std::wstring_view{path.native()},
-            ExplicitWin32Error{error});
-    }
-    auto remove_incomplete_file = wil::scope_exit([&] {
-        file.reset();
-        static_cast<void>(DeleteFileW(path.c_str()));
-    });
     constexpr auto configuration_template = GenerateConfigurationTemplate();
-    constexpr auto size =
-        CompileTimeCast<DWORD, configuration_template.size()>();
-    auto written = DWORD{};
-    if (!WriteFile(file.get(), configuration_template.data(), size,
-            &written, nullptr)) {
-        WinError("could not write the backup configuration template '{}'",
-            std::wstring_view{path.native()});
+    if (const auto result = WriteEntireFile(path, configuration_template, {
+                .overwrite = false,
+                .security_descriptor =
+                    security.Attributes().lpSecurityDescriptor,
+            }); !result && (result.error() != ERROR_FILE_EXISTS)) {
+        std::ignore = DeleteFileW(path.c_str());
+        WinError("failed to write the backup configuration template '{}'",
+            std::wstring_view{path.native()}, result.error());
     }
-    if (written != size) {
-        WinError("could not write the complete backup configuration template '{}'",
-            std::wstring_view{path.native()},
-            ExplicitWin32Error{ERROR_WRITE_FAULT});
-    }
-    remove_incomplete_file.release();
 }
 
 auto InstallExecutable(

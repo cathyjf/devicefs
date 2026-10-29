@@ -21,6 +21,7 @@ module;
 module devicefs.supervisor.native_backup:pbs;
 
 import std;
+import devicefs.file_reader;
 import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import :internal;
@@ -511,35 +512,19 @@ auto CreateUniquePipe() {
         ForwardPipeOutput{
             .destination = GetStdHandle(STD_ERROR_HANDLE)});
 
-    const auto write_input = [handle = started.standard_input.get()](const auto input) {
-        if (input.empty()) {
-            return;
-        }
-        const auto size = [bytes = input.size_bytes()] {
-            auto converted = DWORD{};
-            if (!devicefs::terminal::TryCast(bytes, converted)) {
-                throw std::runtime_error(std::format(
-                    "could not send WSL input: {} bytes exceeds the maximum "
-                    "of {} bytes per write",
-                    bytes,
-                    std::numeric_limits<decltype(converted)>::max()));
-            }
-            return converted;
-        }();
-        auto written = DWORD{};
-        if (!WriteFile(handle, input.data(), size,
-                &written, nullptr)) {
-            WinError("could not write the WSL input");
-        }
-        if (written != size) {
-            WinError("could not write the complete WSL input",
-                ExplicitWin32Error{ERROR_WRITE_FAULT});
+    const auto write_input = [handle = started.standard_input.get()](
+        const auto &input) {
+        if (const auto result = WriteEntireBuffer(handle, input);
+            !result) {
+            WinError("failed to write the WSL input", result.error());
         }
     };
     constexpr auto kProgramTerminator = std::array{char{0}};
     write_input(program);
-    write_input(std::span<const char>{kProgramTerminator});
-    write_input(standard_input);
+    write_input(kProgramTerminator);
+    if (!standard_input.empty()) {
+        write_input(standard_input);
+    }
     started.standard_input.reset();
     return std::move(started.process);
 }

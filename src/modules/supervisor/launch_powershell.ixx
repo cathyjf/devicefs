@@ -21,6 +21,7 @@ module;
 export module devicefs.supervisor.launch_powershell;
 
 import std;
+import devicefs.file_reader;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import <devicefs/winrt_imports.h>;
@@ -290,26 +291,14 @@ export auto EnsurePowerShellProfile() {
     const auto directory = DocumentsDirectory() / L"PowerShell";
     std::filesystem::create_directories(directory);
     const auto path = directory / L"Profile.ps1";
-    ClearCrtIoError();
-    auto profile = std::ofstream{path, std::ios::binary | std::ios::noreplace};
-    if (!profile) {
-        const auto error = ExplicitCrtIoError{};
-        if (std::filesystem::exists(path)) {
+    if (const auto result = WriteEntireFile(path,
+            kPowerShellProfile, {.overwrite = false}); !result) {
+        if (result.error() == ERROR_FILE_EXISTS) {
             return;
         }
-        WinError("could not create the PowerShell profile '{}'",
-            std::wstring_view{path.native()}, error);
+        WinError("failed to write the PowerShell profile '{}'",
+            std::wstring_view{path.native()}, result.error());
     }
-    const auto ensure_io_success = [&profile = std::as_const(profile), &path] {
-        if (!profile) {
-            WinError("could not write the PowerShell profile '{}'",
-                std::wstring_view{path.native()}, ExplicitCrtIoError{});
-        }
-    };
-    std::println(profile, "{}", kPowerShellProfile);
-    ensure_io_success();
-    profile.flush();
-    ensure_io_success();
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: created PowerShell profile '{}'\n", Transcode<std::string>(path.native()));
 }

@@ -21,6 +21,7 @@ module;
 export module devicefs.supervisor.logging_console;
 
 import std;
+import devicefs.file_reader;
 import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
@@ -151,26 +152,10 @@ private:
         if (output.empty()) {
             return;
         }
-        // Current diagnostics and ConPTY chunks are far below MAXDWORD, but WriteRaw
-        // accepts an arbitrary string view, so reject a length WriteFile cannot represent.
-        const auto size = [bytes = output.size()] {
-            auto converted = DWORD{};
-            if (!devicefs::terminal::TryCast(bytes, converted)) {
-                throw std::runtime_error(std::format(
-                    "could not write the backup supervisor log: {} bytes "
-                    "exceeds the maximum of {} bytes per write",
-                    bytes, std::numeric_limits<decltype(converted)>::max()));
-            }
-            return converted;
-        }();
-        auto written = DWORD{};
-        if (!WriteFile(file_.get(), output.data(),
-                size, &written, nullptr)) {
-            WinError("could not write the backup supervisor log");
-        }
-        if (written != size) {
-            WinError("could not write the complete backup supervisor log",
-                ExplicitWin32Error{ERROR_WRITE_FAULT});
+        if (const auto result = WriteEntireBuffer(file_.get(), output);
+            !result) {
+            WinError("failed to write the backup supervisor log",
+                result.error());
         }
     }
 

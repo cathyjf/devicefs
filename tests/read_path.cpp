@@ -545,14 +545,16 @@ auto TestBitmapReductions(const auto &reduce_bitmap,
         };
         for (const auto region : std::views::iota(0uz, 10uz)) {
             const auto first = region * bytes_per_region;
-            const auto last = std::min(first + bytes_per_region, input.size()) - 1;
+            const auto last =
+                std::min(first + bytes_per_region, input.size()) - 1;
             input[first] = 1;
             input[last] |= 0x80;
             check_result();
             input[first] = input[last] = 0;
             // Checking these positions independently detects missed loads
             // that a set bit at the start of the region would otherwise hide.
-            for (const auto position : {first, first + (last - first) / 2, last}) {
+            for (const auto position :
+                {first, first + (last - first) / 2, last}) {
                 input[position] = 0x80;
                 check_result();
                 input[position] = 0;

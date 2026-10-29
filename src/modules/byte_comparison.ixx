@@ -10,7 +10,7 @@ import <devicefs/windows_imports.h>;
 
 #ifdef _M_X64
 import <isa_availability.h>;
-#endif
+#endif // #ifdef _M_X64
 
 #ifdef _M_ARM64
 __pragma(warning(push))
@@ -23,7 +23,7 @@ extern "C++" {
 #include <arm64_neon.h>
 }
 __pragma(warning(pop))
-#endif
+#endif // #ifdef _M_ARM64
 
 namespace devicefs::byte_comparison_detail {
 
@@ -119,7 +119,7 @@ struct ArmVectorMaxInvoker {
         return vpmaxq_u8(left, right);
     }
 };
-#endif
+#endif // #ifdef _M_ARM64
 
 #ifdef _M_X64
 // Compute the bitwise OR of each pair of adjacent 64-bit lanes in each
@@ -172,7 +172,7 @@ auto ReduceVectorsToBitmapByte(const Vector a, const Vector b,
             CombineAdjacentLanes(g, h)));
     return _mm512_cmpneq_epi64_mask(groups, _mm512_setzero_si512());
 }
-#endif
+#endif // #ifdef _M_X64
 
 // Return eight bitmap bits in source order, with one set bit for each nonzero
 // vector. Bit zero describes `a`.
@@ -181,7 +181,7 @@ template <class Vector>
 [[msvc::forceinline]]
 auto ReduceVectorsToBitmapByte(const Vector a, const Vector b,
     const Vector c, const Vector d, const Vector e, const Vector f,
-    const Vector g, const Vector h) noexcept {
+    const Vector g, const Vector h) noexcept -> unsigned char {
 #ifdef _M_ARM64
     // Pairwise maxima reduce each source vector to one byte. Grouping the
     // pairs in source order preserves the output bit positions.
@@ -223,7 +223,11 @@ auto ReduceVectorsToBitmapByte(const Vector a, const Vector b,
     };
     const auto low = nibble(a, b, c, d);
     const auto high = nibble(e, f, g, h);
-    const auto packed = low | (high << 4);
+    [[gsl::suppress("26472", justification:
+        "Each x64 nibble is in [0, 15]. Combining the low nibble with the "
+        "high nibble shifted left by four produces a value in [0, 255], "
+        "which fits in an `unsigned char` output byte.")]]
+    const auto packed = static_cast<unsigned char>(low | (high << 4));
 #else
 #error `ReduceVectorsToBitmapByte` lacks an implementation for this architecture
 #endif
@@ -283,7 +287,7 @@ namespace devicefs {
 
 #ifdef _M_ARM64
 export [[nodiscard]] auto SveVectorBytes() noexcept -> std::size_t;
-#endif
+#endif // #ifdef _M_ARM64
 
 // Count the byte positions at which the two buffers differ.
 export
@@ -444,80 +448,117 @@ auto ReduceBitmap(const std::span<T> storage,
     const auto reduce = [input, storage, output]<class Vector,
         std::size_t regions_per_group = 1>
         [[msvc::noinline]] {
-        const auto group = [input] [[msvc::forceinline]] (
-            const std::size_t first) {
-            constexpr auto words_per_group = words_per_bit * regions_per_group;
-            constexpr auto vector_words = sizeof(Vector) / sizeof(T);
-            constexpr auto vector_count = words_per_group / vector_words;
-            if constexpr (vector_count == 1) {
-                return byte_comparison_detail::LoadVector<Vector>(
-                    input + first * sizeof(T));
-            } else if constexpr (byte_comparison_detail::
-                kExpandBitmapReduction<words_per_group * sizeof(T), Vector>) {
-                // A 4 MiB output bit covers at most 128 bitmap bytes when
-                // source units are 4 KiB or larger. Expanding these short
-                // groups removes the fixed-bound loops retained by MSVC;
-                // the pairwise OR tree also shortens their dependency chains.
-                return [input, first]<std::size_t... Index>
+        const auto pack = [input] [[msvc::forceinline]] (
+            const std::size_t bit) {
+            static constexpr auto words_per_group =
+                words_per_bit * regions_per_group;
+            static constexpr auto vector_words = sizeof(Vector) / sizeof(T);
+            static constexpr auto vector_count = words_per_group / vector_words;
+            if constexpr ((vector_count == 1) ||
+                byte_comparison_detail::kExpandBitmapReduction<
+                    words_per_group * sizeof(T), Vector>) {
+                const auto group = [input] [[msvc::forceinline]] (
+                    const std::size_t start) {
+                    if constexpr (vector_count == 1) {
+                        return byte_comparison_detail::LoadVector<Vector>(
+                            input + start * sizeof(T));
+                    } else {
+                        // A 4 MiB output bit covers at most 128 bitmap bytes
+                        // when source units are 4 KiB or larger. Expanding
+                        // these short groups removes the fixed-bound loops
+                        // retained by MSVC; the pairwise OR tree also shortens
+                        // their dependency chains.
+                        return [input, start]<std::size_t... Index>
+                            [[msvc::forceinline]] (
+                            std::index_sequence<Index...>) {
+                            return byte_comparison_detail::ReducePairwise<
+                                byte_comparison_detail::VectorBitwiseOrInvoker>(
+                                byte_comparison_detail::LoadVector<Vector>(
+                                    input + start * sizeof(T) +
+                                        Index * sizeof(Vector))...);
+                        }(std::make_index_sequence<vector_count>{});
+                    }
+                };
+                return [&group, bit]<std::size_t... Index>
                     [[msvc::forceinline]] (std::index_sequence<Index...>) {
-                    return byte_comparison_detail::ReducePairwise<
-                        byte_comparison_detail::VectorBitwiseOrInvoker>(
-                        byte_comparison_detail::LoadVector<Vector>(
-                            input + first * sizeof(T) +
-                                Index * sizeof(Vector))...);
-                }(std::make_index_sequence<vector_count>{});
+                    if constexpr ((sizeof(Vector) == 64) &&
+                        (regions_per_group == 1)) {
+                        // Collecting the AVX-512 groups before packing is
+                        // intended to reduce the repeated address calculations
+                        // MSVC emits for direct arguments.
+                        const auto values = std::array{
+                            group((bit + Index * regions_per_group) *
+                                words_per_bit)...};
+                        return byte_comparison_detail::
+                            ReduceVectorsToBitmapByte(values[Index]...);
+                    } else {
+                        // Passing groups directly avoids the pointer spills
+                        // MSVC introduced when collecting short NEON groups
+                        // into arrays or tuples.
+                        return byte_comparison_detail::
+                            ReduceVectorsToBitmapByte(
+                                group((bit + Index * regions_per_group) *
+                                    words_per_bit)...);
+                    }
+                }(std::make_index_sequence<
+                    bits_per_byte / regions_per_group>{});
             } else {
-                auto value = byte_comparison_detail::LoadVector<Vector>(
-                    input + first * sizeof(T));
-                for (auto word = vector_words; word < words_per_group;
-                     word += vector_words) {
-                    const auto next = byte_comparison_detail::
-                        LoadVector<Vector>(input + (first + word) * sizeof(T));
-                    value = byte_comparison_detail::VectorBitwiseOr(
-                        value, next);
-                }
-                return value;
+                const auto groups = [input]<std::size_t... Group>
+                    [[msvc::forceinline]] (
+                    const std::size_t first, std::index_sequence<Group...>) {
+                    auto values = std::array{
+                        byte_comparison_detail::LoadVector<Vector>(
+                            input + (first + Group * words_per_group) *
+                                sizeof(T))...};
+                    // The loop advances independent accumulators together,
+                    // sharing loop control and allowing their loads and bitwise
+                    // OR operations to overlap.
+                    for (auto word = vector_words; word < words_per_group;
+                         word += vector_words) {
+                        ((values[Group] =
+                            byte_comparison_detail::VectorBitwiseOr(
+                                values[Group],
+                                byte_comparison_detail::LoadVector<Vector>(
+                                    input + (first + Group * words_per_group +
+                                        word) * sizeof(T)))), ...);
+                    }
+                    return values;
+                };
+                constexpr auto regions_per_batch = bits_per_byte / 2;
+                using Batch = std::make_index_sequence<
+                    regions_per_batch / regions_per_group>;
+                const auto low = groups(bit * words_per_bit, Batch{});
+                const auto high = groups(
+                    (bit + regions_per_batch) * words_per_bit, Batch{});
+                return [&low, &high]<std::size_t... Index>
+                    [[msvc::forceinline]] (std::index_sequence<Index...>) {
+                    return byte_comparison_detail::ReduceVectorsToBitmapByte(
+                        low[Index]..., high[Index]...);
+                }(Batch{});
             }
         };
         auto bit = 0uz;
         const auto complete_bits = storage.size() / words_per_bit;
         for (; (complete_bits - bit) >= bits_per_byte; bit += bits_per_byte) {
-            const auto packed =
-                [&group, bit]<std::size_t... Index>
-                    [[msvc::forceinline]] (std::index_sequence<Index...>) {
-                    return byte_comparison_detail::ReduceVectorsToBitmapByte(
-                        group((bit + Index * regions_per_group) *
-                            words_per_bit)...);
-                }(std::make_index_sequence<
-                    bits_per_byte / regions_per_group>{});
-            __pragma(warning(push))
-            __pragma(warning(disable : 4244, justification :
-                "Each mask is in [0, 15]. Combining the low mask with the "
-                "high mask shifted left by four produces a value in [0, 255], "
-                "which fits in the output byte."))
-            output[bit / bits_per_byte] = packed;
-            __pragma(warning(pop))
+            output[bit / bits_per_byte] = pack(bit);
         }
         // The last incomplete eight-region batch compares only the remaining
         // bytes. The result allocation initializes these tail bits to zero.
         for (auto first = bit * words_per_bit; first < storage.size();
              first += words_per_bit, ++bit) {
-            [[gsl::suppress("26429", justification:
-                "Nullable pointer `bytes` is used for pointer arithmetic.")]]
-            const auto *const bytes = input + first * sizeof(T);
+            const auto &byte = input[first * sizeof(T)];
             const auto size =
                 std::min(words_per_bit, storage.size() - first) * sizeof(T);
             // A nonempty range is all zero if its first byte is zero and
             // each subsequent byte equals the preceding byte.
-            if ((*bytes != 0) || (std::memcmp(bytes, bytes + 1, size - 1) != 0)) {
+            if ((byte != 0) || (std::memcmp(&byte, &byte + 1, size - 1) != 0)) {
                 output[bit / bits_per_byte] |= 1u << (bit % bits_per_byte);
             }
         }
     };
 #ifdef _M_ARM64
     // At 128-bit width, the dispatcher selects NEON's expanded reductions
-    // for their more compact packing. Otherwise, it selects SVE for wider
-    // loads or four independent accumulators.
+    // for their more compact packing.
     if (IsaSupport::operator()(PF_ARM_SVE_INSTRUCTIONS_AVAILABLE) &&
         (!byte_comparison_detail::kExpandBitmapReduction<
             words_per_bit * sizeof(T), uint8x16_t> ||

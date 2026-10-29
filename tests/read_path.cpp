@@ -529,11 +529,8 @@ auto TestBitmapReductions(const auto &reduce_bitmap,
         const auto bytes_per_region = bits_per_region / 8;
         auto storage = std::vector<unsigned char>(9 * bytes_per_region + 2);
         const auto input = std::span{storage}.subspan(1);
-        for (const auto region : std::views::iota(0uz, 10uz)) {
-            const auto first = region * bytes_per_region;
-            const auto last = std::min(first + bytes_per_region, input.size()) - 1;
-            input[first] = 1;
-            input[last] |= 0x80;
+        const auto check_result = [input, &dispatch_reduce_bitmap, &check,
+            implementation, original_resolution, bits_per_region] {
             for (const auto minimum_length : {0uz, 1uz, 4096uz}) {
                 const auto result = dispatch_reduce_bitmap(
                     std::span<const unsigned char>{input}, original_resolution,
@@ -545,7 +542,21 @@ auto TestBitmapReductions(const auto &reduce_bitmap,
                 }
                 check(input, bits_per_region, *result, minimum_length);
             }
+        };
+        for (const auto region : std::views::iota(0uz, 10uz)) {
+            const auto first = region * bytes_per_region;
+            const auto last = std::min(first + bytes_per_region, input.size()) - 1;
+            input[first] = 1;
+            input[last] |= 0x80;
+            check_result();
             input[first] = input[last] = 0;
+            // Checking these positions independently detects missed loads
+            // that a set bit at the start of the region would otherwise hide.
+            for (const auto position : {first, first + (last - first) / 2, last}) {
+                input[position] = 0x80;
+                check_result();
+                input[position] = 0;
+            }
         }
     }
     const auto input = std::to_array<unsigned char>({1});

@@ -63,10 +63,28 @@ template <typename Operation>
     return VolumeImageName(snapshot.original_volume, ".img");
 }
 
-auto TryWriteError(const std::string_view context,
-    const std::exception &error) noexcept {
+template <class ErrorObject>
+    requires (requires(const ErrorObject &error) { error.what(); } ||
+        requires(const ErrorObject &error) { error->what(); })
+auto TryWriteError(const std::string_view context, const ErrorObject &error,
+    const std::string_view prefix = {}) noexcept {
     devicefs::WriteToStream(
-        devicefs::stderr, "backup-supervisor: {}: {}\n", context, &error);
+        devicefs::stderr, "backup-supervisor: {}{}: {}\n", prefix, context,
+        [&error] -> decltype(auto) {
+            if constexpr (requires { error->what(); }) {
+                return error;
+            } else {
+                return &error;
+            }
+        }());
+}
+
+auto TryWriteNonFatalError(auto &&...args) noexcept {
+    using namespace std::literals::string_view_literals;
+    [[gsl::suppress("26485", justification:
+        "This code forwards arguments generically.")]]
+    TryWriteError(std::forward<decltype(args)>(args)...,
+        "continuing despite the following non-fatal error: "sv);
 }
 
 } // namespace internal

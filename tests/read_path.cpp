@@ -730,9 +730,15 @@ auto main() -> int try {
                 std::forward<decltype(arguments)>(arguments)...);
         }, devicefs::DispatchReduceBitmap<const unsigned char>, "default");
     const auto test_supported = []<unsigned Feature>(
-        const std::string_view implementation) static {
+        std::string implementation) static {
         if (IsaSupportFor<Feature>::IsSupported()) {
-#ifdef _M_X64
+#ifdef _M_ARM64
+            if constexpr (Feature == PF_ARM_SVE_INSTRUCTIONS_AVAILABLE) {
+                implementation += std::format(" ({}-bit vectors)",
+                    devicefs::SveVectorBytes() *
+                        std::numeric_limits<unsigned char>::digits);
+            }
+#elifdef _M_X64
             TestDifferingByteCounts(
                 devicefs::CountDifferingBytes<IsaSupportFor<Feature>>,
                 implementation);

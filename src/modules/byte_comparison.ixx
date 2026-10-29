@@ -234,7 +234,6 @@ auto ReduceVectorsToBitmapByte(const Vector a, const Vector b,
 // MSVC 19.51.36260 crashes while writing SVE types to an IFC, including in
 // private module fragments. The SVE definitions are compiled in
 // `byte_comparison_sve.cpp` instead.
-[[nodiscard]] auto SveVectorBytes() noexcept -> std::size_t;
 
 // Reduce each source region to one output bit. Predicated loads keep reads
 // within the supplied input, including an incomplete final region.
@@ -281,6 +280,10 @@ struct IsaSupportInvoker {
 } // namespace devicefs::byte_comparison_detail
 
 namespace devicefs {
+
+#ifdef _M_ARM64
+export [[nodiscard]] auto SveVectorBytes() noexcept -> std::size_t;
+#endif
 
 // Count the byte positions at which the two buffers differ.
 export
@@ -518,7 +521,7 @@ auto ReduceBitmap(const std::span<T> storage,
     if (IsaSupport::operator()(PF_ARM_SVE_INSTRUCTIONS_AVAILABLE) &&
         (!byte_comparison_detail::kExpandBitmapReduction<
             words_per_bit * sizeof(T), uint8x16_t> ||
-            (byte_comparison_detail::SveVectorBytes() > sizeof(uint8x16_t))) &&
+            (SveVectorBytes() > sizeof(uint8x16_t))) &&
         byte_comparison_detail::ReduceBitmapUsingSve<words_per_bit * sizeof(T)>(
             input, storage.size_bytes(), output)) {
         return result;

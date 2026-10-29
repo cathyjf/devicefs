@@ -17,11 +17,11 @@ extern "C++" {
 }
 __pragma(warning(pop))
 
-namespace devicefs::byte_comparison_detail {
-
-auto SveVectorBytes() noexcept -> std::size_t {
+auto devicefs::SveVectorBytes() noexcept -> std::size_t {
     return svcntb();
 }
+
+namespace devicefs::byte_comparison_detail {
 
 // Load `bytes` bytes and combine the vectors using a balanced tree of bitwise
 // OR operations. A predicated final load reads only the remaining bytes.

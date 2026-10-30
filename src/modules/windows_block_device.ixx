@@ -28,7 +28,7 @@ import devicefs.bitmap_set;
 import devicefs.byte_comparison;
 import devicefs.count_zeros;
 import <devicefs/common.h>;
-import <devicefs/malloca.h>;
+import devicefs.filesystem.ioctl;
 import devicefs.noinline_invoker;
 import devicefs.stream_writer;
 
@@ -96,53 +96,6 @@ template <std::uint64_t BlockSize>
 } // namespace devicefs
 
 namespace devicefs::filesystem_internal {
-
-_Success_(return == ERROR_SUCCESS)
-[[nodiscard]] auto Ioctl(const HANDLE device, const DWORD code,
-    _Out_writes_bytes_opt_(output_size) void *const output,
-    const DWORD output_size,
-    _In_reads_bytes_opt_(input_size) void *const input,
-    const DWORD input_size,
-    _Out_opt_ DWORD *const bytes_returned) -> DWORD {
-    auto event = wil::unique_event_nothrow{};
-    if (!event.try_create(wil::EventOptions::ManualReset, nullptr)) {
-        return GetLastError();
-    }
-
-    auto operation = OVERLAPPED{.hEvent = event.get()};
-    auto returned = DWORD{};
-    auto *const result_size = bytes_returned == nullptr ? &returned : bytes_returned;
-    if (DeviceIoControl(device, code, input, input_size,
-            output, output_size, result_size, &operation)) {
-        return DWORD{ERROR_SUCCESS};
-    }
-    const auto error = GetLastError();
-    if (error != ERROR_IO_PENDING) {
-        return error;
-    }
-    if (!GetOverlappedResult(device, &operation, result_size, TRUE)) {
-        return GetLastError();
-    }
-    return DWORD{ERROR_SUCCESS};
-}
-
-// This overloaded declaration of `Ioctl` exists to work around an apparent
-// defect in MSVC Code Analysis. In a previous version of the code, there
-// was only a single declaration of `Ioctl`, and it had two optional pointer
-// arguments with default values of `nullptr`. When the former declaration
-// was consumed by a module implementation unit, Code Analysis emitted
-// C26477 ("Use `nullptr` rather than 0 or NULL"), even though the default
-// values were already spelled `nullptr`. Adding a suppression to the
-// declaration of `Ioctl` was ineffective to prevent C26477 from being
-// raised. Instead, this overloaded version with fewer arguments avoids the
-// need for default arguments.
-_Success_(return == ERROR_SUCCESS)
-[[nodiscard]] auto Ioctl(const HANDLE device, const DWORD code,
-    _Out_writes_bytes_opt_(output_size) void *const output,
-    const DWORD output_size) -> DWORD {
-    return Ioctl(
-        device, code, output, output_size, nullptr, 0, nullptr);
-}
 
 inline constexpr auto kVolumeBitmapHeaderSize =
     offsetof(VOLUME_BITMAP_BUFFER, Buffer);
@@ -767,6 +720,8 @@ struct OrdinaryFileBlockDevice {
 
 namespace devicefs::filesystem_internal {
 
+using filesystem::Ioctl;
+
 [[nodiscard]] auto LoadAllocationBitmap(
     const HANDLE device,
     const std::filesystem::path &filename,
@@ -886,8 +841,8 @@ namespace devicefs::filesystem_internal {
 
 namespace devicefs {
 
+using filesystem::Ioctl;
 using filesystem_internal::AllocationBitmap;
-using filesystem_internal::Ioctl;
 using filesystem_internal::LoadAllocationBitmap;
 
 auto OpenBlockDevice(
@@ -909,100 +864,6 @@ auto OpenBlockDevice(
             std::wstring_view{filename.native()}, description);
     }
     return handle;
-}
-
-// Retrieve the mount manager's opaque device ID through `device`.
-export [[nodiscard]] auto QueryMountManagerId(const HANDLE device)
-    -> std::expected<std::vector<BYTE>, DWORD> {
-    // Windows SDKs 26100 and 28000 omit the mount manager query declarations
-    // supplied by the WDK in `mountdev.h`. Declaring them locally allows
-    // DeviceFs to issue the query without requiring the WDK to build.
-    constexpr auto kQueryUniqueId =
-        CTL_CODE('M', 0, METHOD_BUFFERED, FILE_ANY_ACCESS);
-    struct {
-        USHORT length;
-        BYTE bytes[1];
-    } header{};
-    // The documented minimum output size is `sizeof(MOUNTDEV_UNIQUE_ID)`,
-    // so the length probe uses the full structure even though it only
-    // needs `UniqueIdLength`.
-    // https://learn.microsoft.com/windows-hardware/drivers/ddi/mountdev/ni-mountdev-ioctl_mountdev_query_unique_id#output-buffer-length
-    const auto probe_error = Ioctl(
-        device, kQueryUniqueId, &header, sizeof(header));
-    if ((probe_error != ERROR_SUCCESS) && (probe_error != ERROR_MORE_DATA)) {
-        return std::unexpected{probe_error};
-    }
-    constexpr auto kIdOffset =
-        CompileTimeCast<DWORD, offsetof(decltype(header), bytes)>();
-    const auto output_size = std::max(
-        CompileTimeCast<DWORD, sizeof(header)>(), kIdOffset + header.length);
-    const auto output = NEW_MALLOCA_BUFFER(BYTE, output_size);
-    if (!output) {
-        return std::unexpected{ERROR_NOT_ENOUGH_MEMORY};
-    }
-
-    if (const auto error =
-            Ioctl(device, kQueryUniqueId, output.get(), output_size);
-        error != ERROR_SUCCESS) {
-        return std::unexpected{error};
-    }
-    const auto length =
-        std::start_lifetime_as<decltype(header)>(output.get())->length;
-    return std::span{
-        std::start_lifetime_as_array<BYTE>(
-            output.get() + kIdOffset, length),
-        length} | std::ranges::to<std::vector<BYTE>>();
-}
-
-// Return a Win32 GLOBALROOT path for a volume's device name.
-export [[nodiscard]] auto QueryVolumePath(const HANDLE volume)
-    -> std::filesystem::path {
-    const auto query = [volume](void *const output, const DWORD size,
-        const bool probe = false) {
-        constexpr auto kQueryDeviceName =
-            CTL_CODE('M', 2, METHOD_BUFFERED, FILE_ANY_ACCESS);
-        const auto error = devicefs::filesystem_internal::Ioctl(
-            volume, kQueryDeviceName, output, size);
-        if ((error != ERROR_SUCCESS) &&
-            (!probe || (error != ERROR_MORE_DATA))) {
-            WinError("failed to query the device name for volume handle {}",
-                volume, ExplicitWin32Error{error});
-        }
-    };
-
-    // MOUNTDEV_NAME is supplied by the WDK rather than by the Windows SDK.
-    struct {
-        USHORT name_length;
-        WCHAR name[1];
-    } header{};
-    query(&header, sizeof(header), true);
-
-    using Character = std::remove_extent_t<decltype(header.name)>;
-    constexpr auto kNameOffset =
-        CompileTimeCast<DWORD, offsetof(decltype(header), name)>();
-    constexpr auto prefix = std::basic_string_view<Character>{
-        LR"(\\?\GLOBALROOT)"};
-    constexpr auto kPrefixBytes = prefix.size() * sizeof(Character);
-    constexpr auto kExtraBytes = kPrefixBytes - kNameOffset;
-
-    const auto output_size = kNameOffset + header.name_length;
-    const auto buffer = NEW_MALLOCA_BUFFER(std::byte,
-        kExtraBytes + output_size);
-    if (!buffer) {
-        throw std::bad_alloc{};
-    }
-    auto *const output = buffer.get() + kExtraBytes;
-    query(output, output_size);
-
-    const auto name_length =
-        std::start_lifetime_as<decltype(header)>(output)->name_length;
-    // Once its length has been read, the query header can be overwritten
-    // by the end of the prefix, leaving the returned name directly after it.
-    std::memcpy(buffer.get(), prefix.data(), kPrefixBytes);
-    const auto characters = prefix.size() + name_length / sizeof(Character);
-    const auto *const path =
-        std::start_lifetime_as_array<Character>(buffer.get(), characters);
-    return std::filesystem::path{std::wstring_view{path, characters}};
 }
 
 template <bool HasAllocationBitmap>

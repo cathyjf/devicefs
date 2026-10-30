@@ -29,10 +29,10 @@ export import :manifest;
 import :pbs;
 import :production_incremental;
 import <devicefs/common.h>;
+import devicefs.filesystem.mount_manager;
 import devicefs.file_reader;
 import devicefs.guid_formatter;
 import devicefs.stream_writer;
-import devicefs.windows_block_device;
 import devicefs.supervisor.configuration;
 import devicefs.supervisor.launch_powershell;
 import devicefs.supervisor.installation;
@@ -133,7 +133,7 @@ namespace internal {
     const SnapshotHandles &snapshot_handles) {
     auto mount_manager_ids = std::map<GUID, std::vector<BYTE>, GuidLess>{};
     for (const auto &snapshot : snapshots) {
-        auto result = devicefs::QueryMountManagerId(
+        auto result = devicefs::filesystem::QueryMountManagerId(
             snapshot_handles.at(snapshot.identifier).get());
         if (result) {
             mount_manager_ids.emplace(snapshot.identifier, std::move(*result));

@@ -346,6 +346,7 @@ foreach(target IN ITEMS backup-supervisor devicefs-read-path-test)
             src/modules/byte_comparison.ixx
             src/modules/count_zeros.ixx
             src/modules/windows_block_device.ixx
+            src/modules/filesystem/ioctl.ixx
         PRIVATE
             src/modules/noinline_invoker.cpp
             src/modules/stream_writer.cpp
@@ -373,6 +374,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/guid_formatter.ixx
     src/modules/filesystem.ixx
     src/modules/filesystem/internal.cpp
+    src/modules/filesystem/mount_manager.ixx
     src/modules/filesystem/rpc_client.cpp
     src/modules/filesystem/winfsp_loader.cpp
     src/modules/rpc_block_device_server.ixx

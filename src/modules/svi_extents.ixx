@@ -21,11 +21,11 @@ module;
 export module devicefs.svi_extents;
 
 import std;
+import devicefs.filesystem.mount_manager;
 import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import devicefs.vss_block_descriptors;
-import devicefs.windows_block_device;
 
 // The Windows SDK omits the declaration of `NtQueryInformationFile`.
 extern "C" __declspec(dllimport) auto NTAPI NtQueryInformationFile(
@@ -271,7 +271,7 @@ auto EnumerateBlockRanges(const HANDLE volume, RangeAdder &&add_range,
     const std::filesystem::path &volume_path = {},
     const SviExtentsOptions options = {}) -> void {
     const auto device_path = volume_path.empty()
-        ? devicefs::QueryVolumePath(volume) : volume_path;
+        ? devicefs::filesystem::QueryVolumePath(volume) : volume_path;
     // The cluster-size query uses synchronous I/O. Reopening is needed when
     // the supplied handle is asynchronous or its I/O mode cannot be determined.
     const auto synchronous_volume = [volume, &device_path] {

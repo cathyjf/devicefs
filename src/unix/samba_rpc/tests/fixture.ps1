@@ -179,6 +179,7 @@ $grpc_server = $null
 $ready_pipe = $null
 $server = $null
 $device = $null
+$device_stream = $null
 $mounted_directory = $null
 $failure = $null
 $log_tail = $null
@@ -239,15 +240,15 @@ try {
                     ($attachment | Out-String)
             }
             $attachment | Write-Host
-            $device = '/dev/' +
-                ($attachment | ConvertFrom-Json).'system-entities'.'dev-entry'
             Add-Type -Path (Join-Path $PSScriptRoot 'types/DiskArbitration.cs')
-            Write-Host ("Testing: Disk Arbitration idle after appearance of " +
-                "'$device'.")
-            [DeviceFs.Tests.DiskArbitration]::WaitForDisk(
-                [IO.Path]::GetFileName($device))
-            Write-Host ("Passed: Disk Arbitration reported idle after " +
-                "appearance of '$device'.")
+            # Keep the device pathname for cleanup if opening it fails.
+            $device =
+                [DeviceFs.Tests.DiskArbitration]::FindImageDevice($backing)
+            Write-Host "Testing: opening the disk image for '$backing'."
+            $device_stream =
+                [DeviceFs.Tests.DiskArbitration]::OpenImage($backing)
+            $device = $device_stream.Name
+            Write-Host "Passed: opened '$device' for image '$backing'."
         } else {
             $attachment = @(& $LosetupPath --find --show --read-only `
                 $backing 2>&1)
@@ -446,6 +447,9 @@ try {
                 Write-Warning $unmount_failure
             }
         }
+    }
+    if ($null -ne $device_stream) {
+        $device_stream.Dispose()
     }
     if ($null -ne $device) {
         if ($IsMacOS) {

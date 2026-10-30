@@ -275,7 +275,8 @@ auto EnumerateBlockRanges(const HANDLE volume, RangeAdder &&add_range,
 //
 // Precondition: the process has the backup reading privilege.
 export [[nodiscard]] auto ReadBlockOffsets(
-    const std::string_view snapshot_device)
+    const std::string_view snapshot_device,
+    const std::optional<std::uint64_t> volume_length = std::nullopt)
     -> devicefs::vss::BlockOffsetSet {
     const auto device_path = std::filesystem::path{snapshot_device};
     auto device = wil::unique_hfile{CreateFileW(
@@ -286,7 +287,19 @@ export [[nodiscard]] auto ReadBlockOffsets(
             std::wstring_view{device_path.native()});
     }
 
-    auto block_offsets = devicefs::vss::BlockOffsetSet{};
+    const auto length = [&device, &device_path, volume_length] {
+        if (volume_length) {
+            return *volume_length;
+        }
+        const auto queried_length = filesystem::QueryDeviceLength(device.get());
+        if (!queried_length) {
+            WinError("failed to query the length of SVI volume '{}'",
+                std::wstring_view{device_path.native()},
+                ExplicitWin32Error{queried_length.error()});
+        }
+        return *queried_length;
+    }();
+    auto block_offsets = devicefs::vss::BlockOffsetSet(length - 1);
     // The successful insertion of ranges into `block_offsets` relies on the
     // truth of the following proposition.
     static_assert(decltype(block_offsets)::block_size{} ==

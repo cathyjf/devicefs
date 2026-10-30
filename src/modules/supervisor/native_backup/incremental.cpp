@@ -77,12 +77,15 @@ export [[nodiscard]] auto BuildDirtyBlockMap(
             catalog.payload.volume_size, allocation_blocks.volume_size));
     }
 
-    auto svi_blocks = [baseline_device, payload_device] {
+    auto svi_blocks = [baseline_device, payload_device,
+        volume_length = catalog.payload.volume_size] {
         auto privileges = ProcessPrivilegeEnabler{
             GetCurrentProcess(), std::array{wil::zwstring_view{SE_BACKUP_NAME}},
             "the backup privilege"sv};
-        auto svi_blocks = devicefs::svi::ReadBlockOffsets(baseline_device);
-        auto payload_svi_blocks = devicefs::svi::ReadBlockOffsets(payload_device);
+        auto svi_blocks = devicefs::svi::ReadBlockOffsets(
+            baseline_device, volume_length);
+        auto payload_svi_blocks = devicefs::svi::ReadBlockOffsets(
+            payload_device, volume_length);
         svi_blocks.merge(payload_svi_blocks);
         return svi_blocks;
     }();

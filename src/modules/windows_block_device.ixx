@@ -42,10 +42,6 @@ using devicefs::terminal::Transcode;
 
 export namespace devicefs {
 
-constexpr auto kHandleDevicePrefix = std::string_view{R"(\\\handle:)"};
-constexpr auto kFileHandleDevicePrefix =
-    std::string_view{R"(\\\file-handle:)"};
-
 class SnapshotAllocationBitmap {
 public:
     SnapshotAllocationBitmap(SnapshotAllocationBitmap &&) noexcept;

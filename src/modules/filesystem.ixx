@@ -220,7 +220,8 @@ struct Options {
 
 [[nodiscard]] auto IsFileHandleDevice(
     const internal::Mapping &mapping) noexcept {
-    return mapping.device.starts_with(devicefs::kFileHandleDevicePrefix);
+    return mapping.device.starts_with(
+        devicefs::rpc::kFileHandleDevicePrefix);
 }
 
 [[nodiscard]] auto IsWindowsDevice(
@@ -516,7 +517,7 @@ template <BlockDevice... DeviceTypes>
         if (IsFileHandleDevice(mapping)) {
             return open_inherited_source.template operator()<
                 devicefs::OrdinaryFileBlockDevice,
-                devicefs::kFileHandleDevicePrefix>();
+                devicefs::rpc::kFileHandleDevicePrefix>();
         }
     }
     if constexpr ((std::same_as<DeviceTypes, RPCBlockDevice> || ...)) {
@@ -530,15 +531,14 @@ template <BlockDevice... DeviceTypes>
                     tcp
                         ? std::string_view{}
                         : std::string_view{mapping.device}.substr(
-                            std::string_view{
-                                devicefs::rpc::kDeviceSourcePrefix}.size())));
+                            devicefs::rpc::kDeviceSourcePrefix.size())));
         }
     }
     if constexpr ((WindowsDevice<DeviceTypes> || ...)) {
         using WindowsType = SelectedWindowsBlockDevice<DeviceTypes...>;
-        if (mapping.device.starts_with(devicefs::kHandleDevicePrefix)) {
+        if (mapping.device.starts_with(devicefs::rpc::kHandleDevicePrefix)) {
             return open_inherited_source.template operator()<
-                WindowsType, devicefs::kHandleDevicePrefix>(
+                WindowsType, devicefs::rpc::kHandleDevicePrefix>(
                     extended_dasd, cache);
         }
         return VariantFromBlockDevice<SourceType>(WindowsType::FromFilename(

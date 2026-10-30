@@ -49,8 +49,7 @@ constexpr auto kTcpUsername = "devicefs"sv;
 [[nodiscard]] auto IsTcpDevice(const internal::Mapping &mapping) noexcept {
     return IsRpcDevice(mapping) &&
         std::string_view{mapping.device}
-            .substr(std::string_view{
-                devicefs::rpc::kDeviceSourcePrefix}.size())
+            .substr(devicefs::rpc::kDeviceSourcePrefix.size())
             .starts_with(devicefs::rpc::kTcpSourcePrefix);
 }
 
@@ -93,8 +92,8 @@ constexpr auto kTcpUsername = "devicefs"sv;
     const internal::Mapping &mapping,
     const std::string_view password) {
     const auto source = std::string_view{mapping.device}.substr(
-        std::string_view{devicefs::rpc::kDeviceSourcePrefix}.size() +
-            std::string_view{devicefs::rpc::kTcpSourcePrefix}.size());
+        devicefs::rpc::kDeviceSourcePrefix.size() +
+            devicefs::rpc::kTcpSourcePrefix.size());
     auto fields = source | std::views::split(':');
     auto position = fields.begin();
     const auto next = [&]() {

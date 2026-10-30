@@ -28,7 +28,6 @@ import :internal;
 import <devicefs/common.h>;
 import devicefs.rpc_constants;
 import devicefs.stream_writer;
-import devicefs.windows_block_device;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.temporary_paths;
@@ -122,7 +121,7 @@ struct DeviceFsStartRequest {
     }
     if (request.rpc_endpoint &&
         !SetEnvironmentVariableA(
-            devicefs::rpc::kEndpointEnvironmentVariable,
+            devicefs::rpc::kEndpointEnvironmentVariable.c_str(),
             request.rpc_endpoint->c_str())) {
         WinError("could not set environment variable '{}' to RPC endpoint '{}'",
             devicefs::rpc::kEndpointEnvironmentVariable,
@@ -185,7 +184,8 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
         std::views::transform([&snapshot_handles](const auto &snapshot) {
             return DeviceFsSource{
                 .name = SnapshotImageName(snapshot),
-                .source = std::format("{}{}", devicefs::kHandleDevicePrefix,
+                .source = std::format("{}{}",
+                    devicefs::rpc::kHandleDevicePrefix,
                     std::bit_cast<std::uintptr_t>(
                         snapshot_handles.at(snapshot.identifier).get())),
             };
@@ -195,7 +195,8 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
         inherited_handles.push_back(handle.get());
         sources.push_back({
             .name = name,
-            .source = std::format("{}{}", devicefs::kFileHandleDevicePrefix,
+            .source = std::format("{}{}",
+                devicefs::rpc::kFileHandleDevicePrefix,
                 std::bit_cast<std::uintptr_t>(handle.get())),
         });
     }

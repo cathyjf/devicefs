@@ -14,17 +14,23 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+module;
+
+#include <devicefs/strsafe_compat.h>
+
 export module devicefs.rpc_constants;
+
+import <devicefs/windows_imports.h>;
+
+using namespace wil::literals;
 
 export namespace devicefs::rpc {
 
-// This file uses string literals rather than string view literals to avoid
-// introducing a dependency on `std.ixx` too early in the project's
-// compile-time dependency graph.
-
-constexpr auto kEndpointEnvironmentVariable = "DEVICEFS_RPC_ENDPOINT";
-constexpr auto kProtocolSequence = "ncalrpc";
-constexpr auto kDeviceSourcePrefix = R"(\\\rpc:)";
-constexpr auto kTcpSourcePrefix = "tcp:";
+constexpr auto kEndpointEnvironmentVariable = "DEVICEFS_RPC_ENDPOINT"_zv;
+constexpr auto kProtocolSequence = "ncalrpc"_zv;
+constexpr auto kDeviceSourcePrefix = R"(\\\rpc:)"_zv;
+constexpr auto kTcpSourcePrefix = "tcp:"_zv;
+constexpr auto kHandleDevicePrefix = R"(\\\handle:)"_zv;
+constexpr auto kFileHandleDevicePrefix = R"(\\\file-handle:)"_zv;
 
 } // namespace devicefs::rpc

@@ -254,6 +254,8 @@ auto EnsureWinFsp() -> bool {
 auto InstallWslPackage() -> bool {
     using namespace winrt::Windows::Data::Json;
     using namespace winrt::Windows::Foundation;
+    using namespace winrt::Windows::Web::Http;
+    using namespace winrt::Windows::Web::Http::Headers;
 
     // Installation must also work when the existing `wsl.exe` is too old to
     // support `wsl --update`. The release MSI supplies the new executable
@@ -272,7 +274,15 @@ auto InstallWslPackage() -> bool {
             releases_url);
         const auto client = MakeUncachedHttpClient();
         client.DefaultRequestHeaders().UserAgent().ParseAdd(L"backup-supervisor");
-        const auto response = client.GetAsync(Uri{releases_url}).get();
+        const auto request = HttpRequestMessage{
+            HttpMethod::Get(), Uri{releases_url}};
+        if (const auto token =
+                wil::TryGetEnvironmentVariableW<std::wstring>(L"GITHUB_TOKEN");
+            !token.empty()) {
+            request.Headers().Authorization(
+                HttpCredentialsHeaderValue{L"Bearer", token});
+        }
+        const auto response = client.SendRequestAsync(request).get();
         response.EnsureSuccessStatusCode();
         const auto release = JsonObject::Parse(
             response.Content().ReadAsStringAsync().get());

@@ -196,6 +196,8 @@ jobs:
 
       - name: Test the installer
         if: matrix.test_group == 'install'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           $run = '.github/scripts/Run-ConsoleTests.ps1'
           & $run ('build/windows-{0}/Release/backup-supervisor.exe --install' `

@@ -231,13 +231,16 @@ try {
         $helper_backing = $socket
     } else {
         if ($IsMacOS) {
-            $attachment = @(& $DiskutilPath image attach --noMount --readOnly `
-                $backing)
+            $attachment = @(& $DiskutilPath image attach --noMount `
+                --readOnly --plist $backing |
+                plutil -convert json -o - -)
             if ($LASTEXITCODE -ne 0) {
-                throw "diskutil image attach failed:`n$($attachment | Out-String)"
+                throw "diskutil image attach or plist conversion failed:`n" +
+                    ($attachment | Out-String)
             }
-            $device =
-                ([string]($attachment | Select-Object -First 1)).Split()[0]
+            $attachment | Write-Host
+            $device = '/dev/' +
+                ($attachment | ConvertFrom-Json).'system-entities'.'dev-entry'
             Add-Type -Path (Join-Path $PSScriptRoot 'types/DiskArbitration.cs')
             Write-Host ("Testing: Disk Arbitration idle after appearance of " +
                 "'$device'.")

@@ -301,7 +301,7 @@ constexpr ConfigurationField::~ConfigurationField() = default;
             {"parallelize_image_upload", OptionalBooleanDestination{
                 &BackupConfiguration::pbs_parallelize_image_upload, true}},
             {"use_known_data_map", OptionalBooleanDestination{
-                &BackupConfiguration::pbs_use_known_data_map, false}},
+                &BackupConfiguration::pbs_use_known_data_map, true}},
             {"fingerprint",
                 Utf8TextDestination{
                     &BackupConfiguration::pbs_fingerprint}},

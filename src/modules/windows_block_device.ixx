@@ -954,6 +954,57 @@ export [[nodiscard]] auto QueryMountManagerId(const HANDLE device)
         length} | std::ranges::to<std::vector<BYTE>>();
 }
 
+// Return a Win32 GLOBALROOT path for a volume's device name.
+export [[nodiscard]] auto QueryVolumePath(const HANDLE volume)
+    -> std::filesystem::path {
+    const auto query = [volume](void *const output, const DWORD size,
+        const bool probe = false) {
+        constexpr auto kQueryDeviceName =
+            CTL_CODE('M', 2, METHOD_BUFFERED, FILE_ANY_ACCESS);
+        const auto error = devicefs::filesystem_internal::Ioctl(
+            volume, kQueryDeviceName, output, size);
+        if ((error != ERROR_SUCCESS) &&
+            (!probe || (error != ERROR_MORE_DATA))) {
+            WinError("failed to query the device name for volume handle {}",
+                volume, ExplicitWin32Error{error});
+        }
+    };
+
+    // MOUNTDEV_NAME is supplied by the WDK rather than by the Windows SDK.
+    struct {
+        USHORT name_length;
+        WCHAR name[1];
+    } header{};
+    query(&header, sizeof(header), true);
+
+    using Character = std::remove_extent_t<decltype(header.name)>;
+    constexpr auto kNameOffset =
+        CompileTimeCast<DWORD, offsetof(decltype(header), name)>();
+    constexpr auto prefix = std::basic_string_view<Character>{
+        LR"(\\?\GLOBALROOT)"};
+    constexpr auto kPrefixBytes = prefix.size() * sizeof(Character);
+    constexpr auto kExtraBytes = kPrefixBytes - kNameOffset;
+
+    const auto output_size = kNameOffset + header.name_length;
+    const auto buffer = NEW_MALLOCA_BUFFER(std::byte,
+        kExtraBytes + output_size);
+    if (!buffer) {
+        throw std::bad_alloc{};
+    }
+    auto *const output = buffer.get() + kExtraBytes;
+    query(output, output_size);
+
+    const auto name_length =
+        std::start_lifetime_as<decltype(header)>(output)->name_length;
+    // Once its length has been read, the query header can be overwritten
+    // by the end of the prefix, leaving the returned name directly after it.
+    std::memcpy(buffer.get(), prefix.data(), kPrefixBytes);
+    const auto characters = prefix.size() + name_length / sizeof(Character);
+    const auto *const path =
+        std::start_lifetime_as_array<Character>(buffer.get(), characters);
+    return std::filesystem::path{std::wstring_view{path, characters}};
+}
+
 template <bool HasAllocationBitmap>
 auto WindowsBlockDevice<HasAllocationBitmap>::FromHandle(
     wil::unique_hfile handle, std::filesystem::path filename,

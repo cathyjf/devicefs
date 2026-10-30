@@ -25,16 +25,24 @@ import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import devicefs.vss_block_descriptors;
+import devicefs.windows_block_device;
+
+// The Windows SDK omits the declaration of `NtQueryInformationFile`.
+extern "C" __declspec(dllimport) auto NTAPI NtQueryInformationFile(
+    HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG,
+    std::underlying_type_t<FILE_INFORMATION_CLASS>) -> NTSTATUS;
 
 namespace {
 
 constexpr auto kShareMode =
     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+constexpr auto kSecurityFlags =
+    SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION;
 
 [[nodiscard]] auto OpenObject(const std::filesystem::path &path) {
     auto result = wil::unique_hfile{CreateFileW(
         path.c_str(), GENERIC_READ, kShareMode, nullptr, OPEN_EXISTING,
-        SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION |
+        kSecurityFlags |
             FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
         nullptr)};
     if (!result) {
@@ -218,6 +226,44 @@ private:
 
 export namespace devicefs::svi {
 
+// Return the 16-KiB block offsets for System Volume Information extents.
+// `volume_path` may be supplied when the volume's pathname is already known.
+[[nodiscard]] auto ReadBlockOffsets(const HANDLE volume,
+    const std::filesystem::path &volume_path = {})
+    -> devicefs::vss::BlockOffsetSet {
+    const auto device_path = volume_path.empty()
+        ? devicefs::QueryVolumePath(volume) : volume_path;
+    // The cluster-size query uses synchronous I/O. Reopening is needed when
+    // the supplied handle is asynchronous or its I/O mode cannot be determined.
+    const auto synchronous_volume = [volume, &device_path] {
+        auto mode = ULONG{};
+        auto io_status = IO_STATUS_BLOCK{};
+        // The SDK's partial enum omits FileModeInformation (16) from the WDK.
+        constexpr auto kFileModeInformation = 16;
+        const auto status = NtQueryInformationFile(volume, &io_status, &mode,
+            sizeof(mode), kFileModeInformation);
+        if (NT_SUCCESS(status) &&
+            ((mode & (FILE_SYNCHRONOUS_IO_ALERT |
+                FILE_SYNCHRONOUS_IO_NONALERT)) != 0)) {
+            return wil::unique_hfile{};
+        }
+        auto reopened = wil::unique_hfile{ReOpenFile(volume, GENERIC_READ,
+            kShareMode, kSecurityFlags)};
+        if (!reopened) {
+            WinError("failed to reopen SVI volume '{}' for synchronous I/O",
+                std::wstring_view{device_path.native()});
+        }
+        return reopened;
+    }();
+
+    const auto cluster_size = QueryClusterSize(
+        synchronous_volume ? synchronous_volume.get() : volume, device_path);
+    const auto root = device_path / L"System Volume Information";
+    auto block_offsets = devicefs::vss::BlockOffsetSet{};
+    SviExtentReader{cluster_size, block_offsets}.ReadTreeBlockOffsets(root);
+    return block_offsets;
+}
+
 // Open the snapshot volume named by the path `snapshot_device` and walk its
 // System Volume Information directory, including named streams. The result
 // contains volume-relative byte offsets of VSS blocks intersecting allocated
@@ -230,17 +276,13 @@ export namespace devicefs::svi {
     const auto device_path = std::filesystem::path{snapshot_device};
     auto device = wil::unique_hfile{CreateFileW(
         device_path.c_str(), GENERIC_READ, kShareMode, nullptr, OPEN_EXISTING,
-        SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr)};
+        kSecurityFlags, nullptr)};
     if (!device) {
         WinError("could not open SVI snapshot volume '{}'",
             std::wstring_view{device_path.native()});
     }
 
-    const auto cluster_size = QueryClusterSize(device.get(), device_path);
-    const auto root = device_path / L"System Volume Information";
-    auto block_offsets = devicefs::vss::BlockOffsetSet{};
-    SviExtentReader{cluster_size, block_offsets}.ReadTreeBlockOffsets(root);
-    return block_offsets;
+    return ReadBlockOffsets(device.get(), device_path);
 }
 
 } // namespace devicefs::svi

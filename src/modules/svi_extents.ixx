@@ -31,10 +31,19 @@ import devicefs.vss_block_descriptors;
 namespace devicefs::svi {
 
 export struct SviExtentsOptions {
-    // The requested alignment in bytes; must be nonzero.
+    // Emit ranges aligned to this size in bytes.
     std::uint64_t block_size = devicefs::vss::kBlockSize;
+
+    // The cluster size of the volume, if known. If not specified, it will
+    // be queried from the volume.
+    std::optional<std::uint64_t> cluster_size;
+
+    // If true, visit only objects related to VSS.
+    // If false, visit all objects under System Volume Information.
     bool vss_only = false;
-    // If false, retain only aligned blocks wholly contained in an extent.
+
+    // If true, emit all ranges that contain any portion of a visited extent.
+    // If false, emit only ranges that lie entirely within a visited extent.
     bool round_up = true;
 };
 
@@ -58,6 +67,10 @@ constexpr auto kSecurityFlags =
     return result;
 }
 
+// This function duplicates code from `windows_block_device.ixx`, and the
+// version there is better because it also supports ReFS.
+//
+// TODO: Fix the duplication.
 [[nodiscard]] auto QueryClusterSize(
     const HANDLE device,
     const std::filesystem::path &path) {
@@ -264,7 +277,12 @@ auto EnumerateBlockRanges(const HANDLE volume, RangeAdder &&add_range,
     const SviExtentsOptions options = {}) -> void {
     const auto device_path = volume_path.empty()
         ? devicefs::filesystem::QueryVolumePath(volume) : volume_path;
-    const auto cluster_size = detail::QueryClusterSize(volume, device_path);
+    const auto cluster_size = [&options, volume, &device_path] {
+        if (options.cluster_size) {
+            return *options.cluster_size;
+        }
+        return detail::QueryClusterSize(volume, device_path);
+    }();
     const auto root = device_path / L"System Volume Information";
     detail::SviExtentReader{cluster_size, add_range, options}.
         ReadTreeBlockOffsets(root);

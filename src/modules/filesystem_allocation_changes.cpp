@@ -47,6 +47,7 @@ auto filesystem_internal::AllocationBitmap::ExcludeVssStorage(
                     limit >> cluster_shift);
             }, {}, {
                 .block_size = cluster_size,
+                .cluster_size = cluster_size,
                 .vss_only = true,
                 .round_up = false,
             });

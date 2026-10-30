@@ -162,16 +162,28 @@ struct AllocationBitmap {
     auto ExcludeVssStorage(HANDLE volume,
         const std::filesystem::path &filename) -> void;
 
-    _Pre_satisfies_((first <= limit) && (limit <= cluster_count))
+    _Pre_satisfies_((first < limit) && (limit <= cluster_count))
     auto MarkClustersFree(const UINT64 first, const UINT64 limit) noexcept
         -> void {
-        for (auto cluster = first; cluster < limit; ++cluster) {
-            const auto byte =
-                devicefs::terminal::FailFastMaybeCast<std::size_t>(
-                    cluster / kBitsPerByte);
-            storage[kVolumeBitmapHeaderSize + byte] &=
-                ~(1u << (cluster % kBitsPerByte));
+        const auto last = limit - 1;
+        const auto first_byte =
+            devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                first / kBitsPerByte);
+        const auto last_byte =
+            devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                last / kBitsPerByte);
+        constexpr auto all_bits = std::numeric_limits<BYTE>::max();
+        const auto first_mask = all_bits << (first % kBitsPerByte);
+        const auto last_mask = all_bits >>
+            ((kBitsPerByte - 1) - (last % kBitsPerByte));
+        auto &byte = storage[kVolumeBitmapHeaderSize + first_byte];
+        if (first_byte == last_byte) {
+            byte &= ~(first_mask & last_mask);
+            return;
         }
+        byte &= ~first_mask;
+        std::memset(&byte + 1, 0, last_byte - first_byte - 1);
+        storage[kVolumeBitmapHeaderSize + last_byte] &= ~last_mask;
     }
 
     // Search [first, limit) for an allocated cluster (a set bit) or a free

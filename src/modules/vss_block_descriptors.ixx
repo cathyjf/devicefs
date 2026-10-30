@@ -63,6 +63,7 @@ export module devicefs.vss_block_descriptors;
 
 import std;
 import devicefs.bitmap_set;
+import devicefs.filesystem.ioctl;
 import devicefs.terminal.safecast;
 import devicefs.guid_formatter;
 import <devicefs/windows_imports.h>;
@@ -292,20 +293,17 @@ class RawSource {
         // reads require sector handling. The ordinary-file fallback is for the
         // trusted acceptance fixture's exact flat copy of the same raw address
         // space; it is not an SVI-file transport.
-        auto device_length = GET_LENGTH_INFORMATION{};
-        auto returned = DWORD{};
-        if (DeviceIoControl(handle_.get(), IOCTL_DISK_GET_LENGTH_INFO,
-                nullptr, 0, &device_length, sizeof(device_length),
-                &returned, nullptr)) {
-            size_ = devicefs::terminal::FailFastCast<std::uint64_t>(
-                device_length.Length.QuadPart);
+        const auto device_length =
+            filesystem::QueryDeviceLength(handle_.get());
+        if (device_length) {
+            size_ = *device_length;
 
             // The parser requests arbitrary byte ranges, but Windows requires
             // noncached volume reads to start and end on sector boundaries.
             // `ReadRawExact` uses this sector size to expand each read. The
             // returned view covers only the bytes that the parser requested.
             auto geometry = DISK_GEOMETRY{};
-            returned = 0;
+            auto returned = DWORD{};
             if (!DeviceIoControl(handle_.get(), IOCTL_DISK_GET_DRIVE_GEOMETRY,
                     nullptr, 0, &geometry, sizeof(geometry),
                     &returned, nullptr)) {
@@ -331,7 +329,7 @@ class RawSource {
                 FSCTL_ALLOW_EXTENDED_DASD_IO, nullptr, 0, nullptr, 0,
                 &returned, nullptr));
         } else {
-            const auto device_error = GetLastError();
+            const auto device_error = device_length.error();
             if (raw_device_path ||
                 ((device_error != ERROR_INVALID_FUNCTION) &&
                 (device_error != ERROR_NOT_SUPPORTED) &&

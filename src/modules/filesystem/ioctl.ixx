@@ -20,6 +20,8 @@ module;
 
 export module devicefs.filesystem.ioctl;
 
+import std;
+import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 
 export namespace devicefs::filesystem {
@@ -58,5 +60,16 @@ _Success_(return == ERROR_SUCCESS)
     return ERROR_SUCCESS;
 }
 __pragma(warning(pop))
+
+[[nodiscard]] auto QueryDeviceLength(const HANDLE device)
+    -> std::expected<std::uint64_t, DWORD> {
+    auto length = GET_LENGTH_INFORMATION{};
+    if (const auto status = Ioctl(device, IOCTL_DISK_GET_LENGTH_INFO,
+            &length, sizeof(length));
+        status != ERROR_SUCCESS) {
+        return std::unexpected{status};
+    }
+    return terminal::FailFastCast<std::uint64_t>(length.Length.QuadPart);
+}
 
 } // namespace devicefs::filesystem

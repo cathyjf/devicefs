@@ -904,13 +904,11 @@ auto WindowsBlockDevice<HasAllocationBitmap>::FromHandle(
             std::wstring_view{filename.native()}, description);
     }
 
-    auto length = GET_LENGTH_INFORMATION{};
-    const auto length_error =
-        Ioctl(handle.get(), IOCTL_DISK_GET_LENGTH_INFO, &length, sizeof(length));
-    if (length_error != ERROR_SUCCESS) {
+    const auto length = filesystem::QueryDeviceLength(handle.get());
+    if (!length) {
         WinError("IOCTL_DISK_GET_LENGTH_INFO failed for '{}' ({})",
             std::wstring_view{filename.native()}, description,
-            ExplicitWin32Error{length_error});
+            ExplicitWin32Error{length.error()});
     }
 
     auto geometry = DISK_GEOMETRY{};
@@ -922,13 +920,12 @@ auto WindowsBlockDevice<HasAllocationBitmap>::FromHandle(
             ExplicitWin32Error{geometry_error});
     }
 
-    const auto size =
-        devicefs::terminal::FailFastCast<UINT64>(length.Length.QuadPart);
-    if ((size % kAdvertisedSectorSize) != 0) {
+    if ((*length % kAdvertisedSectorSize) != 0) {
         throw std::runtime_error(std::format(
-            "block device '{}' has a {}-byte length that is not a multiple of "
-            "the advertised {}-byte allocation unit ({})",
-            Transcode<std::string>(filename.native()), size, kAdvertisedSectorSize, description));
+            "block device '{}' has a {}-byte length, which is not a multiple "
+            "of the advertised {}-byte allocation unit ({})",
+            Transcode<std::string>(filename.native()), *length,
+            kAdvertisedSectorSize, description));
     }
 
     const auto dasd_error = extended_dasd
@@ -968,7 +965,7 @@ auto WindowsBlockDevice<HasAllocationBitmap>::FromHandle(
             }
         }();
     return WindowsBlockDevice{
-        .length = size,
+        .length = *length,
         .filename = std::move(filename),
         .handle = std::move(handle),
         .buffer_alignment = *alignment,

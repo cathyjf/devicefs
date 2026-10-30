@@ -273,10 +273,15 @@ auto EnumerateBlockRanges(const HANDLE volume, RangeAdder &&add_range,
 // Return a bitmap of SVI extent data. A set bit indicates that at least some
 // portion of the corresponding region contains SVI data.
 //
+// If the variant argument contains a `std::uint64_t`, it specifies the length
+// of the device. If the variant argument contains a `BlockOffsetSet` object,
+// that object is moved from, populated, and then returned.
+//
 // Precondition: the process has the backup reading privilege.
 export [[nodiscard]] auto ReadBlockOffsets(
     const std::string_view snapshot_device,
-    const std::optional<std::uint64_t> volume_length = std::nullopt)
+    std::variant<std::monostate, std::uint64_t, devicefs::vss::BlockOffsetSet>
+        extra_argument = {})
     -> devicefs::vss::BlockOffsetSet {
     const auto device_path = std::filesystem::path{snapshot_device};
     auto device = wil::unique_hfile{CreateFileW(
@@ -287,19 +292,29 @@ export [[nodiscard]] auto ReadBlockOffsets(
             std::wstring_view{device_path.native()});
     }
 
-    const auto length = [&device, &device_path, volume_length] {
-        if (volume_length) {
-            return *volume_length;
+    auto block_offsets = [&device, &device_path, &extra_argument] {
+        if (const auto set = std::get_if<devicefs::vss::BlockOffsetSet>(
+                &extra_argument)) {
+            return std::move(*set);
         }
-        const auto queried_length = filesystem::QueryDeviceLength(device.get());
-        if (!queried_length) {
-            WinError("failed to query the length of SVI volume '{}'",
-                std::wstring_view{device_path.native()},
-                ExplicitWin32Error{queried_length.error()});
-        }
-        return *queried_length;
+        const auto length = [&device, &device_path,
+            &extra_argument = std::as_const(extra_argument)] {
+            if (const auto volume_length = std::get_if<std::uint64_t>(
+                    &extra_argument)) {
+                return *volume_length;
+            }
+            const auto queried_length = filesystem::QueryDeviceLength(
+                device.get());
+            if (!queried_length) {
+                WinError("failed to query the length of SVI volume '{}'",
+                    std::wstring_view{device_path.native()},
+                    ExplicitWin32Error{queried_length.error()});
+            }
+            return *queried_length;
+        }();
+        return devicefs::vss::BlockOffsetSet(length - 1);
     }();
-    auto block_offsets = devicefs::vss::BlockOffsetSet(length - 1);
+
     // The successful insertion of ranges into `block_offsets` relies on the
     // truth of the following proposition.
     static_assert(decltype(block_offsets)::block_size{} ==

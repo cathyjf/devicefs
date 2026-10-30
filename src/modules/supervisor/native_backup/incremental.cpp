@@ -82,12 +82,9 @@ export [[nodiscard]] auto BuildDirtyBlockMap(
         auto privileges = ProcessPrivilegeEnabler{
             GetCurrentProcess(), std::array{wil::zwstring_view{SE_BACKUP_NAME}},
             "the backup privilege"sv};
-        auto svi_blocks = devicefs::svi::ReadBlockOffsets(
-            baseline_device, volume_length);
-        auto payload_svi_blocks = devicefs::svi::ReadBlockOffsets(
-            payload_device, volume_length);
-        svi_blocks.merge(payload_svi_blocks);
-        return svi_blocks;
+        return devicefs::svi::ReadBlockOffsets(
+            payload_device, devicefs::svi::ReadBlockOffsets(
+                baseline_device, volume_length));
     }();
     const auto svi_block_count = svi_blocks.size();
 

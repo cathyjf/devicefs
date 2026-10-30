@@ -982,11 +982,20 @@ template <bool AsVhdx, bool ExposeKnownDataMap, BlockDevice... SourceTypes>
             VariantBlockDevice<SourceTypes..., MemoryBlockDevice>,
             SourceType>>;
     auto sources = std::views::iota(0uz, options.mappings.size())
-        | std::views::transform([&](const auto i) {
-            return OpenSource<SourceTypes...>(
+        | std::views::transform([&options, &rpc_password](const auto i) {
+            auto source = OpenSource<SourceTypes...>(
                 options.mappings[i], options.extended_dasd,
                 options.cache,
                 i + 1, std::string_view{rpc_password});
+            VisitBlockDevice(source, [](auto &device) static {
+                if constexpr (std::same_as<
+                        std::remove_cvref_t<decltype(device)>,
+                        WindowsBlockDevice<true>>) {
+                    device.allocation_bitmap.ExcludeVssStorage(
+                        device.handle.get(), device.filename);
+                }
+            });
+            return source;
         }) | std::ranges::to<std::vector>();
     if constexpr ((WindowsDevice<SourceTypes> || ...)) {
         // `VhdxViewer::FromBlockDevice` reads NTFS metadata from its source and

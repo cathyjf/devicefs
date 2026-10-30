@@ -159,6 +159,21 @@ struct AllocationBitmap {
         return {BitmapData(), BitmapByteCount()};
     }
 
+    auto ExcludeVssStorage(HANDLE volume,
+        const std::filesystem::path &filename) -> void;
+
+    _Pre_satisfies_((first <= limit) && (limit <= cluster_count))
+    auto MarkClustersFree(const UINT64 first, const UINT64 limit) noexcept
+        -> void {
+        for (auto cluster = first; cluster < limit; ++cluster) {
+            const auto byte =
+                devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                    cluster / kBitsPerByte);
+            storage[kVolumeBitmapHeaderSize + byte] &=
+                ~(1u << (cluster % kBitsPerByte));
+        }
+    }
+
     // Search [first, limit) for an allocated cluster (a set bit) or a free
     // cluster (a clear bit). A `UINT64` result is the first matching index,
     // or `limit` if none exists. A `bool` result reports whether a match

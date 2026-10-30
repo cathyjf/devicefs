@@ -39,10 +39,10 @@ in-range relative offset. File, directory, and named data-stream extents are
 obtained directly from NTFS with FSCTL_GET_RETRIEVAL_POINTERS.
 
 Each large overwrite is sufficient to exercise a chained VSS block list. The
-test also requires every map component to contribute independently and rejects
-a map covering the entire volume. The VHD and snapshots are removed during
-cleanup. Use -KeepArtifactsOnFailure to retain the detached VHD, process logs,
-and descriptor-tool output after a failure.
+test also requires descriptor and allocation-change coverage to contribute
+independently and rejects a map covering the entire volume. The VHD and
+snapshots are removed during cleanup. Use -KeepArtifactsOnFailure to retain
+the detached VHD, process logs, and descriptor-tool output after a failure.
 
 .PARAMETER SupervisorPath
 The `backup-supervisor.exe` to test. Its `--devicefs` mode runs the filesystem,
@@ -1185,11 +1185,10 @@ try {
 
     $descriptor_only = $delta_ab.DescriptorOnly + $delta_bc.DescriptorOnly
     $allocation_only = $delta_ab.AllocationOnly + $delta_bc.AllocationOnly
-    $svi_only = $delta_ab.SviOnly + $delta_bc.SviOnly
     Assert-Condition (
-        ($descriptor_only -ne 0) -and ($allocation_only -ne 0) -and
-            ($svi_only -ne 0)) `
-        'The fixture did not independently exercise every map component.'
+        ($descriptor_only -ne 0) -and ($allocation_only -ne 0)) (
+        'The fixture did not independently exercise descriptor and ' +
+        'allocation-change coverage.')
 
     $forwarder_count = $store_a.ForwarderCount +
         $store_b.ForwarderCount + $store_c.ForwarderCount

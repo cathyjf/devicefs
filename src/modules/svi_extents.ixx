@@ -21,20 +21,16 @@ module;
 export module devicefs.svi_extents;
 
 import std;
+import devicefs.filesystem.ioctl;
 import devicefs.filesystem.mount_manager;
 import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import devicefs.vss_block_descriptors;
 
-// The Windows SDK omits the declaration of `NtQueryInformationFile`.
-extern "C" __declspec(dllimport) auto NTAPI NtQueryInformationFile(
-    HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG,
-    std::underlying_type_t<FILE_INFORMATION_CLASS>) -> NTSTATUS;
+namespace devicefs::svi {
 
-export namespace devicefs::svi {
-
-struct SviExtentsOptions {
+export struct SviExtentsOptions {
     // The requested alignment in bytes; must be nonzero.
     std::uint64_t block_size = devicefs::vss::kBlockSize;
     bool vss_only = false;
@@ -42,9 +38,7 @@ struct SviExtentsOptions {
     bool round_up = true;
 };
 
-} // namespace devicefs::svi
-
-namespace {
+namespace detail {
 
 constexpr auto kShareMode =
     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
@@ -68,11 +62,11 @@ constexpr auto kSecurityFlags =
     const HANDLE device,
     const std::filesystem::path &path) {
     auto ntfs = NTFS_VOLUME_DATA_BUFFER{};
-    auto returned = DWORD{};
-    if (!DeviceIoControl(device, FSCTL_GET_NTFS_VOLUME_DATA, nullptr, 0,
-            &ntfs, sizeof(ntfs), &returned, nullptr)) {
+    if (const auto status = filesystem::Ioctl(
+            device, FSCTL_GET_NTFS_VOLUME_DATA, &ntfs, sizeof(ntfs));
+        status != ERROR_SUCCESS) {
         WinError("FSCTL_GET_NTFS_VOLUME_DATA failed for '{}'",
-            std::wstring_view{path.native()});
+            std::wstring_view{path.native()}, ExplicitWin32Error{status});
     }
     return CompileTimeCast<std::uint64_t>(ntfs.BytesPerCluster);
 }
@@ -258,47 +252,21 @@ private:
     const devicefs::svi::SviExtentsOptions options_;
 };
 
-} // namespace
-
-export namespace devicefs::svi {
+} // namespace detail
 
 // Pass each aligned byte range [first, limit) to `add_range`.
 // Ranges may overlap and are not sorted.
 // `volume_path` may be supplied when the volume's pathname is already known.
-template <class RangeAdder>
+export template <class RangeAdder>
     requires std::invocable<RangeAdder &, std::uint64_t, std::uint64_t>
 auto EnumerateBlockRanges(const HANDLE volume, RangeAdder &&add_range,
     const std::filesystem::path &volume_path = {},
     const SviExtentsOptions options = {}) -> void {
     const auto device_path = volume_path.empty()
         ? devicefs::filesystem::QueryVolumePath(volume) : volume_path;
-    // The cluster-size query uses synchronous I/O. Reopening is needed when
-    // the supplied handle is asynchronous or its I/O mode cannot be determined.
-    const auto synchronous_volume = [volume, &device_path] {
-        auto mode = ULONG{};
-        auto io_status = IO_STATUS_BLOCK{};
-        // The SDK's partial enum omits FileModeInformation (16) from the WDK.
-        constexpr auto kFileModeInformation = 16;
-        const auto status = NtQueryInformationFile(volume, &io_status, &mode,
-            sizeof(mode), kFileModeInformation);
-        if (NT_SUCCESS(status) &&
-            ((mode & (FILE_SYNCHRONOUS_IO_ALERT |
-                FILE_SYNCHRONOUS_IO_NONALERT)) != 0)) {
-            return wil::unique_hfile{};
-        }
-        auto reopened = wil::unique_hfile{ReOpenFile(volume, GENERIC_READ,
-            kShareMode, kSecurityFlags)};
-        if (!reopened) {
-            WinError("failed to reopen SVI volume '{}' for synchronous I/O",
-                std::wstring_view{device_path.native()});
-        }
-        return reopened;
-    }();
-
-    const auto cluster_size = QueryClusterSize(
-        synchronous_volume ? synchronous_volume.get() : volume, device_path);
+    const auto cluster_size = detail::QueryClusterSize(volume, device_path);
     const auto root = device_path / L"System Volume Information";
-    SviExtentReader{cluster_size, add_range, options}.
+    detail::SviExtentReader{cluster_size, add_range, options}.
         ReadTreeBlockOffsets(root);
 }
 
@@ -306,13 +274,13 @@ auto EnumerateBlockRanges(const HANDLE volume, RangeAdder &&add_range,
 // portion of the corresponding region contains SVI data.
 //
 // Precondition: the process has the backup reading privilege.
-[[nodiscard]] auto ReadBlockOffsets(
+export [[nodiscard]] auto ReadBlockOffsets(
     const std::string_view snapshot_device)
     -> devicefs::vss::BlockOffsetSet {
     const auto device_path = std::filesystem::path{snapshot_device};
     auto device = wil::unique_hfile{CreateFileW(
-        device_path.c_str(), GENERIC_READ, kShareMode, nullptr, OPEN_EXISTING,
-        kSecurityFlags, nullptr)};
+        device_path.c_str(), GENERIC_READ, detail::kShareMode, nullptr,
+        OPEN_EXISTING, detail::kSecurityFlags, nullptr)};
     if (!device) {
         WinError("could not open SVI snapshot volume '{}'",
             std::wstring_view{device_path.native()});

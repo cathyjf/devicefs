@@ -23,6 +23,9 @@ module devicefs.windows_block_device;
 import std;
 import devicefs.bitmap_set;
 import devicefs.count_zeros;
+import devicefs.stream_writer;
+import devicefs.svi_extents;
+import devicefs.supervisor.process_privileges;
 import devicefs.terminal.safecast;
 import devicefs.vss_block_descriptors;
 import <devicefs/windows_imports.h>;
@@ -30,6 +33,30 @@ import <devicefs/windows_imports.h>;
 namespace devicefs {
 
 using namespace std::string_view_literals;
+
+auto filesystem_internal::AllocationBitmap::ExcludeVssStorage(
+    const HANDLE volume, const std::filesystem::path &filename) -> void {
+    try {
+        const auto privileges = ProcessPrivilegeEnabler{
+            GetCurrentProcess(),
+            std::array{wil::zwstring_view{SE_BACKUP_NAME}},
+            "the backup privilege"sv};
+        devicefs::svi::EnumerateBlockRanges(volume,
+            [this](const auto first, const auto limit) {
+                MarkClustersFree(first >> cluster_shift,
+                    limit >> cluster_shift);
+            }, {}, {
+                .block_size = cluster_size,
+                .vss_only = true,
+                .round_up = false,
+            });
+    } catch (const std::exception &error) {
+        devicefs::WriteToStream(devicefs::stderr,
+            L"devicefs: failed to finish excluding VSS storage "
+            L"from '{}': {}; continuing anyway\n",
+            std::wstring_view{filename.native()}, &error);
+    }
+}
 
 struct SnapshotAllocationBitmap::State {
     std::uint64_t volume_size;

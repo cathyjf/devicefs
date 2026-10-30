@@ -21,17 +21,34 @@ runs:
         SOURCE_PATH: ${{ inputs.path }}
         PRESET: ${{ inputs.preset }}
       run: |
-        [[ $(uname) == 'Darwin' ]] || {
+        use_sudo=0
+        if [[ $(uname) == 'Darwin' ]]; then
+          if [[ $PRESET == 'release' ]]; then
+            # On the GitHub macOS runner, opening a newly-mounted volume as
+            # the ordinary runner user occasionally fails with an access denied
+            # error. The explanation for this is unknown because the ordinary
+            # runner user should have already been granted permission by the
+            # Disk Arbitration daemon before this opening occurs. To attempt to
+            # work around this apparent defect in the GitHub runner environment,
+            # we will use root to run the test that requires mounting a volume.
+            use_sudo=1
+          fi
+        else
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-          [[ $PRESET != 'unix' ]] || {
+          if [[ $PRESET == 'unix' ]]; then
             llvm_dir=$(brew --prefix llvm)
             export LDFLAGS=-L${llvm_dir}/lib
             export LD_LIBRARY_PATH=${llvm_dir}/lib:$LD_LIBRARY_PATH
-          }
-        }
+          fi
+        fi
         build_dir=$(mktemp -d "${RUNNER_TEMP}/${PRESET}.XXXXXX")
         cmake -B "$build_dir" -S "$SOURCE_PATH" --preset "$PRESET"
         cmake --build "$build_dir" --preset "$PRESET"
-        ctest --test-dir "$build_dir" \
+        ctest_argv=(ctest --test-dir "$build_dir" \
           --presets-file "${SOURCE_PATH}/CMakePresets.json" \
-          --preset "$PRESET"
+          --preset "$PRESET")
+        if [[ $use_sudo -eq 0 ]]; then
+          "${ctest_argv[@]}"
+        else
+          sudo -E -- "${ctest_argv[@]}"
+        fi

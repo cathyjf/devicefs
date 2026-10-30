@@ -201,6 +201,7 @@ public:
     using key_type = std::uint64_t;
     using value_type = key_type;
     using size_type = std::uint64_t;
+    using block_size = std::integral_constant<decltype(BlockSize), BlockSize>;
 
     BitmapSet() = default;
 

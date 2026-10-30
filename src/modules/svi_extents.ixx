@@ -32,6 +32,18 @@ extern "C" __declspec(dllimport) auto NTAPI NtQueryInformationFile(
     HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG,
     std::underlying_type_t<FILE_INFORMATION_CLASS>) -> NTSTATUS;
 
+export namespace devicefs::svi {
+
+struct SviExtentsOptions {
+    // The requested alignment in bytes; must be nonzero.
+    std::uint64_t block_size = devicefs::vss::kBlockSize;
+    bool vss_only = false;
+    // If false, retain only aligned blocks wholly contained in an extent.
+    bool round_up = true;
+};
+
+} // namespace devicefs::svi
+
 namespace {
 
 constexpr auto kShareMode =
@@ -76,15 +88,29 @@ auto ThrowIfFileInfoFailed(
         ExplicitHresult{result});
 }
 
+[[nodiscard]] constexpr auto IsVssStorageFile(const std::wstring_view name)
+    noexcept -> bool {
+    // VSS uses this GUID for its control file and as the suffix of each
+    // shadow-copy storage filename.
+    return name.ends_with(L"{3808876b-c176-4e48-b7ae-04046e6cc752}");
+}
+
+template <class RangeAdder>
 class SviExtentReader {
 public:
     SviExtentReader(
         const std::uint64_t cluster_size,
-        devicefs::vss::BlockOffsetSet &block_offsets) noexcept
-        : cluster_size_{cluster_size}, block_offsets_{block_offsets} {}
+        RangeAdder &add_range,
+        const devicefs::svi::SviExtentsOptions options) noexcept
+        : cluster_size_{cluster_size}, add_range_{add_range},
+          options_{options} {}
 
     auto ReadTreeBlockOffsets(const std::filesystem::path &root) -> void {
         auto root_handle = OpenObject(root);
+        if (options_.vss_only) {
+            EnumerateDirectory(root, root_handle.get());
+            return;
+        }
         auto attributes = FILE_ATTRIBUTE_TAG_INFO{};
         ThrowIfFileInfoFailed(
             wil::GetFileInfoNoThrow<FileAttributeTagInfo>(
@@ -100,12 +126,15 @@ private:
         const auto start = starting_cluster * cluster_size_;
         const auto end =
             start + (cluster_count * cluster_size_);
-        const auto first_block = start / devicefs::vss::kBlockSize;
-        const auto past_last_block =
-            ((end - 1) / devicefs::vss::kBlockSize) + 1;
-        block_offsets_.insert_range(
-            first_block * devicefs::vss::kBlockSize,
-            past_last_block * devicefs::vss::kBlockSize);
+        const auto block_size = options_.block_size;
+        const auto first_block = start / block_size +
+            (!options_.round_up && ((start % block_size) != 0));
+        const auto past_last_block = end / block_size +
+            (options_.round_up && ((end % block_size) != 0));
+        if (first_block < past_last_block) {
+            std::invoke(add_range_, first_block * block_size,
+                past_last_block * block_size);
+        }
     }
 
     auto ReadExtents(
@@ -199,6 +228,12 @@ private:
                     continue;
                 }
 
+                if (options_.vss_only &&
+                    (((entry.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) ||
+                        !IsVssStorageFile(name))) {
+                    continue;
+                }
+
                 const auto child_path = path / name;
                 auto child = OpenObject(child_path);
                 ReadObject(child_path, entry.FileAttributes, child.get());
@@ -219,18 +254,22 @@ private:
     }
 
     const std::uint64_t cluster_size_;
-    devicefs::vss::BlockOffsetSet &block_offsets_;
+    RangeAdder &add_range_;
+    const devicefs::svi::SviExtentsOptions options_;
 };
 
 } // namespace
 
 export namespace devicefs::svi {
 
-// Return the 16-KiB block offsets for System Volume Information extents.
+// Pass each aligned byte range [first, limit) to `add_range`.
+// Ranges may overlap and are not sorted.
 // `volume_path` may be supplied when the volume's pathname is already known.
-[[nodiscard]] auto ReadBlockOffsets(const HANDLE volume,
-    const std::filesystem::path &volume_path = {})
-    -> devicefs::vss::BlockOffsetSet {
+template <class RangeAdder>
+    requires std::invocable<RangeAdder &, std::uint64_t, std::uint64_t>
+auto EnumerateBlockRanges(const HANDLE volume, RangeAdder &&add_range,
+    const std::filesystem::path &volume_path = {},
+    const SviExtentsOptions options = {}) -> void {
     const auto device_path = volume_path.empty()
         ? devicefs::QueryVolumePath(volume) : volume_path;
     // The cluster-size query uses synchronous I/O. Reopening is needed when
@@ -259,17 +298,14 @@ export namespace devicefs::svi {
     const auto cluster_size = QueryClusterSize(
         synchronous_volume ? synchronous_volume.get() : volume, device_path);
     const auto root = device_path / L"System Volume Information";
-    auto block_offsets = devicefs::vss::BlockOffsetSet{};
-    SviExtentReader{cluster_size, block_offsets}.ReadTreeBlockOffsets(root);
-    return block_offsets;
+    SviExtentReader{cluster_size, add_range, options}.
+        ReadTreeBlockOffsets(root);
 }
 
-// Open the snapshot volume named by the path `snapshot_device` and walk its
-// System Volume Information directory, including named streams. The result
-// contains volume-relative byte offsets of VSS blocks intersecting allocated
-// extents. The function measures reparse objects themselves without following
-// directory reparse targets. It opens objects with backup semantics using the
-// caller's enabled privileges.
+// Return a bitmap of SVI extent data. A set bit indicates that at least some
+// portion of the corresponding region contains SVI data.
+//
+// Precondition: the process has the backup reading privilege.
 [[nodiscard]] auto ReadBlockOffsets(
     const std::string_view snapshot_device)
     -> devicefs::vss::BlockOffsetSet {
@@ -282,7 +318,17 @@ export namespace devicefs::svi {
             std::wstring_view{device_path.native()});
     }
 
-    return ReadBlockOffsets(device.get(), device_path);
+    auto block_offsets = devicefs::vss::BlockOffsetSet{};
+    // The successful insertion of ranges into `block_offsets` relies on the
+    // truth of the following proposition.
+    static_assert(decltype(block_offsets)::block_size{} ==
+        SviExtentsOptions{}.block_size);
+
+    EnumerateBlockRanges(device.get(),
+        [&block_offsets](const auto first, const auto limit) {
+            block_offsets.insert_range(first, limit);
+        }, device_path);
+    return block_offsets;
 }
 
 } // namespace devicefs::svi

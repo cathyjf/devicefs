@@ -129,17 +129,24 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
     -> PreparedDirtyMaps {
     const auto previous = [cancellation_event, &namespace_override]
         -> std::optional<PreviousBackupManifestResult::SnapshotManifest> {
+        using write_error = decltype([](const auto &error) static {
+            TryWriteNonFatalError(
+                "unable to prepare dirty maps because of a failure while "
+                "retrieving or parsing the previous backup manifest", error);
+        });
         try {
             const auto result = RetrieveBackupManifest(
                 cancellation_event, namespace_override, std::nullopt, true);
-            if (result.exit_code != 0) {
+            if (result.exit_code != EXIT_SUCCESS) {
+                write_error::operator()(TryConstructWinError(
+                    "the manifest retrieval process terminated with a nonzero "
+                    "exit status: {}", result.exit_code,
+                    ExplicitWin32Error{ERROR_CAN_NOT_COMPLETE}));
                 return std::nullopt;
             }
             return result.ParseManifest();
         } catch (const std::runtime_error &error) {
-            TryWriteNonFatalError(
-                "unable to prepare dirty maps because of a failure while "
-                "retrieving or parsing the previous backup manifest", error);
+            write_error::operator()(error);
             return std::nullopt;
         }
     }();

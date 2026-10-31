@@ -29,6 +29,7 @@ export import :manifest;
 import :pbs;
 import :production_incremental;
 import <devicefs/common.h>;
+import devicefs.filesystem.ioctl;
 import devicefs.filesystem.mount_manager;
 import devicefs.file_reader;
 import devicefs.guid_formatter;
@@ -128,24 +129,40 @@ export [[nodiscard]] auto RunSelectiveView(
 
 namespace internal {
 
-[[nodiscard]] auto QuerySnapshotMountManagerIds(
+[[nodiscard]] auto QuerySnapshotManifestVolumeMetadata(
     const std::span<const devicefs::vshadow::Snapshot> snapshots,
     const SnapshotHandles &snapshot_handles) {
-    auto mount_manager_ids = std::map<GUID, std::vector<BYTE>, GuidLess>{};
+    auto metadata_map = ManifestVolumeMetadataMap{};
     for (const auto &snapshot : snapshots) {
-        auto result = devicefs::filesystem::QueryMountManagerId(
-            snapshot_handles.at(snapshot.identifier).get());
-        if (result) {
-            mount_manager_ids.emplace(snapshot.identifier, std::move(*result));
-            continue;
-        }
-        devicefs::WriteToStream(devicefs::stderr,
-            "backup-supervisor: {}.\n",
-            TryConstructWinError("failed to retrieve the mount manager ID "
-                "for snapshot device '{}'; continuing anyway", snapshot.device,
-                ExplicitWin32Error{result.error()}));
+        const auto get_metadata = [
+            handle = snapshot_handles.at(snapshot.identifier).get(),
+            device_name = std::basic_string_view{snapshot.device}]
+            <auto function>(const auto description) {
+            auto result = std::invoke(function, handle);
+            using ReturnType =
+                std::optional<typename decltype(result)::value_type>;
+            if (result) {
+                return ReturnType{std::move(*result)};
+            }
+            TryWriteNonFatalError("failed to collect snapshot metadata",
+                TryConstructWinError(
+                    "failed to retrieve the {} for snapshot device '{}'",
+                    description, device_name,
+                    ExplicitWin32Error{result.error()}));
+            return ReturnType{};
+        };
+        metadata_map.emplace(snapshot.identifier, ManifestVolumeMetadata{
+            .mount_manager_id =
+                get_metadata.template operator()<
+                    devicefs::filesystem::QueryMountManagerId>(
+                        "mount manager ID"sv),
+            .file_system =
+                get_metadata.template operator()<
+                    devicefs::filesystem::QueryVolumeFileSystem>(
+                        "file system format"sv),
+        });
     }
-    return mount_manager_ids;
+    return metadata_map;
 }
 
 [[nodiscard]] auto RunSnapshotBackup(
@@ -215,7 +232,7 @@ namespace internal {
             .snapshot_manifest = [&snapshot_set, &snapshot_handles](
                 const std::string_view layer) {
                 return SerializeSnapshotManifest(
-                    snapshot_set, QuerySnapshotMountManagerIds(
+                    snapshot_set, QuerySnapshotManifestVolumeMetadata(
                         snapshot_set.snapshots, snapshot_handles), layer);
             },
             .send_encryption_key = true,

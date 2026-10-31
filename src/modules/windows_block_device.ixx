@@ -750,36 +750,26 @@ using filesystem::Ioctl;
     const std::filesystem::path &filename,
     const std::string_view description) -> AllocationBitmap {
     const auto file_system = [device, &filename, description] {
-        auto file_system = std::array<wchar_t, MAX_PATH + 1>{};
-        if (!GetVolumeInformationByHandleW(device, nullptr, 0, nullptr, nullptr,
-            nullptr, file_system.data(),
-            CompileTimeCast<DWORD, std::size(file_system)>())) {
-            WinError("failed to identify the filesystem for '{}' ({})",
-                std::wstring_view{filename.native()}, description);
+        auto file_system_ = filesystem::QueryVolumeFileSystem(device);
+        if (!file_system_) {
+            WinError("error occurred while attempting to load an allocation "
+                "bitmap: failed to identify the filesystem for '{}' ({})",
+                std::wstring_view{filename.native()}, description,
+                ExplicitWin32Error{file_system_.error()});
         }
-        return file_system;
+        return std::move(*file_system_);
     }();
-    // `GetDiskSpaceInformationW` returns `STATUS_INVALID_PARAMETER` for the
-    // read-only ReFS test volumes. The filesystem-specific control codes
-    // successfully return their cluster counts and sizes through the volume handle.
-    const auto query_geometry = [device, &filename,
-        file_system_ = std::wstring_view{file_system.data()}, description](
-        auto volume, const DWORD code) {
-        const auto error = Ioctl(device, code, &volume, sizeof(volume));
-        if (error != ERROR_SUCCESS) {
-            WinError("querying the {} volume data failed for '{}' ({})",
-                file_system_, std::wstring_view{filename.native()}, description,
-                ExplicitWin32Error{error});
+    const auto [cluster_count, cluster_size] = [device, &filename,
+        file_system_ = std::wstring_view{file_system}, description] {
+        const auto geometry = filesystem::QueryVolumeGeometry(
+            device, file_system_);
+        if (!geometry) {
+            WinError("failed to query the {} volume data for '{}' ({})",
+                file_system_, std::wstring_view{filename.native()},
+                description, ExplicitWin32Error{geometry.error()});
         }
-        return std::pair{
-            devicefs::terminal::FailFastCast<UINT64>(
-                volume.TotalClusters.QuadPart),
-            volume.BytesPerCluster};
-    };
-    const auto [cluster_count, cluster_size] =
-        (std::wstring_view{file_system.data()} == L"ReFS")
-        ? query_geometry(REFS_VOLUME_DATA_BUFFER{}, FSCTL_GET_REFS_VOLUME_DATA)
-        : query_geometry(NTFS_VOLUME_DATA_BUFFER{}, FSCTL_GET_NTFS_VOLUME_DATA);
+        return *geometry;
+    }();
 
     // The bitmap is applied directly to device offsets, so LCN 0 must begin at byte 0.
     {

@@ -72,4 +72,62 @@ __pragma(warning(pop))
     return terminal::FailFastCast<std::uint64_t>(length.Length.QuadPart);
 }
 
+[[nodiscard]] auto QueryVolumeFileSystem(const HANDLE device)
+    -> std::expected<std::wstring, DWORD> {
+    // The documentation for `GetVolumeInformationByHandleW` specifies that the
+    // maximum buffer size for a filesystem is `MAX_PATH + 1` characters but the
+    // documentation does not specify whether the function writes a null
+    // terminator into the buffer.
+    constexpr auto buffer_length = MAX_PATH + 1;
+    auto buffer = std::wstring(buffer_length, L'\0');
+    if (!GetVolumeInformationByHandleW(device, nullptr, 0, nullptr, nullptr,
+            nullptr, buffer.data(), buffer_length)) {
+        return std::unexpected{GetLastError()};
+    }
+    // Remove any suffix starting with the first null character.
+    buffer.erase(std::ranges::find(buffer, L'\0'), buffer.end());
+    return buffer;
+}
+
+namespace detail {
+
+using GeometryType = std::expected<std::pair<UINT64, DWORD>, DWORD>;
+
+template <class Buffer, auto Code>
+auto QueryVolumeGeometry(const HANDLE device) -> GeometryType {
+    // We use `Ioctl` rather than `GetDiskSpaceInformationW` because
+    // `GetDiskSpaceInformationW` has been observed to fail for ReFS volumes.
+    auto volume = Buffer{};
+    if (const auto status = Ioctl(device, Code, &volume, sizeof(volume));
+        status != ERROR_SUCCESS) {
+        return std::unexpected{status};
+    }
+    return std::pair{
+        devicefs::terminal::FailFastCast<UINT64>(
+            volume.TotalClusters.QuadPart),
+        volume.BytesPerCluster};
+}
+
+} // namespace detail
+
+auto QueryVolumeGeometry(const HANDLE device,
+    const std::optional<std::wstring_view> file_system = {})
+    -> detail::GeometryType {
+    if (!file_system) {
+        const auto file_system_ = QueryVolumeFileSystem(device);
+        if (!file_system_) {
+            return std::unexpected{file_system_.error()};
+        }
+        return QueryVolumeGeometry(device, *file_system_);
+    }
+    if (file_system == L"ReFS") {
+        return detail::QueryVolumeGeometry<
+            REFS_VOLUME_DATA_BUFFER, FSCTL_GET_REFS_VOLUME_DATA>(device);
+    }
+    // Filesystems other than ReFs are assumed to be NTFS.
+    // If that assumption is wrong, this call will naturally fail.
+    return detail::QueryVolumeGeometry<
+        NTFS_VOLUME_DATA_BUFFER, FSCTL_GET_NTFS_VOLUME_DATA>(device);
+}
+
 } // namespace devicefs::filesystem

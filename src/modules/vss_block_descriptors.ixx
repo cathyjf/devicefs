@@ -380,32 +380,26 @@ public:
             ThrowOffsetError("a VSS metadata read was out of bounds",
                 offset, Size, size_);
         }
-        if (sector_size_ != 0) {
-            return std::span<const std::byte, Size>{
-                ReadRawExact(offset, Size), Size};
-        }
-
-        Seek(offset);
         return std::span<const std::byte, Size>{
-            ReadCurrentExact(offset, Size), Size};
+            (sector_size_ != 0) ? ReadRawExact(offset, Size) :
+                ReadExact(offset, Size), Size};
     }
 
 private:
-    void Seek(const std::uint64_t offset) const {
-        const auto position = LARGE_INTEGER{
-            .QuadPart = devicefs::terminal::FailFastCast<LONGLONG>(offset),
-        };
-        if (!SetFilePointerEx(handle_.get(), position, nullptr, FILE_BEGIN)) {
-            WinError("could not seek to VSS metadata at offset 0x{:x}", offset);
-        }
-    }
-
-    auto ReadCurrentExact(const std::uint64_t offset,
+    auto ReadExact(const std::uint64_t offset,
         const DWORD requested) const -> const std::byte * {
+        // Supplying the offset here avoids a separate seek. Because the handle
+        // is synchronous, the `ReadFile` call still waits for the read to
+        // complete (or fail) before returning.
+        const auto parts = ULARGE_INTEGER{.QuadPart = offset};
+        auto operation = OVERLAPPED{
+            .Offset = parts.LowPart,
+            .OffsetHigh = parts.HighPart,
+        };
         auto completed = DWORD{};
         if (!ReadFile(handle_.get(), buffer_.get(), requested,
-                &completed, nullptr)) {
-            WinError("could not read VSS metadata at offset 0x{:x}", offset);
+                &completed, &operation)) {
+            WinError("failed to read VSS metadata at offset 0x{:x}", offset);
         }
         if (completed != requested) {
             ThrowOffsetError("a VSS metadata read completed short",
@@ -422,27 +416,9 @@ private:
         if (const auto remainder = end % sector_size_; remainder != 0) {
             raw_end += sector_size_ - remainder;
         }
-        const auto raw_size = [raw_size_ = raw_end - raw_offset, &raw_offset,
-            &size_ = std::as_const(size_)] {
-            /* [[indeterminate]] */ DWORD output;
-            if (!devicefs::terminal::TryCast(raw_size_, output)) {
-                ThrowOffsetError("an aligned VSS metadata read was too large",
-                    raw_offset, raw_size_, size_);
-            }
-            return output;
-        }();
-        Seek(raw_offset);
-        auto completed = DWORD{};
-        if (!ReadFile(handle_.get(), buffer_.get(), raw_size,
-                &completed, nullptr)) {
-            WinError("failed to read aligned VSS metadata at offset 0x{:x}",
-                raw_offset);
-        }
-        if (completed != raw_size) {
-            ThrowOffsetError("an aligned VSS metadata read completed short",
-                raw_offset, raw_size, size_);
-        }
-        return buffer_.get() + (offset - raw_offset);
+        const auto raw_size =
+            devicefs::terminal::FailFastCast<DWORD>(raw_end - raw_offset);
+        return ReadExact(raw_offset, raw_size) + (offset - raw_offset);
     }
 
     wil::unique_hfile handle_;

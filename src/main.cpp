@@ -15,8 +15,9 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import std;
-import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import <devicefs/malloca.h>;
+import <devicefs/windows_imports.h>;
 import devicefs.stream_writer;
 import devicefs.terminal.transcoding;
 
@@ -46,10 +47,18 @@ auto main(
     }
     try {
         HardenProcess();
-        const auto arguments =
-            std::span{argv, argv + argc} |
-            std::ranges::to<std::vector<std::string_view>>();
-        return BackupSupervisorMain(std::span{arguments}.subspan(1));
+
+        const auto length = argc - 1uz;
+        const auto string_views = NEW_MALLOCA_BUFFER(
+            std::string_view, length);
+        if (!string_views) {
+            throw std::bad_alloc{};
+        }
+        const auto *argv_cursor = argv + 1;
+        for (auto i = 0uz; i < length; ++i) {
+            ::new (string_views.get() + i) std::string_view{*argv_cursor++};
+        }
+        return BackupSupervisorMain(std::span{string_views.get(), length});
     } catch (const std::exception &error) {
         const auto argv0_basename = [argv0 = argv[0]] noexcept
             -> std::string {

@@ -43,6 +43,14 @@ struct NamedFile {
     wil::unique_hfile handle;
 };
 
+struct ManifestVolumeMetadata {
+    std::optional<std::vector<BYTE>> mount_manager_id;
+    std::optional<std::wstring> file_system;
+};
+
+using ManifestVolumeMetadataMap =
+    std::map<GUID, ManifestVolumeMetadata, GuidLess>;
+
 template <typename Operation>
 [[nodiscard]] auto RunVssOperation(
     const HANDLE cancellation_event,

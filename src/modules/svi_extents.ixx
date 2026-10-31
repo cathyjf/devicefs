@@ -61,27 +61,10 @@ constexpr auto kSecurityFlags =
             FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
         nullptr)};
     if (!result) {
-        WinError("could not open System Volume Information object '{}'",
+        WinError("failed to open System Volume Information object '{}'",
             std::wstring_view{path.native()});
     }
     return result;
-}
-
-// This function duplicates code from `windows_block_device.ixx`, and the
-// version there is better because it also supports ReFS.
-//
-// TODO: Fix the duplication.
-[[nodiscard]] auto QueryClusterSize(
-    const HANDLE device,
-    const std::filesystem::path &path) {
-    auto ntfs = NTFS_VOLUME_DATA_BUFFER{};
-    if (const auto status = filesystem::Ioctl(
-            device, FSCTL_GET_NTFS_VOLUME_DATA, &ntfs, sizeof(ntfs));
-        status != ERROR_SUCCESS) {
-        WinError("FSCTL_GET_NTFS_VOLUME_DATA failed for '{}'",
-            std::wstring_view{path.native()}, ExplicitWin32Error{status});
-    }
-    return CompileTimeCast<std::uint64_t>(ntfs.BytesPerCluster);
 }
 
 auto ThrowIfFileInfoFailed(
@@ -122,7 +105,7 @@ public:
         ThrowIfFileInfoFailed(
             wil::GetFileInfoNoThrow<FileAttributeTagInfo>(
                 root_handle.get(), &attributes),
-            "could not query System Volume Information attributes", root);
+            "failed to query System Volume Information attributes", root);
         ReadObject(root, attributes.FileAttributes, root_handle.get());
     }
 
@@ -164,7 +147,7 @@ private:
             }
             if (!completed && (error != ERROR_MORE_DATA)) {
                 WinError(
-                    "could not retrieve System Volume Information extents for '{}'",
+                    "failed to retrieve System Volume Information extents for '{}'",
                     std::wstring_view{path.native()},
                     ExplicitWin32Error{error});
             }
@@ -191,7 +174,7 @@ private:
         auto streams = wistd::unique_ptr<FILE_STREAM_INFO>{};
         ThrowIfFileInfoFailed(
             wil::GetFileInfoNoThrow<FileStreamInfo>(object, streams),
-            "could not enumerate System Volume Information streams", path);
+            "failed to enumerate System Volume Information streams", path);
         for (const auto &stream :
             wil::create_next_entry_offset_iterator(streams.get())) {
             const auto name = std::wstring_view{
@@ -219,7 +202,7 @@ private:
             ThrowIfFileInfoFailed(
                 wil::GetFileInfoNoThrow<FileFullDirectoryInfo>(
                     directory, entries),
-                "could not enumerate System Volume Information", path);
+                "failed to enumerate System Volume Information", path);
             if (!entries) {
                 return;
             }
@@ -277,11 +260,20 @@ auto EnumerateBlockRanges(const HANDLE volume, RangeAdder &&add_range,
     const SviExtentsOptions options = {}) -> void {
     const auto device_path = volume_path.empty()
         ? devicefs::filesystem::QueryVolumePath(volume) : volume_path;
-    const auto cluster_size = [&options, volume, &device_path] {
+    const auto cluster_size = [&options, volume, &device_path]
+        -> std::uint64_t {
         if (options.cluster_size) {
             return *options.cluster_size;
         }
-        return detail::QueryClusterSize(volume, device_path);
+        const auto geometry = filesystem::QueryVolumeGeometry(volume);
+        if (!geometry) {
+            WinError("error occurred while attempting to enumerate SVI "
+                "extents: failed to query the geometry for volume '{}'",
+                std::wstring_view{device_path.native()},
+                ExplicitWin32Error{geometry.error()});
+        }
+        const auto [_, cluster_size] = *geometry;
+        return cluster_size;
     }();
     const auto root = device_path / L"System Volume Information";
     detail::SviExtentReader{cluster_size, add_range, options}.
@@ -306,7 +298,7 @@ export [[nodiscard]] auto ReadBlockOffsets(
         device_path.c_str(), GENERIC_READ, detail::kShareMode, nullptr,
         OPEN_EXISTING, detail::kSecurityFlags, nullptr)};
     if (!device) {
-        WinError("could not open SVI snapshot volume '{}'",
+        WinError("failed to open SVI snapshot volume '{}'",
             std::wstring_view{device_path.native()});
     }
 

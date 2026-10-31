@@ -130,16 +130,24 @@ private:
     auto ReadExtents(
         const std::filesystem::path &path,
         const HANDLE object) -> void {
+        using Output = RETRIEVAL_POINTERS_BUFFER;
+        using Extent = std::remove_extent_t<decltype(Output::Extents)>;
+        constexpr auto kExtentCapacity = std::size_t{128};
+        constexpr auto kOutputSize = offsetof(Output, Extents) +
+            kExtentCapacity * sizeof(Extent);
+        __pragma(warning(suppress : 26494, justification :
+            "The array `output` is intentionally uninitialized."))
+        alignas(Output) /* [[indeterminate]] */
+            std::array<std::byte, kOutputSize> output;
         auto starting_vcn = LARGE_INTEGER{};
         while (true) {
             auto input = STARTING_VCN_INPUT_BUFFER{
                 .StartingVcn = starting_vcn,
             };
-            auto output = RETRIEVAL_POINTERS_BUFFER{};
             auto returned = DWORD{};
             const auto completed = DeviceIoControl(object,
                 FSCTL_GET_RETRIEVAL_POINTERS,
-                &input, sizeof(input), &output, sizeof(output),
+                &input, sizeof(input), output.data(), sizeof(output),
                 &returned, nullptr);
             const auto error = completed ? DWORD{ERROR_SUCCESS} : GetLastError();
             if (!completed && (error == ERROR_HANDLE_EOF)) {
@@ -151,20 +159,28 @@ private:
                     std::wstring_view{path.native()},
                     ExplicitWin32Error{error});
             }
-            const auto current_vcn = output.StartingVcn.QuadPart;
-            const auto next_vcn = output.Extents[0].NextVcn.QuadPart;
-            const auto lcn = output.Extents[0].Lcn.QuadPart;
-            if (lcn >= 0) {
-                AddRange(
-                    devicefs::terminal::FailFastCast<std::uint64_t>(lcn),
-                    devicefs::terminal::FailFastCast<std::uint64_t>(
-                        next_vcn - current_vcn));
+            const auto *const header =
+                std::start_lifetime_as<Output>(output.data());
+            auto current_vcn = header->StartingVcn.QuadPart;
+            const auto extent_count = header->ExtentCount;
+            const auto extents = std::span{
+                std::start_lifetime_as_array<Extent>(
+                    output.data() + offsetof(Output, Extents), extent_count),
+                extent_count};
+            for (const auto &extent : extents) {
+                if (extent.Lcn.QuadPart >= 0) {
+                    AddRange(
+                        devicefs::terminal::FailFastCast<std::uint64_t>(
+                            extent.Lcn.QuadPart),
+                        devicefs::terminal::FailFastCast<std::uint64_t>(
+                            extent.NextVcn.QuadPart - current_vcn));
+                }
+                current_vcn = extent.NextVcn.QuadPart;
             }
-
             if (completed) {
                 return;
             }
-            starting_vcn = output.Extents[0].NextVcn;
+            starting_vcn.QuadPart = current_vcn;
         }
     }
 

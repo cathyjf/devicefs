@@ -809,15 +809,11 @@ using filesystem::Ioctl;
     }();
 
     auto storage = std::make_unique_for_overwrite<BYTE[]>(output_size_for_api);
-    [[gsl::suppress("26403",
-        justification:
-            "The pointer `output` is not the owner of the memory to which it "
-            "points. The owner is `storage`, which is a smart pointer.")]]
-    auto *const output = ::new (storage.get()) VOLUME_BITMAP_BUFFER;
-    auto input = STARTING_LCN_INPUT_BUFFER{.StartingLcn = {.QuadPart = 0}};
+    auto &output = *::new (storage.get()) VOLUME_BITMAP_BUFFER;
+    auto input = STARTING_LCN_INPUT_BUFFER{};
     auto returned = DWORD{};
     const auto bitmap_error = Ioctl(device, FSCTL_GET_VOLUME_BITMAP,
-        output, output_size_for_api, &input, sizeof(input), &returned);
+        &output, output_size_for_api, &input, sizeof(input), &returned);
     // Only the bitmap prefix covering this image is needed. `ERROR_MORE_DATA`
     // is acceptable when that entire prefix was returned; additional bits
     // describe clusters beyond the volume geometry and are never consulted.
@@ -826,8 +822,8 @@ using filesystem::Ioctl;
             std::wstring_view{filename.native()}, description,
             ExplicitWin32Error{bitmap_error});
     }
-    if ((returned < bitmap_data_size) || (output->StartingLcn.QuadPart != 0) ||
-        std::cmp_less(output->BitmapSize.QuadPart, cluster_count)) {
+    if ((returned < bitmap_data_size) || (output.StartingLcn.QuadPart != 0) ||
+        std::cmp_less(output.BitmapSize.QuadPart, cluster_count)) {
         throw std::runtime_error(std::format(
             "FSCTL_GET_VOLUME_BITMAP returned incomplete data for '{}' ({})",
             Transcode<std::string>(filename.native()), description));

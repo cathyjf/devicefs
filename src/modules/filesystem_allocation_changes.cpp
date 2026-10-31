@@ -161,16 +161,17 @@ auto ReadAllocationChangeBlocks(
     auto block_offsets = BitmapSet<BlockSize>(previous_size - 1);
     auto range_first = std::uint64_t{};
     auto range_limit = std::uint64_t{};
-    const auto add_cluster = [&block_offsets, &range_first, &range_limit,
-        cluster_size = previous_bitmap.cluster_size](const std::uint64_t cluster) {
-        const auto start = cluster * cluster_size;
-        const auto end = start + cluster_size;
+    const auto add_cluster_range = [&block_offsets, &range_first, &range_limit,
+        cluster_size = previous_bitmap.cluster_size](
+        const std::uint64_t first_cluster, const std::uint64_t limit_cluster) {
+        const auto start = first_cluster * cluster_size;
+        const auto end = limit_cluster * cluster_size;
         const auto first_block = start / BlockSize;
         const auto past_last_block = ((end - 1) / BlockSize) + 1;
         const auto first = first_block * BlockSize;
         const auto limit = past_last_block * BlockSize;
-        // Clusters arrive in increasing order. Overlapping or adjacent block
-        // ranges therefore need only one insertion, even across bitmap words.
+        // Cluster ranges arrive in increasing order. Overlapping or adjacent
+        // block ranges need only one insertion, even across bitmap words.
         if (first > range_limit) {
             block_offsets.insert_range(range_first, range_limit);
             range_first = first;
@@ -195,16 +196,26 @@ auto ReadAllocationChangeBlocks(
                     std::ranges::distance(remaining.begin(), mismatch.in1));
             continue;
         }
+        const auto word_first_cluster =
+            devicefs::terminal::FailFastMaybeCast<std::uint64_t>(byte_index) *
+                filesystem_internal::kBitsPerByte;
         while (changed != 0) {
-            const auto cluster =
-                devicefs::terminal::FailFastMaybeCast<std::uint64_t>(
-                    byte_index) * filesystem_internal::kBitsPerByte +
-                CountTrailingZeros(changed);
-            if (cluster >= previous_bitmap.cluster_count) {
+            const auto first_bit = CountTrailingZeros(changed);
+            const auto first_cluster = word_first_cluster + first_bit;
+            if (first_cluster >= previous_bitmap.cluster_count) {
                 break;
             }
-            add_cluster(cluster);
-            changed &= changed - 1;
+            // Adding at the first set bit carries through its run of ones.
+            // The lowest set bit of `after_run` is the run's limit, or the
+            // addition wraps to zero if the run reaches the end of the word.
+            const auto after_run = changed + (std::uint64_t{1} << first_bit);
+            const auto limit_bit = (after_run == 0)
+                ? std::numeric_limits<decltype(changed)>::digits
+                : CountTrailingZeros(after_run);
+            add_cluster_range(first_cluster,
+                std::min(word_first_cluster + limit_bit,
+                    previous_bitmap.cluster_count));
+            changed &= after_run;
         }
         byte_index = next_byte;
     }

@@ -3,18 +3,72 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Security;
+using System.Threading;
 
 namespace DeviceFs.Tests;
 
 public static class DiskArbitration {
     private sealed class MediaHandle : SafeHandle {
-        public MediaHandle(string bsdName) : base(IntPtr.Zero, true) {
-            SetHandle((IntPtr)IOServiceGetMatchingService(0,
-                IOBSDNameMatching(0, 0, bsdName)));
+        private readonly string description;
+
+        public MediaHandle(string bsdName) : this(
+            IOBSDNameMatching(0, 0, bsdName), $"BSD name '{bsdName}'") {
             if (IsInvalid) {
                 throw new InvalidOperationException(
-                    $"failed to find IOMedia for '{bsdName}'");
+                    $"failed to find IOMedia for {description}");
+            }
+        }
+
+        private MediaHandle(IntPtr matching, string description)
+            : base(IntPtr.Zero, true) {
+            this.description = description;
+            if (matching == IntPtr.Zero) {
+                throw new OutOfMemoryException();
+            }
+            SetHandle((IntPtr)IOServiceGetMatchingService(0, matching));
+        }
+
+        public static MediaHandle ForImage(string path) {
+            var url = SecurityElement.Escape(new Uri(path).AbsoluteUri);
+            var matching = IOCFUnserialize($"""
+                <dict>
+                  <key>IOProviderClass</key><string>IOMedia</string>
+                  <key>IOPropertyMatch</key>
+                  <dict><key>Whole</key><true/></dict>
+                  <key>IOParentMatch</key>
+                  <dict>
+                    <key>IOProviderClass</key>
+                    <string>AppleDiskImageDevice</string>
+                    <key>IOPropertyMatch</key>
+                    <dict><key>DiskImageURL</key><string>{url}</string></dict>
+                  </dict>
+                </dict>
+                """, IntPtr.Zero, 0, IntPtr.Zero);
+            return new MediaHandle(matching, $"image '{path}'");
+        }
+
+        public string DevicePath {
+            get {
+                const uint kCFStringEncodingUTF8 = 0x08000100;
+                using var key = CFStringCreateWithCString(
+                    IntPtr.Zero, "BSD Name", kCFStringEncodingUTF8);
+                if (key.IsInvalid) {
+                    throw new OutOfMemoryException();
+                }
+                using var name = IORegistryEntrySearchCFProperty(
+                    Value, "IOService", key, IntPtr.Zero, 0);
+                if (name.IsInvalid) {
+                    throw new InvalidOperationException(
+                        $"failed to get a BSD name for {description}");
+                }
+                var characters = new char[CFStringGetLength(name)];
+                CFStringGetCharacters(name, new CFRange(0, characters.Length),
+                    characters);
+                return $"/dev/{new string(characters)}";
             }
         }
 
@@ -108,6 +162,28 @@ public static class DiskArbitration {
         CFObject number, nint type, out long value);
 
     [DllImport(IOKitLibrary)]
+    private static extern IntPtr IOCFUnserialize(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string text,
+        IntPtr allocator, uint options, IntPtr errorString);
+
+    [DllImport(IOKitLibrary)]
+    private static extern uint IOObjectIsEqualTo(uint left, uint right);
+
+    [DllImport(CoreFoundationLibrary)]
+    private static extern nint CFStringGetLength(CFObject text);
+
+    [DllImport(CoreFoundationLibrary)]
+    private static extern void CFStringGetCharacters(CFObject text,
+        CFRange range, [Out, MarshalAs(UnmanagedType.LPArray,
+            ArraySubType = UnmanagedType.U2)] char[] characters);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private readonly struct CFRange(nint location, nint length) {
+        public readonly nint Location = location;
+        public readonly nint Length = length;
+    }
+
+    [DllImport(IOKitLibrary)]
     private static extern IntPtr IOBSDNameMatching(uint mainPort, uint options,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string bsdName);
 
@@ -170,7 +246,49 @@ public static class DiskArbitration {
         }
     }
 
-    public static void WaitForDisk(string bsdName) {
+    // Keep the selected image open until Samba exits, so its BSD name cannot
+    // be reused between this lookup and Samba's open.
+    public static FileStream OpenImage(string imagePath) {
+        var timeout = TimeSpan.FromSeconds(30);
+        var interval = TimeSpan.FromMilliseconds(100);
+        var elapsed = Stopwatch.StartNew();
+        while (true) {
+            var file = TryOpenImage(imagePath);
+            if (file != null) {
+                return file;
+            }
+            var remaining = timeout - elapsed.Elapsed;
+            if (remaining <= TimeSpan.Zero) {
+                throw new TimeoutException(
+                    $"failed to open the disk for image '{imagePath}' " +
+                    $"within {timeout.TotalSeconds} seconds");
+            }
+            Thread.Sleep(interval);
+        }
+    }
+
+    private static FileStream TryOpenImage(string imagePath) {
+        using var media = MediaHandle.ForImage(imagePath);
+        if (media.IsInvalid) {
+            return null;
+        }
+        var devicePath = media.DevicePath;
+        WaitForDisk(media, Path.GetFileName(devicePath));
+        var file = File.OpenRead(devicePath);
+        var verified = false;
+        try {
+            using var current = MediaHandle.ForImage(imagePath);
+            verified = !current.IsInvalid &&
+                IOObjectIsEqualTo(media.Value, current.Value) != 0;
+            return verified ? file : null;
+        } finally {
+            if (!verified) {
+                file.Dispose();
+            }
+        }
+    }
+
+    private static void WaitForDisk(MediaHandle media, string bsdName) {
         var runLoop = CFRunLoopGetCurrent();
         var diskAppeared = false;
         DiskAppearedCallback appeared = (_, _) => diskAppeared = true;
@@ -183,7 +301,6 @@ public static class DiskArbitration {
         // BSD names can be reused while Disk Arbitration still has the old
         // disk in its list. Matching the current IOMedia's registry ID prevents
         // that old disk's appearance notification from satisfying this wait.
-        using var media = new MediaHandle(bsdName);
         var mediaMatch = IntPtr.Zero;
         var match = IntPtr.Zero;
         var session = IntPtr.Zero;

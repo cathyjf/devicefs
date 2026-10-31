@@ -224,16 +224,17 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
         using FutureType = std::future<std::optional<NamedFile>>;
         const auto length = std::size(snapshots);
         const auto futures_buffer = NEW_MALLOCA_BUFFER(FutureType, length);
-        if (!futures_buffer) {
-            throw std::bad_alloc{};
-        }
-        const auto futures_destroyer = [length](const FutureType *future) {
-            std::destroy_n(future, length);
-        };
-        const auto futures = std::unique_ptr<FutureType[],
-            decltype(futures_destroyer)>{
-                ::new (futures_buffer.get()) FutureType[length],
+        const auto futures = [buffer = futures_buffer.get(), length] {
+            if (!buffer) {
+                throw std::bad_alloc{};
+            }
+            const auto futures_destroyer = [length](const FutureType *future) {
+                std::destroy_n(future, length);
+            };
+            return std::unique_ptr<FutureType[], decltype(futures_destroyer)>{
+                ::new (buffer) FutureType[length],
                 futures_destroyer};
+        }();
         auto j = 0uz;
         for (auto i = snapshots.begin(); i != snapshots.end(); ++i) {
             // The first task will run on this thread once it is collected

@@ -142,23 +142,45 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
     // The cache contains the properties collected by that enumeration, so the
     // manifest's snapshot IDs can be looked up without another VSS query.
     const auto baselines = previous->QuerySnapshotVolumes(true);
-    auto snapshots = payload.snapshots | std::views::filter(
-        [&baselines](const auto &snapshot) {
-            return baselines.contains(
+    struct SnapshotPair {
+        const typename decltype(payload.snapshots)::value_type &payload;
+        const typename decltype(baselines)::value_type::second_type &baseline;
+    };
+    const auto snapshot_buffer = NEW_MALLOCA_BUFFER(
+        SnapshotPair, payload.snapshots.size());
+    if (!snapshot_buffer) {
+        throw std::bad_alloc{};
+    }
+    const auto snapshots = [buffer = snapshot_buffer.get(),
+        &snapshots = payload.snapshots, &baselines] {
+        auto index = 0uz;
+        for (const auto &snapshot : snapshots) {
+            const auto baseline = baselines.find(
                 ParseVolumeGuid(snapshot.original_volume).value());
-        });
+            if (baseline == baselines.end()) {
+                continue;
+            }
+            ::new (buffer + index++) SnapshotPair{
+                .payload = snapshot,
+                .baseline = baseline->second,
+            };
+        }
+        return std::span<SnapshotPair>{buffer, index};
+    }();
     if (snapshots.empty()) {
         return {};
     }
     const auto volumes = snapshots | std::views::transform(
-        [](const auto &snapshot) static { return snapshot.original_volume; }) |
-        std::ranges::to<std::vector>();
+        [](const auto &snapshot_pair) static {
+            return snapshot_pair.payload.original_volume;
+        }) | std::ranges::to<std::vector>();
     auto files = std::vector<NamedFile>{};
+    files.reserve(std::size(snapshots));
     // VSS descriptor metadata is read through the payload snapshots. Creating
     // a newer snapshot on each volume makes that metadata readable. The maps
     // are built in the callback so the temporary snapshots still exist during
     // those reads.
-    const auto build_maps = [&snapshots, &baselines, &files](
+    const auto build_maps = [snapshots, &files](
         const devicefs::vshadow::SnapshotSet &) {
         // `vshadow::Run` retains the set when its callback returns zero.
         // A return value of 1 instead makes it attempt to delete these
@@ -185,9 +207,8 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
         }
 
         using FutureType = std::future<std::optional<NamedFile>>;
-        const auto length = std::ranges::distance(snapshots);
-        const auto futures_buffer = NEW_MALLOCA_BUFFER(std::byte,
-            sizeof(FutureType) * length);
+        const auto length = std::size(snapshots);
+        const auto futures_buffer = NEW_MALLOCA_BUFFER(FutureType, length);
         if (!futures_buffer) {
             throw std::bad_alloc{};
         }
@@ -198,7 +219,7 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
             decltype(futures_destroyer)>{
                 ::new (futures_buffer.get()) FutureType[length],
                 futures_destroyer};
-        auto j = 0;
+        auto j = 0uz;
         for (auto i = snapshots.begin(); i != snapshots.end(); ++i) {
             // The first task will run on this thread once it is collected
             // below. If there is more than one task, each additional task
@@ -206,15 +227,12 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
             const auto policy = std::launch::deferred |
                 ((i != snapshots.begin()) ?
                     std::launch::async : std::launch{});
-            const auto &snapshot = *i;
-            futures[j++] = std::async(policy,
-                [&snapshot, &baseline = baselines.at(
-                    ParseVolumeGuid(snapshot.original_volume).value())] {
+            futures[j++] = std::async(policy, [&pair = *i] {
                 return TryPrepareAndWriteDirtyMapForSnapshot(
-                    snapshot, baseline);
+                    pair.payload, pair.baseline);
             });
         }
-        for (auto i = 0; i < length; ++i) {
+        for (auto i = 0uz; i < length; ++i) {
             if (auto file = futures[i].get()) {
                 files.push_back(std::move(*file));
             }

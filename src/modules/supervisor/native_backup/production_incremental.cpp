@@ -9,6 +9,7 @@ module devicefs.supervisor.native_backup:production_incremental;
 
 import std;
 import <devicefs/common.h>;
+import <devicefs/malloca.h>;
 import <devicefs/windows_imports.h>;
 import devicefs.byte_comparison;
 import devicefs.file_reader;
@@ -182,7 +183,22 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
                 "enabling process privileges", privilege_result.error());
             return kReturnValue;
         }
-        auto futures = std::vector<std::future<std::optional<NamedFile>>>{};
+
+        using FutureType = std::future<std::optional<NamedFile>>;
+        const auto length = std::ranges::distance(snapshots);
+        const auto futures_buffer = NEW_MALLOCA_BUFFER(std::byte,
+            sizeof(FutureType) * length);
+        if (!futures_buffer) {
+            throw std::bad_alloc{};
+        }
+        const auto futures_destroyer = [length](const FutureType *future) {
+            std::destroy_n(future, length);
+        };
+        const auto futures = std::unique_ptr<FutureType[],
+            decltype(futures_destroyer)>{
+                ::new (futures_buffer.get()) FutureType[length],
+                futures_destroyer};
+        auto j = 0;
         for (auto i = snapshots.begin(); i != snapshots.end(); ++i) {
             // The first task will run on this thread once it is collected
             // below. If there is more than one task, each additional task
@@ -191,15 +207,15 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
                 ((i != snapshots.begin()) ?
                     std::launch::async : std::launch{});
             const auto &snapshot = *i;
-            futures.emplace_back(std::async(policy,
+            futures[j++] = std::async(policy,
                 [&snapshot, &baseline = baselines.at(
                     ParseVolumeGuid(snapshot.original_volume).value())] {
                 return TryPrepareAndWriteDirtyMapForSnapshot(
                     snapshot, baseline);
-            }));
+            });
         }
-        for (auto &future : futures) {
-            if (auto file = future.get()) {
+        for (auto i = 0; i < length; ++i) {
+            if (auto file = futures[i].get()) {
                 files.push_back(std::move(*file));
             }
         }

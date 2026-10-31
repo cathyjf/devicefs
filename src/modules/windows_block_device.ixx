@@ -29,6 +29,7 @@ import devicefs.byte_comparison;
 import devicefs.count_zeros;
 import <devicefs/common.h>;
 import devicefs.filesystem.ioctl;
+import devicefs.filesystem.overlapped;
 import devicefs.noinline_invoker;
 import devicefs.stream_writer;
 
@@ -446,22 +447,21 @@ auto ReadFromFile(
     const UINT64 position, const auto count,
     _Out_ auto &__restrict done,
     const auto &failure, auto &...observers) noexcept -> NTSTATUS {
-    const auto parts = ULARGE_INTEGER{.QuadPart = position};
-    auto operation = OVERLAPPED{
-        .Offset = parts.LowPart,
-        .OffsetHigh = parts.HighPart,
-        .hEvent = event,
+    auto overlapped_storage = filesystem::Overlapped{
+        .offset = position,
+        .event = event
     };
+    auto *const overlapped = overlapped_storage.Transmogrify();
     (observers.BeginSourceRead(), ...);
     // GetOverlappedResult supplies the byte count for either completion path.
-    if (!ReadFile(file, output, count, nullptr, &operation)) {
+    if (!ReadFile(file, output, count, nullptr, overlapped)) {
         const auto error = GetLastError();
         if (error != ERROR_IO_PENDING) {
             return failure(error);
         }
         (observers.RecordSourcePending(), ...);
     }
-    if (!GetOverlappedResult(file, &operation, &done, TRUE)) {
+    if (!GetOverlappedResult(file, overlapped, &done, TRUE)) {
         return failure(GetLastError());
     }
     if (done != count) {

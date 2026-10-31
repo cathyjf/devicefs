@@ -344,6 +344,7 @@ foreach(target IN ITEMS backup-supervisor devicefs-read-path-test)
             src/modules/count_zeros.ixx
             src/modules/windows_block_device.ixx
             src/modules/filesystem/ioctl.ixx
+            src/modules/filesystem/overlapped.ixx
         PRIVATE
             src/modules/noinline_invoker.cpp
             src/modules/stream_writer.cpp

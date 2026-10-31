@@ -64,6 +64,7 @@ export module devicefs.vss_block_descriptors;
 import std;
 import devicefs.bitmap_set;
 import devicefs.filesystem.ioctl;
+import devicefs.filesystem.overlapped;
 import devicefs.terminal.safecast;
 import devicefs.guid_formatter;
 import <devicefs/windows_imports.h>;
@@ -391,14 +392,13 @@ private:
         // Supplying the offset here avoids a separate seek. Because the handle
         // is synchronous, the `ReadFile` call still waits for the read to
         // complete (or fail) before returning.
-        const auto parts = ULARGE_INTEGER{.QuadPart = offset};
-        auto operation = OVERLAPPED{
-            .Offset = parts.LowPart,
-            .OffsetHigh = parts.HighPart,
+        auto operation_storage = filesystem::Overlapped{
+            .offset = offset
         };
+        auto *const operation = operation_storage.Transmogrify();
         auto completed = DWORD{};
         if (!ReadFile(handle_.get(), buffer_.get(), requested,
-                &completed, &operation)) {
+                &completed, operation)) {
             WinError("failed to read VSS metadata at offset 0x{:x}", offset);
         }
         if (completed != requested) {

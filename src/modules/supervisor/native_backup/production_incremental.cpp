@@ -44,6 +44,74 @@ auto MakeDirtyBitmap(const DirtyBlockMap &map) {
         map.block_offsets.storage(), bytes);
 }
 
+auto TryPrepareAndWriteDirtyMapForSnapshot(const auto &snapshot,
+    const auto &baseline) -> std::optional<NamedFile> {
+    const auto name = SnapshotImageName(snapshot);
+    const auto write_error = [&name](const auto &error) {
+        TryWriteNonFatalError(std::format(
+            "failed to prepare the dirty map for '{}'", name), error);
+    };
+    try {
+        const auto map = BuildDirtyBlockMap(
+            baseline.snapshot_identifier, snapshot.identifier,
+            baseline.device, snapshot.device);
+        if (map.block_offsets.empty()) {
+            return std::nullopt;
+        }
+        const auto path =
+            TemporarySystemDirectoryPath("devicefs-dirty-map");
+        auto file = WriteEntireFile(path,
+            std::span<const unsigned char>{MakeDirtyBitmap(map)}, {
+                .overwrite = false,
+                .allow_readers = true,
+                .delete_on_close = true,
+            });
+        if (!file) {
+            write_error(TryConstructWinError(
+                "failed to create or write file '{}'",
+                std::wstring_view{path.native()}, file.error()));
+            return std::nullopt;
+        }
+        // DeviceFs receives a separate read-only handle so it cannot
+        // change the map. The sharing flags allow the original handle's
+        // write access and delete-on-close setting; otherwise reopening
+        // the file would fail.
+        //
+        // Overlapped I/O allows separate reads through this handle to
+        // run concurrently.
+        auto read_handle = wil::unique_hfile{ReOpenFile(file->get(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_FLAG_OVERLAPPED)};
+        if (!read_handle) {
+            write_error(TryConstructWinError(
+                "failed to reopen dirty-map file '{}' read-only",
+                std::wstring_view{path.native()}));
+            return std::nullopt;
+        }
+        if (!SetHandleInformation(read_handle.get(),
+                HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)) {
+            write_error(TryConstructWinError(
+                "failed to make the read-only handle for '{}' "
+                "inheritable", std::wstring_view{path.native()}));
+            return std::nullopt;
+        }
+        devicefs::WriteToStream(devicefs::stdout,
+            "Successfully prepared dirty map for volume '{}'.\n",
+            snapshot.original_volume);
+        // The reopened handle keeps the map readable after the writer
+        // closes. Delete-on-close removes the file when the last handle
+        // closes, after both the supervisor and DeviceFs release it.
+        return NamedFile{
+            .name = name + ".dirty.bitmap",
+            .handle = std::move(read_handle),
+        };
+    } catch (const std::runtime_error &error) {
+        write_error(error);
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 auto PrepareDirtyMaps(const HANDLE cancellation_event,
@@ -91,77 +159,51 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
     // those reads.
     const auto build_maps = [&snapshots, &baselines, &files](
         const devicefs::vshadow::SnapshotSet &) {
-        for (const auto &snapshot : snapshots) {
-            const auto &baseline = baselines.at(
-                ParseVolumeGuid(snapshot.original_volume).value());
-            const auto name = SnapshotImageName(snapshot);
-            const auto write_error = [&name](const auto &error) {
-                TryWriteNonFatalError(std::format(
-                    "failed to prepare the dirty map for '{}'", name), error);
-            };
-            try {
-                const auto map = BuildDirtyBlockMap(
-                    baseline.snapshot_identifier, snapshot.identifier,
-                    baseline.device, snapshot.device);
-                if (map.block_offsets.empty()) {
-                    continue;
-                }
-                const auto path =
-                    TemporarySystemDirectoryPath("devicefs-dirty-map");
-                auto file = WriteEntireFile(path,
-                    std::span<const unsigned char>{MakeDirtyBitmap(map)}, {
-                        .overwrite = false,
-                        .allow_readers = true,
-                        .delete_on_close = true,
-                    });
-                if (!file) {
-                    write_error(TryConstructWinError(
-                        "failed to create or write file '{}'",
-                        std::wstring_view{path.native()}, file.error()));
-                    continue;
-                }
-                // DeviceFs receives a separate read-only handle so it cannot
-                // change the map. The sharing flags allow the original handle's
-                // write access and delete-on-close setting; otherwise reopening
-                // the file would fail.
-                //
-                // Overlapped I/O allows separate reads through this handle to
-                // run concurrently.
-                auto read_handle = wil::unique_hfile{ReOpenFile(file->get(),
-                    GENERIC_READ,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    FILE_FLAG_OVERLAPPED)};
-                if (!read_handle) {
-                    write_error(TryConstructWinError(
-                        "failed to reopen dirty-map file '{}' read-only",
-                        std::wstring_view{path.native()}));
-                    continue;
-                }
-                if (!SetHandleInformation(read_handle.get(),
-                        HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)) {
-                    write_error(TryConstructWinError(
-                        "failed to make the read-only handle for '{}' "
-                        "inheritable", std::wstring_view{path.native()}));
-                    continue;
-                }
-                // The reopened handle keeps the map readable after the writer
-                // closes. Delete-on-close removes the file when the last handle
-                // closes, after both the supervisor and DeviceFs release it.
-                files.push_back({
-                    .name = name + ".dirty.bitmap",
-                    .handle = std::move(read_handle),
-                });
-                devicefs::WriteToStream(devicefs::stdout,
-                    "Successfully prepared dirty map for volume '{}'.\n",
-                    snapshot.original_volume);
-            } catch (const std::runtime_error &error) {
-                write_error(error);
+        // `vshadow::Run` retains the set when its callback returns zero.
+        // A return value of 1 instead makes it attempt to delete these
+        // temporary snapshots after map preparation.
+        constexpr auto kReturnValue = 1;
+
+        // SVI enumeration requires the `SE_BACKUP_NAME` privilege. The
+        // privilege helper is not currently reentrant, so we acquire the
+        // privilege here before launching the threads.
+        //
+        // It is harmless that the individual threads will also attempt to
+        // acquire the privilege.
+        auto privilege_result =
+            std::expected<void, std::unique_ptr<std::runtime_error>>{};
+        auto privileges = ProcessPrivilegeEnabler{
+            GetCurrentProcess(),
+            std::array{wil::zwstring_view{SE_BACKUP_NAME}},
+            "the backup privilege"sv, std::ref(privilege_result)};
+        if (!privilege_result) {
+            TryWriteNonFatalError(
+                "unable to prepare dirty maps because of a failure while "
+                "enabling process privileges", privilege_result.error());
+            return kReturnValue;
+        }
+        auto futures = std::vector<std::future<std::optional<NamedFile>>>{};
+        for (auto i = snapshots.begin(); i != snapshots.end(); ++i) {
+            // The first task will run on this thread once it is collected
+            // below. If there is more than one task, each additional task
+            // may run on a separate thread.
+            const auto policy = std::launch::deferred |
+                ((i != snapshots.begin()) ?
+                    std::launch::async : std::launch{});
+            const auto &snapshot = *i;
+            futures.emplace_back(std::async(policy,
+                [&snapshot, &baseline = baselines.at(
+                    ParseVolumeGuid(snapshot.original_volume).value())] {
+                return TryPrepareAndWriteDirtyMapForSnapshot(
+                    snapshot, baseline);
+            }));
+        }
+        for (auto &future : futures) {
+            if (auto file = future.get()) {
+                files.push_back(std::move(*file));
             }
         }
-        // `vshadow::Run` retains the set when its callback returns zero.
-        // Returning one instead makes it attempt to delete these temporary
-        // snapshots after map preparation.
-        return 1;
+        return kReturnValue;
     };
     try {
         std::ignore = RunVssOperation(cancellation_event,

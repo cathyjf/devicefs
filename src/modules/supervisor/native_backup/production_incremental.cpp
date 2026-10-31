@@ -52,65 +52,73 @@ auto TryPrepareAndWriteDirtyMapForSnapshot(const auto &snapshot,
         TryWriteNonFatalError(std::format(
             "failed to prepare the dirty map for '{}'", name), error);
     };
-    try {
-        const auto map = BuildDirtyBlockMap(
-            baseline.snapshot_identifier, snapshot.identifier,
-            baseline.device, snapshot.device);
-        if (map.block_offsets.empty()) {
+    using MapAndPath = std::pair<DirtyBlockMap, std::filesystem::path>;
+    const auto maybe_map_and_path = [&snapshot, &baseline, &write_error]
+        -> std::optional<MapAndPath> {
+        try {
+            auto map = BuildDirtyBlockMap(
+                baseline.snapshot_identifier, snapshot.identifier,
+                baseline.device, snapshot.device);
+            if (map.block_offsets.empty()) {
+                return std::nullopt;
+            }
+            return MapAndPath{std::move(map),
+                TemporarySystemDirectoryPath("devicefs-dirty-map")};
+        } catch (const std::runtime_error &error) {
+            write_error(error);
             return std::nullopt;
         }
-        const auto path =
-            TemporarySystemDirectoryPath("devicefs-dirty-map");
-        auto file = WriteEntireFile(path,
-            std::span<const unsigned char>{MakeDirtyBitmap(map)}, {
-                .overwrite = false,
-                .allow_readers = true,
-                .delete_on_close = true,
-            });
-        if (!file) {
-            write_error(TryConstructWinError(
-                "failed to create or write file '{}'",
-                std::wstring_view{path.native()}, file.error()));
-            return std::nullopt;
-        }
-        // DeviceFs receives a separate read-only handle so it cannot
-        // change the map. The sharing flags allow the original handle's
-        // write access and delete-on-close setting; otherwise reopening
-        // the file would fail.
-        //
-        // Overlapped I/O allows separate reads through this handle to
-        // run concurrently.
-        auto read_handle = wil::unique_hfile{ReOpenFile(file->get(),
-            GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            FILE_FLAG_OVERLAPPED)};
-        if (!read_handle) {
-            write_error(TryConstructWinError(
-                "failed to reopen dirty-map file '{}' read-only",
-                std::wstring_view{path.native()}));
-            return std::nullopt;
-        }
-        if (!SetHandleInformation(read_handle.get(),
-                HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)) {
-            write_error(TryConstructWinError(
-                "failed to make the read-only handle for '{}' "
-                "inheritable", std::wstring_view{path.native()}));
-            return std::nullopt;
-        }
-        devicefs::WriteToStream(devicefs::stdout,
-            "Successfully prepared dirty map for volume '{}'.\n",
-            snapshot.original_volume);
-        // The reopened handle keeps the map readable after the writer
-        // closes. Delete-on-close removes the file when the last handle
-        // closes, after both the supervisor and DeviceFs release it.
-        return NamedFile{
-            .name = name + ".dirty.bitmap",
-            .handle = std::move(read_handle),
-        };
-    } catch (const std::runtime_error &error) {
-        write_error(error);
+    }();
+    if (!maybe_map_and_path) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    const auto &[map, path] = *maybe_map_and_path;
+    auto file = WriteEntireFile(path,
+        std::span<const unsigned char>{MakeDirtyBitmap(map)}, {
+            .overwrite = false,
+            .allow_readers = true,
+            .delete_on_close = true,
+        });
+    if (!file) {
+        write_error(TryConstructWinError(
+            "failed to create or write file '{}'",
+            std::wstring_view{path.native()}, file.error()));
+        return std::nullopt;
+    }
+    // DeviceFs receives a separate read-only handle so it cannot
+    // change the map. The sharing flags allow the original handle's
+    // write access and delete-on-close setting; otherwise reopening
+    // the file would fail.
+    //
+    // Overlapped I/O allows separate reads through this handle to
+    // run concurrently.
+    auto read_handle = wil::unique_hfile{ReOpenFile(file->get(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_FLAG_OVERLAPPED)};
+    if (!read_handle) {
+        write_error(TryConstructWinError(
+            "failed to reopen dirty-map file '{}' read-only",
+            std::wstring_view{path.native()}));
+        return std::nullopt;
+    }
+    if (!SetHandleInformation(read_handle.get(),
+            HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)) {
+        write_error(TryConstructWinError(
+            "failed to make the read-only handle for '{}' "
+            "inheritable", std::wstring_view{path.native()}));
+        return std::nullopt;
+    }
+    devicefs::WriteToStream(devicefs::stdout,
+        "Successfully prepared dirty map for volume '{}'.\n",
+        snapshot.original_volume);
+    // The reopened handle keeps the map readable after the writer
+    // closes. Delete-on-close removes the file when the last handle
+    // closes, after both the supervisor and DeviceFs release it.
+    return NamedFile{
+        .name = name + ".dirty.bitmap",
+        .handle = std::move(read_handle),
+    };
 }
 
 } // namespace

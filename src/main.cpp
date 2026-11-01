@@ -49,11 +49,7 @@ auto main(
         HardenProcess();
 
         const auto length = argc - 1uz;
-        const auto string_views = NEW_MALLOCA_BUFFER(
-            std::string_view, length);
-        if (!string_views) {
-            throw std::bad_alloc{};
-        }
+        const auto string_views = NEW_MALLOCA_BUFFER(std::string_view, length);
         const auto *argv_cursor = argv + 1;
         for (auto i = 0uz; i < length; ++i) {
             ::new (string_views.get() + i) std::string_view{*argv_cursor++};

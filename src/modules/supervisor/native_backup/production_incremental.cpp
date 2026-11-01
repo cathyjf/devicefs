@@ -163,9 +163,6 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
     };
     const auto snapshot_buffer = NEW_MALLOCA_BUFFER(
         SnapshotPair, payload.snapshots.size());
-    if (!snapshot_buffer) {
-        throw std::bad_alloc{};
-    }
     const auto snapshots = [buffer = snapshot_buffer.get(),
         &snapshots = payload.snapshots, &baselines] {
         auto index = 0uz;
@@ -225,9 +222,6 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
         const auto length = std::size(snapshots);
         const auto futures_buffer = NEW_MALLOCA_BUFFER(FutureType, length);
         const auto futures = [buffer = futures_buffer.get(), length] {
-            if (!buffer) {
-                throw std::bad_alloc{};
-            }
             const auto futures_destroyer = [length](const FutureType *future) {
                 std::destroy_n(future, length);
             };

@@ -53,7 +53,7 @@ export namespace devicefs::filesystem {
         CompileTimeCast<DWORD, offsetof(decltype(header), bytes)>();
     const auto output_size = std::max(
         CompileTimeCast<DWORD, sizeof(header)>(), kIdOffset + header.length);
-    const auto output = NEW_MALLOCA_BUFFER(BYTE, output_size);
+    const auto output = NEW_MALLOCA_BUFFER_NOTHROW(BYTE, output_size);
     if (!output) {
         return std::unexpected{ERROR_NOT_ENOUGH_MEMORY};
     }
@@ -104,9 +104,6 @@ export namespace devicefs::filesystem {
     const auto output_size = kNameOffset + header.name_length;
     const auto buffer =
         NEW_MALLOCA_BUFFER(std::byte, kExtraBytes + output_size);
-    if (!buffer) {
-        throw std::bad_alloc{};
-    }
     auto *const output = buffer.get() + kExtraBytes;
     query(output, output_size);
 

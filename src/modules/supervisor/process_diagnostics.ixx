@@ -38,7 +38,7 @@ constexpr auto kProcessCommandLineInformation =
     if (bytes < sizeof(UNICODE_STRING)) {
         return std::wstring{};
     }
-    const auto storage = NEW_MALLOCA_BUFFER(std::byte, bytes);
+    const auto storage = NEW_MALLOCA_BUFFER_NOTHROW(std::byte, bytes);
     if (!storage) {
         return std::wstring{};
     }

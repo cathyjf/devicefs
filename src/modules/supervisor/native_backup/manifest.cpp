@@ -71,7 +71,7 @@ using namespace wil::literals;
         (GetLastError() != ERROR_MORE_DATA)) {
         return {};
     }
-    const auto paths = NEW_MALLOCA_BUFFER(wchar_t, required);
+    const auto paths = NEW_MALLOCA_BUFFER_NOTHROW(wchar_t, required);
     if (!paths) {
         return {};
     }

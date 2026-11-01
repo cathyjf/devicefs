@@ -268,7 +268,8 @@ export template <class T = std::string>
     if (information_size == 0) {
         return std::nullopt;
     }
-    const auto information = NEW_MALLOCA_BUFFER(std::byte, information_size);
+    const auto information =
+        NEW_MALLOCA_BUFFER_NOTHROW(std::byte, information_size);
     if (!information) {
         return std::nullopt;
     }

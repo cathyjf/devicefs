@@ -70,9 +70,6 @@ export [[nodiscard]] auto StartProcessWithHandles(
         child_handles.size() + additional_handles.size();
     const auto inherited_handles = NEW_MALLOCA_BUFFER(
         decltype(child_handles[0].get()), inherited_handle_count);
-    if (!inherited_handles) {
-        throw std::bad_alloc{};
-    }
     std::ranges::copy(additional_handles,
         std::ranges::transform(
             child_handles, inherited_handles.get(),

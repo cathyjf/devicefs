@@ -82,7 +82,7 @@ template <std::size_t Size>
             return std::unexpected{domain_size.error()};
         }
 
-        const auto domain = NEW_MALLOCA_BUFFER(wchar_t,
+        const auto domain = NEW_MALLOCA_BUFFER_NOTHROW(wchar_t,
             std::max<DWORD>(1, *domain_size));
         if (!domain) {
             return std::unexpected{ERROR_NOT_ENOUGH_MEMORY};
@@ -199,9 +199,6 @@ template <std::size_t Size>
         (username_text.size() + 1) * sizeof(wchar_t) +
         (domain_text.size() + 1) * sizeof(wchar_t);
     const auto request_storage = NEW_MALLOCA_BUFFER(std::byte, request_size);
-    if (!request_storage) {
-        throw std::bad_alloc{};
-    }
     auto &request = *::new (request_storage.get()) MSV1_0_S4U_LOGON{
         .MessageType = MsV1_0S4ULogon,
         .Flags = 0,

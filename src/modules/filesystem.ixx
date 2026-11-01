@@ -405,9 +405,6 @@ auto Usage(const auto output) noexcept {
 
     const auto sid = NEW_MALLOCA_BUFFER(BYTE, sid_size);
     const auto domain = NEW_MALLOCA_BUFFER(char, std::max<DWORD>(1, domain_size));
-    if (!sid || !domain) {
-        throw std::bad_alloc{};
-    }
     if (!LookupAccountNameA(nullptr, account.c_str(), sid.get(), &sid_size,
             domain.get(), &domain_size, &use)) {
         WinError("failed to resolve --read-user account '{}'", account);

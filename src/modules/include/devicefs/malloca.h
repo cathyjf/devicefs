@@ -50,6 +50,22 @@ private:
 };
 
 template <class T>
+concept IsError = requires {
+    T{}.what();
+};
+
+template <class Error>
+[[msvc::forceinline]]
+auto HandleNull(void *const buffer = nullptr) noexcept(!IsError<Error>) {
+    if constexpr (IsError<Error>) {
+        if (!buffer) {
+            throw Error{};
+        }
+    }
+    return buffer;
+}
+
+template <class T>
 [[msvc::forceinline]]
 constexpr auto ShouldUseStack(const auto length) noexcept {
     return (sizeof(T) * length) <= 1024;
@@ -57,12 +73,15 @@ constexpr auto ShouldUseStack(const auto length) noexcept {
 
 } // namespace malloca_detail
 
-// Allocate a buffer of `sizeof(T) * length` bytes, using stack or heap storage
-// according to the policy defined by `malloca_detail::ShouldUseStack` above.
+// PRIVATE_IMPLEMENTATION_DETAIL_NEW_MALLOCA_BUFFER(T, Error, length)
 //
-// The returned smart pointer exposes a `T *` buffer. The macro returns a
-// `nullptr` owner if the byte count overflows or allocation fails.
-// Unlike `_malloca`, this macro avoids calls to out-of-line helpers.
+// This macro is a private implementation detail and should not be directly
+// used by callers. Instead, callers should choose one of the following two
+// macros: `NEW_MALLOCA_BUFFER_NOTHROW` or `NEW_MALLOCA_BUFFER`.
+//
+// Unlike `_malloca`, these macros avoid calls to out-of-line helpers.
+//
+// Here is an explanation of the warning suppressions:
 //
 // Warning C6255 complains about the use of `_alloca`. That function is used
 // to implement the advertised stack allocation policy.
@@ -75,15 +94,36 @@ constexpr auto ShouldUseStack(const auto length) noexcept {
 // macro is effective to reach the call to `std::free` that occurs within the
 // destructor of the `malloca_detail::UniqueBuffer` class.
 //
-#define NEW_MALLOCA_BUFFER(T, length) \
+#define PRIVATE_IMPLEMENTATION_DETAIL_NEW_MALLOCA_BUFFER(T, Error, length) \
     __pragma(warning(push)) \
     __pragma(warning(disable : 6255 26408)) \
     malloca_detail::UniqueBuffer<T, std::free>{ \
         ((length) > (SIZE_MAX / sizeof(T))) ? \
-            malloca_detail::Allocation{} : \
+            malloca_detail::Allocation{malloca_detail::HandleNull<Error>()} : \
             malloca_detail::ShouldUseStack<T>(length) ? \
                 malloca_detail::Allocation{ \
                     ::_alloca(sizeof(T) * (length)), true} : \
                 malloca_detail::Allocation{ \
-                    std::malloc(sizeof(T) * (length)), false}} \
+                    malloca_detail::HandleNull<Error>( \
+                        std::malloc(sizeof(T) * (length))), false}} \
     __pragma(warning(pop))
+
+// NEW_MALLOCA_BUFFER_NOTHROW(T, length)
+//
+// Allocate a buffer of `sizeof(T) * length` bytes, using stack or heap storage
+// according to the policy defined by `malloca_detail::ShouldUseStack` above.
+//
+// The returned smart pointer exposes a `T *` buffer. The macro returns a
+// `nullptr` owner if the byte count overflows or allocation fails.
+//
+#define NEW_MALLOCA_BUFFER_NOTHROW(T, length) \
+    PRIVATE_IMPLEMENTATION_DETAIL_NEW_MALLOCA_BUFFER(T, void, length)
+
+// NEW_MALLOCA_BUFFER(T, length)
+//
+// This macro is the same as `NEW_MALLOCA_BUFFER_NOTHROW`, except that this
+// macro never returns a `nullptr` owner. Instead, it throws `std::bad_alloc`
+// on failure.
+//
+#define NEW_MALLOCA_BUFFER(T, length) \
+    PRIVATE_IMPLEMENTATION_DETAIL_NEW_MALLOCA_BUFFER(T, std::bad_alloc, length)

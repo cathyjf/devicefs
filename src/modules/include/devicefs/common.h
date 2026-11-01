@@ -246,3 +246,24 @@ auto ByteViewCast(Source &&input) noexcept -> Target {
         "See C++23 [basic.lval]/11.3.")]]
     return reinterpret_cast<Target>(std::forward<Source>(input));
 }
+
+// Precondition: Each bit in the `sizeof(Target)` bytes beginning at
+// `std::addressof(input)` is within some live object. Those bits need not
+// all belong to the same object.
+template <class Target>
+[[nodiscard, msvc::forceinline]]
+auto BitPrefixCast(const devicefs::ByteType auto &input) noexcept -> Target {
+    using BytePrefix = char[sizeof(Target)];
+    // The `std::bit_cast` function does not require a live object of the
+    // source type. It requires only that each bit within the representation
+    // of the source be within some live object.
+    // https://timsong-cpp.github.io/cppwp/n4950/bit.cast
+    //
+    // This function's precondition ensures that that condition is met here.
+    //
+    // Aside from the definition of `std::bit_cast` (which does not disallow
+    // this cast), no other identifiable part of the C++ standard has been
+    // located that requires a live source object of type `BytePrefix` to
+    // exist to perform this cast.
+    return std::bit_cast<Target>(ByteViewCast<const BytePrefix &>(input));
+}

@@ -21,6 +21,7 @@ module;
 export module devicefs.vhdx_viewer;
 
 import std;
+import devicefs.crc32;
 import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
@@ -240,32 +241,18 @@ template <typename Value>
     return result;
 }
 
-template <std::uint32_t Polynomial>
-[[nodiscard]] constexpr auto Crc32(
-    const std::span<const std::byte> input) noexcept -> std::uint32_t {
-    auto result = std::numeric_limits<std::uint32_t>::max();
-    for (const auto byte : input) {
-        result ^= std::to_integer<std::uint32_t>(byte);
-        for (auto bit = 0; bit < 8; ++bit) {
-            const auto mask = std::uint32_t{} - (result & 1u);
-            result = (result >> 1) ^ (Polynomial & mask);
-        }
-    }
-    return ~result;
-}
-
 [[nodiscard]] constexpr auto VhdxCrc32(
     const std::span<const std::byte> input) noexcept {
     // The specification selects CRC-32C with the Castagnoli polynomial.
     // See VHDX Format Specification v1.00, §4.2, p. 36.
-    return Crc32<0x82f63b78>(input);
+    return devicefs::Crc32c(input);
 }
 
 [[nodiscard]] constexpr auto GptCrc32(
     const std::span<const std::byte> input) noexcept {
     // UEFI Specification 2.11, §5.3.2, pp. 115–117, uses the ordinary
     // EFI CRC32 algorithm for the GPT header and partition-entry array.
-    return Crc32<0xedb88320>(input);
+    return devicefs::Crc32(input);
 }
 
 [[nodiscard]] constexpr auto AlignUp(

@@ -36,21 +36,7 @@ auto LoadVector(const ByteType auto *const input) noexcept {
     if constexpr (std::same_as<Vector, __m512i>) {
         return _mm512_loadu_si512(input);
     } else {
-        using Bytes = char[sizeof(Vector)];
-        // The `std::bit_cast` function does not require a live object
-        // of the source type. It requires only that each bit within the
-        // representation of the source be within some live object.
-        // Here, that requirement is met because each bit is within a live
-        // `unsigned char` object in a byte buffer or a live `std::uint64_t`
-        // object in bitmap storage.
-        // https://timsong-cpp.github.io/cppwp/n4950/bit.cast
-        //
-        // Aside from the definition of `std::bit_cast` (which does not
-        // disallow this cast), no other identifiable part of the C++
-        // standard has been located that requires a live source object
-        // of type `Bytes` to exist to perform this cast.
-        const auto vector = std::bit_cast<Vector>(
-            ByteViewCast<const Bytes &>(*input));
+        const auto vector = BitPrefixCast<Vector>(*input);
         if constexpr (std::same_as<Vector, __m256i>) {
             return _mm256_loadu_si256(std::addressof(vector));
         } else {

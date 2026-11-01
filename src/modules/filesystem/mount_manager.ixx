@@ -102,8 +102,8 @@ export namespace devicefs::filesystem {
     constexpr auto kExtraBytes = kPrefixBytes - kNameOffset;
 
     const auto output_size = kNameOffset + header.name_length;
-    const auto buffer = NEW_MALLOCA_BUFFER(std::byte,
-        kExtraBytes + output_size);
+    const auto buffer =
+        NEW_MALLOCA_BUFFER(std::byte, kExtraBytes + output_size);
     if (!buffer) {
         throw std::bad_alloc{};
     }

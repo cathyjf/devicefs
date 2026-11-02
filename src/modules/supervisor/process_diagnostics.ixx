@@ -25,84 +25,94 @@ import devicefs.terminal.transcoding;
 
 using devicefs::terminal::Transcode;
 
-[[gsl::suppress("type.1",
-    justification: "ProcessCommandLineInformation is NT process information class 60.")]]
+// ProcessCommandLineInformation is an undocumented enumeration value.
 constexpr auto kProcessCommandLineInformation =
     static_cast<PROCESSINFOCLASS>(60);
 
-[[nodiscard]] auto ProcessCommandLine(const HANDLE process) {
+[[nodiscard]] auto TryGetProcessCommandLine(const HANDLE process)
+    noexcept -> std::wstring {
     auto bytes = ULONG{};
-    static_cast<void>(NtQueryInformationProcess(
-        process, kProcessCommandLineInformation,
-        nullptr, 0, &bytes));
+    std::ignore = NtQueryInformationProcess(
+        process, kProcessCommandLineInformation, nullptr, 0, &bytes);
     if (bytes < sizeof(UNICODE_STRING)) {
-        return std::wstring{};
+        return {};
     }
     const auto storage = NEW_MALLOCA_BUFFER_NOTHROW(std::byte, bytes);
     if (!storage) {
-        return std::wstring{};
+        return {};
     }
-    if (!NT_SUCCESS(NtQueryInformationProcess(process, kProcessCommandLineInformation,
+    if (!NT_SUCCESS(NtQueryInformationProcess(process,
+            kProcessCommandLineInformation,
             storage.get(), bytes, &bytes))) {
-        return std::wstring{};
+        return {};
     }
     const auto *const command_line =
         std::start_lifetime_as<UNICODE_STRING>(storage.get());
     if (command_line->Buffer == nullptr) {
-        return std::wstring{};
+        return {};
     }
-    return std::wstring(command_line->Buffer,
-        command_line->Length / sizeof(wchar_t));
+    try {
+        return std::wstring(command_line->Buffer,
+            command_line->Length / sizeof(wchar_t));
+    } catch (...) {
+        return {};
+    }
 }
 
-export [[gsl::suppress("26447",
-    justification: "Potentially throwing work is caught locally; catch diagnostics use noexcept operations.")]]
-auto LogJobProcesses(Log &log, const HANDLE job) noexcept {
+auto TryTranscode(auto &&...args) noexcept -> std::string {
     try {
-        auto snapshot = wil::unique_tool_help_snapshot(
-            CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
-        if (!snapshot) {
-            const auto error = TryConstructWinError("");
-            log.TryWrite(
-                "backup-supervisor: could not enumerate processes before "
-                "terminating the backup job: {}",
-                error ? error->what() : "unknown error");
-            return;
-        }
-
-        auto entry = PROCESSENTRY32W{.dwSize = sizeof(PROCESSENTRY32W)};
-        if (!Process32FirstW(snapshot.get(), &entry)) {
-            const auto error = TryConstructWinError("");
-            log.TryWrite(
-                "backup-supervisor: could not read the process snapshot: "
-                "{}", error ? error->what() : "unknown error");
-            return;
-        }
-        do {
-            auto process = wil::unique_process_handle(OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID));
-            if (!process) {
-                continue;
-            }
-            auto in_job = FALSE;
-            if (!IsProcessInJob(process.get(), job, &in_job) || !in_job) {
-                continue;
-            }
-
-            const auto command_line = ProcessCommandLine(process.get());
-            log.TryWrite(
-                "backup-supervisor: terminating '{}' "
-                "(PID {}, command line '{}')",
-                Transcode<std::string>(entry.szExeFile), entry.th32ProcessID,
-                command_line.empty() ? "unavailable" : Transcode<std::string>(command_line));
-        } while (Process32NextW(snapshot.get(), &entry));
-    } catch (const std::exception &error) {
-        log.TryWrite(
-            "backup-supervisor: could not identify processes before "
-            "terminating the backup job: {}", error.what());
+        return Transcode<std::string>(std::forward<decltype(args)>(args)...);
     } catch (...) {
-        log.TryWrite(
-            "backup-supervisor: could not identify processes before "
-            "terminating the backup job: unknown error");
+        return {};
     }
+}
+
+// This function is nonthrowing, but marking it as `noexcept` raises spurious
+// compiler warnings, and nothing depends on it being marked `noexcept`, so it
+// is simplest not to mark it as `noexcept`.
+export auto LogJobProcesses(Log &log, const HANDLE job) {
+    using namespace std::string_view_literals;
+    auto snapshot = wil::unique_tool_help_snapshot(
+        CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+    if (!snapshot) {
+        const auto error = TryConstructWinError("");
+        log.TryWrite(
+            "backup-supervisor: failed to enumerate processes before "
+            "terminating the backup job: {}",
+            error ? std::string_view{error->what()} : "unknown error"sv);
+        return;
+    }
+
+    auto entry = PROCESSENTRY32W{.dwSize = sizeof(PROCESSENTRY32W)};
+    if (!Process32FirstW(snapshot.get(), &entry)) {
+        const auto error = TryConstructWinError("");
+        log.TryWrite(
+            "backup-supervisor: failed to read the process snapshot: {}",
+            error ? std::string_view{error->what()} : "unknown error"sv);
+        return;
+    }
+    do {
+        auto process = wil::unique_process_handle(OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID));
+        if (!process) {
+            continue;
+        }
+        auto in_job = FALSE;
+        if (!IsProcessInJob(process.get(), job, &in_job) || !in_job) {
+            continue;
+        }
+
+        const auto command_line = TryGetProcessCommandLine(process.get());
+        [[gsl::suppress("26449", justification:
+            "The temporary strings survive until the end of the entire "
+            "expression and they are not referenced after that.")]]
+        log.TryWrite(
+            "backup-supervisor: terminating '{}' "
+            "(PID {}, command line '{}')",
+            TryTranscode(entry.szExeFile),
+            entry.th32ProcessID,
+            command_line.empty() ?
+                "unavailable"sv :
+                TryTranscode(command_line));
+    } while (Process32NextW(snapshot.get(), &entry));
 }

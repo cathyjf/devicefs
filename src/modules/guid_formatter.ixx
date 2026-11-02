@@ -4,6 +4,7 @@
 export module devicefs.guid_formatter;
 
 import std;
+import <devicefs/common.h>;
 import <devicefs/windows_imports.h>;
 import devicefs.terminal.transcoding;
 
@@ -72,6 +73,18 @@ export [[nodiscard]] auto ParseGuid(const std::string_view value)
         devicefs::terminal::Transcode<wchar_t>(text).data(), &identifier);
     if (FAILED(result)) {
         return std::unexpected{result};
+    }
+    return identifier;
+}
+
+export [[nodiscard]] auto GenerateRandomGuid() {
+    auto identifier = GUID{};
+    const auto result = CoCreateGuid(&identifier);
+    if (FAILED(result)) [[unlikely]] {
+        // This branch is believed to be reachable only if Windows fails to
+        // load the DLLs transively required by `CoCreateGuid`.
+        WinError("the operation cannot continue because Windows failed to "
+            "generate a random GUID", ExplicitHresult{result});
     }
     return identifier;
 }

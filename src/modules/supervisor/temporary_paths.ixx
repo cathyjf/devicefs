@@ -21,34 +21,24 @@ module;
 export module devicefs.supervisor.temporary_paths;
 
 import std;
-import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import <devicefs/windows_imports.h>;
+import devicefs.guid_formatter;
 import devicefs.stream_writer;
 
-#undef stderr
-#undef stdout
-
 export [[nodiscard]] auto UniqueName() {
-    auto id = GUID{};
-    const auto result = CoCreateGuid(&id);
-    if (FAILED(result)) {
-        WinError("could not create a unique backup identifier",
-            ExplicitHresult{result});
-    }
-    return std::format(
-        "{:08x}{:04x}{:04x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        id.Data1, id.Data2, id.Data3,
-        id.Data4[0], id.Data4[1], id.Data4[2], id.Data4[3],
-        id.Data4[4], id.Data4[5], id.Data4[6], id.Data4[7]);
+    return FormatGuid<false>(GenerateRandomGuid());
 }
 
+// TODO: This function uses many heap allocations for a task that should really
+//       only require one heap allocation.
 export [[nodiscard]] auto TemporarySystemDirectoryPath(
     const std::string_view prefix) {
     const auto windows_directory = [] {
         auto path = std::wstring{};
         const auto result = wil::GetWindowsDirectoryW(path);
         if (FAILED(result)) {
-            WinError("could not obtain the Windows directory",
+            WinError("failed to obtain the path to the Windows directory",
                 ExplicitHresult{result});
         }
         return path;

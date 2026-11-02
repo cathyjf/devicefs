@@ -22,6 +22,7 @@ export module devicefs.vhdx_viewer;
 
 import std;
 import devicefs.crc32;
+import devicefs.guid_formatter;
 import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
@@ -283,16 +284,6 @@ template <typename Value>
         devicefs::terminal::FailFastCast<std::uint8_t>(cylinder & 0xff)};
 }
 
-[[nodiscard]] auto NewGuid() {
-    auto identifier = GUID{};
-    const auto result = CoCreateGuid(&identifier);
-    if (FAILED(result)) {
-        WinError("could not create a VHDX identifier",
-            ExplicitHresult{result});
-    }
-    return identifier;
-}
-
 [[nodiscard]] auto MakeVhdxHeader(
     const std::uint64_t sequence_number,
     const GUID &file_write_id,
@@ -448,13 +439,13 @@ struct GptLayout {
     const auto backup_entries_lba = partition_last_lba + 1;
     const auto backup_header_lba =
         backup_entries_lba + kGptEntryArraySectors;
-    const auto disk_id = NewGuid();
+    const auto disk_id = GenerateRandomGuid();
 
     auto partition_entries =
         std::vector<std::byte>(kGptEntryArrayLength);
     SerializeObject(partition_entries, 0, GptPartitionEntry{
         .type_id = kBasicDataPartitionId,
-        .partition_id = NewGuid(),
+        .partition_id = GenerateRandomGuid(),
         .first_lba = kGptPartitionLba,
         .last_lba = partition_last_lba,
     });
@@ -551,8 +542,8 @@ struct VhdxLayout {
     // the fixed offsets defined by VHDX Format Specification v1.00,
     // §§3.1.1–3.1.3, pp. 14–18.
     SerializeObject(prefix, 0, std::uint64_t{0x656c696678646876});
-    const auto file_write_id = NewGuid();
-    const auto data_write_id = NewGuid();
+    const auto file_write_id = GenerateRandomGuid();
+    const auto data_write_id = GenerateRandomGuid();
     const auto first_header =
         MakeVhdxHeader(1, file_write_id, data_write_id);
     const auto second_header =
@@ -568,7 +559,7 @@ struct VhdxLayout {
     // replay. The required metadata items are defined in VHDX Format
     // Specification v1.00, §§3.1.2 and 3.5.1–3.5.2.5, pp. 15–16 and
     // 30–33.
-    const auto metadata = MakeMetadata(virtual_disk_length, NewGuid());
+    const auto metadata = MakeMetadata(virtual_disk_length, GenerateRandomGuid());
     CopyBytes(prefix, kMetadataOffset, metadata);
     CopyBytes(prefix, kBatOffset, bat);
 
@@ -653,7 +644,7 @@ template <typename DeviceType>
     auto backup = std::array<std::byte, kNtfsChecksumOffset>{};
     ReadExact(source, backup, backup_offset,
         "the backup source volume boot record");
-    const auto identity = NewGuid();
+    const auto identity = GenerateRandomGuid();
     auto serial = std::array<std::byte, 8>{};
     std::memcpy(serial.data(), std::addressof(identity), serial.size());
     return NtfsIdentityOverlay{

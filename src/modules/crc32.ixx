@@ -96,6 +96,22 @@ constexpr auto CanUseCrc32Instructions() noexcept -> bool {
 #endif
 }
 
+extern "C" NTSYSAPI ULONG32 NTAPI RtlComputeCrc32(
+    _In_ ULONG32 partial_crc, _In_ const void *buffer, _In_ ULONG length);
+
+[[nodiscard, msvc::forceinline]]
+auto Crc32UsingNtApi(const std::span<const std::byte> input) noexcept {
+    auto result = std::uint32_t{};
+    constexpr auto chunk_size =
+        CompileTimeCast<std::size_t, std::numeric_limits<ULONG>::max()>();
+    for (auto i = 0uz; i < input.size(); i += chunk_size) {
+        const auto length = static_cast<ULONG>(
+            std::min(chunk_size, input.size() - i));
+        result = RtlComputeCrc32(result, input.data() + i, length);
+    }
+    return result;
+}
+
 } // namespace devicefs::crc32_detail
 
 namespace devicefs {
@@ -109,6 +125,11 @@ export template <std::uint32_t Polynomial = crc32_detail::kIeeePolynomial>
             (Polynomial == crc32_detail::kIeeePolynomial))) {
         if (crc32_detail::CanUseCrc32Instructions()) {
             return crc32_detail::Crc32UsingInstructions<Polynomial>(input);
+        }
+    } else if constexpr (!crc32_detail::kIsArm64 &&
+        (Polynomial == crc32_detail::kIeeePolynomial)) {
+        if not consteval {
+            return crc32_detail::Crc32UsingNtApi(input);
         }
     }
     auto result = std::numeric_limits<std::uint32_t>::max();

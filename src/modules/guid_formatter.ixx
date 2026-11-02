@@ -20,9 +20,12 @@ export struct GuidLess {
     }
 };
 
+export template <bool IncludeBraces>
+constexpr auto GuidLength = IncludeBraces ? 38 : 36;
+
 template <bool IncludeBraces>
 struct FormattedGuid {
-    std::array<char, IncludeBraces ? 38 : 36> characters;
+    std::array<char, GuidLength<IncludeBraces>> characters;
 
     [[nodiscard]] constexpr operator std::string_view() const noexcept {
         return {characters.data(), characters.size()};
@@ -37,31 +40,43 @@ struct std::formatter<FormattedGuid<IncludeBraces>>
 // If `IncludeBraces` is true, the result is enclosed in braces.
 //
 // This function is intended to preserve the last Windows error value.
-export template <bool IncludeBraces = true>
-[[nodiscard]] auto FormatGuid(const GUID &identifier) {
-    // The `result` buffer is intentionally uninitialized because the
-    // subsequent call to `std::format_to_n` overwrites every byte of the
-    // buffer before anything reads the buffer.
-    //
-    // This suppression uses `#pragma warning` rather than the usual
-    // `[[gsl::suppress]]` annotation because using `[[gsl::suppress]]` to
-    // annotate this function causes MSVC to crash.
-#pragma warning(push)
-#pragma warning(disable : 6001 26494)
-    /* [[indeterminate]] */ FormattedGuid<IncludeBraces> result;
-    std::ignore = std::format_to_n(result.characters.begin(),
-        std::tuple_size_v<decltype(result.characters)>,
-        "{}{:08x}-{:04x}-{:04x}-{:02x}{:02x}-"
-        "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{}",
-        IncludeBraces ? "{" : "",
+export template <bool IncludeBraces, class Character>
+auto FormatGuidToBuffer(const GUID &identifier,
+    const std::span<Character, GuidLength<IncludeBraces>> buffer) {
+    static constexpr auto text = std::to_array(
+        "{{{:08x}-{:04x}-{:04x}-{:02x}{:02x}-"
+        "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}}}");
+    static constexpr auto trim = IncludeBraces ? 0 : 2;
+    static constexpr auto subspan =
+        std::span{text}.subspan<trim, text.size() - 2 * trim - 1>();
+    static constexpr auto transcoded = [](const auto &text)
+        static consteval noexcept {
+        auto result = std::array<Character, text.size() + 1>{};
+        std::ranges::copy(text, result.begin());
+        return result;
+    }(subspan);
+    std::format_to_n(buffer.data(), buffer.size(), transcoded.data(),
         identifier.Data1, identifier.Data2, identifier.Data3,
         identifier.Data4[0], identifier.Data4[1], identifier.Data4[2],
         identifier.Data4[3], identifier.Data4[4], identifier.Data4[5],
-        identifier.Data4[6], identifier.Data4[7],
-        IncludeBraces ? "}" : "");
-#pragma warning(pop)
+        identifier.Data4[6], identifier.Data4[7]);
+}
+
+export template <bool IncludeBraces = true>
+[[nodiscard]] auto FormatGuid(const GUID &guid) {
+    // The `result` buffer is intentionally uninitialized because the
+    // subsequent call to `std::format_to_n` overwrites every byte of the
+    // buffer before anything reads the buffer.
+    __pragma(warning(push))
+    __pragma(warning(disable : 6001 26494))
+    /* [[indeterminate]] */ FormattedGuid<IncludeBraces> result;
+    FormatGuidToBuffer<IncludeBraces>(guid, std::span{result.characters});
+    __pragma(warning(pop))
     return result;
 }
+
+template auto FormatGuid<true>(const GUID &);
+template auto FormatGuid<false>(const GUID &);
 
 // Parse a GUID with or without enclosing braces.
 export [[nodiscard]] auto ParseGuid(const std::string_view value)

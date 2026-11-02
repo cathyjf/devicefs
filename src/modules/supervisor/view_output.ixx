@@ -154,7 +154,7 @@ export [[nodiscard]] auto RunOperationWithOutput(
     // While this `output` object is alive, standard output and standard error
     // are redirected into temporary files.
     auto output = view_output_detail::ViewOutput{
-        TemporarySystemDirectoryPath("devicefs-view-output")};
+        TemporarySystemDirectoryPath(L"devicefs-view-output")};
 
     // This menu does not allow exceptions to escape from the supervised
     // asynchronous operation. Instead, exceptions are informationally printed

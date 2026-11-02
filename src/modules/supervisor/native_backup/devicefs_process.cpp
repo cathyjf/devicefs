@@ -71,7 +71,7 @@ struct DeviceFsStartRequest {
 };
 
 [[nodiscard]] auto TemporaryDeviceFsViewPath() {
-    return TemporarySystemDirectoryPath("devicefs-view");
+    return TemporarySystemDirectoryPath(L"devicefs-view");
 }
 
 [[nodiscard]] auto StartDeviceFs(

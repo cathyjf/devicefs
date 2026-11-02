@@ -104,7 +104,7 @@ auto TryRemoveDirectory(
 class ViewDirectory {
 public:
     ViewDirectory(
-        const std::string_view prefix,
+        const std::wstring_view prefix,
         const PSID user)
         : path_{TemporarySystemDirectoryPath(prefix)} {
         if (!CreateDirectoryW(path_.c_str(), nullptr)) {
@@ -215,12 +215,12 @@ auto WaitForViewSession(
     }();
     const auto port = std::to_string(internal::SelectTcpPortCandidate());
     auto devicefs_directory = internal::ViewDirectory{
-        "devicefs-view", user->User.Sid};
+        L"devicefs-view", user->User.Sid};
     const auto devicefs_mount = devicefs_directory.Path() / "view";
     constexpr auto vhdx_filename = "view.vhdx"sv;
     const auto projected_vhdx = devicefs_mount / vhdx_filename;
     auto volume_directory = internal::ViewDirectory{
-        "devicefs-view-volume", user->User.Sid};
+        L"devicefs-view-volume", user->User.Sid};
 
     devicefs::WriteToStream(
         devicefs::stdout,

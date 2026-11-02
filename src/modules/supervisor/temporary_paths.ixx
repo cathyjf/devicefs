@@ -25,27 +25,70 @@ import <devicefs/common.h>;
 import <devicefs/windows_imports.h>;
 import devicefs.guid_formatter;
 import devicefs.stream_writer;
+import devicefs.terminal.safecast;
 
 export [[nodiscard]] auto UniqueName() {
     return FormatGuid<false>(GenerateRandomGuid());
 }
 
-// TODO: This function uses many heap allocations for a task that should really
-//       only require one heap allocation.
-export [[nodiscard]] auto TemporarySystemDirectoryPath(
-    const std::string_view prefix) {
-    const auto windows_directory = [] {
-        auto path = std::wstring{};
-        const auto result = wil::GetWindowsDirectoryW(path);
-        if (FAILED(result)) {
-            WinError("failed to obtain the path to the Windows directory",
-                ExplicitHresult{result});
+auto WriteWindowsDirectoryToBuffer(std::wstring &path, auto &&resize) {
+    using throw_error = decltype([] static {
+        WinError("failed to obtain the path to the Windows directory");
+    });
+    using windows_dir = decltype([](auto &path) static {
+        const auto length = GetWindowsDirectoryW(
+            path.data(), devicefs::terminal::FailFastCast<UINT>(
+                path.length() + 1));
+        if (length == 0) {
+            throw_error::operator()();
         }
-        return path;
-    }();
-    return std::filesystem::path{windows_directory} /
-        "SystemTemp" /
-        std::format("{}-{}", prefix, UniqueName());
+        return length;
+    });
+    const auto reported_windows_length = windows_dir::operator()(path);
+    const bool retry = reported_windows_length > path.size();
+    const auto windows_length =
+        retry ? (reported_windows_length - 1) : reported_windows_length;
+    std::invoke(std::forward<decltype(resize)>(resize), windows_length);
+    if (retry && (windows_dir::operator()(path) != windows_length)) {
+        throw_error::operator()();
+    }
+    return path.begin() + windows_length;
+}
+
+// Generate a pathname of the form
+//   `$WINDOWS\SystemTemp\$PREFIX-$GUID`
+// where
+//   `$WINDOWS` is the path to the Windows directory,
+//   `$PREFIX` is a caller-supplied prefix, and
+//   `$GUID` is a randomly-generated GUID suffix.
+//
+// The function does not create an object in the file system.
+export [[nodiscard]] auto TemporarySystemDirectoryPath(
+    const std::wstring_view prefix) {
+    using namespace std::string_view_literals;
+    constexpr auto likely_windows_length = L"C:\\Windows\\"sv.length();
+    constexpr auto system_temp = L"SystemTemp\\"sv;
+    const auto caller_prefix_length = prefix.length() + 1;
+    constexpr auto guid_length = GuidLength<false>;
+    const auto suffix_length =
+        system_temp.length() + caller_prefix_length + guid_length;
+    const auto minimum_length = likely_windows_length + suffix_length;
+
+    auto path = std::wstring(minimum_length, L'\0');
+    const auto cursor = WriteWindowsDirectoryToBuffer(path,
+        [&path, suffix_length](const auto windows_length) {
+        path.resize(windows_length + suffix_length + 1);
+    });
+    *cursor = L'\\';
+    const auto caller_prefix_cursor =
+        std::copy(system_temp.begin(), system_temp.end(), cursor + 1);
+    const auto guid_cursor =
+        std::copy(prefix.begin(), prefix.end(), caller_prefix_cursor);
+    *guid_cursor = L'-';
+    FormatGuidToBuffer<false>(GenerateRandomGuid(),
+        std::span<wchar_t, guid_length>{guid_cursor + 1, guid_length});
+
+    return std::filesystem::path{std::move(path)};
 }
 
 export class TemporaryDirectory {

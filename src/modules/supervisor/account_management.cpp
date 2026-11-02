@@ -224,7 +224,7 @@ auto EnsureWinFsp() -> bool {
     const auto apartment = WinrtApartment{
         "could not initialize WinRT to install WinFsp", RO_INIT_MULTITHREADED};
     const auto directory = TemporaryDirectory{
-        TemporarySystemDirectoryPath("devicefs-winfsp-package")};
+        TemporarySystemDirectoryPath(L"devicefs-winfsp-package")};
     const auto name = std::format("winfsp-{}.msi", version);
     const auto destination = directory.Path() / name;
     const auto url = std::format("{}/{}", kWinFspRelease, name);
@@ -310,7 +310,7 @@ auto InstallWslPackage() -> bool {
         }
 
         const auto directory = TemporaryDirectory{
-            TemporarySystemDirectoryPath("devicefs-wsl-package")};
+            TemporarySystemDirectoryPath(L"devicefs-wsl-package")};
 
         devicefs::WriteToStream(devicefs::stdout,
             L"backup-supervisor: downloading WSL release '{}' MSI '{}' from '{}'\n",

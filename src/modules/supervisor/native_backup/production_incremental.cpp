@@ -63,7 +63,7 @@ auto TryPrepareAndWriteDirtyMapForSnapshot(const auto &snapshot,
                 return std::nullopt;
             }
             return MapAndPath{std::move(map),
-                TemporarySystemDirectoryPath("devicefs-dirty-map")};
+                TemporarySystemDirectoryPath(L"devicefs-dirty-map")};
         } catch (const std::runtime_error &error) {
             write_error(error);
             return std::nullopt;

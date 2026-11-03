@@ -91,35 +91,60 @@ export [[nodiscard]] auto TemporarySystemDirectoryPath(
     return std::filesystem::path{std::move(path)};
 }
 
-export class TemporaryDirectory {
-public:
-    explicit TemporaryDirectory(std::filesystem::path path)
-        : path_{std::move(path)} {
-        if (!CreateDirectoryW(path_.c_str(), nullptr)) {
-            WinError("could not create temporary directory '{}'",
-                std::wstring_view{path_.native()});
+extern "C" auto NTAPI RtlDosPathNameToNtPathName_U_WithStatus(
+    _In_ PCWSTR windows_path_name, _Out_ PUNICODE_STRING nt_path_name,
+    _Outptr_opt_result_maybenull_ PWSTR *, _Reserved_ PVOID) -> NTSTATUS;
+
+auto GetNtPathFromWin32Path(const std::filesystem::path &path) {
+    static const auto dos_path_to_nt_path = [] static {
+        const auto handle = LoadLibraryExA(
+            "ntdll.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!handle) {
+            std::_Exit(GetLastError());
         }
-    }
-
-    TemporaryDirectory(const TemporaryDirectory &) = delete;
-    auto operator=(const TemporaryDirectory &) -> TemporaryDirectory & = delete;
-    TemporaryDirectory(TemporaryDirectory &&) = delete;
-    auto operator=(TemporaryDirectory &&) -> TemporaryDirectory & = delete;
-
-    ~TemporaryDirectory() noexcept {
-        if (const auto result = wil::RemoveDirectoryRecursiveNoThrow(path_.c_str());
-            FAILED(result)) {
-            devicefs::WriteToStream(devicefs::stderr,
-                L"backup-supervisor: could not remove temporary directory '{}': {}\n",
-                std::wstring_view{path_.native()},
-                TryConstructWinError("", ExplicitHresult{result}));
+        const auto address = GetProcAddressByFunctionDeclaration(
+            handle, RtlDosPathNameToNtPathName_U_WithStatus);
+        if (!address) {
+            std::_Exit(GetLastError());
         }
+        return address;
+    }();
+    using UniqueUnicodeString = wil::unique_struct<UNICODE_STRING,
+        decltype(&::RtlFreeUnicodeString), ::RtlFreeUnicodeString>;
+    auto nt_name = UniqueUnicodeString{};
+    const auto status = dos_path_to_nt_path(
+        path.c_str(), nt_name.addressof(), nullptr, nullptr);
+    if (!NT_SUCCESS(status)) {
+        WinError("failed to convert Win32 path '{}' to an NT path",
+            std::wstring_view{path.native()},
+            ExplicitHresult{HRESULT_FROM_NT(status)});
     }
+    return nt_name;
+}
 
-    [[nodiscard]] auto Path() const noexcept -> const std::filesystem::path & {
-        return path_;
+export auto MakeTemporaryDirectory(std::filesystem::path path) {
+    auto nt_name = GetNtPathFromWin32Path(path);
+    auto attributes = OBJECT_ATTRIBUTES{
+        .Length = sizeof(OBJECT_ATTRIBUTES),
+        .ObjectName = nt_name.addressof(),
+        .Attributes = OBJ_CASE_INSENSITIVE,
+    };
+    auto io_status = IO_STATUS_BLOCK{};
+    auto handle = wil::unique_hfile{};
+    const auto status = NtCreateFile(
+        handle.put(), DELETE, &attributes, &io_status,
+        nullptr, FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_CREATE, FILE_DIRECTORY_FILE | FILE_DELETE_ON_CLOSE,
+        nullptr, 0);
+    if (!NT_SUCCESS(status)) {
+        WinError("failed to create temporary directory '{}'",
+            std::wstring_view{path.native()},
+            ExplicitHresult{HRESULT_FROM_NT(status)});
     }
-
-private:
-    std::filesystem::path path_;
-};
+    struct {
+        wil::unique_hfile handle;
+        std::filesystem::path path;
+    } directory = {std::move(handle), std::move(path)};
+    return directory;
+}

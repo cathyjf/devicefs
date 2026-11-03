@@ -579,10 +579,10 @@ export [[nodiscard]] auto MaterializeOci(
     }();
 
     SetDefaultTokenAcl();
-    const auto temporary = TemporaryDirectory{
+    const auto temporary = MakeTemporaryDirectory(
         std::filesystem::temp_directory_path() /
-            std::format("devicefs-oci-{}", UniqueName())};
-    const auto rootfs = temporary.Path() / "rootfs.tar";
+            std::format("devicefs-oci-{}", UniqueName()));
+    const auto rootfs = temporary.path / "rootfs.tar";
     const auto [digest, rootfs_file] =
         [&oci, &rootfs, &previous_digest, &temporary, distribution]()
         -> std::pair<std::optional<std::string>, wil::unique_hfile> {
@@ -601,7 +601,7 @@ export [[nodiscard]] auto MaterializeOci(
         devicefs::WriteToStream(devicefs::stdout,
             "backup-supervisor: reading OCI image '{}' for WSL distribution '{}'\n",
             Transcode<std::string>(archive.native()), distribution);
-        const auto layer = ReadOciLayerDigest(tar, archive, temporary.Path());
+        const auto layer = ReadOciLayerDigest(tar, archive, temporary.path);
         if (!layer) {
             return {};
         }

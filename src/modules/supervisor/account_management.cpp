@@ -200,6 +200,22 @@ auto VerifyWinFspMsi(const std::filesystem::path &path) {
     }
 }
 
+auto MakeFileDeleter(const std::filesystem::path &path) noexcept {
+    return wil::scope_exit([&path] noexcept {
+        auto error = std::error_code{};
+        std::filesystem::remove(path, error);
+        if (!error) {
+            return;
+        }
+        devicefs::WriteToStream(devicefs::stderr,
+            L"backup-supervisor: continuing despite the following non-fatal "
+            "error: failed to remove temporary file '{}': {}\n",
+            std::wstring_view{path.native()},
+            TryConstructWinError("", ExplicitWin32Error{
+                std::bit_cast<DWORD>(error.value())}));
+    });
+}
+
 } // namespace
 
 auto EnsureWinFsp() -> bool {
@@ -223,10 +239,11 @@ auto EnsureWinFsp() -> bool {
 
     const auto apartment = WinrtApartment{
         "could not initialize WinRT to install WinFsp", RO_INIT_MULTITHREADED};
-    const auto directory = TemporaryDirectory{
-        TemporarySystemDirectoryPath(L"devicefs-winfsp-package")};
+    const auto directory = MakeTemporaryDirectory(
+        TemporarySystemDirectoryPath(L"devicefs-winfsp-package"));
     const auto name = std::format("winfsp-{}.msi", version);
-    const auto destination = directory.Path() / name;
+    const auto destination = directory.path / name;
+    const auto destination_deleter = MakeFileDeleter(destination);
     const auto url = std::format("{}/{}", kWinFspRelease, name);
     devicefs::WriteToStream(devicefs::stdout,
         "backup-supervisor: downloading pinned WinFsp MSI '{}' from '{}'\n",
@@ -309,14 +326,15 @@ auto InstallWslPackage() -> bool {
                 Transcode<std::string>(name), Transcode<std::string>(download_url.AbsoluteUri())));
         }
 
-        const auto directory = TemporaryDirectory{
-            TemporarySystemDirectoryPath(L"devicefs-wsl-package")};
+        const auto directory = MakeTemporaryDirectory(
+            TemporarySystemDirectoryPath(L"devicefs-wsl-package"));
 
         devicefs::WriteToStream(devicefs::stdout,
             L"backup-supervisor: downloading WSL release '{}' MSI '{}' from '{}'\n",
             std::wstring_view{release.GetNamedString(L"tag_name")},
             std::wstring_view{name}, std::wstring_view{download_url.AbsoluteUri()});
-        const auto destination = directory.Path() / "wsl.msi";
+        const auto destination = directory.path / "wsl.msi";
+        const auto destination_deleter = MakeFileDeleter(destination);
         const auto bytes = DownloadFileIntoPath(client, download_url, destination);
         devicefs::WriteToStream(devicefs::stdout,
             L"backup-supervisor: downloaded '{}' ({:.2f} MiB)\n",

@@ -155,7 +155,7 @@ export auto MakeTemporaryDirectory(std::filesystem::path path) {
 // (2) a volume cannot be mounted on a directory if a delete-on-close handle
 // to that directory remains open.
 //
-// This function takes the path by-value so that the returned deleter can
+// This function takes the path by value so that the returned deleter can
 // outlive the path if necessary.
 export auto MakeFileDeleter(std::filesystem::path path) noexcept {
     return wil::scope_exit([path = std::move(path)] noexcept {

@@ -487,16 +487,15 @@ enum class BackupViewPreparation {
     }
 
     // WinFsp creates and removes the leaf mount directories. Only their
-    // shared parent must exist before the children start.
-    const auto mount_root_created =
-        std::filesystem::create_directory(mount_root);
-    auto remove_mount_root = wil::scope_exit([&] {
-        if (mount_root_created) {
-            auto ignored = std::error_code{};
-            static_cast<void>(
-                std::filesystem::remove(mount_root, ignored));
-        }
-    });
+    // shared parent (the "mount root") must exist before the children start.
+    //
+    // If the caller specified a mount root and it already exists, we leave
+    // it alone. Otherwise, we create it and retain a delete-on-close handle.
+    // If the mount root already exists but is not a directory, an exception
+    // will be thrown by `MakeTemporaryDirectory`.
+    const auto mount_root_deleter =
+        (!mount_root_override || !std::filesystem::is_directory(mount_root)) ?
+            std::optional{MakeTemporaryDirectory(mount_root)} : std::nullopt;
 
     const auto synthetic_mount_text = Transcode<std::string>(synthetic_mount.native());
     const auto real_mount_text = Transcode<std::string>(real_mount.native());

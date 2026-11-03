@@ -97,7 +97,7 @@ export [[nodiscard]] auto GenerateRandomGuid() {
     const auto result = CoCreateGuid(&identifier);
     if (FAILED(result)) [[unlikely]] {
         // This branch is believed to be reachable only if Windows fails to
-        // load the DLLs transively required by `CoCreateGuid`.
+        // load the DLLs transitively required by `CoCreateGuid`.
         WinError("the operation cannot continue because Windows failed to "
             "generate a random GUID", ExplicitHresult{result});
     }

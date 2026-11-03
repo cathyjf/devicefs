@@ -91,53 +91,21 @@ auto GrantUserFullControl(
     }
 }
 
-auto TryRemoveDirectory(
-    const std::filesystem::path &path,
-    const char *const description) noexcept {
-    try {
-        static_cast<void>(std::filesystem::remove(path));
-    } catch (const std::exception &error) {
-        TryWriteError(description, error);
+auto MakeViewDirectory(const std::wstring_view prefix, const PSID user) {
+    auto path = TemporarySystemDirectoryPath(prefix);
+    auto path_copy_for_deleter = path;
+    if (!CreateDirectoryW(path.c_str(), nullptr)) {
+        WinError("failed to create temporary view directory '{}'",
+            std::wstring_view{path.native()});
     }
+    auto path_deleter = MakeFileDeleter(std::move(path_copy_for_deleter));
+    GrantUserFullControl(path, user);
+    struct {
+        std::filesystem::path path;
+        decltype(path_deleter) deleter;
+    } directory = {std::move(path), std::move(path_deleter)};
+    return directory;
 }
-
-class ViewDirectory {
-public:
-    ViewDirectory(
-        const std::wstring_view prefix,
-        const PSID user)
-        : path_{TemporarySystemDirectoryPath(prefix)} {
-        if (!CreateDirectoryW(path_.c_str(), nullptr)) {
-            WinError("could not create view directory '{}'",
-                std::wstring_view{path_.native()});
-        }
-        try {
-            GrantUserFullControl(path_, user);
-        } catch (...) {
-            TryRemoveDirectory(path_, "view-directory cleanup failed");
-            throw;
-        }
-    }
-
-    ViewDirectory(const ViewDirectory &) = delete;
-    auto operator=(const ViewDirectory &)
-        -> ViewDirectory & = delete;
-    ViewDirectory(ViewDirectory &&) = delete;
-    auto operator=(ViewDirectory &&)
-        -> ViewDirectory & = delete;
-
-    ~ViewDirectory() {
-        TryRemoveDirectory(path_, "view-directory cleanup failed");
-    }
-
-    [[nodiscard]] auto Path() const noexcept
-        -> const std::filesystem::path & {
-        return path_;
-    }
-
-private:
-    std::filesystem::path path_;
-};
 
 [[nodiscard]] auto GenerateRpcPassword() -> wil::secure_string {
     auto random = std::array<unsigned char, 32>{};
@@ -214,13 +182,13 @@ auto WaitForViewSession(
         return information;
     }();
     const auto port = std::to_string(internal::SelectTcpPortCandidate());
-    auto devicefs_directory = internal::ViewDirectory{
-        L"devicefs-view", user->User.Sid};
-    const auto devicefs_mount = devicefs_directory.Path() / "view";
+    auto devicefs_directory = internal::MakeViewDirectory(
+        L"devicefs-view", user->User.Sid);
+    const auto devicefs_mount = devicefs_directory.path / "view";
     constexpr auto vhdx_filename = "view.vhdx"sv;
     const auto projected_vhdx = devicefs_mount / vhdx_filename;
-    auto volume_directory = internal::ViewDirectory{
-        L"devicefs-view-volume", user->User.Sid};
+    auto volume_directory = internal::MakeViewDirectory(
+        L"devicefs-view-volume", user->User.Sid);
 
     devicefs::WriteToStream(
         devicefs::stdout,
@@ -234,7 +202,7 @@ auto WaitForViewSession(
         L"  Projected VHDX: {}\n"
         L"  View-volume mount: {}\n",
         devicefs_mount.native(), projected_vhdx.native(),
-        volume_directory.Path().native());
+        volume_directory.path.native());
 
     auto rpc_password = std::optional<wil::secure_string>{
         internal::GenerateRpcPassword()};
@@ -313,7 +281,7 @@ auto WaitForViewSession(
     auto attached = internal::AttachedVhdx::Attach(
         projected_vhdx, cancellation_event);
     auto mounted = internal::MountedVolume{
-        volume_directory.Path(), attached.Root()};
+        volume_directory.path, attached.Root()};
 
     devicefs::WriteToStream(
         devicefs::stdout,
@@ -321,7 +289,7 @@ auto WaitForViewSession(
         L"  Attached volume: {}\n"
         L"  Browse and copy files from: {}\n"
         L"Press Ctrl+C here when you are finished.\n",
-        attached.Root(), volume_directory.Path().native());
+        attached.Root(), volume_directory.path.native());
 
     internal::WaitForViewSession(
         devicefs, fish, cancellation_event);

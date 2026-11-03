@@ -148,3 +148,27 @@ export auto MakeTemporaryDirectory(std::filesystem::path path) {
     } directory = {std::move(handle), std::move(path)};
     return directory;
 }
+
+// This function is useful in situations where this program cannot retain a
+// delete-on-close handle to the temporary object. For example, (1) an MSI
+// cannot be installed while a delete-on-close handle to it remains open, and
+// (2) a volume cannot be mounted on a directory if a delete-on-close handle
+// to that directory remains open.
+//
+// This function takes the path by-value so that the returned deleter can
+// outlive the path if necessary.
+export auto MakeFileDeleter(std::filesystem::path path) noexcept {
+    return wil::scope_exit([path = std::move(path)] noexcept {
+        auto error = std::error_code{};
+        std::filesystem::remove(path, error);
+        if (!error) {
+            return;
+        }
+        devicefs::WriteToStream(devicefs::stderr,
+            L"backup-supervisor: continuing despite the following non-fatal "
+            "error: failed to remove temporary file system object '{}': {}\n",
+            std::wstring_view{path.native()},
+            TryConstructWinError("", ExplicitWin32Error{
+                std::bit_cast<DWORD>(error.value())}));
+    });
+}

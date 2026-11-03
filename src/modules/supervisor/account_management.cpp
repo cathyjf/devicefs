@@ -200,22 +200,6 @@ auto VerifyWinFspMsi(const std::filesystem::path &path) {
     }
 }
 
-auto MakeFileDeleter(const std::filesystem::path &path) noexcept {
-    return wil::scope_exit([&path] noexcept {
-        auto error = std::error_code{};
-        std::filesystem::remove(path, error);
-        if (!error) {
-            return;
-        }
-        devicefs::WriteToStream(devicefs::stderr,
-            L"backup-supervisor: continuing despite the following non-fatal "
-            "error: failed to remove temporary file '{}': {}\n",
-            std::wstring_view{path.native()},
-            TryConstructWinError("", ExplicitWin32Error{
-                std::bit_cast<DWORD>(error.value())}));
-    });
-}
-
 } // namespace
 
 auto EnsureWinFsp() -> bool {

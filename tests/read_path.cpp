@@ -21,6 +21,7 @@ import devicefs.bitmap_set;
 import devicefs.byte_comparison;
 import devicefs.count_zeros;
 import <devicefs/common.h>;
+import devicefs.file_reader;
 import devicefs.windows_block_device;
 import devicefs.supervisor.math;
 
@@ -592,7 +593,9 @@ auto TestBitmapReductions(const std::string_view implementation) -> void {
 template <bool HasAllocationBitmap>
 auto TestReads() -> void {
     using Device = devicefs::WindowsBlockDevice<HasAllocationBitmap>;
-    auto contents = std::vector<BYTE>(8uz * 1024 * 1024);
+    const auto contents_buffer = std::make_unique_for_overwrite<
+        std::array<BYTE, 8uz * 1024 * 1024>>();
+    auto &contents = *contents_buffer;
     // Including higher offset bits prevents the contents from repeating every
     // 256 bytes, which could conceal a read from the wrong sector.
     for (auto index = 0uz; index < contents.size(); ++index) {
@@ -601,46 +604,27 @@ auto TestReads() -> void {
     }
     const auto filename = std::filesystem::temp_directory_path() /
         std::format("devicefs-read-path-{}.tmp", GetCurrentProcessId());
-    auto device = [&filename, length = contents.size()] {
-        auto handle = decltype(Device::handle){CreateFileW(
-            filename.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
-            nullptr, CREATE_NEW,
-            FILE_FLAG_OVERLAPPED | FILE_FLAG_DELETE_ON_CLOSE | FILE_ATTRIBUTE_TEMPORARY,
-            nullptr)};
-        if (!handle) {
-            WinError("could not create read-test file '{}'",
-                std::wstring_view{filename.native()});
-        }
-        const auto alignment = QueryBufferAlignment(handle.get());
+    auto [reader, writer] = CreateTemporaryFileWithSeparateHandles(
+        filename, FILE_FLAG_OVERLAPPED | FILE_ATTRIBUTE_TEMPORARY);
+    auto device = [&filename, length = contents.size(), &reader] {
+        const auto alignment = QueryBufferAlignment(reader.get());
         if (!alignment) {
-            WinError("could not query read-test buffer alignment");
+            WinError("failed to query read-test buffer alignment");
         }
         return Device{
             .length = length,
             .filename = filename,
-            .handle = std::move(handle),
+            .handle = std::move(reader),
             .buffer_alignment = *alignment
         };
     }();
     Device::read_buffer_alignment = device.buffer_alignment;
-    auto operation = OVERLAPPED{};
-    if (!WriteFile(device.handle.get(), contents.data(),
-            devicefs::terminal::FailFastCast<DWORD>(contents.size()),
-            nullptr, &operation)) {
-        const auto error = GetLastError();
-        if (error != ERROR_IO_PENDING) {
-            WinError("could not write read-test file '{}'",
-                std::wstring_view{filename.native()}, ExplicitWin32Error{error});
-        }
+    if (const auto status = WriteEntireBuffer(writer.get(), contents);
+            !status) {
+        WinError("failed to write read-test file '{}'",
+            std::wstring_view{filename.native()}, status.error());
     }
-    auto written = DWORD{};
-    if (!GetOverlappedResult(device.handle.get(), &operation, &written, TRUE)) {
-        WinError("could not finish writing read-test file '{}'",
-            std::wstring_view{filename.native()});
-    }
-    if (written != contents.size()) {
-        throw std::runtime_error("the read-test file write was incomplete");
-    }
+    writer.reset();
 
     auto allocation_bits = std::vector<BYTE>{};
     constexpr auto cluster_size = 4096u;

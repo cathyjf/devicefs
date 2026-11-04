@@ -115,3 +115,32 @@ export auto WriteEntireFile(const std::filesystem::path &path,
     }
     return file;
 }
+
+// Create a delete-on-close temporary file, and return a read/delete handle
+// followed by a write handle.
+//
+// Separate handles allow the write handle to be closed without deleting the
+// file. The written file can then be consumed by another read operation while
+// the read/delete handle remains open.
+export [[nodiscard]] auto CreateTemporaryFileWithSeparateHandles(
+    const std::filesystem::path &path, const DWORD extra_reader_flags = 0)
+    -> std::pair<wil::unique_hfile, wil::unique_hfile> {
+    auto file = wil::unique_hfile{CreateFileW(path.c_str(),
+        GENERIC_READ | DELETE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, CREATE_NEW,
+        FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_SEQUENTIAL_SCAN |
+            extra_reader_flags,
+        nullptr)};
+    if (!file) {
+        WinError("failed to create temporary file '{}'",
+            std::wstring_view{path.native()});
+    }
+    auto writer = wil::unique_hfile{ReOpenFile(file.get(), GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_DELETE, 0)};
+    if (!writer) {
+        WinError("failed to open temporary file '{}' for writing",
+            std::wstring_view{path.native()});
+    }
+    return {std::move(file), std::move(writer)};
+}

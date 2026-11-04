@@ -209,24 +209,34 @@ constexpr auto kBasicDataPartitionId = GUID{
     0xebd0a0a2, 0xb9e5, 0x4433,
     {0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7}};
 
-template <typename Value>
+// The serialization and deserialization techniques used in this file assume
+// that the host uses little endian byte ordering.
+static_assert(std::endian::native == std::endian::little);
+
+template <auto Offset, class Value, auto Extent>
+    requires std::is_trivially_copyable_v<Value>
 auto SerializeObject(
-    const std::span<std::byte> destination,
-    const std::size_t offset,
+    const std::span<std::byte, Extent> destination,
     const Value &value) noexcept -> void {
-    static_assert(std::endian::native == std::endian::little);
-    static_assert(std::is_trivially_copyable_v<Value>);
-    std::memcpy(
-        destination.subspan(offset, sizeof(value)).data(),
+    std::memcpy(destination.template subspan<Offset, sizeof(value)>().data(),
         std::addressof(value), sizeof(value));
 }
 
+template <auto Offset, auto DestExtent, class SourceType, auto SourceExtent>
+    requires std::disjunction_v<
+        std::is_same<SourceType, const std::byte>,
+        std::is_same<SourceType, std::byte>>
 auto CopyBytes(
-    const std::span<std::byte> destination,
-    const std::size_t offset,
-    const std::span<const std::byte> source) noexcept -> void {
-    std::memcpy(destination.subspan(offset, source.size()).data(),
-        source.data(), source.size());
+    const std::span<std::byte, DestExtent> destination,
+    const std::span<SourceType, SourceExtent> source) noexcept -> void {
+    decltype(auto) destination_span = CompileTimeCast<
+        std::conditional_t<SourceExtent == std::dynamic_extent,
+            std::span<std::byte>, const std::span<std::byte, SourceExtent>>>(
+                destination.template subspan<Offset, SourceExtent>());
+    if constexpr (SourceExtent == std::dynamic_extent) {
+        destination_span = destination_span.first(source.size());
+    }
+    std::memcpy(destination_span.data(), source.data(), source.size());
 }
 
 [[nodiscard]] constexpr auto VhdxCrc32(
@@ -285,37 +295,61 @@ auto CopyBytes(
         .log_length = std::uint32_t{kLogLength},
         .log_offset = kLogOffset,
     };
-    SerializeObject(result, 0, header);
+    const auto result_span = std::span{result};
+    SerializeObject<0>(result_span, header);
     header.checksum = VhdxCrc32(result);
-    SerializeObject(result, 0, header);
+    SerializeObject<0>(result_span, header);
     return result;
 }
 
 [[nodiscard]] auto MakeRegionTable(
     const std::uint32_t bat_length) {
-    auto result = std::vector<std::byte>(64 * 1024);
+    auto result = std::make_unique<std::array<std::byte, 64 * 1024>>();
     auto header = RegionTableHeader{
         .signature = 0x69676572,
         .entry_count = 2,
     };
-    SerializeObject(result, 0, header);
-    SerializeObject(result, sizeof(header), RegionTableEntry{
+    const auto result_span = std::span{*result};
+    SerializeObject<0>(result_span, header);
+    SerializeObject<sizeof(header)>(result_span, RegionTableEntry{
         .id = kBatRegionId,
         .file_offset = kBatOffset,
         .length = bat_length,
         .flags = 1,
     });
-    SerializeObject(result, sizeof(header) + sizeof(RegionTableEntry),
+    SerializeObject<sizeof(header) + sizeof(RegionTableEntry)>(result_span,
         RegionTableEntry{
             .id = kMetadataRegionId,
             .file_offset = kMetadataOffset,
             .length = std::uint32_t{kMetadataLength},
             .flags = 1,
         });
-    header.checksum = VhdxCrc32(result);
-    SerializeObject(result, 0, header);
+    header.checksum = VhdxCrc32(result_span);
+    SerializeObject<0>(result_span, header);
     return result;
 }
+
+template <std::size_t MaxEntries, class Callable, std::size_t CurrentEntry = 0>
+class MetadataEntryWriter {
+public:
+    MetadataEntryWriter(Callable &callable):
+        callable_(std::move(callable)) {}
+
+    [[nodiscard]]
+    auto AddEntry(auto &&...arguments) requires (CurrentEntry < MaxEntries) {
+        callable_.template operator()<
+            std::integral_constant<std::size_t, CurrentEntry>>(
+                std::forward<decltype(arguments)>(arguments)...);
+        return MetadataEntryWriter<MaxEntries, Callable, CurrentEntry + 1>{
+            callable_};
+    }
+
+    auto Complete() noexcept {
+        static_assert(CurrentEntry == MaxEntries);
+    }
+private:
+    Callable callable_;
+};
 
 [[nodiscard]] auto MakeMetadata(
     const std::uint64_t virtual_disk_length,
@@ -339,48 +373,56 @@ auto CopyBytes(
     constexpr auto required = std::uint32_t{1u << 2};
     constexpr auto virtual_disk = std::uint32_t{1u << 1};
 
-    auto result = std::vector<std::byte>(kMetadataLength);
-    const auto header = MetadataTableHeader{
+    auto result = std::make_unique<std::array<std::byte, kMetadataLength>>();
+    const auto result_span = std::span{*result};
+    constexpr auto header = MetadataTableHeader{
         .signature = 0x617461646174656d,
         .entry_count = 5,
     };
-    SerializeObject(result, 0, header);
-    auto entry_offset = sizeof(header);
-    const auto add_entry = [&result, &entry_offset](const GUID &id,
-        const std::uint32_t offset, const std::uint32_t length,
-        const std::uint32_t flags) {
-        SerializeObject(result, entry_offset, MetadataTableEntry{
-            .id = id,
-            .offset = offset,
-            .length = length,
-            .flags = flags,
-        });
-        entry_offset += sizeof(MetadataTableEntry);
-    };
-    add_entry(kFileParametersId, file_parameters_offset,
-        file_parameters_length, required);
-    add_entry(kVirtualDiskSizeId, virtual_disk_size_offset,
-        virtual_disk_size_length,
-        required | virtual_disk);
-    add_entry(kPage83DataId, page83_data_offset, page83_data_length,
-        required | virtual_disk);
-    add_entry(kLogicalSectorSizeId, logical_sector_size_offset,
-        sector_size_length,
-        required | virtual_disk);
-    add_entry(kPhysicalSectorSizeId, physical_sector_size_offset,
-        sector_size_length,
-        required | virtual_disk);
+    SerializeObject<0>(result_span, header);
 
-    SerializeObject(result, file_parameters_offset, FileParameters{
+    auto writer_callback = [result_span] <class Index> (const GUID &id,
+        const std::uint32_t offset, const std::uint32_t length,
+        const std::uint32_t flags) noexcept {
+        constexpr auto result_offset = sizeof(MetadataTableHeader) +
+            sizeof(MetadataTableEntry) * Index::value;
+        SerializeObject<result_offset>(result_span,
+            MetadataTableEntry{
+                .id = id,
+                .offset = offset,
+                .length = length,
+                .flags = flags,
+            });
+    };
+    auto metadata_writer = MetadataEntryWriter<
+        header.entry_count, decltype(writer_callback)>{writer_callback};
+    metadata_writer
+        .AddEntry(kFileParametersId, file_parameters_offset,
+            file_parameters_length, required)
+        .AddEntry(kVirtualDiskSizeId, virtual_disk_size_offset,
+            virtual_disk_size_length,
+            required | virtual_disk)
+        .AddEntry(kPage83DataId, page83_data_offset, page83_data_length,
+            required | virtual_disk)
+        .AddEntry(kLogicalSectorSizeId, logical_sector_size_offset,
+            sector_size_length,
+            required | virtual_disk)
+        .AddEntry(kPhysicalSectorSizeId, physical_sector_size_offset,
+            sector_size_length,
+            required | virtual_disk)
+        .Complete();
+
+    SerializeObject<file_parameters_offset>(result_span, FileParameters{
         .block_size = std::uint32_t{kPayloadBlockSize},
         .flags = 1,
     });
-    SerializeObject(result, virtual_disk_size_offset, virtual_disk_length);
-    SerializeObject(result, page83_data_offset, page83_data);
-    SerializeObject(result, logical_sector_size_offset,
-        std::uint32_t{kLogicalSectorSize});
-    SerializeObject(result, physical_sector_size_offset,
-        std::uint32_t{kLogicalSectorSize});
+    SerializeObject<virtual_disk_size_offset>(
+        result_span, virtual_disk_length);
+    SerializeObject<page83_data_offset>(result_span, page83_data);
+    SerializeObject<logical_sector_size_offset>(
+        result_span, std::uint32_t{kLogicalSectorSize});
+    SerializeObject<physical_sector_size_offset>(
+        result_span, std::uint32_t{kLogicalSectorSize});
     return result;
 }
 
@@ -398,6 +440,7 @@ auto CopyBytes(
     const auto payload_offset = kBatOffset + bat_length;
     auto result = std::vector<std::byte>(
         devicefs::terminal::FailFastMaybeCast<std::size_t>(bat_length));
+    const auto result_span = std::span{result};
 
     // Fixed VHDX payload blocks are fully present. Sector-bitmap entries are
     // interleaved but remain zero. See VHDX Format Specification v1.00,
@@ -407,9 +450,11 @@ auto CopyBytes(
         const auto bat_index = payload + (payload / chunk_ratio);
         const auto file_offset = payload_offset + payload * kPayloadBlockSize;
         const auto entry = ((file_offset / kOneMiB) << 20) | 6u;
-        SerializeObject(result,
+        const auto subspan_offset =
             devicefs::terminal::FailFastMaybeCast<std::size_t>(
-                bat_index * sizeof(entry)), entry);
+                bat_index * sizeof(entry));
+        SerializeObject<0>(result_span.subspan(
+            subspan_offset, sizeof(entry)), entry);
     }
     return result;
 }
@@ -488,7 +533,7 @@ struct GptLayout {
             devicefs::terminal::FailFastCast<std::uint32_t>(
                 protective_sector_count),
     };
-    SerializeObject(prefix_span, 510, std::uint16_t{0xaa55});
+    SerializeObject<510>(prefix_span, std::uint16_t{0xaa55});
 
     const auto partition_entries_span = write_partition_entry(
         prefix_span.subspan<2 * kLogicalSectorSize,
@@ -500,7 +545,7 @@ struct GptLayout {
 
     auto suffix = std::make_unique<GptLayout::SuffixArray>();
     const auto suffix_span = std::span{*suffix};
-    CopyBytes(suffix_span, 0, partition_entries_span);
+    CopyBytes<0>(suffix_span, partition_entries_span);
     write_header(
         suffix_span.subspan<kGptEntryArrayLength, sizeof(GptHeader)>(),
         backup_header_lba, 1, backup_entries_lba, partition_entries_checksum);
@@ -542,31 +587,34 @@ struct VhdxLayout {
         devicefs::terminal::FailFastMaybeCast<std::uint64_t>(bat.size());
     auto prefix = std::vector<std::byte>(
         devicefs::terminal::FailFastMaybeCast<std::size_t>(payload_offset));
+    const auto prefix_span = std::span{prefix};
 
     // The file identifier, duplicate headers, and duplicate region tables use
     // the fixed offsets defined by VHDX Format Specification v1.00,
     // §§3.1.1–3.1.3, pp. 14–18.
-    SerializeObject(prefix, 0, std::uint64_t{0x656c696678646876});
+    SerializeObject<0>(prefix_span, std::uint64_t{0x656c696678646876});
     const auto file_write_id = GenerateRandomGuid();
     const auto data_write_id = GenerateRandomGuid();
     const auto first_header =
         MakeVhdxHeader(1, file_write_id, data_write_id);
     const auto second_header =
         MakeVhdxHeader(2, file_write_id, data_write_id);
-    CopyBytes(prefix, 64 * 1024, first_header);
-    CopyBytes(prefix, 128 * 1024, second_header);
+    CopyBytes<64 * 1024>(prefix_span, std::span{first_header});
+    CopyBytes<128 * 1024>(prefix_span, std::span{second_header});
     const auto region_table = MakeRegionTable(
         devicefs::terminal::FailFastMaybeCast<std::uint32_t>(bat.size()));
-    CopyBytes(prefix, 192 * 1024, region_table);
-    CopyBytes(prefix, 256 * 1024, region_table);
+    const auto region_table_span = std::span{*region_table};
+    CopyBytes<192 * 1024>(prefix_span, region_table_span);
+    CopyBytes<256 * 1024>(prefix_span, region_table_span);
 
     // A zero LogGuid means that the one-MiB zero-filled log has nothing to
     // replay. The required metadata items are defined in VHDX Format
     // Specification v1.00, §§3.1.2 and 3.5.1–3.5.2.5, pp. 15–16 and
     // 30–33.
-    const auto metadata = MakeMetadata(virtual_disk_length, GenerateRandomGuid());
-    CopyBytes(prefix, kMetadataOffset, metadata);
-    CopyBytes(prefix, kBatOffset, bat);
+    const auto metadata = MakeMetadata(virtual_disk_length,
+        GenerateRandomGuid());
+    CopyBytes<kMetadataOffset>(prefix_span, std::span{*metadata});
+    CopyBytes<kBatOffset>(prefix_span, std::span{bat});
 
     return VhdxLayout{
         .file_length = payload_offset +
@@ -608,14 +656,17 @@ struct NtfsIdentityOverlay {
     std::array<NtfsIdentityPatch, 2> patches;
 };
 
+template <auto PrefixExtent>
 [[nodiscard]] auto MakeNtfsPatch(
     const std::uint64_t sector_offset,
-    const std::span<const std::byte> sector_prefix,
+    const std::span<const std::byte, PrefixExtent> sector_prefix,
     const std::span<const std::byte, 8> serial) noexcept {
     auto checksum_input = std::array<std::byte, kNtfsChecksumOffset>{};
-    CopyBytes(checksum_input, 0,
-        sector_prefix.first(checksum_input.size()));
-    CopyBytes(checksum_input, kNtfsSerialOffset, serial);
+    const auto checksum_input_span = std::span{checksum_input};
+    CopyBytes<0>(checksum_input_span,
+        sector_prefix.template first<
+            std::tuple_size_v<decltype(checksum_input)>>());
+    CopyBytes<kNtfsSerialOffset>(checksum_input_span, serial);
 
     auto checksum = std::uint32_t{};
     for (auto offset = std::size_t{}; offset < checksum_input.size();
@@ -626,12 +677,12 @@ struct NtfsIdentityOverlay {
             "`checksum_input.data() + offset` are all within the array.")]]
         checksum += BitPrefixCast<std::uint32_t>(checksum_input[offset]);
     }
-
     auto result = NtfsIdentityPatch{
         .offset = sector_offset + kNtfsSerialOffset,
     };
-    CopyBytes(result.bytes, 0, serial);
-    SerializeObject(result.bytes, serial.size(), checksum);
+    const auto result_bytes_span = std::span{result.bytes};
+    CopyBytes<0>(result_bytes_span, serial);
+    SerializeObject<decltype(serial)::extent>(result_bytes_span, checksum);
     return result;
 }
 
@@ -653,13 +704,16 @@ template <typename DeviceType>
     auto backup = std::array<std::byte, kNtfsChecksumOffset>{};
     ReadExact(source, backup, backup_offset,
         "the backup source volume boot record");
+    // `GenerateRandomGuid` is used here as a nonthrowing entropy source.
+    // TODO: Consider replacing this.
     const auto identity = GenerateRandomGuid();
-    auto serial = std::array<std::byte, 8>{};
-    std::memcpy(serial.data(), std::addressof(identity), serial.size());
+    const auto identity_span = std::as_bytes(
+        std::span<decltype(identity), 1>{&identity, 1}).first<8>();
     return NtfsIdentityOverlay{
         .patches = {
-            MakeNtfsPatch(0, primary, serial),
-            MakeNtfsPatch(backup_offset, backup, serial),
+            MakeNtfsPatch(0, std::as_bytes(std::span{primary}), identity_span),
+            MakeNtfsPatch(backup_offset,
+                std::as_bytes(std::span{backup}), identity_span),
         },
     };
 }
@@ -681,14 +735,16 @@ auto ApplyNtfsIdentityOverlay(
         if (overlap_begin >= overlap_end) {
             continue;
         }
-        const auto count = devicefs::terminal::FailFastMaybeCast<std::size_t>(
-            overlap_end - overlap_begin);
-        CopyBytes(output,
+        const auto count =
             devicefs::terminal::FailFastMaybeCast<std::size_t>(
-                overlap_begin - source_offset),
-            std::span{patch.bytes}.subspan(
-                devicefs::terminal::FailFastMaybeCast<std::size_t>(
-                    overlap_begin - patch.offset), count));
+                overlap_end - overlap_begin);
+        auto *const destination = output.subspan(
+            devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                overlap_begin - source_offset), count).data();
+        const auto *const source = std::span{patch.bytes}.subspan(
+            devicefs::terminal::FailFastMaybeCast<std::size_t>(
+                overlap_begin - patch.offset)).data();
+        std::memcpy(destination, source, count);
     }
 }
 
@@ -726,8 +782,8 @@ public:
                 devicefs::terminal::FailFastMaybeCast<std::size_t>(position);
             const auto count = std::min<std::size_t>(
                 output.size(), source.size() - source_position);
-            vhdx_detail::CopyBytes(
-                output, 0, source.subspan(source_position, count));
+            vhdx_detail::CopyBytes<0>(
+                output, source.subspan(source_position, count));
             // count is bounded by output.size(), which was constructed from
             // the ULONG wanted parameter.
             [[gsl::suppress("26472",

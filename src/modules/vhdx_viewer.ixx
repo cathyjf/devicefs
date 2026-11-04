@@ -229,19 +229,6 @@ auto CopyBytes(
         source.data(), source.size());
 }
 
-template <typename Value>
-[[nodiscard]] auto DeserializeObject(
-    const std::span<const std::byte> source,
-    const std::size_t offset) noexcept -> Value {
-    static_assert(std::endian::native == std::endian::little);
-    static_assert(std::is_trivially_copyable_v<Value>);
-    auto result = Value{};
-    std::memcpy(
-        std::addressof(result),
-        source.subspan(offset, sizeof(result)).data(), sizeof(result));
-    return result;
-}
-
 [[nodiscard]] constexpr auto VhdxCrc32(
     const std::span<const std::byte> input) noexcept {
     // The specification selects CRC-32C with the Castagnoli polynomial.
@@ -305,7 +292,7 @@ template <typename Value>
 }
 
 [[nodiscard]] auto MakeRegionTable(
-    const std::uint64_t bat_length) {
+    const std::uint32_t bat_length) {
     auto result = std::vector<std::byte>(64 * 1024);
     auto header = RegionTableHeader{
         .signature = 0x69676572,
@@ -315,7 +302,7 @@ template <typename Value>
     SerializeObject(result, sizeof(header), RegionTableEntry{
         .id = kBatRegionId,
         .file_offset = kBatOffset,
-        .length = devicefs::terminal::FailFastCast<std::uint32_t>(bat_length),
+        .length = bat_length,
         .flags = 1,
     });
     SerializeObject(result, sizeof(header) + sizeof(RegionTableEntry),
@@ -359,9 +346,9 @@ template <typename Value>
     };
     SerializeObject(result, 0, header);
     auto entry_offset = sizeof(header);
-    const auto add_entry = [&](const GUID &id, const std::uint32_t offset,
-                               const std::uint32_t length,
-                               const std::uint32_t flags) {
+    const auto add_entry = [&result, &entry_offset](const GUID &id,
+        const std::uint32_t offset, const std::uint32_t length,
+        const std::uint32_t flags) {
         SerializeObject(result, entry_offset, MetadataTableEntry{
             .id = id,
             .offset = offset,
@@ -428,8 +415,11 @@ template <typename Value>
 }
 
 struct GptLayout {
-    std::vector<std::byte> prefix;
-    std::vector<std::byte> suffix;
+    using PrefixArray = std::array<std::byte, kGptPartitionOffset>;
+    using SuffixArray = std::array<std::byte, kGptSuffixLength>;
+
+    std::unique_ptr<PrefixArray> prefix;
+    std::unique_ptr<SuffixArray> suffix;
 };
 
 [[nodiscard]] auto MakeGpt(const std::uint64_t source_length) {
@@ -441,21 +431,27 @@ struct GptLayout {
         backup_entries_lba + kGptEntryArraySectors;
     const auto disk_id = GenerateRandomGuid();
 
-    auto partition_entries =
-        std::vector<std::byte>(kGptEntryArrayLength);
-    SerializeObject(partition_entries, 0, GptPartitionEntry{
-        .type_id = kBasicDataPartitionId,
-        .partition_id = GenerateRandomGuid(),
-        .first_lba = kGptPartitionLba,
-        .last_lba = partition_last_lba,
-    });
-    const auto partition_entries_checksum = GptCrc32(partition_entries);
+    const auto write_partition_entry = [partition_last_lba]<auto Extent>
+        (const std::span<std::byte, Extent> buffer) {
+        auto *const cursor =
+            buffer.template subspan<0, sizeof(GptPartitionEntry)>().data();
+        ::new (cursor) GptPartitionEntry{
+            .type_id = kBasicDataPartitionId,
+            .partition_id = GenerateRandomGuid(),
+            .first_lba = kGptPartitionLba,
+            .last_lba = partition_last_lba,
+        };
+        return buffer;
+    };
 
-    const auto make_header = [&](const std::uint64_t current_lba,
-                                 const std::uint64_t other_lba,
-                                 const std::uint64_t entries_lba) {
-        auto result = std::array<std::byte, 512>{};
-        auto header = GptHeader{
+    const auto write_header = [&partition_last_lba, &disk_id]<auto Extent>(
+        const std::span<std::byte, Extent> destination,
+        const std::uint64_t current_lba, const std::uint64_t other_lba,
+        const std::uint64_t entries_lba,
+        const std::uint32_t partition_entries_checksum) {
+        auto *const header_cursor =
+            destination.template subspan<0, sizeof(GptHeader)>().data();
+        auto &header = *::new (header_cursor) GptHeader{
             .signature = 0x5452415020494645,
             .revision = 0x00010000,
             .header_size = sizeof(GptHeader),
@@ -469,18 +465,21 @@ struct GptLayout {
             .partition_entry_size = sizeof(GptPartitionEntry),
             .partition_entries_checksum = partition_entries_checksum,
         };
-        SerializeObject(result, 0, header);
-        header.checksum = GptCrc32(
-            std::span{result}.first(sizeof(header)));
-        SerializeObject(result, 0, header);
-        return result;
+        header.checksum = GptCrc32(std::as_bytes(
+            std::span<GptHeader, 1>{std::addressof(header), 1}));
     };
 
-    auto prefix = std::vector<std::byte>(kGptPartitionOffset);
+    auto prefix = std::make_unique<GptLayout::PrefixArray>();
+    const auto prefix_span = std::span{*prefix};
     const auto protective_sector_count = std::min(
         backup_header_lba,
         std::uint64_t{std::numeric_limits<std::uint32_t>::max()});
-    SerializeObject(prefix, 446, MbrPartitionEntry{
+    // The protective MBR's partition table begins at byte 446 of sector zero,
+    // after 440 bytes of boot code, a four-byte disk signature, and two unused
+    // bytes. See UEFI Specification 2.11, §5.2.3, Table 5.3.
+    auto *const protective_cursor = prefix_span.
+        subspan<446, sizeof(MbrPartitionEntry)>().data();
+    ::new (protective_cursor) MbrPartitionEntry{
         .starting_chs = EncodeChs(1),
         .type = 0xee,
         .ending_chs = EncodeChs(backup_header_lba),
@@ -488,17 +487,23 @@ struct GptLayout {
         .sector_count =
             devicefs::terminal::FailFastCast<std::uint32_t>(
                 protective_sector_count),
-    });
-    SerializeObject(prefix, 510, std::uint16_t{0xaa55});
-    const auto primary_header = make_header(1, backup_header_lba, 2);
-    CopyBytes(prefix, kLogicalSectorSize, primary_header);
-    CopyBytes(prefix, 2 * kLogicalSectorSize, partition_entries);
+    };
+    SerializeObject(prefix_span, 510, std::uint16_t{0xaa55});
 
-    auto suffix = std::vector<std::byte>(kGptSuffixLength);
-    CopyBytes(suffix, 0, partition_entries);
-    const auto backup_header = make_header(
-        backup_header_lba, 1, backup_entries_lba);
-    CopyBytes(suffix, kGptEntryArrayLength, backup_header);
+    const auto partition_entries_span = write_partition_entry(
+        prefix_span.subspan<2 * kLogicalSectorSize,
+            kGptEntryArrayLength>());
+    const auto partition_entries_checksum = GptCrc32(partition_entries_span);
+    write_header(
+        prefix_span.subspan<kLogicalSectorSize, sizeof(GptHeader)>(),
+        1, backup_header_lba, 2, partition_entries_checksum);
+
+    auto suffix = std::make_unique<GptLayout::SuffixArray>();
+    const auto suffix_span = std::span{*suffix};
+    CopyBytes(suffix_span, 0, partition_entries_span);
+    write_header(
+        suffix_span.subspan<kGptEntryArrayLength, sizeof(GptHeader)>(),
+        backup_header_lba, 1, backup_entries_lba, partition_entries_checksum);
     return GptLayout{
         .prefix = std::move(prefix),
         .suffix = std::move(suffix),
@@ -508,8 +513,8 @@ struct GptLayout {
 struct VhdxLayout {
     std::uint64_t file_length;
     std::vector<std::byte> prefix;
-    std::vector<std::byte> gpt_prefix;
-    std::vector<std::byte> gpt_suffix;
+    decltype(GptLayout::prefix) gpt_prefix;
+    decltype(GptLayout::suffix) gpt_suffix;
 };
 
 [[nodiscard]] auto MakeLayout(const std::uint64_t source_length) {
@@ -528,10 +533,10 @@ struct VhdxLayout {
 
     auto gpt = MakeGpt(source_length);
     const auto virtual_disk_length = source_length +
-        devicefs::terminal::FailFastMaybeCast<std::uint64_t>(
-            gpt.prefix.size()) +
-        devicefs::terminal::FailFastMaybeCast<std::uint64_t>(
-            gpt.suffix.size());
+        CompileTimeCast<std::uint64_t, std::tuple_size_v<
+            std::remove_reference_t<decltype(*gpt.prefix)>>>() +
+        CompileTimeCast<std::uint64_t, std::tuple_size_v<
+            std::remove_reference_t<decltype(*gpt.suffix)>>>();
     auto bat = MakeBat(virtual_disk_length);
     const auto payload_offset = kBatOffset +
         devicefs::terminal::FailFastMaybeCast<std::uint64_t>(bat.size());
@@ -551,7 +556,7 @@ struct VhdxLayout {
     CopyBytes(prefix, 64 * 1024, first_header);
     CopyBytes(prefix, 128 * 1024, second_header);
     const auto region_table = MakeRegionTable(
-        devicefs::terminal::FailFastMaybeCast<std::uint64_t>(bat.size()));
+        devicefs::terminal::FailFastMaybeCast<std::uint32_t>(bat.size()));
     CopyBytes(prefix, 192 * 1024, region_table);
     CopyBytes(prefix, 256 * 1024, region_table);
 
@@ -613,9 +618,13 @@ struct NtfsIdentityOverlay {
     CopyBytes(checksum_input, kNtfsSerialOffset, serial);
 
     auto checksum = std::uint32_t{};
-    for (auto offset = std::size_t{};
-        offset < checksum_input.size(); offset += sizeof(checksum)) {
-        checksum += DeserializeObject<std::uint32_t>(checksum_input, offset);
+    for (auto offset = std::size_t{}; offset < checksum_input.size();
+        offset += sizeof(checksum)) {
+        [[gsl::suppress("26482", justification:
+            "The construction of this `for` loop ensures that the "
+            "`sizeof(std::uint32_t)` bytes starting at "
+            "`checksum_input.data() + offset` are all within the array.")]]
+        checksum += BitPrefixCast<std::uint32_t>(checksum_input[offset]);
     }
 
     auto result = NtfsIdentityPatch{
@@ -710,8 +719,9 @@ public:
         Observers &...observers) const noexcept -> NTSTATUS {
         auto output = std::span{
             static_cast<std::byte *>(buffer), wanted};
-        const auto copy_generated = [&](const std::span<const std::byte> source,
-                                        const std::uint64_t position) {
+        const auto copy_generated = [&output, &transferred](
+            const std::span<const std::byte> source,
+            const std::uint64_t position) {
             const auto source_position =
                 devicefs::terminal::FailFastMaybeCast<std::size_t>(position);
             const auto count = std::min<std::size_t>(
@@ -737,13 +747,14 @@ public:
         const auto virtual_position = offset -
             devicefs::terminal::FailFastMaybeCast<std::uint64_t>(
                 prefix_.size());
-        if (virtual_position < gpt_prefix_.size()) {
-            return copy_generated(gpt_prefix_, virtual_position);
+        constexpr auto gpt_prefix_size =
+            std::tuple_size_v<std::remove_reference_t<decltype(*gpt_prefix_)>>;
+        if (virtual_position < gpt_prefix_size) {
+            return copy_generated(*gpt_prefix_, virtual_position);
         }
 
-        const auto source_begin =
-            devicefs::terminal::FailFastMaybeCast<std::uint64_t>(
-                gpt_prefix_.size());
+        constexpr auto source_begin =
+            CompileTimeCast<std::uint64_t, gpt_prefix_size>();
         const auto source_end = source_begin + source_.length;
         if (virtual_position < source_end) {
             const auto source_offset = virtual_position - source_begin;
@@ -767,8 +778,10 @@ public:
         }
 
         const auto suffix_position = virtual_position - source_end;
-        if (suffix_position < gpt_suffix_.size()) {
-            return copy_generated(gpt_suffix_, suffix_position);
+        constexpr auto gpt_suffix_size =
+            std::tuple_size_v<std::remove_reference_t<decltype(*gpt_suffix_)>>;
+        if (suffix_position < gpt_suffix_size) {
+            return copy_generated(*gpt_suffix_, suffix_position);
         }
 
         // MSVC 19.52 emits a byte-at-a-time loop for `std::ranges::fill` here.
@@ -792,8 +805,8 @@ private:
 
     [[msvc::no_unique_address]] DeviceType source_;
     std::vector<std::byte> prefix_;
-    std::vector<std::byte> gpt_prefix_;
-    std::vector<std::byte> gpt_suffix_;
+    decltype(vhdx_detail::VhdxLayout::gpt_prefix) gpt_prefix_;
+    decltype(vhdx_detail::VhdxLayout::gpt_suffix) gpt_suffix_;
     std::optional<vhdx_detail::NtfsIdentityOverlay> ntfs_identity_;
 };
 

@@ -6,6 +6,7 @@ export module devicefs.guid_formatter;
 import std;
 import <devicefs/common.h>;
 import <devicefs/windows_imports.h>;
+import devicefs.stream_writer;
 import devicefs.terminal.transcoding;
 
 export struct GuidLess {
@@ -92,14 +93,23 @@ export [[nodiscard]] auto ParseGuid(const std::string_view value)
     return identifier;
 }
 
-export [[nodiscard]] auto GenerateRandomGuid() {
+export [[nodiscard]] auto GenerateRandomGuid() noexcept {
     auto identifier = GUID{};
     const auto result = CoCreateGuid(&identifier);
-    if (FAILED(result)) [[unlikely]] {
-        // This branch is believed to be reachable only if Windows fails to
-        // load the DLLs transitively required by `CoCreateGuid`.
-        WinError("the operation cannot continue because Windows failed to "
-            "generate a random GUID", ExplicitHresult{result});
+    if (!FAILED(result)) [[likely]] {
+        return identifier;
     }
-    return identifier;
+    [] [[noreturn, msvc::noinline]] (const auto result) static noexcept {
+        // This code is reachable only if Windows fails to load the DLLs
+        // transitively required by `CoCreateGuid`. The `CoCreateGuid` function
+        // has no other failure path. Such a failure indicates a defective
+        // operating system state and is not a recoverable condition.
+        const auto explicit_error = ExplicitHresult{result};
+        devicefs::WriteToStream(devicefs::stderr,
+            "backup-supervisor: terminating because Windows failed to "
+            "generate a random GUID; this may suggest an operating system "
+            "misconfiguration: {}\n",
+            TryConstructWinError("", explicit_error));
+        std::_Exit(explicit_error);
+    }(result);
 }

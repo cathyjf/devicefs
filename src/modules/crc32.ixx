@@ -96,8 +96,8 @@ constexpr auto CanUseCrc32Instructions() noexcept -> bool {
 #endif
 }
 
-extern "C" NTSYSAPI ULONG32 NTAPI RtlComputeCrc32(
-    _In_ ULONG32 partial_crc, _In_ const void *buffer, _In_ ULONG length);
+extern "C" NTSYSAPI auto NTAPI RtlComputeCrc32(ULONG32 partial_crc,
+    _In_ const void *buffer, ULONG length) -> ULONG32;
 
 [[nodiscard, msvc::forceinline]]
 auto Crc32UsingNtApi(const std::span<const std::byte> input) noexcept {
@@ -129,7 +129,8 @@ export template <std::uint32_t Polynomial = crc32_detail::kIeeePolynomial>
         if (crc32_detail::CanUseCrc32Instructions()) {
             return crc32_detail::Crc32UsingInstructions<Polynomial>(input);
         }
-    } else if constexpr (Polynomial == crc32_detail::kIeeePolynomial) {
+    }
+    if constexpr (Polynomial == crc32_detail::kIeeePolynomial) {
         if not consteval {
             return crc32_detail::Crc32UsingNtApi(input);
         }

@@ -149,9 +149,6 @@ private:
     template <typename Character>
     auto WriteRaw(const std::basic_string_view<Character> output) -> void {
         static_assert(sizeof(Character) == 1);
-        if (output.empty()) {
-            return;
-        }
         if (const auto result = WriteEntireBuffer(file_.get(), output);
             !result) {
             WinError("failed to write the backup supervisor log",

@@ -49,31 +49,24 @@ export template <class String = std::string>
 }
 
 // Write the entire buffer to a synchronous handle.
-// Precondition: `contents.data()` is not null.
 export auto WriteEntireBuffer(const HANDLE file, const auto &contents) noexcept
     -> std::expected<void, ExplicitWin32Error> {
-    const auto size_in_bytes = [element_count = contents.size(),
-        element_size = sizeof(*contents.data())]<class ApiType = DWORD> noexcept
-        -> std::optional<ApiType> {
-        const auto max_element_count =
-            std::numeric_limits<ApiType>::max() / element_size;
-        if (element_count > max_element_count) {
-            return std::nullopt;
+    const auto size_in_bytes = sizeof(*contents.data()) * contents.size();
+    const auto buffer = ByteViewCast<const std::byte *>(contents.data());
+    using ApiType = DWORD;
+    constexpr auto max_chunk_size =
+        CompileTimeCast<std::size_t, std::numeric_limits<ApiType>::max()>();
+    for (auto i = 0uz; i < size_in_bytes;) {
+        const auto chunk_size = static_cast<ApiType>(
+            std::min(max_chunk_size, size_in_bytes - i));
+        auto written = ApiType{};
+        if (!WriteFile(file, buffer + i, chunk_size, &written, nullptr)) {
+            return std::unexpected{ExplicitWin32Error{GetLastError()}};
         }
-        [[gsl::suppress("26472", justification:
-            "The preceding check establishes that the following product fits "
-            "in `ApiType`.")]]
-        return static_cast<ApiType>(element_count * element_size);
-    }();
-    if (!size_in_bytes) {
-        return std::unexpected{ExplicitWin32Error{ERROR_ARITHMETIC_OVERFLOW}};
-    }
-    auto written = DWORD{};
-    if (!WriteFile(file, contents.data(), *size_in_bytes, &written, nullptr)) {
-        return std::unexpected{ExplicitWin32Error{GetLastError()}};
-    }
-    if (written != *size_in_bytes) {
-        return std::unexpected{ExplicitWin32Error{ERROR_WRITE_FAULT}};
+        if (written != chunk_size) {
+            return std::unexpected{ExplicitWin32Error{ERROR_WRITE_FAULT}};
+        }
+        i += chunk_size;
     }
     return {};
 }
@@ -92,7 +85,6 @@ export struct FileWriteOptions {
 
 // Create or truncate a file and then write its complete contents.
 // On success, returns a `unique_hfile` containing a handle to the file.
-// Precondition: `contents.data()` is not null.
 export auto WriteEntireFile(const std::filesystem::path &path,
     const auto &contents, const FileWriteOptions options = {}) noexcept
     -> std::expected<wil::unique_hfile, ExplicitWin32Error> {

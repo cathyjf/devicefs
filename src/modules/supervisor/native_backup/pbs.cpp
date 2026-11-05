@@ -514,9 +514,7 @@ auto CreateUniquePipe() {
     constexpr auto kProgramTerminator = std::array{char{0}};
     write_input(program);
     write_input(kProgramTerminator);
-    if (!standard_input.empty()) {
-        write_input(standard_input);
-    }
+    write_input(standard_input);
     started.standard_input.reset();
     return std::move(started.process);
 }

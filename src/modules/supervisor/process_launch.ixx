@@ -155,22 +155,34 @@ export template <typename Consumer>
         return std::span{buffer}.first(read);
     };
 
+    auto first_write_error = DWORD{ERROR_SUCCESS};
     auto pending = read_output();
-    while (pending && (!pending->empty())) {
-        const auto consumed = consumer(*pending);
-        if (!consumed) {
-            return consumed.error();
-        }
-        if (*consumed == 0) {
-            return DWORD{ERROR_WRITE_FAULT};
+    while (pending && !pending->empty()) {
+        const auto consumed = [&first_write_error,
+            &pending_ = std::as_const(*pending),
+            consumed_ = consumer(*pending)] {
+            if (consumed_) {
+                return *consumed_;
+            }
+            if (first_write_error == ERROR_SUCCESS) {
+                first_write_error = consumed_.error();
+            }
+            // After a write failure, do not attempt to write the same data
+            // again, but continue reading and attempting to write any
+            // later data that might be received.
+            return pending_.size();
+        }();
+        if (consumed == 0) {
+            // Legacy nonblocking output handles are not supported.
+            return DWORD{ERROR_NOT_SUPPORTED};
         }
 
-        *pending = pending->subspan(*consumed);
+        *pending = pending->subspan(consumed);
         if (pending->empty()) {
             pending = read_output();
         }
     }
-    return pending ? DWORD{ERROR_SUCCESS} : pending.error();
+    return pending ? first_write_error : pending.error();
 }
 
 export struct ForwardPipeOutput {

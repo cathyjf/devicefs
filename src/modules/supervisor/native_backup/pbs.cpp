@@ -297,34 +297,26 @@ struct WslProcess {
     }
 
     auto FinishOutput() -> std::optional<std::u8string> {
-        if (captured_standard_output) {
-            const auto standard_error_result = standard_error
-                ? standard_error->Finish() : DWORD{ERROR_SUCCESS};
-            auto captured = captured_standard_output->Finish();
-            if (standard_error_result != ERROR_SUCCESS) {
-                WinError("could not copy WSL output",
-                    ExplicitWin32Error{standard_error_result});
+        using finish_forwarding = decltype([](auto &reader,
+            const std::string_view context) static {
+            if (!reader) {
+                return;
             }
-            return std::move(captured);
-        }
-
-        auto first_error = DWORD{ERROR_SUCCESS};
-        if (standard_output) {
-            first_error = standard_output->Finish();
-        }
+            if (const auto error = reader->Finish(); error != ERROR_SUCCESS) {
+                TryWriteNonFatalError(context,
+                    TryConstructWinError("", ExplicitWin32Error{error}));
+            }
+        });
+        finish_forwarding::operator()(standard_output,
+            "failed to forward WSL standard output");
         if (samba_readiness) {
             static_cast<void>(samba_readiness->Finish());
             samba_readiness.reset();
         }
-        if (standard_error) {
-            const auto error = standard_error->Finish();
-            if (first_error == ERROR_SUCCESS) {
-                first_error = error;
-            }
-        }
-        if (first_error != ERROR_SUCCESS) {
-            WinError("could not copy WSL output",
-                ExplicitWin32Error{first_error});
+        finish_forwarding::operator()(standard_error,
+            "failed to forward WSL standard error");
+        if (captured_standard_output) {
+            return captured_standard_output->Finish();
         }
         return std::nullopt;
     }

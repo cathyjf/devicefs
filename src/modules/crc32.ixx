@@ -120,14 +120,16 @@ namespace devicefs {
 export template <std::uint32_t Polynomial = crc32_detail::kIeeePolynomial>
 [[nodiscard]] constexpr auto Crc32(
     const std::span<const std::byte> input) noexcept -> std::uint32_t {
-    if constexpr ((Polynomial == crc32_detail::kCastagnoliPolynomial) ||
-        (crc32_detail::kIsArm64 &&
-            (Polynomial == crc32_detail::kIeeePolynomial))) {
+    constexpr auto kLittleEndianHardwareAlgorithmExists =
+        (Polynomial == crc32_detail::kCastagnoliPolynomial) ||
+            (crc32_detail::kIsArm64 &&
+                (Polynomial == crc32_detail::kIeeePolynomial));
+    if constexpr ((std::endian::native == std::endian::little) &&
+            kLittleEndianHardwareAlgorithmExists) {
         if (crc32_detail::CanUseCrc32Instructions()) {
             return crc32_detail::Crc32UsingInstructions<Polynomial>(input);
         }
-    } else if constexpr (!crc32_detail::kIsArm64 &&
-        (Polynomial == crc32_detail::kIeeePolynomial)) {
+    } else if constexpr (Polynomial == crc32_detail::kIeeePolynomial) {
         if not consteval {
             return crc32_detail::Crc32UsingNtApi(input);
         }

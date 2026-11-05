@@ -70,90 +70,125 @@ constexpr auto kNtfsChecksumOffset = std::size_t{0x50};
 constexpr auto kNtfsPatchLength =
     kNtfsChecksumOffset + sizeof(std::uint32_t) - kNtfsSerialOffset;
 
+// This file supports both little endian systems and big endian systems.
+// Mixed endian systems are not supported.
+static_assert((std::endian::native == std::endian::little) ||
+    (std::endian::native == std::endian::big));
+
+template <class T>
+concept ByteSwappable =
+    std::is_integral_v<T> || std::is_same_v<T, GUID>;
+
+#pragma pack(push, 1)
+template <ByteSwappable T>
+class LittleEndian {
+public:
+    constexpr LittleEndian(const T value = T{}) noexcept :
+        value_{LittleEndianValue(value)} {}
+
+    constexpr operator T() const noexcept {
+        return LittleEndianValue(value_);
+    }
+private:
+    static constexpr auto LittleEndianValue(T value) noexcept {
+        if constexpr (std::endian::native == std::endian::little) {
+            return value;
+        } else if constexpr (std::is_integral_v<T>) {
+            return std::byteswap(value);
+        } else {
+            value.Data1 = std::byteswap(value.Data1);
+            value.Data2 = std::byteswap(value.Data2);
+            value.Data3 = std::byteswap(value.Data3);
+            return value;
+        }
+    }
+
+    T value_{};
+};
+
 // The VHDX structures below are serialized exactly as specified. Their source
 // is VHDX Format Specification v1.00, §§3.1.2–3.1.3, pp. 14–18;
 // §§3.5.1–3.5.2.5, pp. 30–33; and §4.1, p. 36.
-#pragma pack(push, 1)
 struct VhdxHeader {
-    std::uint32_t signature;
-    std::uint32_t checksum;
-    std::uint64_t sequence_number;
-    GUID file_write_id;
-    GUID data_write_id;
-    GUID log_id;
-    std::uint16_t log_version;
-    std::uint16_t version;
-    std::uint32_t log_length;
-    std::uint64_t log_offset;
+    LittleEndian<std::uint32_t> signature;
+    LittleEndian<std::uint32_t> checksum;
+    LittleEndian<std::uint64_t> sequence_number;
+    LittleEndian<GUID> file_write_id;
+    LittleEndian<GUID> data_write_id;
+    LittleEndian<GUID> log_id;
+    LittleEndian<std::uint16_t> log_version;
+    LittleEndian<std::uint16_t> version;
+    LittleEndian<std::uint32_t> log_length;
+    LittleEndian<std::uint64_t> log_offset;
 };
 
 struct RegionTableHeader {
-    std::uint32_t signature;
-    std::uint32_t checksum;
-    std::uint32_t entry_count;
-    std::uint32_t reserved;
+    LittleEndian<std::uint32_t> signature;
+    LittleEndian<std::uint32_t> checksum;
+    LittleEndian<std::uint32_t> entry_count;
+    LittleEndian<std::uint32_t> reserved;
 };
 
 struct RegionTableEntry {
-    GUID id;
-    std::uint64_t file_offset;
-    std::uint32_t length;
-    std::uint32_t flags;
+    LittleEndian<GUID> id;
+    LittleEndian<std::uint64_t> file_offset;
+    LittleEndian<std::uint32_t> length;
+    LittleEndian<std::uint32_t> flags;
 };
 
 struct MetadataTableHeader {
-    std::uint64_t signature;
-    std::uint16_t reserved;
-    std::uint16_t entry_count;
-    std::array<std::uint32_t, 5> reserved2;
+    LittleEndian<std::uint64_t> signature;
+    LittleEndian<std::uint16_t> reserved;
+    LittleEndian<std::uint16_t> entry_count;
+    std::array<LittleEndian<std::uint32_t>, 5> reserved2;
 };
 
 struct MetadataTableEntry {
-    GUID id;
-    std::uint32_t offset;
-    std::uint32_t length;
-    std::uint32_t flags;
-    std::uint32_t reserved;
+    LittleEndian<GUID> id;
+    LittleEndian<std::uint32_t> offset;
+    LittleEndian<std::uint32_t> length;
+    LittleEndian<std::uint32_t> flags;
+    LittleEndian<std::uint32_t> reserved;
 };
 
 struct FileParameters {
-    std::uint32_t block_size;
-    std::uint32_t flags;
+    LittleEndian<std::uint32_t> block_size;
+    LittleEndian<std::uint32_t> flags;
 };
 
 struct MbrPartitionEntry {
-    std::uint8_t boot_indicator;
-    std::array<std::uint8_t, 3> starting_chs;
-    std::uint8_t type;
-    std::array<std::uint8_t, 3> ending_chs;
-    std::uint32_t starting_lba;
-    std::uint32_t sector_count;
+    LittleEndian<std::uint8_t> boot_indicator;
+    std::array<LittleEndian<std::uint8_t>, 3> starting_chs;
+    LittleEndian<std::uint8_t> type;
+    std::array<LittleEndian<std::uint8_t>, 3> ending_chs;
+    LittleEndian<std::uint32_t> starting_lba;
+    LittleEndian<std::uint32_t> sector_count;
 };
 
 struct GptHeader {
-    std::uint64_t signature;
-    std::uint32_t revision;
-    std::uint32_t header_size;
-    std::uint32_t checksum;
-    std::uint32_t reserved;
-    std::uint64_t current_lba;
-    std::uint64_t backup_lba;
-    std::uint64_t first_usable_lba;
-    std::uint64_t last_usable_lba;
-    GUID disk_id;
-    std::uint64_t partition_entries_lba;
-    std::uint32_t partition_entry_count;
-    std::uint32_t partition_entry_size;
-    std::uint32_t partition_entries_checksum;
+    LittleEndian<std::uint64_t> signature;
+    LittleEndian<std::uint32_t> revision;
+    LittleEndian<std::uint32_t> header_size;
+    LittleEndian<std::uint32_t> checksum;
+    LittleEndian<std::uint32_t> reserved;
+    LittleEndian<std::uint64_t> current_lba;
+    LittleEndian<std::uint64_t> backup_lba;
+    LittleEndian<std::uint64_t> first_usable_lba;
+    LittleEndian<std::uint64_t> last_usable_lba;
+    LittleEndian<GUID> disk_id;
+    LittleEndian<std::uint64_t> partition_entries_lba;
+    LittleEndian<std::uint32_t> partition_entry_count;
+    LittleEndian<std::uint32_t> partition_entry_size;
+    LittleEndian<std::uint32_t> partition_entries_checksum;
 };
 
 struct GptPartitionEntry {
-    GUID type_id;
-    GUID partition_id;
-    std::uint64_t first_lba;
-    std::uint64_t last_lba;
-    std::uint64_t attributes;
-    std::array<char16_t, 36> name;
+    LittleEndian<GUID> type_id;
+    LittleEndian<GUID> partition_id;
+    LittleEndian<std::uint64_t> first_lba;
+    LittleEndian<std::uint64_t> last_lba;
+    LittleEndian<std::uint64_t> attributes;
+    std::array<LittleEndian<char16_t>, 36> name;
 };
 #pragma pack(pop)
 
@@ -181,45 +216,46 @@ constexpr auto kGptSuffixLength =
 constexpr auto kGptEnvelopeLength =
     kGptPartitionOffset + kGptSuffixLength;
 
-constexpr auto kBatRegionId = GUID{
+constexpr auto kBatRegionId = LittleEndian{GUID{
     0x2dc27766, 0xf623, 0x4200,
-    {0x9d, 0x64, 0x11, 0x5e, 0x9b, 0xfd, 0x4a, 0x08}};
-constexpr auto kMetadataRegionId = GUID{
+    {0x9d, 0x64, 0x11, 0x5e, 0x9b, 0xfd, 0x4a, 0x08}}};
+constexpr auto kMetadataRegionId = LittleEndian{GUID{
     0x8b7ca206, 0x4790, 0x4b9a,
-    {0xb8, 0xfe, 0x57, 0x5f, 0x05, 0x0f, 0x88, 0x6e}};
-constexpr auto kFileParametersId = GUID{
+    {0xb8, 0xfe, 0x57, 0x5f, 0x05, 0x0f, 0x88, 0x6e}}};
+constexpr auto kFileParametersId = LittleEndian{GUID{
     0xcaa16737, 0xfa36, 0x4d43,
-    {0xb3, 0xb6, 0x33, 0xf0, 0xaa, 0x44, 0xe7, 0x6b}};
-constexpr auto kVirtualDiskSizeId = GUID{
+    {0xb3, 0xb6, 0x33, 0xf0, 0xaa, 0x44, 0xe7, 0x6b}}};
+constexpr auto kVirtualDiskSizeId = LittleEndian{GUID{
     0x2fa54224, 0xcd1b, 0x4876,
-    {0xb2, 0x11, 0x5d, 0xbe, 0xd8, 0x3b, 0xf4, 0xb8}};
-constexpr auto kPage83DataId = GUID{
+    {0xb2, 0x11, 0x5d, 0xbe, 0xd8, 0x3b, 0xf4, 0xb8}}};
+constexpr auto kPage83DataId = LittleEndian{GUID{
     0xbeca12ab, 0xb2e6, 0x4523,
-    {0x93, 0xef, 0xc3, 0x09, 0xe0, 0x00, 0xc7, 0x46}};
-constexpr auto kLogicalSectorSizeId = GUID{
+    {0x93, 0xef, 0xc3, 0x09, 0xe0, 0x00, 0xc7, 0x46}}};
+constexpr auto kLogicalSectorSizeId = LittleEndian{GUID{
     0x8141bf1d, 0xa96f, 0x4709,
-    {0xba, 0x47, 0xf2, 0x33, 0xa8, 0xfa, 0xab, 0x5f}};
-constexpr auto kPhysicalSectorSizeId = GUID{
+    {0xba, 0x47, 0xf2, 0x33, 0xa8, 0xfa, 0xab, 0x5f}}};
+constexpr auto kPhysicalSectorSizeId = LittleEndian{GUID{
     0xcda348c7, 0x445d, 0x4471,
-    {0x9c, 0xc9, 0xe9, 0x88, 0x52, 0x51, 0xc5, 0x56}};
+    {0x9c, 0xc9, 0xe9, 0x88, 0x52, 0x51, 0xc5, 0x56}}};
 
 // Windows identifies an ordinary data volume with PARTITION_BASIC_DATA_GUID.
 // See Microsoft's "Windows and GPT FAQ", "Basic data partition".
-constexpr auto kBasicDataPartitionId = GUID{
+constexpr auto kBasicDataPartitionId = LittleEndian{GUID{
     0xebd0a0a2, 0xb9e5, 0x4433,
-    {0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7}};
-
-// The serialization and deserialization techniques used in this file assume
-// that the host uses little endian byte ordering.
-static_assert(std::endian::native == std::endian::little);
+    {0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7}}};
 
 template <auto Offset, class Value, auto Extent>
     requires std::is_trivially_copyable_v<Value>
 auto SerializeObject(
     const std::span<std::byte, Extent> destination,
     const Value &value) noexcept -> void {
-    std::memcpy(destination.template subspan<Offset, sizeof(value)>().data(),
-        std::addressof(value), sizeof(value));
+    if constexpr (ByteSwappable<Value>) {
+        SerializeObject<Offset>(destination, LittleEndian{value});
+    } else {
+        std::memcpy(
+            destination.template subspan<Offset, sizeof(value)>().data(),
+            std::addressof(value), sizeof(value));
+    }
 }
 
 template <auto Offset, auto DestExtent, class SourceType, auto SourceExtent>
@@ -267,18 +303,24 @@ auto CopyBytes(
     constexpr auto sectors_per_track = std::uint64_t{63};
     constexpr auto cylinder_count = std::uint64_t{1024};
     if (lba >= cylinder_count * head_count * sectors_per_track) {
-        return std::array{std::uint8_t{0xff}, std::uint8_t{0xff},
-            std::uint8_t{0xff}};
+        return std::array{
+            LittleEndian<std::uint8_t>{0xff},
+            LittleEndian<std::uint8_t>{0xff},
+            LittleEndian<std::uint8_t>{0xff}};
     }
 
     const auto cylinder = lba / (head_count * sectors_per_track);
     const auto head = (lba / sectors_per_track) % head_count;
     const auto sector = (lba % sectors_per_track) + 1;
     return std::array{
-        devicefs::terminal::FailFastCast<std::uint8_t>(head),
-        devicefs::terminal::FailFastCast<std::uint8_t>(
-            sector | ((cylinder >> 2) & 0xc0)),
-        devicefs::terminal::FailFastCast<std::uint8_t>(cylinder & 0xff)};
+        LittleEndian{
+            devicefs::terminal::FailFastCast<std::uint8_t>(head)},
+        LittleEndian{
+            devicefs::terminal::FailFastCast<std::uint8_t>(
+                sector | ((cylinder >> 2) & 0xc0))},
+        LittleEndian{
+            devicefs::terminal::FailFastCast<std::uint8_t>(
+                cylinder & 0xff)}};
 }
 
 [[nodiscard]] auto MakeVhdxHeader(
@@ -381,7 +423,7 @@ private:
     };
     SerializeObject<0>(result_span, header);
 
-    auto writer_callback = [result_span] <class Index> (const GUID &id,
+    auto writer_callback = [result_span] <class Index> (const auto &id,
         const std::uint32_t offset, const std::uint32_t length,
         const std::uint32_t flags) noexcept {
         constexpr auto result_offset = sizeof(MetadataTableHeader) +
@@ -675,7 +717,8 @@ template <auto PrefixExtent>
             "The construction of this `for` loop ensures that the "
             "`sizeof(std::uint32_t)` bytes starting at "
             "`checksum_input.data() + offset` are all within the array.")]]
-        checksum += BitPrefixCast<std::uint32_t>(checksum_input[offset]);
+        checksum += BitPrefixCast<LittleEndian<std::uint32_t>>(
+            checksum_input[offset]);
     }
     auto result = NtfsIdentityPatch{
         .offset = sector_offset + kNtfsSerialOffset,

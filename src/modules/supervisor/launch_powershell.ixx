@@ -21,10 +21,11 @@ module;
 export module devicefs.supervisor.launch_powershell;
 
 import std;
-import devicefs.file_reader;
-import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import <devicefs/windows_imports.h>;
 import <devicefs/winrt_imports.h>;
+import devicefs.file_reader;
+import devicefs.lightweight_future;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
 import devicefs.supervisor.installation;
@@ -32,9 +33,6 @@ import devicefs.supervisor.winrt_apartment;
 import devicefs.terminal.transcoding;
 
 using devicefs::terminal::Transcode;
-
-#undef stderr
-#undef stdout
 
 using namespace std::string_literals;
 using namespace std::string_view_literals;
@@ -469,17 +467,18 @@ export [[nodiscard]] auto LaunchPowerShell(const wil::zwstring_view username) ->
     };
     // Package discovery and registration can overlap. `ResetBackupAccountPassword`
     // serializes each password reset with the logon that uses it.
-    auto terminal_preparation = std::async(
-        std::launch::async, FindAndPrepareWindowsTerminal, username);
-    auto profile_preparation = std::async(std::launch::async, [username] {
-        std::ignore = TryRunConsolePreparation(username,
+    auto terminal_preparation = devicefs::async([username] {
+        return FindAndPrepareWindowsTerminal(username);
+    });
+    auto profile_preparation = devicefs::async([username] {
+        return TryRunConsolePreparation(username,
             "PowerShell profile preparation"sv,
             std::string{kPreparePowerShellProfileOption});
     });
     const auto powershell = FindAndPreparePowerShell(username);
-    profile_preparation.get();
+    profile_preparation.Get();
     if (powershell) {
-        if (const auto terminal = terminal_preparation.get()) {
+        if (const auto &terminal = terminal_preparation.Get()) {
             const auto command =
                 WindowsTerminalCommandLine(*terminal, *powershell);
             const auto status = try_shell(*terminal, command);

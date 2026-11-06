@@ -24,6 +24,7 @@ import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
 import devicefs.coherent_vector;
+import devicefs.lightweight_future;
 import devicefs.stream_writer;
 import devicefs.supervisor.windows_service;
 
@@ -114,7 +115,7 @@ export [[nodiscard]] auto RunForegroundOperation(auto &&operation) {
                 "console input mode"));
     });
 
-    auto result = std::async(std::launch::async, std::ref(foreground_task));
+    auto result = devicefs::async(std::move(foreground_task));
     auto cancel_on_monitor_failure =
         context->cancellation_event.SetEvent_scope_exit();
     // The first signaled handle wins, giving completion priority over input.
@@ -150,5 +151,5 @@ export [[nodiscard]] auto RunForegroundOperation(auto &&operation) {
         }
     }
     cancel_on_monitor_failure.release();
-    return result.get();
+    return std::move(result.Get());
 }

@@ -69,13 +69,37 @@ constexpr auto kCancellationEventName =
     return job;
 }
 
+struct OrchestratorOutputWriter {
+    std::optional<Log> &log;
+
+    auto operator()(const std::u8string_view output) const noexcept {
+        if (log) {
+            std::ignore = log->WriteStream(output);
+        }
+        return ERROR_SUCCESS;
+    }
+};
+
 struct BackupProcess {
     static constexpr auto kJobPollInterval = 100ms;
     static constexpr auto kForcedTerminationTimeout = 30s;
 
-    std::optional<LoggingConsole> console;
+    std::optional<LoggingConsole<OrchestratorOutputWriter>> console;
     wil::unique_process_information process;
     wil::unique_handle job;
+
+    explicit BackupProcess(std::optional<Log> &log) :
+        console{std::in_place, OrchestratorOutputWriter{log}},
+        job{CreateChildJob()} {
+        const auto supervisor = devicefs::terminal::Transcode<std::string>(
+            CurrentExecutablePath().native());
+        const auto arguments = std::array{
+            wil::zstring_view{supervisor}, kOrchestrateOption};
+        process = console->StartProcess(
+            arguments, CREATE_SUSPENDED,
+            std::tuple{PROC_THREAD_ATTRIBUTE_JOB_LIST,
+                job.addressof(), sizeof(job.get())});
+    }
 
     [[nodiscard]] auto Wait(
         const std::chrono::milliseconds timeout) const noexcept {
@@ -116,29 +140,6 @@ struct BackupProcess {
         }
     }
 };
-
-[[nodiscard]] auto StartOrchestrator(std::optional<Log> &log) {
-    auto console = LoggingConsole([&log](const std::u8string_view output) noexcept {
-        if (log) {
-            std::ignore = log->WriteStream(output);
-        }
-        return ERROR_SUCCESS;
-    });
-    auto job = CreateChildJob();
-    const auto supervisor = devicefs::terminal::Transcode<std::string>(
-        CurrentExecutablePath().native());
-    const auto arguments = std::array{
-        wil::zstring_view{supervisor}, kOrchestrateOption};
-    auto process = console.StartProcess(
-        arguments, CREATE_SUSPENDED,
-        std::tuple{PROC_THREAD_ATTRIBUTE_JOB_LIST,
-            job.addressof(), sizeof(job.get())});
-    return BackupProcess{
-        .console = std::move(console),
-        .process = std::move(process),
-        .job = std::move(job),
-    };
-}
 
 struct ServiceContext {
     static constexpr auto kInitialPendingCheckpoint = DWORD{1};
@@ -207,7 +208,7 @@ struct ServiceOutcome {
 [[nodiscard]] auto RunBackup(
     ServiceContext &context,
     std::optional<Log> &log) {
-    auto backup = StartOrchestrator(log);
+    auto backup = BackupProcess{log};
     if (log) {
         log->TryWrite("backup-supervisor: running version '{}'",
             CurrentProductVersion().value_or("unknown"));

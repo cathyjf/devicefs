@@ -22,6 +22,7 @@ export module devicefs.supervisor.logging_console;
 
 import std;
 import devicefs.file_reader;
+import devicefs.lightweight_future;
 import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
@@ -233,6 +234,9 @@ concept ConsoleOutputWriter = std::is_nothrow_invocable_r_v<
     wil::unique_handle output,
     const ConsoleOutputWriter auto &write_output) noexcept {
     constexpr auto kBufferSize = DWORD{4096};
+    __pragma(warning(suppress : 26494, justification:
+        "Bytes are read from `buffer` only after `ReadFile` has written the "
+        "bytes first. Uninitialized bytes are never read."))
     /* [[indeterminate]] */ std::array<char8_t, kBufferSize> buffer;
     auto first_error = DWORD{ERROR_SUCCESS};
     auto filter = devicefs::terminal::VtFilter{};
@@ -242,7 +246,7 @@ concept ConsoleOutputWriter = std::is_nothrow_invocable_r_v<
                 &read, nullptr)) {
             const auto error = GetLastError();
             if (error != ERROR_BROKEN_PIPE) {
-                return first_error == ERROR_SUCCESS ? error : first_error;
+                return (first_error == ERROR_SUCCESS) ? error : first_error;
             }
         }
         if (read == 0) {
@@ -255,9 +259,10 @@ concept ConsoleOutputWriter = std::is_nothrow_invocable_r_v<
     }
 }
 
-export class LoggingConsole {
+export template <ConsoleOutputWriter OutputWriter>
+class LoggingConsole {
 public:
-    explicit LoggingConsole(ConsoleOutputWriter auto write_output) {
+    explicit LoggingConsole(OutputWriter write_output) {
         if (!CreatePipe(input_read_.addressof(),
                 input_write_.addressof(), nullptr, 0)) {
             WinError("failed to create the console input pipe");
@@ -274,9 +279,10 @@ public:
             WinError("failed to create a console for the program",
                 ExplicitHresult{result});
         }
-        output_task_ = std::async(
-            std::launch::async, CopyConsoleOutput<decltype(write_output)>,
-            std::move(output_read), std::move(write_output));
+        output_task_.emplace(OutputReader{
+            .output_read = std::move(output_read),
+            .write_output = std::move(write_output),
+        });
     }
 
     // Start the fully qualified executable specified by `argv[0]`.
@@ -320,7 +326,7 @@ public:
     auto Finish() {
         input_write_.reset();
         console_.reset();
-        const auto error = output_task_.get();
+        const auto error = output_task_->Get();
         if (error != ERROR_SUCCESS) {
             WinError("failed to record the program's console output",
                 ExplicitWin32Error{error});
@@ -328,9 +334,18 @@ public:
     }
 
 private:
+    struct OutputReader {
+        wil::unique_handle output_read;
+        OutputWriter write_output;
+
+        auto operator()() noexcept {
+            return CopyConsoleOutput(std::move(output_read), write_output);
+        }
+    };
+
     // Destruction is in reverse order, so the reader remains active while
     // ClosePseudoConsole emits and closes its final output.
-    std::future<DWORD> output_task_;
+    std::optional<devicefs::AsyncFuture<OutputReader>> output_task_;
     unique_pseudoconsole console_;
     wil::unique_handle input_read_;
     wil::unique_handle input_write_;

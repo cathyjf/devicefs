@@ -108,4 +108,7 @@ auto async(Callable callback) {
         std::move(callback)};
 }
 
+export template <class Callable>
+using AsyncFuture = decltype(devicefs::async(std::declval<Callable>()));
+
 } // namespace devicefs

@@ -13,6 +13,7 @@ import <devicefs/malloca.h>;
 import <devicefs/windows_imports.h>;
 import devicefs.byte_comparison;
 import devicefs.file_reader;
+import devicefs.lightweight_future;
 import devicefs.stream_writer;
 import devicefs.supervisor.temporary_paths;
 import devicefs.supervisor.vshadow;
@@ -46,7 +47,7 @@ auto MakeDirtyBitmap(const DirtyBlockMap &map) {
 }
 
 auto TryPrepareAndWriteDirtyMapForSnapshot(const auto &snapshot,
-    const auto &baseline) -> std::optional<NamedFile> {
+    const auto &baseline) -> NamedFile {
     const auto name = SnapshotImageName(snapshot);
     const auto write_error = [&name](const auto &error) {
         TryWriteNonFatalError(std::format(
@@ -70,7 +71,7 @@ auto TryPrepareAndWriteDirtyMapForSnapshot(const auto &snapshot,
         }
     }();
     if (!maybe_map_and_path) {
-        return std::nullopt;
+        return {};
     }
     const auto &[map, path] = *maybe_map_and_path;
     auto file = WriteEntireFile(path,
@@ -83,15 +84,15 @@ auto TryPrepareAndWriteDirtyMapForSnapshot(const auto &snapshot,
         write_error(TryConstructWinError(
             "failed to create or write file '{}'",
             std::wstring_view{path.native()}, file.error()));
-        return std::nullopt;
+        return {};
     }
-    // DeviceFs receives a separate read-only handle so it cannot
-    // change the map. The sharing flags allow the original handle's
-    // write access and delete-on-close setting; otherwise reopening
-    // the file would fail.
+    // DeviceFs receives a separate read-only handle so that the handle it
+    // receives cannot be used to change the map. The sharing flags allow the
+    // original handle's write access and delete-on-close setting; otherwise,
+    // reopening the file would fail.
     //
-    // Overlapped I/O allows separate reads through this handle to
-    // run concurrently.
+    // Overlapped I/O allows separate reads through this handle to run
+    // concurrently.
     auto read_handle = wil::unique_hfile{ReOpenFile(file->get(),
         GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -100,14 +101,14 @@ auto TryPrepareAndWriteDirtyMapForSnapshot(const auto &snapshot,
         write_error(TryConstructWinError(
             "failed to reopen dirty-map file '{}' read-only",
             std::wstring_view{path.native()}));
-        return std::nullopt;
+        return {};
     }
     if (!SetHandleInformation(read_handle.get(),
             HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)) {
         write_error(TryConstructWinError(
             "failed to make the read-only handle for '{}' "
             "inheritable", std::wstring_view{path.native()}));
-        return std::nullopt;
+        return {};
     }
     devicefs::WriteToStream(devicefs::stdout,
         "Successfully prepared dirty map for volume '{}'.\n",
@@ -115,7 +116,7 @@ auto TryPrepareAndWriteDirtyMapForSnapshot(const auto &snapshot,
     // The reopened handle keeps the map readable after the writer
     // closes. Delete-on-close removes the file when the last handle
     // closes, after both the supervisor and DeviceFs release it.
-    return NamedFile{
+    return {
         .name = name + ".dirty.bitmap",
         .handle = std::move(read_handle),
     };
@@ -218,33 +219,37 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
             return kReturnValue;
         }
 
-        using FutureType = std::future<std::optional<NamedFile>>;
+        using FutureCallable = decltype([](const auto &pair) static {
+            return TryPrepareAndWriteDirtyMapForSnapshot(
+                pair.payload, pair.baseline);
+        });
+        using FutureType =
+            devicefs::LightweightFuture<FutureCallable, true, SnapshotPair>;
         const auto length = std::size(snapshots);
         const auto futures_buffer = NEW_MALLOCA_BUFFER(FutureType, length);
-        const auto futures = [buffer = futures_buffer.get(), length] {
-            const auto futures_destroyer = [length](const FutureType *future) {
-                std::destroy_n(future, length);
+        auto future_index = 0uz;
+        const auto futures = [buffer = futures_buffer.get(), &future_index] {
+            const auto futures_destroyer = [&future_index](const auto future) {
+                std::destroy_n(future, future_index);
             };
             return std::unique_ptr<FutureType[], decltype(futures_destroyer)>{
-                ::new (buffer) FutureType[length],
-                futures_destroyer};
+                buffer, futures_destroyer};
         }();
-        auto j = 0uz;
-        for (auto i = snapshots.begin(); i != snapshots.end(); ++i) {
+        const auto future_error = [snapshots, &future_index] [[noreturn]] {
+            WinError("failed to create a thread pool work object to prepare a "
+                "dirty map for volume '{}'",
+                snapshots[future_index].payload.original_volume);
+        };
+        for (; future_index < length; ++future_index) {
             // The first task will run on this thread once it is collected
             // below. If there is more than one task, each additional task
             // may run on a separate thread.
-            const auto policy = std::launch::deferred |
-                ((i != snapshots.begin()) ?
-                    std::launch::async : std::launch{});
-            futures[j++] = std::async(policy, [&pair = *i] {
-                return TryPrepareAndWriteDirtyMapForSnapshot(
-                    pair.payload, pair.baseline);
-            });
+            ::new (futures.get() + future_index) FutureType{
+                snapshots[future_index], future_index != 0, future_error};
         }
         for (auto i = 0uz; i < length; ++i) {
-            if (auto file = futures[i].get()) {
-                files.push_back(std::move(*file));
+            if (auto &file = futures[i].Get(); file.handle) {
+                files.push_back(std::move(file));
             }
         }
         return kReturnValue;

@@ -99,16 +99,17 @@ private:
     UniqueWork work_;
 };
 
-export template <class Callable>
+export template <bool CancelOnDestruction = false, class Callable>
 auto async(Callable callback) {
     using FutureCallback = decltype([](Callable &callback_) static {
         return callback_();
     });
-    return LightweightFuture<FutureCallback, false, Callable>{
+    return LightweightFuture<FutureCallback, CancelOnDestruction, Callable>{
         std::move(callback)};
 }
 
-export template <class Callable>
-using AsyncFuture = decltype(devicefs::async(std::declval<Callable>()));
+export template <class Callable, bool CancelOnDestruction = false>
+using AsyncFuture = decltype(
+    devicefs::async<CancelOnDestruction>(std::declval<Callable>()));
 
 } // namespace devicefs

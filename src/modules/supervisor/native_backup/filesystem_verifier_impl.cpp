@@ -26,6 +26,7 @@ import devicefs.terminal.safecast;
 import <devicefs/windows_imports.h>;
 import :devicefs_process;
 import :internal;
+import devicefs.lightweight_future;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.process_privileges;
 import :vhdx_attachment;
@@ -1049,20 +1050,23 @@ public:
         };
         Queue(std::move(initial));
 
-        auto workers = std::vector<std::future<void>>{};
-        workers.reserve(kVerificationWorkerCount);
+        using FutureCallable = decltype([](auto *const self) static {
+            self->Worker();
+        });
+        auto workers = std::array<std::optional<
+            devicefs::LightweightFuture<FutureCallable, true, decltype(this)>>,
+            kVerificationWorkerCount>{};
         try {
-            for (auto index = 0uz;
-                index < kVerificationWorkerCount; ++index) {
-                workers.push_back(std::async(
-                    std::launch::async,
-                    [this] { Worker(); }));
+            for (auto &worker : workers) {
+                worker.emplace(this);
             }
         } catch (...) {
             Fail(std::current_exception());
         }
         for (auto &worker : workers) {
-            worker.get();
+            if (worker) {
+                worker->Get();
+            }
         }
 
         if (failure_) {
@@ -1964,19 +1968,26 @@ auto RunComparisonWorkers(
         }
     };
 
-    auto workers = std::vector<std::future<void>>{};
+    using FutureCallable = decltype([](const auto run) static {
+        return std::invoke(*run);
+    });
+    auto workers = std::array<
+        std::optional<devicefs::LightweightFuture<
+            FutureCallable, true, decltype(std::addressof(run))>>,
+        kVerificationWorkerCount>{};
     const auto worker_count = std::min(
-        kVerificationWorkerCount, plan.tasks.size());
-    workers.reserve(worker_count);
+        std::tuple_size_v<decltype(workers)>, plan.tasks.size());
     try {
         for (auto index = 0uz; index < worker_count; ++index) {
-            workers.push_back(std::async(std::launch::async, run));
+            workers[index].emplace(std::addressof(run));
         }
-    } catch (const std::system_error &) {
+    } catch (...) {
         state.Fail(std::current_exception());
     }
     for (auto &worker : workers) {
-        worker.get();
+        if (worker) {
+            worker->Get();
+        }
     }
     return !state.Failed() &&
         !wil::event_is_signaled(cancellation_event) &&
@@ -2012,34 +2023,32 @@ auto CompareFilesystems(
         Transcode<std::string>(real_root),
         kVerificationWorkerCount);
 
-    auto synthetic_operation = std::async(
-        std::launch::async,
-        [&] {
-            return InventoryFilesystem(
-                synthetic_root,
-                VerificationEndpoint::Synthetic,
-                cancellation_event, io_cancellation, state);
-        });
-    auto real_operation = std::async(
-        std::launch::async,
-        [&] {
-            return InventoryFilesystem(
-                real_root, VerificationEndpoint::Real,
-                cancellation_event, io_cancellation, state);
-        });
+    auto synthetic_operation = devicefs::async<true>([&] {
+        return InventoryFilesystem(
+            synthetic_root,
+            VerificationEndpoint::Synthetic,
+            cancellation_event, io_cancellation, state);
+    });
+    auto real_operation = devicefs::async<true>([&] {
+        return InventoryFilesystem(
+            real_root, VerificationEndpoint::Real,
+            cancellation_event, io_cancellation, state);
+    });
 
     // Launch the authoritative traversals before this optional telemetry task.
     // Failure to start or run it leaves progress without an ETA and cannot
     // change the verification result.
-    auto estimate_operation = [&]()
-        -> std::optional<std::future<void>> {
+    auto estimate_operation = [&] {
+        auto callback = [&] {
+            return PublishTraversalLayoutEstimate(
+                real_root, synthetic_root,
+                volume_identifier,
+                cancellation_event, io_cancellation, state);
+        };
+        using ReturnType = std::optional<
+            devicefs::AsyncFuture<decltype(callback), true>>;
         try {
-            return std::async(std::launch::async, [&] {
-                PublishTraversalLayoutEstimate(
-                    real_root, synthetic_root,
-                    volume_identifier,
-                    cancellation_event, io_cancellation, state);
-            });
+            return ReturnType{std::in_place, std::move(callback)};
         } catch (const std::exception &error) {
             devicefs::WriteToStream(devicefs::stdout,
                 "Failed to start the optional layout count for volume {}. "
@@ -2047,75 +2056,75 @@ auto CompareFilesystems(
                 volume_identifier);
             devicefs::WriteToStream(
                 devicefs::stdout, "  Failure: {}\n", error.what());
-            return std::nullopt;
+            return ReturnType{};
         }
     }();
-    auto synthetic = synthetic_operation.get();
-    auto real = real_operation.get();
-    if (synthetic && real && !state.Failed() &&
-        !wil::event_is_signaled(cancellation_event)) {
-        state.CompleteTraversal();
-        const auto observation = state.Observe();
-        devicefs::WriteToStream(devicefs::stdout,
-            "Filesystem traversal finished for volume {}.\n"
-            "  Synthetic: {} directories, {} object(s), {} "
-            "stream(s), {}{} logical stream byte(s) observed, "
-            "{} operation failure(s)\n"
-            "  Real B: {} directories, {} object(s), {} "
-            "stream(s), {}{} logical stream byte(s) observed, "
-            "{} operation failure(s)\n",
-            volume_identifier,
-            observation.synthetic.directories,
-            observation.synthetic.objects,
-            observation.synthetic.streams,
-            observation.synthetic.stream_bytes ==
-                std::numeric_limits<std::uint64_t>::max()
-                ? "at least "sv
-                : std::string_view{},
-            observation.synthetic.stream_bytes,
-            observation.synthetic.failures,
-            observation.real.directories,
-            observation.real.objects,
-            observation.real.streams,
-            observation.real.stream_bytes ==
-                std::numeric_limits<std::uint64_t>::max()
-                ? "at least "sv
-                : std::string_view{},
-            observation.real.stream_bytes,
-            observation.real.failures);
-        const auto comparison_surface_incomplete =
-            ComparisonSurfaceIncomplete(*synthetic) ||
-            ComparisonSurfaceIncomplete(*real);
-        state.SetPhase(VerificationPhase::Planning);
-        devicefs::WriteToStream(devicefs::stdout,
-            "Filesystem inventories are ready for volume {}; "
-            "preparing content comparisons.\n",
-            volume_identifier);
-        auto plan = BuildComparisonPlan(
-            *synthetic, *real, seed_identifier,
-            percentage, cancellation_event, state);
-        if (plan) {
-            state.SetPlan(*plan);
-        }
-        if (plan &&
-            !wil::event_is_signaled(cancellation_event)) {
-            state.BeginComparison();
-            if (RunComparisonWorkers(
-                    *plan, *synthetic, *real,
-                    cancellation_event, io_cancellation, state)) {
-                if (comparison_surface_incomplete) {
-                    state.Fail(std::make_exception_ptr(std::runtime_error{
-                        "ordinary filesystem traversal failed to observe "
-                        "the complete namespace beneath at least one "
-                        "directory"}));
-                } else {
-                    state.CompleteComparison();
-                }
-            }
-        }
+    const auto &synthetic = synthetic_operation.Get();
+    const auto &real = real_operation.Get();
+    if (!synthetic || !real || state.Failed() ||
+            wil::event_is_signaled(cancellation_event)) {
+        return;
     }
-    if (estimate_operation) {
-        estimate_operation->wait();
+    state.CompleteTraversal();
+    const auto observation = state.Observe();
+    devicefs::WriteToStream(devicefs::stdout,
+        "Filesystem traversal finished for volume {}.\n"
+        "  Synthetic: {} directories, {} object(s), {} "
+        "stream(s), {}{} logical stream byte(s) observed, "
+        "{} operation failure(s)\n"
+        "  Real B: {} directories, {} object(s), {} "
+        "stream(s), {}{} logical stream byte(s) observed, "
+        "{} operation failure(s)\n",
+        volume_identifier,
+        observation.synthetic.directories,
+        observation.synthetic.objects,
+        observation.synthetic.streams,
+        observation.synthetic.stream_bytes ==
+            std::numeric_limits<std::uint64_t>::max()
+            ? "at least "sv
+            : std::string_view{},
+        observation.synthetic.stream_bytes,
+        observation.synthetic.failures,
+        observation.real.directories,
+        observation.real.objects,
+        observation.real.streams,
+        observation.real.stream_bytes ==
+            std::numeric_limits<std::uint64_t>::max()
+            ? "at least "sv
+            : std::string_view{},
+        observation.real.stream_bytes,
+        observation.real.failures);
+    const auto comparison_surface_incomplete =
+        ComparisonSurfaceIncomplete(*synthetic) ||
+        ComparisonSurfaceIncomplete(*real);
+    state.SetPhase(VerificationPhase::Planning);
+    devicefs::WriteToStream(devicefs::stdout,
+        "Filesystem inventories are ready for volume {}; "
+        "preparing content comparisons.\n",
+        volume_identifier);
+    auto plan = BuildComparisonPlan(
+        *synthetic, *real, seed_identifier,
+        percentage, cancellation_event, state);
+    if (!plan) {
+        return;
+    }
+    state.SetPlan(*plan);
+    if (wil::event_is_signaled(cancellation_event)) {
+        return;
+    }
+    state.BeginComparison();
+    if (!RunComparisonWorkers(
+            *plan, *synthetic, *real,
+            cancellation_event, io_cancellation, state)) {
+        return;
+    }
+    if (comparison_surface_incomplete) {
+        state.Fail(std::make_exception_ptr(std::runtime_error{
+            "ordinary filesystem traversal failed to observe "
+            "the complete namespace beneath at least one "
+            "directory"}));
+    } else {
+        state.CompleteComparison();
     }
 }
 

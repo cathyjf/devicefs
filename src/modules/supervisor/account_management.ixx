@@ -23,6 +23,7 @@ export module devicefs.supervisor.account_management;
 import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import devicefs.lightweight_future;
 import devicefs.supervisor.math;
 import devicefs.stream_writer;
 import devicefs.supervisor.process_launch;
@@ -599,7 +600,7 @@ export auto EnsureInternalWindowsAccountAndEnvironment(
     const std::string_view distribution,
     const std::filesystem::path &installed_executable,
     const std::filesystem::path &wsl_directory) {
-    auto account_preparation = std::async(std::launch::async, [username, &wsl_directory] {
+    auto account_preparation = devicefs::async([username, &wsl_directory] {
         const auto created = CreateAccountIfMissing(username);
         const auto sid = GetInternalWindowsAccountSid(username);
         if (created) {
@@ -635,8 +636,8 @@ export auto EnsureInternalWindowsAccountAndEnvironment(
         }
         EnsureWslDistributionDirectory(sid.get(), wsl_directory);
     });
-    auto winfsp_preparation = std::async(std::launch::async, EnsureWinFsp);
-    auto package_preparation = std::async(std::launch::async, [] {
+    auto winfsp_preparation = devicefs::async(EnsureWinFsp);
+    auto package_preparation = devicefs::async([] static {
         constexpr auto minimum_version = std::array{2u, 7u, 13u};
         if (IsSuitablePackageInstalled(kWslRegistration, minimum_version)) {
             devicefs::WriteToStream(
@@ -656,8 +657,8 @@ export auto EnsureInternalWindowsAccountAndEnvironment(
     // continue during materialization. The installer collects the WinFsp result
     // after materialization completes or is deferred.
     const auto component_restart_needed = EnsureWsl1Component();
-    account_preparation.get();
-    const auto package_restart_needed = package_preparation.get();
+    account_preparation.Get();
+    const auto package_restart_needed = package_preparation.Get();
     if (package_restart_needed || component_restart_needed) {
         devicefs::WriteToStream(
             devicefs::stdout,
@@ -668,7 +669,7 @@ export auto EnsureInternalWindowsAccountAndEnvironment(
         EnsureMaterializedWslDistribution(username, distribution,
             installed_executable);
     }
-    if (winfsp_preparation.get()) {
+    if (winfsp_preparation.Get()) {
         devicefs::WriteToStream(devicefs::stdout,
             "The computer must be restarted before backups can be performed.\n");
     }

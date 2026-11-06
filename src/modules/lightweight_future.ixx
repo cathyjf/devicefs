@@ -26,11 +26,11 @@ class LightweightFuture {
     using UniqueWork = std::conditional_t<CancelOnDestruction,
         wil::unique_threadpool_work, wil::unique_threadpool_work_nocancel>;
 public:
-    using ResultType = std::invoke_result_t<Callable, const Context &>;
+    using ResultType = std::invoke_result_t<Callable, Context &>;
 
-    LightweightFuture(const Context &context, const bool async = true,
+    LightweightFuture(Context &&context, const bool async = true,
         auto &&...error) requires (sizeof...(error) <= 1) :
-        result_{std::addressof(context)},
+        result_{std::forward<Context>(context)},
         work_{[this, async, ...error_ = std::forward<decltype(error)>(error)]
             -> UniqueWork {
             if (!async) {
@@ -76,7 +76,7 @@ private:
     }
 
     auto RunCallback() {
-        const auto &context = *std::get<const Context *>(result_);
+        auto &context = std::get<Context>(result_);
         if constexpr (std::is_void_v<ResultType>) {
             Callable::operator()(context);
         } else {
@@ -92,11 +92,20 @@ private:
         }
     }
 
-    std::variant<const Context *,
+    std::variant<Context,
         std::conditional_t<std::is_void_v<ResultType>,
             std::monostate, ResultType>,
         std::exception_ptr> result_;
     UniqueWork work_;
 };
+
+export template <class Callable>
+auto async(Callable callback) {
+    using FutureCallback = decltype([](Callable &callback_) static {
+        return callback_();
+    });
+    return LightweightFuture<FutureCallback, false, Callable>{
+        std::move(callback)};
+}
 
 } // namespace devicefs

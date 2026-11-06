@@ -219,12 +219,12 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
             return kReturnValue;
         }
 
-        using FutureCallable = decltype([](const auto &pair) static {
+        using FutureCallable = decltype([](const auto *const pair) static {
             return TryPrepareAndWriteDirtyMapForSnapshot(
-                pair.payload, pair.baseline);
+                pair->payload, pair->baseline);
         });
-        using FutureType =
-            devicefs::LightweightFuture<FutureCallable, true, SnapshotPair>;
+        using FutureType = devicefs::LightweightFuture<
+            FutureCallable, true, const SnapshotPair *>;
         const auto length = std::size(snapshots);
         const auto futures_buffer = NEW_MALLOCA_BUFFER(FutureType, length);
         auto future_index = 0uz;
@@ -245,7 +245,7 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
             // below. If there is more than one task, each additional task
             // may run on a separate thread.
             ::new (futures.get() + future_index) FutureType{
-                snapshots[future_index], future_index != 0, future_error};
+                &snapshots[future_index], future_index != 0, future_error};
         }
         for (auto i = 0uz; i < length; ++i) {
             if (auto &file = futures[i].Get(); file.handle) {

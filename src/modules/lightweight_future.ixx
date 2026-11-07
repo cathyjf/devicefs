@@ -158,9 +158,10 @@ private:
 
 export enum class FuturePolicy {
     Default = 0,
-    CancelOnDestruction = 1,
-    ProvideAtomicReadiness = 2,
-    AllowMultipleRetrieval = 4
+    AllowSynchronousCallback = 1,
+    CancelOnDestruction = 2,
+    ProvideAtomicReadiness = 4,
+    AllowMultipleRetrieval = 8
 };
 
 export constexpr auto operator&(const FuturePolicy policy,
@@ -185,13 +186,20 @@ public:
     using ResultType = std::invoke_result_t<Callable, Context &>;
     static_assert(!std::is_same_v<ResultType, VoidSentinel>);
 
+    // The `AllowSynchronousCallback` and `AllowMultipleRetrieval` policies are
+    // not supported at the same time as each other.
+    static_assert(!(Policy & FuturePolicy::AllowSynchronousCallback) ||
+        !(Policy & FuturePolicy::AllowMultipleRetrieval));
+
     LightweightFuture(Context &&context, const bool async = true,
         auto &&...error) requires (sizeof...(error) <= 1) :
         state_{std::forward<Context>(context)},
         work_{[this, async, ...error_ = std::forward<decltype(error)>(error)]
             -> UniqueWork {
-            if (!async) {
-                return nullptr;
+            if constexpr (Policy & FuturePolicy::AllowSynchronousCallback) {
+                if (!async) {
+                    return nullptr;
+                }
             }
             if (const auto work =
                     CreateThreadpoolWork(WorkCallback, this, nullptr); work) {
@@ -208,11 +216,8 @@ public:
     // Precondition without `AllowMultipleRetrieval`:
     //   `Get` has never previously been called on this object.
     //
-    // Preconditions with `AllowMultipleRetrieval`:
-    //   (1) The constructor used to create this object must have been called
-    //       with the `async` parameter set to `true`; and
-    //
-    //   (2) No other thread is currently executing `Get`.
+    // Precondition with `AllowMultipleRetrieval`:
+    //   `this->Get()` is not executing on any other thread.
     //
     // If any parameters are supplied, they are set to `true` the first time
     // that a state change is observed.
@@ -226,7 +231,8 @@ public:
             (Policy & FuturePolicy::AllowMultipleRetrieval))
     auto Get(auto &&...observers) -> decltype(auto) {
         using OptionalReturn = std::optional<ResultType>;
-        if (work_) {
+        if (!(Policy & (FuturePolicy::AllowSynchronousCallback |
+                FuturePolicy::AllowMultipleRetrieval)) || work_) {
             if constexpr (AllowStateChange) {
                 std::ignore = wil::unique_threadpool_work_nocancel{
                     work_.release()};

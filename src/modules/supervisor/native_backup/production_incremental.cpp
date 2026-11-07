@@ -224,7 +224,7 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
                 pair->payload, pair->baseline);
         });
         using FutureType = devicefs::LightweightFuture<
-            FutureCallable, true, const SnapshotPair *>;
+            FutureCallable, const SnapshotPair *>;
         const auto length = std::size(snapshots);
         const auto futures_buffer = NEW_MALLOCA_BUFFER(FutureType, length);
         auto future_index = 0uz;

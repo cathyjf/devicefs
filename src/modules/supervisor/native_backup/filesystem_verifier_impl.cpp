@@ -1054,7 +1054,7 @@ public:
             self->Worker();
         });
         auto workers = std::array<std::optional<
-            devicefs::LightweightFuture<FutureCallable, true, decltype(this)>>,
+            devicefs::LightweightFuture<FutureCallable, decltype(this)>>,
             kVerificationWorkerCount>{};
         try {
             for (auto &worker : workers) {
@@ -1973,7 +1973,7 @@ auto RunComparisonWorkers(
     });
     auto workers = std::array<
         std::optional<devicefs::LightweightFuture<
-            FutureCallable, true, decltype(std::addressof(run))>>,
+            FutureCallable, decltype(std::addressof(run))>>,
         kVerificationWorkerCount>{};
     const auto worker_count = std::min(
         std::tuple_size_v<decltype(workers)>, plan.tasks.size());
@@ -2023,13 +2023,15 @@ auto CompareFilesystems(
         Transcode<std::string>(real_root),
         kVerificationWorkerCount);
 
-    auto synthetic_operation = devicefs::async<true>([&] {
+    auto synthetic_operation = devicefs::async<
+        devicefs::FuturePolicy::CancelOnDestruction>([&] {
         return InventoryFilesystem(
             synthetic_root,
             VerificationEndpoint::Synthetic,
             cancellation_event, io_cancellation, state);
     });
-    auto real_operation = devicefs::async<true>([&] {
+    auto real_operation = devicefs::async<
+        devicefs::FuturePolicy::CancelOnDestruction>([&] {
         return InventoryFilesystem(
             real_root, VerificationEndpoint::Real,
             cancellation_event, io_cancellation, state);
@@ -2046,7 +2048,8 @@ auto CompareFilesystems(
                 cancellation_event, io_cancellation, state);
         };
         using ReturnType = std::optional<
-            devicefs::AsyncFuture<decltype(callback), true>>;
+            devicefs::AsyncFuture<decltype(callback),
+                devicefs::FuturePolicy::CancelOnDestruction>>;
         try {
             return ReturnType{std::in_place, std::move(callback)};
         } catch (const std::exception &error) {

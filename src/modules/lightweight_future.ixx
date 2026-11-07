@@ -58,9 +58,17 @@ using AtomicReadinessFlag = std::conditional_t<
 
 struct VoidSentinel {};
 
-template <class Context, class Result, bool AtomicReadiness>
+struct EmptyError {
+    explicit constexpr operator bool() const noexcept {
+        return false;
+    }
+};
+
+template <class Context, class Result, bool AtomicReadiness,
+    bool NeedsErrorStorage>
 class FutureState {
-    using Error = std::exception_ptr;
+    using Error = std::conditional_t<NeedsErrorStorage,
+        std::exception_ptr, EmptyError>;
 public:
     FutureState(Context &&context) noexcept(noexcept(Construct(
             state_.context, std::forward<Context>(context)))) {
@@ -78,6 +86,7 @@ public:
             static_assert(std::is_nothrow_constructible_v<Result, T>);
             Construct(state_.result, std::forward<T>(result));
         } else {
+            static_assert(NeedsErrorStorage);
             Construct(state_.error, std::forward<T>(result));
             has_error_ = true;
         }
@@ -90,7 +99,7 @@ public:
 
     template <bool TestForError>
     auto GetResult() noexcept(!TestForError) -> decltype(auto) {
-        if constexpr (TestForError) {
+        if constexpr (NeedsErrorStorage && TestForError) {
             if (has_error_) {
                 std::rethrow_exception(state_.error);
             }
@@ -111,7 +120,7 @@ public:
 
     ~FutureState() noexcept(noexcept(ClearContext()) &&
             std::is_nothrow_destructible_v<Result>) {
-        if (has_error_) {
+        if (NeedsErrorStorage && has_error_) {
             std::destroy_at(std::addressof(state_.error));
         } else if constexpr (std::is_same_v<Result, VoidSentinel>) {
             ClearContext();
@@ -153,7 +162,8 @@ private:
     __pragma(warning(pop))
     [[msvc::no_unique_address]] std::conditional_t<
         AtomicReadiness, AtomicReadinessFlag, bool> has_result_{};
-    [[msvc::no_unique_address]] bool has_error_ = false;
+    [[msvc::no_unique_address]] std::conditional_t<
+        NeedsErrorStorage, bool, EmptyError> has_error_{};
 };
 
 export enum class FuturePolicy {
@@ -185,12 +195,16 @@ class LightweightFuture {
 public:
     using ResultType = std::invoke_result_t<Callable, Context &>;
     static_assert(!std::is_same_v<ResultType, VoidSentinel>);
+    static_assert(std::is_void_v<ResultType> ||
+        std::is_nothrow_destructible_v<Context>);
 
     // The `AllowSynchronousCallback` and `AllowMultipleRetrieval` policies are
     // not supported at the same time as each other.
     static_assert(!(Policy & FuturePolicy::AllowSynchronousCallback) ||
         !(Policy & FuturePolicy::AllowMultipleRetrieval));
 
+    // Precondition: if an `error` callable is supplied, invoking it must not
+    // return normally.
     LightweightFuture(Context &&context, const bool async = true,
         auto &&...error) requires (sizeof...(error) <= 1) :
         state_{std::forward<Context>(context)},
@@ -271,7 +285,10 @@ private:
         static_cast<LightweightFuture *>(context_)->TryRunCallback();
     }
 
-    auto RunCallback() {
+    static constexpr auto kCallbackExecutionIsNonthrowing =
+        std::is_nothrow_invocable_v<Callable, Context &>;
+
+    auto RunCallback() noexcept(kCallbackExecutionIsNonthrowing) {
         auto &context = state_.GetContext();
         if constexpr (std::is_void_v<ResultType>) {
             Callable::operator()(context);
@@ -282,23 +299,34 @@ private:
     }
 
     auto TryRunCallback() noexcept {
-        try {
+        if constexpr (kCallbackExecutionIsNonthrowing) {
             RunCallback();
-        } catch (...) {
-            state_.template SetResult<true>(std::current_exception());
+        } else {
+            try {
+                RunCallback();
+            } catch (...) {
+                state_.template SetResult<true>(std::current_exception());
+            }
         }
     }
 
     [[msvc::no_unique_address]] FutureState<Context,
         std::conditional_t<std::is_void_v<ResultType>,
             VoidSentinel, ResultType>,
-        Policy & FuturePolicy::ProvideAtomicReadiness> state_;
+        Policy & FuturePolicy::ProvideAtomicReadiness,
+        !kCallbackExecutionIsNonthrowing> state_;
     [[msvc::no_unique_address]] UniqueWork work_;
 };
 
 export template <FuturePolicy Policy = FuturePolicy::Default, class Callable>
 auto async(Callable callback) {
-    using FutureCallback = decltype([](Callable &callback_) static {
+    // Note: If we later add support for returning a reference from the
+    // callback, the return type of this lambda should be changed to
+    // `decltype(auto)` and the noexcept expression should be changed to
+    // `noexcept(std::is_nothrow_invocable_v<Callable &>)`.
+    using FutureCallback = decltype([](Callable &callback_) static
+        noexcept(std::is_nothrow_invocable_r_v<
+            std::decay_t<std::invoke_result_t<Callable &>>, Callable &>) {
         return callback_();
     });
     return LightweightFuture<FutureCallback, Callable, Policy>{

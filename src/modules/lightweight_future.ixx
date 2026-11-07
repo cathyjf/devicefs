@@ -22,18 +22,16 @@ import <devicefs/windows_imports.h>;
 namespace devicefs {
 
 template <class T>
-concept IsBooleanType = std::is_same_v<std::remove_cvref_t<T>, bool>;
-
-template <class T>
 concept IsAtomicFlagType = std::is_same_v<
     std::remove_cvref_t<T>, std::atomic_flag>;
 
+using AtomicReadinessFlag = std::conditional_t<
+    std::atomic<bool>::is_always_lock_free,
+        std::atomic<bool>, std::atomic_flag>;
+
 template <class T>
 auto ReadFlag(const T &flag, const std::memory_order order) noexcept {
-    if constexpr (IsBooleanType<T>) {
-        std::ignore = order;
-        return flag;
-    } else if constexpr (IsAtomicFlagType<T>) {
+    if constexpr (IsAtomicFlagType<T>) {
         return flag.test(order);
     } else {
         return flag.load(order);
@@ -42,19 +40,12 @@ auto ReadFlag(const T &flag, const std::memory_order order) noexcept {
 
 template <class T>
 auto SetFlag(T &flag, const std::memory_order order) noexcept {
-    if constexpr (IsBooleanType<T>) {
-        std::ignore = order;
-        flag = true;
-    } else if constexpr (IsAtomicFlagType<T>) {
+    if constexpr (IsAtomicFlagType<T>) {
         flag.test_and_set(order);
     } else {
         flag.store(true, order);
     }
 }
-
-using AtomicReadinessFlag = std::conditional_t<
-    std::atomic<bool>::is_always_lock_free,
-        std::atomic<bool>, std::atomic_flag>;
 
 struct VoidSentinel {};
 
@@ -63,6 +54,76 @@ struct EmptyError {
         return false;
     }
 };
+
+class EmptyDiscriminator {
+public:
+    constexpr auto SetSuccessfulResult() const noexcept {}
+    constexpr auto SetErrorResult() const noexcept {}
+    constexpr auto HasError() const noexcept { return false; }
+};
+
+template <bool NeedsErrorStorage>
+class CombinedDiscriminator {
+    static auto constexpr kInitialValue = 0;
+    static auto constexpr kHasResult = 1;
+    static auto constexpr kHasError = 2;
+public:
+    constexpr auto SetSuccessfulResult() noexcept {
+        value_ = kHasResult;
+    }
+    constexpr auto SetErrorResult() noexcept {
+        if constexpr (NeedsErrorStorage) {
+            value_ = kHasError;
+        }
+    }
+    constexpr auto HasResult(auto) const noexcept {
+        return value_ != kInitialValue;
+    }
+    constexpr auto HasError() const noexcept {
+        if constexpr (NeedsErrorStorage) {
+            return value_ == kHasError;
+        } else {
+            return false;
+        }
+    }
+private:
+    [[msvc::no_unique_address]] std::uint8_t value_ = kInitialValue;
+};
+
+template <bool NeedsErrorStorage>
+class AtomicDiscriminator {
+public:
+    auto SetSuccessfulResult() noexcept {
+        SetFlag(has_result_, std::memory_order_release);
+    }
+    auto SetErrorResult() noexcept {
+        has_error_ = true;
+        SetSuccessfulResult();
+    }
+    auto HasResult(const std::memory_order order) const noexcept {
+        return ReadFlag(has_result_, order);
+    }
+    constexpr auto HasError() const noexcept {
+        return has_error_;
+    }
+private:
+    [[msvc::no_unique_address]] AtomicReadinessFlag has_result_{};
+    [[msvc::no_unique_address]] std::conditional_t<
+        NeedsErrorStorage, bool, EmptyError> has_error_{};
+};
+
+template <class Context, class Result, bool AtomicReadiness,
+    bool NeedsErrorStorage>
+using Discriminator = std::conditional_t<
+    AtomicReadiness,
+    AtomicDiscriminator<NeedsErrorStorage>,
+    std::conditional_t<
+        NeedsErrorStorage ||
+            (!std::is_same_v<Result, VoidSentinel> &&
+                !(std::is_trivially_destructible_v<Context> &&
+                    std::is_trivially_destructible_v<Result>)),
+        CombinedDiscriminator<NeedsErrorStorage>,
+        EmptyDiscriminator>>;
 
 template <class Context, class Result, bool AtomicReadiness,
     bool NeedsErrorStorage>
@@ -76,7 +137,7 @@ public:
     }
 
     auto SetResult() noexcept {
-        SetFlag(has_result_, std::memory_order_release);
+        flag_.SetSuccessfulResult();
     }
 
     template <bool IsError, class T>
@@ -85,12 +146,12 @@ public:
         if constexpr (!IsError) {
             static_assert(std::is_nothrow_constructible_v<Result, T>);
             Construct(state_.result, std::forward<T>(result));
+            flag_.SetSuccessfulResult();
         } else {
             static_assert(NeedsErrorStorage);
             Construct(state_.error, std::forward<T>(result));
-            has_error_ = true;
+            flag_.SetErrorResult();
         }
-        SetResult();
     }
 
     auto GetContext() noexcept -> decltype(auto) {
@@ -98,9 +159,10 @@ public:
     }
 
     template <bool TestForError>
-    auto GetResult() noexcept(!TestForError) -> decltype(auto) {
+    auto GetResult() noexcept(!NeedsErrorStorage || !TestForError)
+        -> decltype(auto) {
         if constexpr (NeedsErrorStorage && TestForError) {
-            if (has_error_) {
+            if (flag_.HasError()) {
                 std::rethrow_exception(state_.error);
             }
         }
@@ -110,7 +172,7 @@ public:
     }
 
     bool HasResult() const noexcept {
-        return ReadFlag(has_result_, std::memory_order_acquire);
+        return flag_.HasResult(std::memory_order_acquire);
     }
 
     FutureState(const FutureState &) = delete;
@@ -120,14 +182,18 @@ public:
 
     ~FutureState() noexcept(noexcept(ClearContext()) &&
             std::is_nothrow_destructible_v<Result>) {
-        if (NeedsErrorStorage && has_error_) {
+        if (NeedsErrorStorage && flag_.HasError()) {
             std::destroy_at(std::addressof(state_.error));
         } else if constexpr (std::is_same_v<Result, VoidSentinel>) {
             ClearContext();
-        } else if (!ReadFlag(has_result_, std::memory_order_relaxed)) {
-            ClearContext();
-        } else {
-            std::destroy_at(std::addressof(state_.result));
+        } else if constexpr (requires {
+            flag_.HasResult(std::memory_order_relaxed);
+        }) {
+            if (!flag_.HasResult(std::memory_order_relaxed)) {
+                ClearContext();
+            } else {
+                std::destroy_at(std::addressof(state_.result));
+            }
         }
     }
 
@@ -160,10 +226,8 @@ private:
         ~StateUnion() {}
     } state_;
     __pragma(warning(pop))
-    [[msvc::no_unique_address]] std::conditional_t<
-        AtomicReadiness, AtomicReadinessFlag, bool> has_result_{};
-    [[msvc::no_unique_address]] std::conditional_t<
-        NeedsErrorStorage, bool, EmptyError> has_error_{};
+    [[msvc::no_unique_address]] Discriminator<
+        Context, Result, AtomicReadiness, NeedsErrorStorage> flag_;
 };
 
 export enum class FuturePolicy {

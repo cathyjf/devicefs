@@ -22,24 +22,41 @@ import <devicefs/windows_imports.h>;
 namespace devicefs {
 
 template <class T>
+concept IsBooleanType = std::is_same_v<std::remove_cvref_t<T>, bool>;
+
+template <class T>
+concept IsAtomicFlagType = std::is_same_v<
+    std::remove_cvref_t<T>, std::atomic_flag>;
+
+template <class T>
 auto ReadFlag(const T &flag, const std::memory_order order) noexcept {
-    if constexpr (std::is_same_v<std::remove_cvref_t<T>, bool>) {
+    if constexpr (IsBooleanType<T>) {
         std::ignore = order;
         return flag;
-    } else {
+    } else if constexpr (IsAtomicFlagType<T>) {
         return flag.test(order);
+    } else {
+        return flag.load(order);
     }
 }
 
 template <class T>
 auto SetFlag(T &flag, const std::memory_order order) noexcept {
-    if constexpr (std::is_same_v<std::remove_cvref_t<T>, bool>) {
+    if constexpr (IsBooleanType<T>) {
         std::ignore = order;
         flag = true;
-    } else {
+    } else if constexpr (IsAtomicFlagType<T>) {
         flag.test_and_set(order);
+    } else {
+        flag.store(true, order);
     }
 }
+
+using AtomicReadinessFlag = std::conditional_t<
+    std::atomic<bool>::is_always_lock_free,
+        std::atomic<bool>, std::atomic_flag>;
+
+struct VoidSentinel {};
 
 template <class Context, class Result, bool AtomicReadiness>
 class FutureState {
@@ -54,10 +71,10 @@ public:
         SetFlag(has_result_, std::memory_order_release);
     }
 
-    template <class T>
+    template <bool IsError, class T>
     auto SetResult(T &&result) noexcept(noexcept(ClearContext())) {
         ClearContext();
-        if constexpr (std::is_same_v<std::remove_cvref_t<T>, Result>) {
+        if constexpr (!IsError) {
             static_assert(std::is_nothrow_constructible_v<Result, T>);
             Construct(state_.result, std::forward<T>(result));
         } else {
@@ -78,7 +95,7 @@ public:
                 std::rethrow_exception(state_.error);
             }
         }
-        if constexpr (!std::is_same_v<Result, std::monostate>) {
+        if constexpr (!std::is_same_v<Result, VoidSentinel>) {
             return (state_.result);
         }
     }
@@ -96,7 +113,7 @@ public:
             std::is_nothrow_destructible_v<Result>) {
         if (has_error_) {
             std::destroy_at(std::addressof(state_.error));
-        } else if constexpr (std::is_same_v<Result, std::monostate>) {
+        } else if constexpr (std::is_same_v<Result, VoidSentinel>) {
             ClearContext();
         } else if (!ReadFlag(has_result_, std::memory_order_relaxed)) {
             ClearContext();
@@ -135,7 +152,7 @@ private:
     } state_;
     __pragma(warning(pop))
     [[msvc::no_unique_address]] std::conditional_t<
-        AtomicReadiness, std::atomic_flag, bool> has_result_{};
+        AtomicReadiness, AtomicReadinessFlag, bool> has_result_{};
     [[msvc::no_unique_address]] bool has_error_ = false;
 };
 
@@ -166,6 +183,7 @@ class LightweightFuture {
             wil::unique_threadpool_work_nocancel>;
 public:
     using ResultType = std::invoke_result_t<Callable, Context &>;
+    static_assert(!std::is_same_v<ResultType, VoidSentinel>);
 
     LightweightFuture(Context &&context, const bool async = true,
         auto &&...error) requires (sizeof...(error) <= 1) :
@@ -198,15 +216,32 @@ public:
     //
     // If any parameters are supplied, they are set to `true` the first time
     // that a state change is observed.
+    //
+    // If `AllowStateChange` is `false` (which is allowed only with
+    // `AllowMultipleRetrieval`), the function returns `std::nullopt` if the
+    // result has not been previously collected, and returns an `std::optional`
+    // containing a copy of the result if it has been previously collected.
+    template <bool AllowStateChange = true>
+        requires (AllowStateChange ||
+            (Policy & FuturePolicy::AllowMultipleRetrieval))
     auto Get(auto &&...observers) -> decltype(auto) {
+        using OptionalReturn = std::optional<ResultType>;
         if (work_) {
-            std::ignore = wil::unique_threadpool_work_nocancel{
-                work_.release()};
-            ((observers = true), ...);
-            return state_.template GetResult<true>();
+            if constexpr (AllowStateChange) {
+                std::ignore = wil::unique_threadpool_work_nocancel{
+                    work_.release()};
+                ((observers = true), ...);
+                return state_.template GetResult<true>();
+            } else {
+                return OptionalReturn{};
+            }
         }
         if constexpr (Policy & FuturePolicy::AllowMultipleRetrieval) {
-            return state_.template GetResult<true>();
+            if constexpr (AllowStateChange) {
+                return state_.template GetResult<true>();
+            } else {
+                return OptionalReturn{state_.template GetResult<true>()};
+            }
         } else {
             RunCallback();
             ((observers = true), ...);
@@ -236,7 +271,7 @@ private:
             Callable::operator()(context);
             state_.SetResult();
         } else {
-            state_.SetResult(Callable::operator()(context));
+            state_.template SetResult<false>(Callable::operator()(context));
         }
     }
 
@@ -244,13 +279,13 @@ private:
         try {
             RunCallback();
         } catch (...) {
-            state_.SetResult(std::current_exception());
+            state_.template SetResult<true>(std::current_exception());
         }
     }
 
     [[msvc::no_unique_address]] FutureState<Context,
         std::conditional_t<std::is_void_v<ResultType>,
-            std::monostate, ResultType>,
+            VoidSentinel, ResultType>,
         Policy & FuturePolicy::ProvideAtomicReadiness> state_;
     [[msvc::no_unique_address]] UniqueWork work_;
 };

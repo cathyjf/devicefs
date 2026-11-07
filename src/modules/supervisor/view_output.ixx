@@ -4,9 +4,10 @@
 export module devicefs.supervisor.view_output;
 
 import std;
-import <devicefs/windows_imports.h>;
-import <devicefs/common.h>;
 import <io.h>;
+import <devicefs/common.h>;
+import <devicefs/windows_imports.h>;
+import devicefs.lightweight_future;
 import devicefs.stream_redirector;
 import devicefs.stream_writer;
 import devicefs.supervisor.temporary_paths;
@@ -91,46 +92,48 @@ private:
 
 } // namespace view_output_detail
 
-template <class T>
-class FutureWithSavedResult {
-    using ResultType = decltype(T{}.get());
-
+template <class Callable>
+class FutureMonitor {
 public:
-    FutureWithSavedResult(T &&future) noexcept : future_(std::move(future)) {}
+    FutureMonitor(Callable callback)
+        requires (std::is_nothrow_invocable_v<Callable &> &&
+            std::is_nothrow_move_constructible_v<Callable> &&
+            std::is_nothrow_copy_constructible_v<
+                std::remove_cvref_t<std::invoke_result_t<Callable &>>>) :
+        future_{std::move(callback)} {}
 
-    auto Get() {
-        if (!result_) {
-            result_ = future_.get();
-        }
-        return *result_;
+    auto Get() noexcept {
+        return future_.Get();
     }
 
-    auto MaybeCompleteTask() {
-        using namespace std::chrono_literals;
-        if (result_ ||
-            (future_.wait_for(0ms) != std::future_status::ready)) {
+    auto MaybeCompleteTask() noexcept {
+        if (!future_.IsReady()) {
             return false;
         }
-        result_ = future_.get();
-        return true;
+        auto state_change = false;
+        future_.Get(state_change);
+        return state_change;
     }
 
-    auto operator*() const
-        noexcept(std::is_nothrow_copy_constructible_v<ResultType>) {
-        return result_;
+    auto operator*() noexcept {
+        return future_.template Get<false>();
     }
 
 private:
-    std::optional<ResultType> result_;
-    T future_;
+    devicefs::AsyncFuture<Callable,
+        devicefs::FuturePolicy::ProvideAtomicReadiness |
+            devicefs::FuturePolicy::AllowMultipleRetrieval> future_;
 };
 
-template <typename T>
+using HypotheticalFutureMonitor =
+    FutureMonitor<decltype([] noexcept { return 0; })>;
+
+template <class T>
 concept OutputOperation = requires(T &callbacks,
     devicefs::terminal::Frame<
         std::remove_reference_t<decltype(callbacks.terminal)>> &frame,
     devicefs::terminal::OutputMenu &menu, int exit_code,
-    FutureWithSavedResult<std::future<int>> &task,
+    HypotheticalFutureMonitor &task,
     std::optional<std::size_t> command,
     const decltype([] noexcept {}) &close) {
     { callbacks.terminal } -> devicefs::terminal::MenuTerminal;
@@ -159,8 +162,7 @@ export [[nodiscard]] auto RunOperationWithOutput(
     // This menu does not allow exceptions to escape from the supervised
     // asynchronous operation. Instead, exceptions are informationally printed
     // and then translated into a nonzero exit status code.
-    auto task = FutureWithSavedResult{
-        std::async(std::launch::async, [&callbacks] noexcept {
+    auto task = FutureMonitor{[&callbacks] noexcept {
         try {
             return callbacks.operation();
         } catch (const std::exception &error) {
@@ -175,7 +177,7 @@ export [[nodiscard]] auto RunOperationWithOutput(
                 "Unknown exception from operation.\n");
         }
         return EXIT_FAILURE;
-    })};
+    }};
 
     auto dismiss_on_failure = wil::scope_exit(
         [&callbacks, &view, &task, &close, &closed = std::as_const(closed)]

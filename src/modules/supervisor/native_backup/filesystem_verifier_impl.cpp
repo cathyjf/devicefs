@@ -2208,6 +2208,18 @@ struct VolumeJob {
             std::forward<decltype(callable)>(callable)] mutable {
             if constexpr (!std::is_same_v<std::nullopt_t,
                     std::remove_cvref_t<decltype(callable)>>) {
+                // Requiring the callable to be an `std::reference_wrapper`
+                // guarantees under the C++ standard that the constructor for
+                // `std::move_only_function` will not throw `std::bad_alloc`.
+                // This in turn implies that the constructor will not allocate
+                // memory on the heap, because doing so would introduce a
+                // failure path that the standard does not allow.
+                //
+                // See C++23 § 22.10.17.4.3 [func.wrap.move.ctor], § 9.
+                static_assert(std::is_same_v<
+                    std::remove_cvref_t<decltype(callable)>,
+                    decltype(std::ref(callable))>,
+                    "callable must be an `std::reference_wrapper`");
                 return MaybeMakeOperationFuture(state,
                     ErasedOperation{std::move(callable)});
             } else {
@@ -2825,13 +2837,14 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     auto io_cancellation = SynchronousIoCancellation{};
     // The mounted reference volume's GUID makes content sampling repeatable
     // while the caller keeps this pair mounted.
+    const auto callback = [&](VerificationState &state) {
+        CompareFilesystems(*volume_identifier, *volume_identifier,
+            synthetic_root, real_root, cancellation_event, percentage,
+            io_cancellation, state);
+        state.SetPhase(VerificationPhase::Complete);
+    };
     auto jobs = std::array{VolumeJob{*volume_identifier, percentage,
-        [&](VerificationState &state) {
-            CompareFilesystems(*volume_identifier, *volume_identifier,
-                synthetic_root, real_root, cancellation_event, percentage,
-                io_cancellation, state);
-            state.SetPhase(VerificationPhase::Complete);
-        }}};
+        std::ref(callback)}};
     return FinishVerification(jobs, cancellation_event, io_cancellation, 0, 0);
 }
 
@@ -3069,11 +3082,13 @@ private:
         double percentage;
         wil::srwlock &virtual_disk_lock;
         SynchronousIoCancellation &io_cancellation;
+
+        auto operator()(VerificationState &state) const {
+            VerifyVolume(volume, synthetic_vhdx, real_vhdx, cancellation_event,
+                percentage, virtual_disk_lock, io_cancellation, state);
+        }
     };
 
-    // Allocating the `VolumeContext` objects here using `NEW_MALLOCA_BUFFER`
-    // allows the type-erased callables stored by `VolumeJob` to fit within the
-    // inline buffer of MSVC's implementation of `std::move_only_function`.
     const auto context_buffer = NEW_MALLOCA_BUFFER(
         VolumeContext, volumes.size());
     auto context_creator = ObjectCreator{};
@@ -3089,12 +3104,7 @@ private:
     const auto jobs = job_creator.CreateObjects(jobs_buffer.get(),
         contexts.span, [percentage](const auto &context) {
         return VolumeJob{context.volume.volume_identifier, percentage,
-            [&context](VerificationState &state) {
-            VerifyVolume(context.volume, context.synthetic_vhdx,
-                context.real_vhdx, context.cancellation_event,
-                context.percentage, context.virtual_disk_lock,
-                context.io_cancellation, state);
-        }};
+            std::ref(context)};
     });
     return FinishVerification(jobs.span, cancellation_event,
         io_cancellation, optimization_unavailable, preparation_failures);

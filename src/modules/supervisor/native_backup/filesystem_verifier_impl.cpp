@@ -2171,7 +2171,7 @@ using ErasedOperation = std::move_only_function<
     auto (VerificationState &) -> void>;
 
 auto MaybeMakeOperationFuture(VerificationState &state,
-    ErasedOperation &operation) noexcept {
+    ErasedOperation operation) noexcept {
     auto callback = [operation = std::move(operation), &state]
         mutable noexcept {
         try {
@@ -2193,7 +2193,7 @@ auto MaybeMakeOperationFuture(VerificationState &state,
 }
 
 using OptionalOperationFuture = decltype(MaybeMakeOperationFuture(
-    std::declval<VerificationState &>(), std::declval<ErasedOperation &>()));
+    std::declval<VerificationState &>(), std::declval<ErasedOperation>()));
 
 struct VolumeJob {
     GUID volume_identifier;
@@ -2212,8 +2212,8 @@ struct VolumeJob {
             std::forward<decltype(callable)>(callable)] mutable {
             if constexpr (!std::is_same_v<std::nullopt_t,
                     std::remove_cvref_t<decltype(callable)>>) {
-                auto erased_operation = ErasedOperation{std::move(callable)};
-                return MaybeMakeOperationFuture(state, erased_operation);
+                return MaybeMakeOperationFuture(state,
+                    ErasedOperation{std::move(callable)});
             } else {
                 return OptionalOperationFuture{};
             }
@@ -3065,19 +3065,41 @@ private:
     // operations cannot overlap one another.
     auto virtual_disk_lock = wil::srwlock{};
 
-    const auto jobs = job_creator.CreateObjects(jobs_buffer.get(), volumes,
-        [&](const auto &volume) {
+    struct VolumeContext {
+        const FilesystemVerificationVolume &volume;
+        std::filesystem::path synthetic_vhdx;
+        std::filesystem::path real_vhdx;
+        HANDLE cancellation_event;
+        double percentage;
+        wil::srwlock &virtual_disk_lock;
+        SynchronousIoCancellation &io_cancellation;
+    };
+
+    // Allocating the `VolumeContext` objects here using `NEW_MALLOCA_BUFFER`
+    // allows the type-erased callables stored by `VolumeJob` to fit within the
+    // inline buffer of MSVC's implementation of `std::move_only_function`.
+    const auto context_buffer = NEW_MALLOCA_BUFFER(
+        VolumeContext, volumes.size());
+    auto context_creator = ObjectCreator{};
+    const auto contexts = context_creator.CreateObjects(
+        context_buffer.get(), volumes, [&](const auto &volume) {
         auto synthetic_vhdx = synthetic_mount / volume.filename;
         auto real_vhdx = real_mount / volume.filename;
-        return VolumeJob{volume.volume_identifier, percentage,
-            [volume, synthetic_vhdx = std::move(synthetic_vhdx),
-            real_vhdx = std::move(real_vhdx), cancellation_event, percentage,
-            &virtual_disk_lock, &io_cancellation](VerificationState &state) {
-                VerifyVolume(volume, synthetic_vhdx, real_vhdx,
-                    cancellation_event, percentage, virtual_disk_lock,
-                    io_cancellation, state);
-            }};
-        });
+        return VolumeContext{volume, std::move(synthetic_vhdx),
+            std::move(real_vhdx), cancellation_event, percentage,
+            virtual_disk_lock, io_cancellation};
+    });
+
+    const auto jobs = job_creator.CreateObjects(jobs_buffer.get(),
+        contexts.span, [percentage](const auto &context) {
+        return VolumeJob{context.volume.volume_identifier, percentage,
+            [&context](VerificationState &state) {
+            VerifyVolume(context.volume, context.synthetic_vhdx,
+                context.real_vhdx, context.cancellation_event,
+                context.percentage, context.virtual_disk_lock,
+                context.io_cancellation, state);
+        }};
+    });
     return FinishVerification(jobs.span, cancellation_event,
         io_cancellation, optimization_unavailable, preparation_failures);
 }

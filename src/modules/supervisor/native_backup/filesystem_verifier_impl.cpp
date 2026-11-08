@@ -2198,28 +2198,27 @@ using OptionalOperationFuture = decltype(MaybeMakeOperationFuture(
 struct VolumeJob {
     GUID volume_identifier;
     double percentage;
-    std::unique_ptr<VerificationState> state;
+    VerificationState state{};
     // The operation is destroyed before the state it borrows.
     OptionalOperationFuture operation;
     std::size_t printed_mismatches = 0;
     std::size_t printed_operation_comparisons = 0;
-};
 
-template <class Operation>
-[[nodiscard]] auto StartVerification(
-    const GUID &volume_identifier,
-    const double percentage,
-    Operation operation) -> VolumeJob {
-    auto state = std::make_unique<VerificationState>();
-    auto &state_ = *state;
-    auto erased_operation = ErasedOperation{std::move(operation)};
-    return {
-        .volume_identifier = volume_identifier,
-        .percentage = percentage,
-        .state = std::move(state),
-        .operation = MaybeMakeOperationFuture(state_, erased_operation),
-    };
-}
+    VolumeJob(const auto &volume_identifier, const auto percentage,
+        auto &&callable) :
+        volume_identifier{volume_identifier},
+        percentage{percentage},
+        operation{[this, callable =
+            std::forward<decltype(callable)>(callable)] mutable {
+            if constexpr (!std::is_same_v<std::nullopt_t,
+                    std::remove_cvref_t<decltype(callable)>>) {
+                auto erased_operation = ErasedOperation{std::move(callable)};
+                return MaybeMakeOperationFuture(state, erased_operation);
+            } else {
+                return OptionalOperationFuture{};
+            }
+        }()} {}
+};
 
 [[nodiscard]] auto PhaseName(
     const VerificationPhase phase) noexcept -> std::string_view {
@@ -2427,11 +2426,11 @@ auto PrintNewMismatches(
     const auto output) -> void {
     for (auto &job : jobs) {
         for (const auto &mismatch :
-            job.state->NewMismatches(job.printed_mismatches)) {
+            job.state.NewMismatches(job.printed_mismatches)) {
             PrintMismatch(output, job.volume_identifier, mismatch);
         }
         for (const auto &comparison :
-            job.state->NewOperationComparisons(
+            job.state.NewOperationComparisons(
                 job.printed_operation_comparisons)) {
             if (!IsMatchedError(comparison)) {
                 PrintOperationComparison(
@@ -2536,7 +2535,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     devicefs::WriteToStream(
         devicefs::stdout, "\nFilesystem verification progress:\n");
     for (const auto &job : jobs) {
-        const auto observation = job.state->Observe();
+        const auto observation = job.state.Observe();
         devicefs::WriteToStream(devicefs::stdout,
             "  Volume ID: {}\n", FormatGuid(job.volume_identifier));
         devicefs::WriteToStream(devicefs::stdout,
@@ -2626,10 +2625,10 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     auto matched_error_volumes = 0uz;
     auto exclusion_volumes = 0uz;
     for (const auto &job : jobs) {
-        const auto observation = job.state->Observe();
-        const auto &mismatches = job.state->MismatchesAfterJoin();
+        const auto observation = job.state.Observe();
+        const auto &mismatches = job.state.MismatchesAfterJoin();
         const auto &operation_comparisons =
-            job.state->OperationComparisonsAfterJoin();
+            job.state.OperationComparisonsAfterJoin();
         if (observation.matched_error_count != 0) {
             ++matched_error_volumes;
         }
@@ -2830,13 +2829,13 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     auto io_cancellation = SynchronousIoCancellation{};
     // The mounted reference volume's GUID makes content sampling repeatable
     // while the caller keeps this pair mounted.
-    auto jobs = std::array{StartVerification(*volume_identifier, percentage,
+    auto jobs = std::array{VolumeJob{*volume_identifier, percentage,
         [&](VerificationState &state) {
             CompareFilesystems(*volume_identifier, *volume_identifier,
                 synthetic_root, real_root, cancellation_event, percentage,
                 io_cancellation, state);
             state.SetPhase(VerificationPhase::Complete);
-        })};
+        }}};
     return FinishVerification(jobs, cancellation_event, io_cancellation, 0, 0);
 }
 
@@ -3046,10 +3045,8 @@ private:
     if (wil::event_is_signaled(cancellation_event)) {
         const auto jobs = job_creator.CreateObjects(jobs_buffer.get(), volumes,
             [percentage](const auto &volume) {
-            return VolumeJob{
-                .volume_identifier = volume.volume_identifier,
-                .percentage = percentage,
-                .state = std::make_unique<VerificationState>()};
+                return VolumeJob{volume.volume_identifier, percentage,
+                    std::nullopt};
             });
         return PrintFinalResults(jobs.span, optimization_unavailable,
             preparation_failures);
@@ -3072,14 +3069,14 @@ private:
         [&](const auto &volume) {
         auto synthetic_vhdx = synthetic_mount / volume.filename;
         auto real_vhdx = real_mount / volume.filename;
-        return StartVerification(volume.volume_identifier, percentage,
+        return VolumeJob{volume.volume_identifier, percentage,
             [volume, synthetic_vhdx = std::move(synthetic_vhdx),
             real_vhdx = std::move(real_vhdx), cancellation_event, percentage,
             &virtual_disk_lock, &io_cancellation](VerificationState &state) {
                 VerifyVolume(volume, synthetic_vhdx, real_vhdx,
                     cancellation_event, percentage, virtual_disk_lock,
                     io_cancellation, state);
-            });
+            }};
         });
     return FinishVerification(jobs.span, cancellation_event,
         io_cancellation, optimization_unavailable, preparation_failures);

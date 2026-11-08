@@ -21,16 +21,17 @@ module;
 module devicefs.supervisor.native_backup:filesystem_verifier_impl;
 
 import std;
+import <devicefs/common.h>;
+import <devicefs/malloca.h>;
+import <devicefs/windows_imports.h>;
 import :filesystem_verifier;
 import devicefs.terminal.safecast;
-import <devicefs/windows_imports.h>;
 import :devicefs_process;
 import :internal;
 import devicefs.lightweight_future;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.process_privileges;
 import :vhdx_attachment;
-import <devicefs/common.h>;
 import devicefs.byte_comparison;
 import devicefs.guid_formatter;
 import devicefs.stream_writer;
@@ -532,7 +533,10 @@ public:
         return observation_.failed.load(std::memory_order_acquire);
     }
 
-    auto Fail(std::exception_ptr failure) -> void {
+    // Precondition: this thread does not hold a lock on `mutex_`.
+    [[gsl::suppress("26447", justification:
+        "The precondition ensures that lock acquisition cannot throw.")]]
+    auto Fail(std::exception_ptr failure) noexcept -> void {
         const auto lock = std::scoped_lock{mutex_};
         if (observation_.failed.load(std::memory_order_relaxed)) {
             return;
@@ -2163,45 +2167,57 @@ auto VerifyVolume(
         cancellation_event, percentage, io_cancellation, state);
 }
 
+using ErasedOperation = std::move_only_function<
+    auto (VerificationState &) -> void>;
+
+auto MaybeMakeOperationFuture(VerificationState &state,
+    ErasedOperation &operation) noexcept {
+    auto callback = [operation = std::move(operation), &state]
+        mutable noexcept {
+        try {
+            operation(state);
+        } catch (...) {
+            state.Fail(std::current_exception());
+            state.SetPhase(VerificationPhase::Complete);
+        }
+    };
+    using ReturnType = std::optional<devicefs::AsyncFuture<
+        decltype(callback), devicefs::FuturePolicy::ProvideAtomicReadiness>>;
+    try {
+        return ReturnType{std::in_place, std::move(callback)};
+    } catch (...) {
+        state.Fail(std::current_exception());
+        state.SetPhase(VerificationPhase::Complete);
+        return ReturnType{};
+    }
+}
+
+using OptionalOperationFuture = decltype(MaybeMakeOperationFuture(
+    std::declval<VerificationState &>(), std::declval<ErasedOperation &>()));
+
 struct VolumeJob {
     GUID volume_identifier;
     double percentage;
     std::unique_ptr<VerificationState> state;
     // The operation is destroyed before the state it borrows.
-    std::future<void> operation;
+    OptionalOperationFuture operation;
     std::size_t printed_mismatches = 0;
     std::size_t printed_operation_comparisons = 0;
 };
 
-template <typename Operation>
+template <class Operation>
 [[nodiscard]] auto StartVerification(
     const GUID &volume_identifier,
     const double percentage,
     Operation operation) -> VolumeJob {
     auto state = std::make_unique<VerificationState>();
-    auto &borrowed_state = *state;
-    auto future = [&]() -> std::future<void> {
-        try {
-            return std::async(std::launch::async,
-                [operation = std::move(operation), &borrowed_state] {
-                    try {
-                        operation(borrowed_state);
-                    } catch (...) {
-                        borrowed_state.Fail(std::current_exception());
-                        borrowed_state.SetPhase(VerificationPhase::Complete);
-                    }
-                });
-        } catch (...) {
-            state->Fail(std::current_exception());
-            state->SetPhase(VerificationPhase::Complete);
-            return {};
-        }
-    }();
+    auto &state_ = *state;
+    auto erased_operation = ErasedOperation{std::move(operation)};
     return {
         .volume_identifier = volume_identifier,
         .percentage = percentage,
         .state = std::move(state),
-        .operation = std::move(future),
+        .operation = MaybeMakeOperationFuture(state_, erased_operation),
     };
 }
 
@@ -2590,9 +2606,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
 [[nodiscard]] auto JobsReady(
     const std::span<VolumeJob> jobs) {
     return std::ranges::all_of(jobs, [](const VolumeJob &job) {
-        return !job.operation.valid() ||
-            (job.operation.wait_for(0s) ==
-                std::future_status::ready);
+        return !job.operation || job.operation->IsReady();
     });
 }
 
@@ -2768,8 +2782,8 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
         std::this_thread::sleep_for(kReporterPollInterval);
     }
     for (auto &job : jobs) {
-        if (job.operation.valid()) {
-            job.operation.get();
+        if (job.operation) {
+            job.operation->Get();
         }
     }
     return PrintFinalResults(jobs, optimization_unavailable, preparation_failures);
@@ -2840,7 +2854,8 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             internal::DeviceFsStartRequest{
                 .sources = sources,
                 .mount_target =
-                    Transcode<std::string>(internal::TemporaryDeviceFsViewPath().native()),
+                    Transcode<std::string>(
+                        internal::TemporaryDeviceFsViewPath().native()),
                 .vhdx = true,
             })};
     if (!internal::WaitForDeviceFs(
@@ -2893,51 +2908,51 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             wil::zwstring_view{SE_MANAGE_VOLUME_NAME},
         },
         "the backup and volume-management privileges"sv};
-    auto operation = std::async(std::launch::async,
-        [&state, &io_cancellation, &virtual_disk_lock,
-            vhdx_path, device, cancellation_event] {
-            const auto complete = wil::scope_exit([&state] noexcept {
-                state.SetPhase(VerificationPhase::Complete);
-            });
-            auto view = AttachedVhdx::Attach(
-                vhdx_path, "requested device",
-                cancellation_event,
-                virtual_disk_lock, io_cancellation, state);
-            state.BeginTraversal();
-            devicefs::WriteToStream(
-                devicefs::stdout,
-                L"\nBeginning VHDX filesystem inventory:\n"
-                L"  Source device: {}\n"
-                L"  VHDX file: {}\n"
-                L"  Attached volume: {}\n"
-                L"  Traversal workers: {}\n",
-                Transcode<std::wstring>(device),
-                vhdx_path.native(), view.Root(),
-                kVerificationWorkerCount);
-            const auto root = std::wstring{view.Root()};
-            const auto inventory = InventoryFilesystem(
-                root, VerificationEndpoint::Synthetic,
-                cancellation_event, io_cancellation, state);
-            if (!inventory) {
-                WinError("VHDX filesystem inventory was cancelled",
-                    ExplicitWin32Error{ERROR_CANCELLED});
-            }
-            state.CompleteTraversal();
-            for (const auto &issue : inventory->issues) {
-                devicefs::WriteToStream(devicefs::stdout,
-                    "VHDX inventory failure: {}\n",
-                    TryConstructWinError("{} failed for '{}'",
-                        OperationName(issue.key.operation),
-                        DisplayPath(issue.key.path),
-                        ExplicitWin32Error{issue.failure.error}));
-            }
+    auto operation = devicefs::async<
+        devicefs::FuturePolicy::ProvideAtomicReadiness>([&state,
+        &io_cancellation, &virtual_disk_lock, vhdx_path, device,
+        cancellation_event] {
+        const auto complete = wil::scope_exit([&state] noexcept {
+            state.SetPhase(VerificationPhase::Complete);
         });
+        auto view = AttachedVhdx::Attach(
+            vhdx_path, "requested device",
+            cancellation_event,
+            virtual_disk_lock, io_cancellation, state);
+        state.BeginTraversal();
+        devicefs::WriteToStream(
+            devicefs::stdout,
+            L"\nBeginning VHDX filesystem inventory:\n"
+            L"  Source device: {}\n"
+            L"  VHDX file: {}\n"
+            L"  Attached volume: {}\n"
+            L"  Traversal workers: {}\n",
+            Transcode<std::wstring>(device),
+            vhdx_path.native(), view.Root(),
+            kVerificationWorkerCount);
+        const auto root = std::wstring{view.Root()};
+        const auto inventory = InventoryFilesystem(
+            root, VerificationEndpoint::Synthetic,
+            cancellation_event, io_cancellation, state);
+        if (!inventory) {
+            WinError("VHDX filesystem inventory was cancelled",
+                ExplicitWin32Error{ERROR_CANCELLED});
+        }
+        state.CompleteTraversal();
+        for (const auto &issue : inventory->issues) {
+            devicefs::WriteToStream(devicefs::stdout,
+                "VHDX inventory failure: {}\n",
+                TryConstructWinError("{} failed for '{}'",
+                    OperationName(issue.key.operation),
+                    DisplayPath(issue.key.path),
+                    ExplicitWin32Error{issue.failure.error}));
+        }
+    });
     auto next_progress =
         std::chrono::steady_clock::now() +
         kProgressReportInterval;
     auto cancellation_failure = DWORD{ERROR_SUCCESS};
-    while (operation.wait_for(0s) !=
-        std::future_status::ready) {
+    while (!operation.IsReady()) {
         if (wil::event_is_signaled(
                 cancellation_event)) {
             RequestPendingIoCancellation(
@@ -2976,7 +2991,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             devicefs::stdout, "  Cleanup failure: {}\n", failure);
     }
     try {
-        operation.get();
+        operation.Get();
     } catch (const std::exception &error) {
         return preserve_for_manual_mount(
             error.what(), std::current_exception());
@@ -2988,6 +3003,30 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     return observation.cleanup_failures.empty() ? 0 : 1;
 }
 
+class ObjectCreator {
+public:
+    template <class T>
+    auto CreateObjects(T *const buffer, auto &collection, auto &&callback) {
+        auto destroyer = [this](auto *const buffer) noexcept {
+            std::destroy_n(buffer, index_);
+        };
+        auto unique_objects = std::unique_ptr<T[], decltype(destroyer)>{
+            buffer, std::move(destroyer)};
+        for (auto &entry : collection) {
+            ::new (buffer + index_) T{callback(entry)};
+            ++index_;
+        }
+        struct ReturnedObjects {
+            std::span<T> span;
+            decltype(unique_objects) objects;
+        };
+        return ReturnedObjects{std::span{buffer, index_},
+            std::move(unique_objects)};
+    }
+private:
+    std::size_t index_{};
+};
+
 [[nodiscard]] auto VerifyFilesystemViews(
     const HANDLE cancellation_event,
     const std::span<const FilesystemVerificationVolume> volumes,
@@ -2997,22 +3036,23 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     const std::size_t optimization_unavailable,
     const std::size_t preparation_failures) -> int {
     if (volumes.empty()) {
-        const auto jobs = std::vector<VolumeJob>{};
-        return PrintFinalResults(
-            jobs, optimization_unavailable, preparation_failures);
+        return PrintFinalResults({}, optimization_unavailable,
+            preparation_failures);
     }
+
+    const auto jobs_buffer = NEW_MALLOCA_BUFFER(VolumeJob, volumes.size());
+    auto job_creator = ObjectCreator{};
+
     if (wil::event_is_signaled(cancellation_event)) {
-        auto jobs = std::vector<VolumeJob>{};
-        jobs.reserve(volumes.size());
-        for (const auto &volume : volumes) {
-            jobs.push_back({
+        const auto jobs = job_creator.CreateObjects(jobs_buffer.get(), volumes,
+            [percentage](const auto &volume) {
+            return VolumeJob{
                 .volume_identifier = volume.volume_identifier,
                 .percentage = percentage,
-                .state = std::make_unique<VerificationState>(),
+                .state = std::make_unique<VerificationState>()};
             });
-        }
-        return PrintFinalResults(
-            jobs, optimization_unavailable, preparation_failures);
+        return PrintFinalResults(jobs.span, optimization_unavailable,
+            preparation_failures);
     }
 
     auto privileges = ProcessPrivilegeEnabler{
@@ -3027,20 +3067,20 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     // Every volume job borrows this one lock, so attach, discovery, and detach
     // operations cannot overlap one another.
     auto virtual_disk_lock = wil::srwlock{};
-    auto jobs = std::vector<VolumeJob>{};
-    jobs.reserve(volumes.size());
-    for (const auto &volume : volumes) {
+
+    const auto jobs = job_creator.CreateObjects(jobs_buffer.get(), volumes,
+        [&](const auto &volume) {
         auto synthetic_vhdx = synthetic_mount / volume.filename;
         auto real_vhdx = real_mount / volume.filename;
-        jobs.push_back(StartVerification(volume.volume_identifier, percentage,
+        return StartVerification(volume.volume_identifier, percentage,
             [volume, synthetic_vhdx = std::move(synthetic_vhdx),
-                real_vhdx = std::move(real_vhdx), cancellation_event, percentage,
-                &virtual_disk_lock, &io_cancellation](VerificationState &state) {
+            real_vhdx = std::move(real_vhdx), cancellation_event, percentage,
+            &virtual_disk_lock, &io_cancellation](VerificationState &state) {
                 VerifyVolume(volume, synthetic_vhdx, real_vhdx,
                     cancellation_event, percentage, virtual_disk_lock,
                     io_cancellation, state);
-            }));
-    }
-    return FinishVerification(jobs, cancellation_event,
+            });
+        });
+    return FinishVerification(jobs.span, cancellation_event,
         io_cancellation, optimization_unavailable, preparation_failures);
 }

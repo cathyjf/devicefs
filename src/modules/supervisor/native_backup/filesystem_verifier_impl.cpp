@@ -25,13 +25,13 @@ import <devicefs/common.h>;
 import <devicefs/malloca.h>;
 import <devicefs/windows_imports.h>;
 import :filesystem_verifier;
-import devicefs.terminal.safecast;
 import :devicefs_process;
 import :internal;
+import :vhdx_attachment;
 import devicefs.lightweight_future;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.process_privileges;
-import :vhdx_attachment;
+import devicefs.terminal.safecast;
 import devicefs.byte_comparison;
 import devicefs.guid_formatter;
 import devicefs.stream_writer;
@@ -892,23 +892,21 @@ private:
         "for traversal progress and ETA.\n",
         endpoint_name, volume_identifier);
 
-    auto volume_path = std::wstring{root};
-    volume_path.pop_back();
-
     // This control code has no required-size probe. With no inclusion flags,
     // each result contains only fixed-size FILE_LAYOUT_ENTRY records. The
     // established 4-MiB batch kept the call count low enough for the earlier
     // whole-volume diagnostic to finish in about a minute.
     constexpr auto batch_size = 4uz * 1024 * 1024;
-    static_assert((batch_size % sizeof(std::max_align_t)) == 0);
-    static_assert(batch_size >=
-        (sizeof(QUERY_FILE_LAYOUT_OUTPUT) + sizeof(FILE_LAYOUT_ENTRY)));
-    auto storage = std::vector<std::max_align_t>(
-        batch_size / sizeof(std::max_align_t));
-    const auto buffer = std::as_writable_bytes(std::span{storage});
+    struct AlignedArray {
+        alignas(std::max_align_t) std::array<std::byte, batch_size> data;
+    };
+    const auto storage = std::make_unique_for_overwrite<AlignedArray>();
+    const auto buffer = std::span{storage->data};
+
     const auto registration =
         SynchronousIoCancellation::Registration{io_cancellation};
-    const auto query_once = [&]()
+    const auto query_once = [cancellation_event, buffer,
+        volume_path = std::wstring{root.substr(0, root.length() - 1)}]
         -> std::expected<std::uint64_t, DWORD> {
         if (wil::event_is_signaled(cancellation_event)) {
             return std::unexpected{DWORD{ERROR_CANCELLED}};
@@ -933,12 +931,10 @@ private:
             auto returned = DWORD{};
             if (DeviceIoControl(volume.get(), FSCTL_QUERY_FILE_LAYOUT,
                     &query, sizeof(query), buffer.data(),
-                    devicefs::terminal::FailFastCast<DWORD>(buffer.size()),
+                    CompileTimeCast<DWORD, buffer.size()>(),
                     &returned, nullptr)) {
-                auto output = QUERY_FILE_LAYOUT_OUTPUT{};
-                std::memcpy(std::addressof(output), buffer.data(),
-                    sizeof(output));
-                count += output.FileEntryCount;
+                count += std::start_lifetime_as<QUERY_FILE_LAYOUT_OUTPUT>(
+                    buffer.data())->FileEntryCount;
                 query.Flags = 0;
                 continue;
             }

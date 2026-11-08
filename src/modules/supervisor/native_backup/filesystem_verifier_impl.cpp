@@ -3011,29 +3011,30 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     return observation.cleanup_failures.empty() ? 0 : 1;
 }
 
-class ObjectCreator {
-public:
-    template <class T>
-    auto CreateObjects(T *const buffer, auto &collection, auto &&callback) {
-        auto destroyer = [this](auto *const buffer) noexcept {
-            std::destroy_n(buffer, index_);
-        };
-        auto unique_objects = std::unique_ptr<T[], decltype(destroyer)>{
-            buffer, std::move(destroyer)};
-        for (auto &entry : collection) {
-            ::new (buffer + index_) T{callback(entry)};
-            ++index_;
-        }
-        struct ReturnedObjects {
-            std::span<T> span;
-            decltype(unique_objects) objects;
-        };
-        return ReturnedObjects{std::span{buffer, index_},
-            std::move(unique_objects)};
+template <class T>
+auto CreateObjects(T *const buffer, auto &collection, auto &&callback) {
+    auto index_ = std::size_t{};
+    auto destroyer = [&index_](auto *const buffer) noexcept {
+        std::destroy_n(buffer, index_);
+    };
+    auto unique_objects = std::unique_ptr<T[], decltype(destroyer)>{
+        buffer, std::move(destroyer)};
+    for (auto &entry : collection) {
+        ::new (buffer + index_) T{callback(entry)};
+        ++index_;
     }
-private:
-    std::size_t index_{};
-};
+    // The new destroyer captures `index_` by value instead of by reference.
+    auto new_destroyer = [index_](auto *const buffer) noexcept {
+        std::destroy_n(buffer, index_);
+    };
+    using NewOwner = std::unique_ptr<T[], decltype(new_destroyer)>;
+    struct ReturnedObjects {
+        std::span<T> span;
+        NewOwner objects;
+    };
+    return ReturnedObjects{std::span{buffer, index_},
+        NewOwner{unique_objects.release(), std::move(new_destroyer)}};
+}
 
 [[nodiscard]] auto VerifyFilesystemViews(
     const HANDLE cancellation_event,
@@ -3049,10 +3050,9 @@ private:
     }
 
     const auto jobs_buffer = NEW_MALLOCA_BUFFER(VolumeJob, volumes.size());
-    auto job_creator = ObjectCreator{};
 
     if (wil::event_is_signaled(cancellation_event)) {
-        const auto jobs = job_creator.CreateObjects(jobs_buffer.get(), volumes,
+        const auto jobs = CreateObjects(jobs_buffer.get(), volumes,
             [percentage](const auto &volume) {
                 return VolumeJob{volume.volume_identifier, percentage,
                     std::nullopt};
@@ -3091,8 +3091,7 @@ private:
 
     const auto context_buffer = NEW_MALLOCA_BUFFER(
         VolumeContext, volumes.size());
-    auto context_creator = ObjectCreator{};
-    const auto contexts = context_creator.CreateObjects(
+    const auto contexts = CreateObjects(
         context_buffer.get(), volumes, [&](const auto &volume) {
         auto synthetic_vhdx = synthetic_mount / volume.filename;
         auto real_vhdx = real_mount / volume.filename;
@@ -3101,7 +3100,7 @@ private:
             virtual_disk_lock, io_cancellation};
     });
 
-    const auto jobs = job_creator.CreateObjects(jobs_buffer.get(),
+    const auto jobs = CreateObjects(jobs_buffer.get(),
         contexts.span, [percentage](const auto &context) {
         return VolumeJob{context.volume.volume_identifier, percentage,
             std::ref(context)};

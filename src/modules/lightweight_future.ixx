@@ -307,7 +307,13 @@ public:
     template <bool AllowStateChange = true>
         requires (AllowStateChange ||
             (Policy & FuturePolicy::AllowMultipleRetrieval))
-    auto Get(auto &&...observers) -> decltype(auto) {
+    auto Get(auto &&...observers)
+        noexcept(noexcept(RunCallback()) &&
+            (AllowStateChange ?
+                (noexcept(observers = true) && ...) :
+                std::is_nothrow_constructible_v<
+                    ResultType, std::add_lvalue_reference_t<ResultType>>))
+        -> decltype(auto) {
         using OptionalReturn = std::optional<ResultType>;
         if (!(Policy & (FuturePolicy::AllowSynchronousCallback |
                 FuturePolicy::AllowMultipleRetrieval)) || work_) {

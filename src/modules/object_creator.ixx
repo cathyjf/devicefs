@@ -92,11 +92,12 @@ auto CreateObjects(T *const buffer_, auto &&collection, auto &&callback) {
     for (auto &entry : collection) {
         auto *const target = buffer + guard.index;
         if constexpr (std::is_invocable_v<
-                decltype(callback), decltype(entry)>) {
+                decltype(callback) &, decltype(entry)>) {
             ::new (target) ConstructedType{callback(entry)};
         } else if constexpr (std::is_invocable_v<
-                decltype(callback), decltype(entry), std::size_t>) {
-            ::new (target) ConstructedType{callback(entry, guard.index)};
+                decltype(callback) &, decltype(entry),
+                decltype(guard.index)>) {
+            ::new (target) ConstructedType{callback(entry, auto(guard.index))};
         } else {
             static_assert(std::is_same_v<decltype(callback(target, entry)),
                 ObjectCreationDisposition>,

@@ -18,6 +18,12 @@ export module devicefs.object_creator;
 
 import std;
 
+namespace devicefs {
+
+export auto CreateObjects(auto *, auto &&, auto &&);
+
+} // namespace devicefs
+
 namespace devicefs::object_creator_detail {
 
 template <class T, bool NoExceptionGuard = std::is_nothrow_destructible_v<T>>
@@ -62,6 +68,31 @@ auto DestroyObjects(T *const buffer, const std::size_t length)
         }
     }
 }
+__pragma(warning(pop))
+
+__pragma(warning(push))
+__pragma(warning(disable : 26456, justification :
+    "Under the restriction stated in the comment above `CreateObjects` below, "
+    "the hidden non-virtual operators should not be called."))
+__pragma(warning(disable : 26432, justification :
+    "All of the identified member functions are defined or deleted."))
+template <class T>
+class ManagedObjects : public std::span<T> {
+public:
+    ~ManagedObjects() noexcept(std::is_nothrow_destructible_v<T>) {
+        object_creator_detail::DestroyObjects(
+            std::span<T>::data(), std::span<T>::size());
+    }
+private:
+    ManagedObjects(T *const buffer, const std::size_t length) noexcept :
+        std::span<T>{buffer, length} {}
+    ManagedObjects(const ManagedObjects &) = delete;
+    ManagedObjects(ManagedObjects &&) = delete;
+    auto operator=(const ManagedObjects &) -> ManagedObjects & = delete;
+    auto operator=(ManagedObjects &&) -> ManagedObjects & = delete;
+
+    friend auto ::devicefs::CreateObjects(auto *, auto &&, auto &&);
+};
 __pragma(warning(pop))
 
 } // namespace devicefs::object_creator_detail
@@ -111,29 +142,10 @@ auto CreateObjects(T *const buffer_, auto &&collection, auto &&callback) {
         }
         ++guard.index;
     }
-    __pragma(warning(push))
-    __pragma(warning(disable : 26456, justification:
-        "Under the stated restriction, the hidden non-virtual operators "
-        "should not be called."))
-    __pragma(warning(disable : 26432, justification :
-        "All of the identified member functions are defined or deleted."))
-    struct ManagedObjects : std::span<T> {
-        ManagedObjects(T *const buffer, const std::size_t length) noexcept:
-            std::span<T>{buffer, length} {}
-        ~ManagedObjects() noexcept(std::is_nothrow_destructible_v<T>) {
-            object_creator_detail::DestroyObjects(
-                std::span<T>::data(), std::span<T>::size());
-        }
-
-        ManagedObjects(const ManagedObjects &) = delete;
-        ManagedObjects(ManagedObjects &&) = delete;
-        auto operator=(const ManagedObjects &) -> ManagedObjects & = delete;
-        auto operator=(ManagedObjects &&) -> ManagedObjects & = delete;
-    };
-    __pragma(warning(pop))
     return std::conditional_t<
-        std::is_trivially_destructible_v<T>, std::span<T>, ManagedObjects>{
-            buffer, guard.Release()};
+        std::is_trivially_destructible_v<T>,
+            std::span<T>, object_creator_detail::ManagedObjects<T>>{
+                buffer, guard.Release()};
 }
 
 } // namespace devicefs

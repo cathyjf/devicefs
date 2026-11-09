@@ -11,17 +11,18 @@ import std;
 import <devicefs/common.h>;
 import <devicefs/malloca.h>;
 import <devicefs/windows_imports.h>;
+import :incremental;
+import :internal;
+import :manifest;
 import devicefs.byte_comparison;
 import devicefs.file_reader;
 import devicefs.lightweight_future;
+import devicefs.object_creator;
 import devicefs.stream_writer;
 import devicefs.supervisor.temporary_paths;
 import devicefs.supervisor.vshadow;
 import devicefs.terminal.safecast;
 import devicefs.vss_block_descriptors;
-import :incremental;
-import :internal;
-import :manifest;
 
 namespace internal {
 
@@ -227,30 +228,24 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
             FutureCallable, const SnapshotPair *,
             devicefs::FuturePolicy::AllowSynchronousCallback |
                 devicefs::FuturePolicy::CancelOnDestruction>;
-        const auto length = std::size(snapshots);
-        const auto futures_buffer = NEW_MALLOCA_BUFFER(FutureType, length);
-        auto future_index = 0uz;
-        const auto futures = [buffer = futures_buffer.get(), &future_index] {
-            const auto futures_destroyer = [&future_index](const auto future) {
-                std::destroy_n(future, future_index);
-            };
-            return std::unique_ptr<FutureType[], decltype(futures_destroyer)>{
-                buffer, futures_destroyer};
-        }();
-        const auto future_error = [snapshots, &future_index] [[noreturn]] {
-            WinError("failed to create a thread pool work object to prepare a "
-                "dirty map for volume '{}'",
-                snapshots[future_index].payload.original_volume);
-        };
-        for (; future_index < length; ++future_index) {
-            // The first task will run on this thread once it is collected
-            // below. If there is more than one task, each additional task
-            // may run on a separate thread.
-            ::new (futures.get() + future_index) FutureType{
-                &snapshots[future_index], future_index != 0, future_error};
-        }
-        for (auto i = 0uz; i < length; ++i) {
-            if (auto &file = futures[i].Get(); file.handle) {
+        const auto futures_buffer = NEW_MALLOCA_BUFFER(
+            FutureType, std::size(snapshots));
+        const auto futures = devicefs::CreateObjects(
+            futures_buffer.get(), snapshots,
+            [](const auto &snapshot, const auto index) static {
+                const auto error = [&snapshot] [[noreturn]] {
+                    WinError("failed to create a thread pool work object to "
+                        "prepare a dirty map for volume '{}'",
+                        snapshot.payload.original_volume);
+                };
+                // The first task will run on this thread once it is collected
+                // below. If there is more than one task, each additional task
+                // may run on a separate thread.
+                return FutureType{&snapshot, index != 0, error};
+            });
+        // Collect the futures.
+        for (auto &future : futures) {
+            if (auto &file = future.Get(); file.handle) {
                 files.push_back(std::move(file));
             }
         }

@@ -272,8 +272,7 @@ public:
     LightweightFuture(Context &&context, const bool async = true,
         auto &&...error) requires (sizeof...(error) <= 1) :
         state_{std::forward<Context>(context)},
-        work_{[this, async, ...error_ = std::forward<decltype(error)>(error)]
-            -> UniqueWork {
+        work_{[this, async, &...error_ = error] -> UniqueWork {
             if constexpr (Policy & FuturePolicy::AllowSynchronousCallback) {
                 if (!async) {
                     return nullptr;

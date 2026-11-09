@@ -29,6 +29,10 @@ namespace devicefs {
 //
 // Objects need not be trivially destructible. However, if destruction of a
 // created object throws an exception, the program will terminate.
+//
+// Restriction:
+//   The behavior of calling `std::span<T>::operator=` on the returned object
+//   is undefined.
 export template <class T>
 auto CreateObjects(T *const buffer, auto &collection, auto &&callback) {
     auto index_ = std::size_t{};
@@ -46,21 +50,24 @@ auto CreateObjects(T *const buffer, auto &collection, auto &&callback) {
         }
         ++index_;
     }
-    // The new destroyer captures `index_` by value instead of by reference.
-    auto new_destroyer = [index_](auto *const buffer) noexcept {
-        std::destroy_n(buffer, index_);
-    };
-    using NewOwner = std::unique_ptr<T[], decltype(new_destroyer)>;
     struct ReturnedObjects : std::span<T> {
-        NewOwner objects;
+        ReturnedObjects(T *const buffer, const std::size_t length) noexcept:
+            std::span<T>{buffer, length} {}
+        ~ReturnedObjects() noexcept {
+            std::destroy_n(std::span<T>::data(), std::span<T>::size());
+        }
 
-        ReturnedObjects(std::span<T> &&span, NewOwner &&objects)
-            noexcept :
-            std::span<T>{std::forward<std::span<T>>(span)},
-            objects{std::forward<NewOwner>(objects)} {}
+        __pragma(warning(push))
+        __pragma(warning(disable : 26456, justification:
+            "Under the stated restriction, the hidden non-virtual operators "
+            "should not be called."))
+        ReturnedObjects(const ReturnedObjects &) = delete;
+        ReturnedObjects(ReturnedObjects &&) = delete;
+        auto operator=(const ReturnedObjects &) -> ReturnedObjects & = delete;
+        auto operator=(ReturnedObjects &&) -> ReturnedObjects & = delete;
+        __pragma(warning(pop))
     };
-    return ReturnedObjects{std::span{buffer, index_},
-        NewOwner{unique_objects.release(), std::move(new_destroyer)}};
+    return ReturnedObjects{unique_objects.release(), index_};
 }
 
 } // namespace devicefs

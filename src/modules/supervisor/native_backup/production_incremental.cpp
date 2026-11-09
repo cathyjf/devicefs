@@ -165,22 +165,20 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
     };
     const auto snapshot_buffer = NEW_MALLOCA_BUFFER(
         SnapshotPair, payload.snapshots.size());
-    const auto snapshots = [buffer = snapshot_buffer.get(),
-        &snapshots = payload.snapshots, &baselines] {
-        auto index = 0uz;
-        for (const auto &snapshot : snapshots) {
+    const auto snapshots = devicefs::CreateObjects(snapshot_buffer.get(),
+        payload.snapshots, [&baselines](auto *const buffer,
+            const auto &snapshot) {
             const auto baseline = baselines.find(
                 ParseVolumeGuid(snapshot.original_volume).value());
             if (baseline == baselines.end()) {
-                continue;
+                return devicefs::ObjectCreationDisposition::SkipThisObject;
             }
-            ::new (buffer + index++) SnapshotPair{
+            ::new (buffer) SnapshotPair{
                 .payload = snapshot,
                 .baseline = baseline->second,
             };
-        }
-        return std::span<SnapshotPair>{buffer, index};
-    }();
+            return devicefs::ObjectCreationDisposition::ObjectCreated;
+        });
     if (snapshots.empty()) {
         return {};
     }

@@ -68,6 +68,12 @@ __pragma(warning(pop))
 
 namespace devicefs {
 
+export enum class ObjectCreationDisposition {
+    ObjectCreated,
+    StopCreatingObjects,
+    SkipThisObject
+};
+
 // Create objects in a buffer.
 //
 // Preconditions:
@@ -91,8 +97,16 @@ auto CreateObjects(T *const buffer_, auto &&collection, auto &&callback) {
         } else if constexpr (std::is_invocable_v<
                 decltype(callback), decltype(entry), std::size_t>) {
             ::new (target) ConstructedType{callback(entry, guard.index)};
-        } else if (!callback(target, entry)) {
-            break;
+        } else {
+            static_assert(std::is_same_v<decltype(callback(target, entry)),
+                ObjectCreationDisposition>,
+                "this callback must return an `ObjectCreationDisposition`");
+            const auto result = callback(target, entry);
+            if (result == ObjectCreationDisposition::StopCreatingObjects) {
+                break;
+            } else if (result == ObjectCreationDisposition::SkipThisObject) {
+                continue;
+            }
         }
         ++guard.index;
     }

@@ -1521,10 +1521,10 @@ VerificationJob::VerificationJob(const VolumeReport &volume) :
     auto jobs = devicefs::CreateObjects(jobs_buffer.get(), volumes,
         [cancellation_event](auto *const buffer, auto &volume) {
         if (wil::event_is_signaled(cancellation_event)) {
-            return false;
+            return devicefs::ObjectCreationDisposition::StopCreatingObjects;
         }
         ::new (buffer) VerificationJob{volume};
-        return true;
+        return devicefs::ObjectCreationDisposition::ObjectCreated;
     });
 
     for (auto &job : jobs) {

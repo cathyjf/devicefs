@@ -20,12 +20,35 @@ import std;
 
 namespace devicefs::object_creator_detail {
 
+template <class T, bool NoExceptionGuard = std::is_nothrow_destructible_v<T>>
+auto DestroyObjects(T *, std::size_t) noexcept(NoExceptionGuard) -> void;
+
+__pragma(warning(push))
+__pragma(warning(disable : 26432, justification:
+    "Deleting the move and copy constructors and assignment operators as "
+    "suggested by the analyzer would disable aggregate initialization without "
+    "gaining any corresponding benefit."))
+template <class T>
+struct ExceptionGuard {
+    T *const buffer;
+    std::size_t index;
+    auto Release() noexcept -> std::size_t {
+        return std::exchange(index, 0);
+    }
+    ~ExceptionGuard() noexcept {
+        if (index != 0) {
+            DestroyObjects<T, true>(buffer, index);
+        }
+    }
+};
+__pragma(warning(pop))
+
 // Destroy a sequence of objects using the same algorithm as if the objects
 // were stored in a fixed-size array that is going out of scope.
 __pragma(warning(push))
 __pragma(warning(disable : 26457, justification:
     "Destructors do not return values."))
-template <class T, bool NoExceptionGuard = std::is_nothrow_destructible_v<T>>
+template <class T, bool NoExceptionGuard>
 auto DestroyObjects(T *const buffer, const std::size_t length)
     noexcept(NoExceptionGuard) -> void {
     if constexpr (NoExceptionGuard) {
@@ -33,18 +56,9 @@ auto DestroyObjects(T *const buffer, const std::size_t length)
             (buffer + --i)->~T();
         }
     } else {
-        struct ExceptionGuard {
-            T *const buffer;
-            std::size_t remaining;
-            ~ExceptionGuard() noexcept {
-                if (remaining != 0) {
-                    DestroyObjects<T, true>(buffer, remaining);
-                }
-            }
-        };
         auto guard = ExceptionGuard{buffer, length};
-        while (guard.remaining > 0) {
-            (buffer + --guard.remaining)->~T();
+        while (guard.index > 0) {
+            (buffer + --guard.index)->~T();
         }
     }
 }
@@ -66,20 +80,15 @@ namespace devicefs {
 //   is undefined.
 export template <class T>
 auto CreateObjects(T *const buffer, auto &collection, auto &&callback) {
-    auto index_ = std::size_t{};
-    auto destroyer = [&index_](auto *const buffer) noexcept {
-        object_creator_detail::DestroyObjects<T, true>(buffer, index_);
-    };
-    auto unique_objects = std::unique_ptr<T[], decltype(destroyer)>{
-        buffer, std::move(destroyer)};
+    auto guard = object_creator_detail::ExceptionGuard{buffer, 0};
     for (auto &entry : collection) {
         if constexpr (std::is_invocable_v<
                 decltype(callback), decltype(entry)>) {
-            ::new (buffer + index_) T{callback(entry)};
-        } else if (!callback(buffer + index_, entry)) {
+            ::new (buffer + guard.index) T{callback(entry)};
+        } else if (!callback(buffer + guard.index, entry)) {
             break;
         }
-        ++index_;
+        ++guard.index;
     }
     struct ReturnedObjects : std::span<T> {
         ReturnedObjects(T *const buffer, const std::size_t length) noexcept:
@@ -99,7 +108,7 @@ auto CreateObjects(T *const buffer, auto &collection, auto &&callback) {
         auto operator=(ReturnedObjects &&) -> ReturnedObjects & = delete;
         __pragma(warning(pop))
     };
-    return ReturnedObjects{unique_objects.release(), index_};
+    return ReturnedObjects{buffer, guard.Release()};
 }
 
 } // namespace devicefs

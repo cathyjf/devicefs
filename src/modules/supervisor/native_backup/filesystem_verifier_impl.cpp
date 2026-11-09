@@ -34,13 +34,11 @@ import devicefs.supervisor.process_privileges;
 import devicefs.terminal.safecast;
 import devicefs.byte_comparison;
 import devicefs.guid_formatter;
+import devicefs.object_creator;
 import devicefs.stream_writer;
 import devicefs.terminal.transcoding;
 
 using devicefs::terminal::Transcode;
-
-#undef stderr
-#undef stdout
 
 namespace {
 
@@ -3011,31 +3009,6 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     return observation.cleanup_failures.empty() ? 0 : 1;
 }
 
-template <class T>
-auto CreateObjects(T *const buffer, auto &collection, auto &&callback) {
-    auto index_ = std::size_t{};
-    auto destroyer = [&index_](auto *const buffer) noexcept {
-        std::destroy_n(buffer, index_);
-    };
-    auto unique_objects = std::unique_ptr<T[], decltype(destroyer)>{
-        buffer, std::move(destroyer)};
-    for (auto &entry : collection) {
-        ::new (buffer + index_) T{callback(entry)};
-        ++index_;
-    }
-    // The new destroyer captures `index_` by value instead of by reference.
-    auto new_destroyer = [index_](auto *const buffer) noexcept {
-        std::destroy_n(buffer, index_);
-    };
-    using NewOwner = std::unique_ptr<T[], decltype(new_destroyer)>;
-    struct ReturnedObjects {
-        std::span<T> span;
-        NewOwner objects;
-    };
-    return ReturnedObjects{std::span{buffer, index_},
-        NewOwner{unique_objects.release(), std::move(new_destroyer)}};
-}
-
 [[nodiscard]] auto VerifyFilesystemViews(
     const HANDLE cancellation_event,
     const std::span<const FilesystemVerificationVolume> volumes,
@@ -3052,12 +3025,12 @@ auto CreateObjects(T *const buffer, auto &collection, auto &&callback) {
     const auto jobs_buffer = NEW_MALLOCA_BUFFER(VolumeJob, volumes.size());
 
     if (wil::event_is_signaled(cancellation_event)) {
-        const auto jobs = CreateObjects(jobs_buffer.get(), volumes,
+        const auto jobs = devicefs::CreateObjects(jobs_buffer.get(), volumes,
             [percentage](const auto &volume) {
                 return VolumeJob{volume.volume_identifier, percentage,
                     std::nullopt};
             });
-        return PrintFinalResults(jobs.span, optimization_unavailable,
+        return PrintFinalResults(jobs, optimization_unavailable,
             preparation_failures);
     }
 
@@ -3091,7 +3064,7 @@ auto CreateObjects(T *const buffer, auto &collection, auto &&callback) {
 
     const auto context_buffer = NEW_MALLOCA_BUFFER(
         VolumeContext, volumes.size());
-    const auto contexts = CreateObjects(
+    const auto contexts = devicefs::CreateObjects(
         context_buffer.get(), volumes, [&](const auto &volume) {
         auto synthetic_vhdx = synthetic_mount / volume.filename;
         auto real_vhdx = real_mount / volume.filename;
@@ -3100,11 +3073,11 @@ auto CreateObjects(T *const buffer, auto &collection, auto &&callback) {
             virtual_disk_lock, io_cancellation};
     });
 
-    const auto jobs = CreateObjects(jobs_buffer.get(),
-        contexts.span, [percentage](const auto &context) {
+    const auto jobs = devicefs::CreateObjects(jobs_buffer.get(),
+        contexts, [percentage](const auto &context) {
         return VolumeJob{context.volume.volume_identifier, percentage,
             std::ref(context)};
     });
-    return FinishVerification(jobs.span, cancellation_event,
+    return FinishVerification(jobs, cancellation_event,
         io_cancellation, optimization_unavailable, preparation_failures);
 }

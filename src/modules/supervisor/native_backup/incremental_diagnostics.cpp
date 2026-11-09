@@ -18,12 +18,11 @@ module;
 
 #include <devicefs/strsafe_compat.h>
 
-#include <cstddef>
-
 module devicefs.supervisor.native_backup;
 
 import std;
-import devicefs.terminal.safecast;
+import <devicefs/common.h>;
+import <devicefs/malloca.h>;
 import <devicefs/windows_imports.h>;
 import :devicefs_process;
 import :filesystem_verifier;
@@ -31,18 +30,18 @@ import :incremental;
 import :internal;
 import :manifest;
 import devicefs.allocation;
-import <devicefs/common.h>;
 import devicefs.byte_comparison;
-import <devicefs/malloca.h>;
 import devicefs.filesystem;
 import devicefs.guid_formatter;
+import devicefs.object_creator;
 import devicefs.rpc_block_device_server;
 import devicefs.stream_writer;
-import devicefs.synthetic_backup_block_device;
 import devicefs.supervisor.temporary_paths;
 import devicefs.supervisor.vshadow;
-import devicefs.vss_block_descriptors;
+import devicefs.synthetic_backup_block_device;
+import devicefs.terminal.safecast;
 import devicefs.terminal.transcoding;
+import devicefs.vss_block_descriptors;
 
 using devicefs::terminal::Transcode;
 
@@ -681,15 +680,36 @@ struct ClusterOwnershipCache {
     std::set<std::uint64_t> queried_clusters;
 };
 
+struct VerificationRange {
+    std::uint64_t start;
+    std::uint64_t end;
+};
+
+struct VerificationJob;
+
+struct VerificationRangeContext {
+    VerificationJob &job;
+    HANDLE cancellation_event;
+    VerificationRange range;
+
+    auto operator()() const -> void;
+};
+
+using OptionalVerificationFuture = std::optional<
+    devicefs::AsyncFuture<VerificationRangeContext,
+        devicefs::FuturePolicy::ProvideAtomicReadiness>>;
+
 struct VerificationJob {
-    std::reference_wrapper<const VolumeReport> volume;
-    std::uint64_t volume_size;
-    std::unique_ptr<VerificationState> state;
+    const VolumeReport &volume;
+    std::uint64_t volume_size{};
+    VerificationState state{};
     std::optional<VerificationAllocation> allocation;
     ClusterOwnershipCache ownership;
     // Futures are destroyed first so an exceptional unwind cannot release
     // state or allocation data while a worker still refers to them.
-    std::vector<std::future<void>> workers;
+    std::array<OptionalVerificationFuture, kVerificationWorkerCount> workers;
+
+    VerificationJob(const VolumeReport &);
 };
 
 [[nodiscard]] auto OpenVerificationSnapshot(
@@ -950,10 +970,10 @@ auto VerifySnapshotRange(
     }
 }
 
-struct VerificationRange {
-    std::uint64_t start;
-    std::uint64_t end;
-};
+auto VerificationRangeContext::operator()() const -> void {
+    VerifySnapshotRange(job.state, job.volume, *job.allocation,
+        cancellation_event, range.start, range.end);
+}
 
 [[nodiscard]] constexpr auto VerificationWorkerRange(
     const std::uint64_t volume_size,
@@ -974,45 +994,26 @@ struct VerificationRange {
     };
 }
 
-[[nodiscard]] auto StartVerificationWorker(
-    VerificationJob &job,
-    const HANDLE cancellation_event,
-    const VerificationRange range) {
-    try {
-        job.workers.push_back(std::async(
-            std::launch::async,
-            VerifySnapshotRange,
-            std::ref(*job.state),
-            job.volume,
-            std::cref(*job.allocation),
-            cancellation_event,
-            range.start, range.end));
-        return true;
-    } catch (const std::system_error &error) {
-        job.state->Fail(error.what());
-        return false;
-    }
-}
-
 auto StartVerificationWorkers(
     VerificationJob &job,
     const HANDLE cancellation_event) {
     if (!job.allocation) {
         return;
     }
-    for (auto worker = 0uz;
-        worker < kVerificationWorkerCount; ++worker) {
-        if (job.state->Failed() ||
+    for (auto worker = 0uz; worker < job.workers.size(); ++worker) {
+        if (job.state.Failed() ||
             wil::event_is_signaled(cancellation_event)) {
             return;
         }
-        const auto range = VerificationWorkerRange(
-            job.volume_size, worker);
+        const auto range = VerificationWorkerRange(job.volume_size, worker);
         if (range.start == range.end) {
             continue;
         }
-        if (!StartVerificationWorker(
-                job, cancellation_event, range)) {
+        try {
+            job.workers.at(worker).emplace(VerificationRangeContext{
+                job, cancellation_event, range});
+        } catch (const std::system_error &error) {
+            job.state.Fail(error.what());
             return;
         }
     }
@@ -1023,9 +1024,10 @@ auto StartVerificationWorkers(
     const std::string_view description,
     const std::span<const std::uint64_t> clusters) {
     const auto api_clusters = clusters |
-        std::views::transform([](const auto cluster) {
+        std::views::transform([](const auto cluster) static {
             return LARGE_INTEGER{
-                .QuadPart = devicefs::terminal::FailFastCast<LONGLONG>(cluster),
+                .QuadPart = devicefs::terminal::FailFastCast<LONGLONG>(
+                    cluster),
             };
         }) |
         std::ranges::to<std::vector<LARGE_INTEGER>>();
@@ -1171,10 +1173,10 @@ auto UpdateClusterOwnership(
     }
     ResolveSnapshotOwnership(
         job.ownership, SnapshotEndpoint::Baseline,
-        job.volume.get().interval.baseline_device, new_clusters);
+        job.volume.interval.baseline_device, new_clusters);
     ResolveSnapshotOwnership(
         job.ownership, SnapshotEndpoint::Payload,
-        job.volume.get().interval.payload_device, new_clusters);
+        job.volume.interval.payload_device, new_clusters);
 }
 
 [[nodiscard]] constexpr auto VerificationPercentage(
@@ -1282,8 +1284,8 @@ auto PrintClusterOwnership(
 auto PrintVerificationProgress(
     const std::span<VerificationJob> jobs) {
     const auto observations = jobs |
-        std::views::transform([](const VerificationJob &job) {
-            return job.state->Snapshot();
+        std::views::transform([](const VerificationJob &job) static {
+            return job.state.Snapshot();
         }) |
         std::ranges::to<std::vector<ComparisonObservation>>();
     devicefs::WriteToStream(
@@ -1302,7 +1304,7 @@ auto PrintVerificationProgress(
         uncovered_total += observation.uncovered_blocks;
         devicefs::WriteToStream(devicefs::stdout,
             "  Volume ID: {}\n",
-            FormatGuid(job.volume.get().interval.volume_identifier));
+            FormatGuid(job.volume.interval.volume_identifier));
         devicefs::WriteToStream(devicefs::stdout,
             "    Compared: {} of {} bytes ({:.2f}%)\n"
             "    Differences observed: {} byte(s) in {} 16-KiB block(s)\n",
@@ -1311,11 +1313,11 @@ auto PrintVerificationProgress(
                 observation.compared_bytes, volume_size),
             observation.differing_bytes,
             observation.differing_blocks);
-        if (!job.volume.get().map) {
+        if (!job.volume.map) {
             ++coverage_unavailable;
             devicefs::WriteToStream(devicefs::stdout,
                 "    Dirty-map coverage unavailable: {}\n",
-                job.volume.get().map.error());
+                job.volume.map.error());
         } else {
             devicefs::WriteToStream(devicefs::stdout,
                 "    Dirty-map coverage: {} differing block(s) "
@@ -1342,7 +1344,7 @@ auto PrintVerificationProgress(
         }
         UpdateClusterOwnership(job, observation.uncovered_clusters);
         PrintOwnershipUpdate(
-            devicefs::stdout, job.volume.get().interval.volume_identifier,
+            devicefs::stdout, job.volume.interval.volume_identifier,
             job.ownership);
     }
 }
@@ -1394,7 +1396,7 @@ auto PrintVerificationResult(
     const bool cancelled) {
     devicefs::WriteToStream(output,
         "\n  Volume ID: {}\n",
-        FormatGuid(job.volume.get().interval.volume_identifier));
+        FormatGuid(job.volume.interval.volume_identifier));
     if (!observation.failure.empty()) {
         devicefs::WriteToStream(output,
             "    Status: failed after comparing {} byte(s): {}\n",
@@ -1419,16 +1421,16 @@ auto PrintVerificationResult(
             observation.compared_bytes, volume_size),
         observation.differing_bytes,
         observation.differing_blocks);
-    if (!job.volume.get().map) {
+    if (!job.volume.map) {
         devicefs::WriteToStream(output,
             "    Dirty-map candidates and coverage unavailable: {}\n",
-            job.volume.get().map.error());
+            job.volume.map.error());
         return;
     }
 
     devicefs::WriteToStream(output,
         "    Dirty-map candidates: {} 16-KiB block(s)\n",
-        job.volume.get().map->block_offsets.size());
+        job.volume.map->block_offsets.size());
     if (observation.uncovered_blocks != 0) {
         devicefs::WriteToStream(output,
             "    Coverage failure: {} differing byte(s) in {} "
@@ -1468,13 +1470,13 @@ auto PrintVerificationResult(
         devicefs::stdout, "\nIncremental verification results:\n");
     auto summary = VerificationSummary{};
     for (const auto &job : jobs) {
-        const auto observation = job.state->Snapshot();
+        const auto observation = job.state.Snapshot();
         const auto volume_size = job.volume_size;
         const auto complete = observation.failure.empty() &&
             (observation.compared_bytes == volume_size);
         AddVerificationResult(
             summary, observation, volume_size, complete,
-            job.volume.get().map.has_value());
+            job.volume.map.has_value());
         PrintVerificationResult(
             devicefs::stdout, job, observation,
             volume_size, complete, cancelled);
@@ -1499,45 +1501,42 @@ auto PrintVerificationResult(
         (unprocessed_volumes != 0)) ? 1 : 0;
 }
 
+VerificationJob::VerificationJob(const VolumeReport &volume) :
+    volume{volume} {
+    try {
+        allocation.emplace(
+            LoadVerificationAllocation(volume));
+        volume_size = allocation->baseline.VolumeSize();
+    } catch (const std::runtime_error &error) {
+        state.Fail(error.what());
+    }
+}
+
 [[nodiscard]] auto RunIncrementalVerification(
     const HANDLE cancellation_event,
     const std::span<const VolumeReport> volumes,
     const std::size_t unprocessed_volumes,
     const std::size_t unavailable_snapshots) -> int {
-    auto jobs = std::vector<VerificationJob>{};
-    for (const auto &volume : volumes) {
+    auto jobs_buffer = NEW_MALLOCA_BUFFER(VerificationJob, volumes.size());
+    auto jobs = devicefs::CreateObjects(jobs_buffer.get(), volumes,
+        [cancellation_event](auto *const buffer, auto &volume) {
         if (wil::event_is_signaled(cancellation_event)) {
-            break;
+            return false;
         }
-        auto state = std::make_unique<VerificationState>();
-        auto volume_size = std::uint64_t{};
-        auto allocation = std::optional<VerificationAllocation>{};
-        try {
-            allocation.emplace(
-                LoadVerificationAllocation(volume));
-            volume_size = allocation->baseline.VolumeSize();
-        } catch (const std::runtime_error &error) {
-            state->Fail(error.what());
-        }
-        jobs.push_back({
-            .volume = std::cref(volume),
-            .volume_size = volume_size,
-            .state = std::move(state),
-            .allocation = std::move(allocation),
-        });
-    }
+        ::new (buffer) VerificationJob{volume};
+        return true;
+    });
 
     for (auto &job : jobs) {
         StartVerificationWorkers(job, cancellation_event);
     }
 
-    const auto all_workers_ready = [&] {
+    const auto all_workers_ready = [&jobs] {
         return std::ranges::all_of(
-            jobs, [](const VerificationJob &job) {
+            jobs, [](const VerificationJob &job) static {
                 return std::ranges::all_of(
-                    job.workers, [](const std::future<void> &worker) {
-                        return worker.wait_for(0s) ==
-                            std::future_status::ready;
+                    job.workers, [](const auto &worker) static {
+                        return !worker || worker->IsReady();
                     });
             });
     };
@@ -1555,9 +1554,11 @@ auto PrintVerificationResult(
     }
     for (auto &job : jobs) {
         for (auto &worker : job.workers) {
-            worker.get();
+            if (worker) {
+                worker->Get();
+            }
         }
-        const auto observation = job.state->Snapshot();
+        const auto observation = job.state.Snapshot();
         UpdateClusterOwnership(job, observation.uncovered_clusters);
     }
 

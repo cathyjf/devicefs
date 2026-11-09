@@ -377,6 +377,7 @@ target_module_interfaces(backup-supervisor PRIVATE
     src/modules/filesystem/rpc_client.cpp
     src/modules/filesystem/winfsp_loader.cpp
     src/modules/lightweight_future.ixx
+    src/modules/object_creator.ixx
     src/modules/rpc_block_device_server.ixx
     src/modules/rpc_constants.ixx
     src/modules/synthetic_backup_block_device.ixx

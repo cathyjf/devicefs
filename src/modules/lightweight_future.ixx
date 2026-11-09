@@ -17,6 +17,7 @@
 export module devicefs.lightweight_future;
 
 import std;
+import <devicefs/common.h>;
 import <devicefs/windows_imports.h>;
 
 namespace devicefs {
@@ -284,7 +285,9 @@ public:
                 return UniqueWork{work};
             }
             if constexpr (sizeof...(error_) == 0) {
-                throw std::bad_alloc{};
+                [] [[noreturn, msvc::noinline]] static {
+                    WinError("failed to create a `LightweightFuture` object");
+                }();
             } else {
                 (error_(), ...);
             }

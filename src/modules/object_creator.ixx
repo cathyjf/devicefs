@@ -18,6 +18,40 @@ export module devicefs.object_creator;
 
 import std;
 
+namespace devicefs::object_creator_detail {
+
+// Destroy a sequence of objects using the same algorithm as if the objects
+// were stored in a fixed-size array that is going out of scope.
+__pragma(warning(push))
+__pragma(warning(disable : 26457, justification:
+    "Destructors do not return values."))
+template <class T, bool NoExceptionGuard = std::is_nothrow_destructible_v<T>>
+auto DestroyObjects(T *const buffer, const std::size_t length)
+    noexcept(NoExceptionGuard) -> void {
+    if constexpr (NoExceptionGuard) {
+        for (auto i = length; i > 0;) {
+            (buffer + --i)->~T();
+        }
+    } else {
+        struct ExceptionGuard {
+            T *const buffer;
+            std::size_t remaining;
+            ~ExceptionGuard() noexcept {
+                if (remaining != 0) {
+                    DestroyObjects<T, true>(buffer, remaining);
+                }
+            }
+        };
+        auto guard = ExceptionGuard{buffer, length};
+        while (guard.remaining > 0) {
+            (buffer + --guard.remaining)->~T();
+        }
+    }
+}
+__pragma(warning(pop))
+
+} // namespace devicefs::object_creator_detail
+
 namespace devicefs {
 
 // Create objects in a buffer.
@@ -27,9 +61,6 @@ namespace devicefs {
 //       `sizeof(T) * collection.size()` writable bytes; and
 //   (2) `buffer` is suitably aligned for creation of objects of type `T`.
 //
-// Objects need not be trivially destructible. However, if destruction of a
-// created object throws an exception, the program will terminate.
-//
 // Restriction:
 //   The behavior of calling `std::span<T>::operator=` on the returned object
 //   is undefined.
@@ -37,7 +68,7 @@ export template <class T>
 auto CreateObjects(T *const buffer, auto &collection, auto &&callback) {
     auto index_ = std::size_t{};
     auto destroyer = [&index_](auto *const buffer) noexcept {
-        std::destroy_n(buffer, index_);
+        object_creator_detail::DestroyObjects<T, true>(buffer, index_);
     };
     auto unique_objects = std::unique_ptr<T[], decltype(destroyer)>{
         buffer, std::move(destroyer)};
@@ -53,8 +84,9 @@ auto CreateObjects(T *const buffer, auto &collection, auto &&callback) {
     struct ReturnedObjects : std::span<T> {
         ReturnedObjects(T *const buffer, const std::size_t length) noexcept:
             std::span<T>{buffer, length} {}
-        ~ReturnedObjects() noexcept {
-            std::destroy_n(std::span<T>::data(), std::span<T>::size());
+        ~ReturnedObjects() noexcept(std::is_nothrow_destructible_v<T>) {
+            object_creator_detail::DestroyObjects(
+                std::span<T>::data(), std::span<T>::size());
         }
 
         __pragma(warning(push))

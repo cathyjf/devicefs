@@ -18,6 +18,7 @@ import std;
 import <devicefs/common.h>;
 import <devicefs/malloca.h>;
 import <devicefs/windows_imports.h>;
+import devicefs.object_creator;
 import devicefs.stream_writer;
 import devicefs.terminal.transcoding;
 
@@ -49,12 +50,13 @@ auto main(
         HardenProcess();
 
         const auto length = argc - 1uz;
-        const auto string_views = NEW_MALLOCA_BUFFER(std::string_view, length);
-        const auto *argv_cursor = argv + 1;
-        for (auto i = 0uz; i < length; ++i) {
-            ::new (string_views.get() + i) std::string_view{*argv_cursor++};
-        }
-        return BackupSupervisorMain(std::span{string_views.get(), length});
+        const auto buffer = NEW_MALLOCA_BUFFER(std::string_view, length);
+        return BackupSupervisorMain(
+            devicefs::CreateObjects<const std::string_view>(
+                buffer.get(), std::span{argv + 1, length},
+                [](const char *const argument) static noexcept {
+                    return std::string_view{argument};
+                }));
     } catch (const std::exception &error) {
         const auto argv0_basename = [argv0 = argv[0]] noexcept
             -> std::string {

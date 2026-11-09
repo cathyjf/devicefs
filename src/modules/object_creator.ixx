@@ -79,21 +79,23 @@ namespace devicefs {
 //   The behavior of calling `std::span<T>::operator=` on the returned object
 //   is undefined.
 export template <class T>
-auto CreateObjects(T *const buffer, auto &collection, auto &&callback) {
+auto CreateObjects(T *const buffer_, auto &&collection, auto &&callback) {
+    auto *const buffer = const_cast<std::remove_const_t<T> *>(buffer_);
     auto guard = object_creator_detail::ExceptionGuard{buffer, 0};
     for (auto &entry : collection) {
         if constexpr (std::is_invocable_v<
                 decltype(callback), decltype(entry)>) {
-            ::new (buffer + guard.index) T{callback(entry)};
+            ::new (buffer + guard.index) std::remove_const_t<T>{
+                callback(entry)};
         } else if (!callback(buffer + guard.index, entry)) {
             break;
         }
         ++guard.index;
     }
-    struct ReturnedObjects : std::span<T> {
-        ReturnedObjects(T *const buffer, const std::size_t length) noexcept:
+    struct ManagedObjects : std::span<T> {
+        ManagedObjects(T *const buffer, const std::size_t length) noexcept:
             std::span<T>{buffer, length} {}
-        ~ReturnedObjects() noexcept(std::is_nothrow_destructible_v<T>) {
+        ~ManagedObjects() noexcept(std::is_nothrow_destructible_v<T>) {
             object_creator_detail::DestroyObjects(
                 std::span<T>::data(), std::span<T>::size());
         }
@@ -102,13 +104,15 @@ auto CreateObjects(T *const buffer, auto &collection, auto &&callback) {
         __pragma(warning(disable : 26456, justification:
             "Under the stated restriction, the hidden non-virtual operators "
             "should not be called."))
-        ReturnedObjects(const ReturnedObjects &) = delete;
-        ReturnedObjects(ReturnedObjects &&) = delete;
-        auto operator=(const ReturnedObjects &) -> ReturnedObjects & = delete;
-        auto operator=(ReturnedObjects &&) -> ReturnedObjects & = delete;
+        ManagedObjects(const ManagedObjects &) = delete;
+        ManagedObjects(ManagedObjects &&) = delete;
+        auto operator=(const ManagedObjects &) -> ManagedObjects & = delete;
+        auto operator=(ManagedObjects &&) -> ManagedObjects & = delete;
         __pragma(warning(pop))
     };
-    return ReturnedObjects{buffer, guard.Release()};
+    return std::conditional_t<
+        std::is_trivially_destructible_v<T>, std::span<T>, ManagedObjects>{
+            buffer, guard.Release()};
 }
 
 } // namespace devicefs

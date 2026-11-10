@@ -115,7 +115,7 @@ constexpr auto SafeSum(const T left, const T right) {
         WinError("failed to create devicefs stop event '{}'", stop_event_name);
     }
 
-    auto arguments = devicefs::ReallocVector<wil::zstring_view, false>{};
+    auto arguments = devicefs::InlineReallocVector<wil::zstring_view, 36>{};
 
     const auto executable_path =
         Transcode<std::string>(CurrentExecutablePath().native());
@@ -176,11 +176,9 @@ constexpr auto SafeSum(const T left, const T right) {
             *request.rpc_endpoint);
     }
 
-    const auto argument_span = std::span<const wil::zstring_view>{arguments};
-
     devicefs::WriteToStream(
         devicefs::stdout, "Setting up virtual filesystem: {}\n",
-        wil::ArgvToCommandLine(argument_span));
+        wil::ArgvToCommandLine(arguments));
     auto password_input = wil::unique_handle{};
     auto password_output = wil::unique_handle{};
     if (request.rpc_password) {
@@ -202,7 +200,7 @@ constexpr auto SafeSum(const T left, const T right) {
         password_output.reset();
     }
     auto process = StartProcessWithHandles(ProcessLaunchOptions{
-        .argv = argument_span,
+        .argv = arguments,
         .flags = request.rpc_endpoint ? CREATE_SUSPENDED : DWORD{},
         .standard_input = password_input
             ? password_input.get() : GetStdHandle(STD_INPUT_HANDLE),

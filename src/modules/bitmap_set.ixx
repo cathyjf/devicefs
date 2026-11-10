@@ -20,13 +20,13 @@ export template <class T, bool ZeroInitialize = true>
         std::is_trivially_copyable_v<T> &&
         (alignof(T) <= alignof(std::max_align_t)))
 class ReallocVector {
+public:
     constexpr static auto max_size =
         std::numeric_limits<std::size_t>::max() / sizeof(T);
 
-public:
     explicit constexpr ReallocVector(
-        const std::size_t maximum_size = max_size) noexcept
-        : max_size_{std::min(maximum_size, max_size)} {}
+        const std::size_t maximum_size = max_size) noexcept :
+            max_size_{std::min(maximum_size, max_size)} {}
 
     // Precondition:
     //   The construction of a new `T` from the provided arguments must not
@@ -73,6 +73,10 @@ public:
 
     operator std::span<const T>() const noexcept {
         return {storage_.get(), size_};
+    }
+
+    auto data() const noexcept {
+        return storage_.get();
     }
 
     auto size() const noexcept -> std::size_t {
@@ -142,6 +146,88 @@ private:
         std::free(buffer);
     })> storage_{};
 };
+
+export template <class T, std::size_t InlineCapacity>
+    requires ((requires { typename ReallocVector<T, false>; }) &&
+        (InlineCapacity > 0) &&
+        (InlineCapacity < ReallocVector<T, false>::max_size))
+__pragma(warning(push))
+__pragma(warning(disable : 26495, justification:
+    "The inline buffer is intentionally uninitialized. Callers are responsible "
+    "for accessing only initialized elements."))
+__pragma(warning(disable : 26490, justification:
+    "`reinterpret_cast` is used to provide typed pointers to objects created in "
+    "raw storage without needing to retain typed pointers as class members."))
+class InlineReallocVector {
+public:
+    // This user-defined constructor prevents the inline buffer from being
+    // zero-initialized by value construction of this type.
+    [[msvc::forceinline]]
+    InlineReallocVector() noexcept {}
+
+    // Precondition:
+    //   The preconditions for `ReallocVector::emplace_back` must be satisfied.
+    [[msvc::forceinline]]
+    auto emplace_back(auto &&...arguments) -> T & {
+        if (inline_entries_ < InlineCapacity) {
+            return *::new (inline_.data() + sizeof(T) * inline_entries_++) T{
+                std::forward<decltype(arguments)>(arguments)...};
+        }
+        return heap_.emplace_back(
+            std::forward<decltype(arguments)>(arguments)...);
+    }
+
+    [[msvc::forceinline]]
+    auto front() const noexcept -> decltype(auto) {
+        return *std::launder(reinterpret_cast<const T*>(inline_.data()));
+    }
+
+    [[msvc::forceinline]]
+    auto begin() const noexcept {
+        struct ConstIterator {
+            const T *cursor{};
+            const T *const crossover{};
+            const T *const heap{};
+
+            [[msvc::forceinline]]
+            auto operator*() const noexcept -> decltype(auto) {
+                return *cursor;
+            }
+            [[msvc::forceinline]]
+            auto operator++() noexcept -> decltype(auto) {
+                if (++cursor == crossover) {
+                    cursor = heap;
+                }
+                return *this;
+            }
+            [[msvc::forceinline]]
+            auto operator!=(const T *const other) const noexcept {
+                return cursor != other;
+            }
+        };
+        const auto *const first =
+            std::launder(reinterpret_cast<const T *>(inline_.data()));
+        if (inline_entries_ < InlineCapacity) {
+            return ConstIterator{first};
+        }
+        return ConstIterator{first, first + InlineCapacity, heap_.data()};
+    }
+
+    [[msvc::forceinline]]
+    auto end() const noexcept -> const T * {
+        if (inline_entries_ < InlineCapacity) {
+            return reinterpret_cast<const T *>(
+                inline_.data() + sizeof(T) * inline_entries_);
+        }
+        return heap_.data() + heap_.size();
+    }
+private:
+    alignas(T) std::array<std::byte, sizeof(T) * InlineCapacity> inline_;
+    std::size_t inline_entries_{};
+    ReallocVector<T, false> heap_{
+        ReallocVector<T, false>::max_size - InlineCapacity};
+};
+__pragma(warning(pop))
 
 } // namespace devicefs
 

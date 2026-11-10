@@ -94,6 +94,32 @@ consteval auto ConvertNumberToString() noexcept {
     return wil::zstring_view{kStringArray.data(), kStringArray.size() - 1};
 }
 
+template <std::unsigned_integral T>
+constexpr auto SafeSum(const T left, const T right) {
+    constexpr auto max = std::numeric_limits<T>::max();
+    if (right > (max - left)) {
+        throw std::bad_alloc{};
+    }
+    return left + right;
+}
+
+template <std::unsigned_integral T>
+constexpr auto SafeProduct(const T left, const T right) {
+    constexpr auto max = std::numeric_limits<T>::max();
+    if ((left != 0) && (right > (max / left))) {
+        throw std::bad_alloc{};
+    }
+    return left * right;
+}
+
+template <std::unsigned_integral T>
+struct SafeAugend {
+    T integer{};
+    constexpr auto operator+(const T right) const {
+        return SafeAugend{SafeSum(integer, right)};
+    }
+};
+
 [[nodiscard]] auto StartDeviceFs(
     const DeviceFsStartRequest &request) {
     auto stop_event_name = std::format(
@@ -104,28 +130,47 @@ consteval auto ConvertNumberToString() noexcept {
     if (!stop_event) {
         WinError("failed to create devicefs stop event '{}'", stop_event_name);
     }
+
+    const auto argument_count =
+        SafeAugend{8uz} + SafeProduct(3uz, std::size(request.sources)) +
+        (request.read_user ? 2uz : 0uz) +
+        (request.vhdx ? 1uz :
+            ((!request.rpc_endpoint && request.expose_known_data_map) ?
+                2uz : 0uz));
+    const auto argument_buffer =
+        NEW_MALLOCA_BUFFER(wil::zstring_view, argument_count.integer);
+    auto argument_index = 0uz;
+    const auto add_argument = [buffer = argument_buffer.get(), &argument_index,
+        max_arguments = argument_count.integer]
+        (auto &&...arguments) noexcept {
+        if (argument_index >= max_arguments) {
+            __fastfail(FAST_FAIL_RANGE_CHECK_FAILURE);
+        }
+        ::new (buffer + argument_index++) wil::zstring_view{
+            std::forward<decltype(arguments)>(arguments)...};
+    };
+
     const auto executable_path =
         Transcode<std::string>(CurrentExecutablePath().native());
-    auto arguments = std::vector<wil::zstring_view>{
-        executable_path,
-        "--devicefs"_zv,
-        "--synthetic-free-clusters"_zv,
-        "--cache"_zv,
-    };
+    add_argument(executable_path);
+    add_argument("--devicefs"_zv);
+    add_argument("--synthetic-free-clusters"_zv);
+    add_argument("--cache"_zv);
+
     if (request.vhdx) {
-        arguments.emplace_back("--vhdx"_zv);
+        add_argument("--vhdx"_zv);
     } else if (!request.rpc_endpoint && request.expose_known_data_map) {
-        arguments.emplace_back("--expose-known-data-map"_zv);
-        arguments.emplace_back(ConvertNumberToString<kPbsImageChunkSize>());
+        add_argument("--expose-known-data-map"_zv);
+        add_argument(ConvertNumberToString<kPbsImageChunkSize>());
     }
-    arguments.emplace_back("--mount"_zv);
-    arguments.emplace_back(request.mount_target);
+    add_argument("--mount"_zv);
+    add_argument(request.mount_target);
     if (request.read_user) {
-        arguments.emplace_back("--read-user"_zv);
-        arguments.emplace_back(*request.read_user);
+        add_argument("--read-user"_zv);
+        add_argument(*request.read_user);
     }
-    arguments.emplace_back("--stop-event"_zv);
-    arguments.emplace_back(stop_event_name);
+    add_argument("--stop-event"_zv);
+    add_argument(stop_event_name);
 
     auto readiness_path = std::filesystem::path{};
     const auto source_string_count =
@@ -133,24 +178,24 @@ consteval auto ConvertNumberToString() noexcept {
     const auto source_string_buffer = NEW_MALLOCA_BUFFER(
         std::string, source_string_count);
     const auto source_strings = source_string_buffer.CreateObjects(
-        request.sources, [&request, &readiness_path, &arguments]
+        request.sources, [&request, &readiness_path, &add_argument]
         (auto *const buffer, const auto &source) {
         if (readiness_path.empty()) {
             readiness_path = std::filesystem::path(
                 std::format("{}\\", request.mount_target)) /
                 source.name;
         }
-        arguments.emplace_back("--map"_zv);
-        arguments.emplace_back(source.name);
+        add_argument("--map"_zv);
+        add_argument(source.name);
         if (!request.rpc_endpoint) {
-            arguments.emplace_back(source.source);
+            add_argument(source.source);
             return devicefs::ObjectCreationDisposition::SkipThisObject;
         }
-        auto &argument = arguments.emplace_back();
+
         const auto &string = *::new (buffer) std::string{
             std::format("{}{}", devicefs::rpc::kDeviceSourcePrefix,
                 source.source)};
-        argument = string;
+        add_argument(string);
         return devicefs::ObjectCreationDisposition::ObjectCreated;
     });
 
@@ -162,9 +207,12 @@ consteval auto ConvertNumberToString() noexcept {
             devicefs::rpc::kEndpointEnvironmentVariable,
             *request.rpc_endpoint);
     }
+
+    const auto argument_span = std::span{argument_buffer.get(), argument_index};
+
     devicefs::WriteToStream(
         devicefs::stdout, "Setting up virtual filesystem: {}\n",
-        wil::ArgvToCommandLine(arguments));
+        wil::ArgvToCommandLine(argument_span));
     auto password_input = wil::unique_handle{};
     auto password_output = wil::unique_handle{};
     if (request.rpc_password) {
@@ -186,7 +234,7 @@ consteval auto ConvertNumberToString() noexcept {
         password_output.reset();
     }
     auto process = StartProcessWithHandles(ProcessLaunchOptions{
-        .argv = arguments,
+        .argv = argument_span,
         .flags = request.rpc_endpoint ? CREATE_SUSPENDED : DWORD{},
         .standard_input = password_input
             ? password_input.get() : GetStdHandle(STD_INPUT_HANDLE),
@@ -206,22 +254,13 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
     }
 }
 
-template <std::unsigned_integral T>
-auto AddWithoutOverflow(const T left, const T right) {
-    constexpr auto max = std::numeric_limits<T>::max();
-    if (right > (max - left)) {
-        throw std::bad_alloc{};
-    }
-    return left + right;
-}
-
 [[nodiscard]] auto StartDeviceFs(
     const std::span<const devicefs::vshadow::Snapshot> snapshots,
     const std::string_view read_user,
     const bool use_known_data_map,
     const SnapshotHandles &snapshot_handles,
     const std::span<const NamedFile> dirty_maps) {
-    const auto handle_count = AddWithoutOverflow(std::size(snapshot_handles),
+    const auto handle_count = SafeSum(std::size(snapshot_handles),
         std::size(dirty_maps));
     const auto inherited_handles = NEW_MALLOCA_BUFFER(HANDLE, handle_count);
     auto handle_index = 0uz;
@@ -233,7 +272,7 @@ auto AddWithoutOverflow(const T left, const T right) {
         add_handle(handle);
     }
 
-    const auto source_count = AddWithoutOverflow(std::size(snapshots),
+    const auto source_count = SafeSum(std::size(snapshots),
         std::size(dirty_maps));
     const auto source_buffer = NEW_MALLOCA_BUFFER(DeviceFsSource, source_count);
     const auto sources_first = source_buffer.CreateObjects(snapshots,

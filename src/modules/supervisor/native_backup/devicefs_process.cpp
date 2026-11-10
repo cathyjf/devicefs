@@ -42,6 +42,7 @@ namespace internal {
 
 using namespace std::chrono_literals;
 using namespace std::string_view_literals;
+using namespace wil::literals;
 
 struct DeviceFsProcess {
     static constexpr auto kPollInterval = 100ms;
@@ -76,6 +77,23 @@ struct DeviceFsStartRequest {
     return TemporarySystemDirectoryPath(L"devicefs-view");
 }
 
+template <std::unsigned_integral auto Number>
+consteval auto ConvertNumberToString() noexcept {
+    static constexpr auto kStringArray = [] static consteval noexcept {
+        constexpr auto digit_count = [] static consteval noexcept {
+            auto count = std::size_t{1};
+            for (auto value = Number; value >= 10; value /= 10) {
+                ++count;
+            }
+            return count;
+        }();
+        auto text = std::array<char, digit_count + 1>{};
+        std::to_chars(text.data(), text.data() + digit_count, Number);
+        return text;
+    }();
+    return wil::zstring_view{kStringArray.data(), kStringArray.size() - 1};
+}
+
 [[nodiscard]] auto StartDeviceFs(
     const DeviceFsStartRequest &request) {
     auto stop_event_name = std::format(
@@ -86,41 +104,56 @@ struct DeviceFsStartRequest {
     if (!stop_event) {
         WinError("failed to create devicefs stop event '{}'", stop_event_name);
     }
-    auto arguments = std::vector<std::string>{
-        Transcode<std::string>(CurrentExecutablePath().native()),
-        "--devicefs",
-        "--synthetic-free-clusters",
-        "--cache",
+    const auto executable_path =
+        Transcode<std::string>(CurrentExecutablePath().native());
+    auto arguments = std::vector<wil::zstring_view>{
+        executable_path,
+        "--devicefs"_zv,
+        "--synthetic-free-clusters"_zv,
+        "--cache"_zv,
     };
     if (request.vhdx) {
-        arguments.emplace_back("--vhdx");
+        arguments.emplace_back("--vhdx"_zv);
     } else if (!request.rpc_endpoint && request.expose_known_data_map) {
-        arguments.emplace_back("--expose-known-data-map");
-        arguments.emplace_back(std::to_string(kPbsImageChunkSize));
+        arguments.emplace_back("--expose-known-data-map"_zv);
+        arguments.emplace_back(ConvertNumberToString<kPbsImageChunkSize>());
     }
-    arguments.emplace_back("--mount");
+    arguments.emplace_back("--mount"_zv);
     arguments.emplace_back(request.mount_target);
     if (request.read_user) {
-        arguments.emplace_back("--read-user");
+        arguments.emplace_back("--read-user"_zv);
         arguments.emplace_back(*request.read_user);
     }
-    arguments.emplace_back("--stop-event");
+    arguments.emplace_back("--stop-event"_zv);
     arguments.emplace_back(stop_event_name);
 
     auto readiness_path = std::filesystem::path{};
-    for (const auto &source : request.sources) {
+    const auto source_string_count =
+        request.rpc_endpoint ? std::size(request.sources) : 0;
+    const auto source_string_buffer = NEW_MALLOCA_BUFFER(
+        std::string, source_string_count);
+    const auto source_strings = source_string_buffer.CreateObjects(
+        request.sources, [&request, &readiness_path, &arguments]
+        (auto *const buffer, const auto &source) {
         if (readiness_path.empty()) {
             readiness_path = std::filesystem::path(
                 std::format("{}\\", request.mount_target)) /
                 source.name;
         }
-        arguments.emplace_back("--map");
+        arguments.emplace_back("--map"_zv);
         arguments.emplace_back(source.name);
-        arguments.emplace_back(request.rpc_endpoint
-            ? std::format("{}{}",
-                devicefs::rpc::kDeviceSourcePrefix, source.source)
-            : source.source);
-    }
+        if (!request.rpc_endpoint) {
+            arguments.emplace_back(source.source);
+            return devicefs::ObjectCreationDisposition::SkipThisObject;
+        }
+        auto &argument = arguments.emplace_back();
+        const auto &string = *::new (buffer) std::string{
+            std::format("{}{}", devicefs::rpc::kDeviceSourcePrefix,
+                source.source)};
+        argument = string;
+        return devicefs::ObjectCreationDisposition::ObjectCreated;
+    });
+
     if (request.rpc_endpoint &&
         !SetEnvironmentVariableA(
             devicefs::rpc::kEndpointEnvironmentVariable.c_str(),

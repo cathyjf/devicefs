@@ -108,9 +108,10 @@ export enum class ObjectCreationDisposition {
 // Create objects in a buffer.
 //
 // Preconditions:
-//   (1) `buffer` points to a buffer of at least
-//       `sizeof(T) * collection.size()` writable bytes; and
-//   (2) `buffer` is suitably aligned for creation of objects of type `T`.
+//   (1) `buffer` points to a buffer of at least `sizeof(T) * N` writable
+//        bytes, where `N` is the number of objects to be created; and
+//   (2) `buffer` is suitably aligned for creation of objects of type `T`,
+//        unless `N == 0`, in which case alignment does not matter.
 //
 // Restriction:
 //   The behavior of calling `std::span<T>::operator=` on the returned object

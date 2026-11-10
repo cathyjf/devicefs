@@ -13,8 +13,9 @@ import <isa_availability.h>;
 
 namespace devicefs {
 
-// Constraint on `T`: an all-zero object representation must be valid.
-export template <class T>
+// Constraint on `T` if `ZeroInitialize` is `true`:
+//   An all-zero object representation must be a valid `T`.
+export template <class T, bool ZeroInitialize = true>
     requires (std::is_implicit_lifetime_v<T> &&
         std::is_trivially_copyable_v<T> &&
         (alignof(T) <= alignof(std::max_align_t)))
@@ -26,6 +27,26 @@ public:
     explicit constexpr ReallocVector(
         const std::size_t maximum_size = max_size) noexcept
         : max_size_{std::min(maximum_size, max_size)} {}
+
+    // Precondition:
+    //   The construction of a new `T` from the provided arguments must not
+    //   access any memory within the existing elements of this container.
+    [[msvc::forceinline]]
+    _Pre_satisfies_(size_ < max_size_)
+    auto emplace_back(auto &&...arguments) -> T &
+        requires (noexcept(T{std::forward<decltype(arguments)>(arguments)...})) {
+        if constexpr (sizeof(T) == 1) {
+            // This check needs to protect only against integer overflow.
+            // It does not need to duplicate the logic of `resize`.
+            if (size_ == max_size) [[unlikely]] {
+                throw std::bad_alloc{};
+            }
+        }
+        const auto index = size_;
+        resize(size_ + 1);
+        return *::new (storage_.get() + index) T{
+            std::forward<decltype(arguments)>(arguments)...};
+    }
 
     [[msvc::forceinline]]
     _Pre_satisfies_(new_size <= max_size_)
@@ -81,9 +102,11 @@ private:
             }
             storage_.release();
             storage_.reset(buffer);
-            if (std::cmp_greater(new_reservation, reservation_)) {
-                std::memset(buffer + reservation_, 0,
-                    (new_reservation - reservation_) * sizeof(T));
+            if constexpr (ZeroInitialize) {
+                if (std::cmp_greater(new_reservation, reservation_)) {
+                    std::memset(buffer + reservation_, 0,
+                        (new_reservation - reservation_) * sizeof(T));
+                }
             }
             reservation_ = new_reservation;
             size_ = new_size;

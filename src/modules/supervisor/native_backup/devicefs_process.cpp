@@ -25,6 +25,7 @@ import <devicefs/common.h>;
 import <devicefs/malloca.h>;
 import <devicefs/windows_imports.h>;
 import :internal;
+import devicefs.bitmap_set;
 import devicefs.file_reader;
 import devicefs.object_creator;
 import devicefs.rpc_constants;
@@ -103,23 +104,6 @@ constexpr auto SafeSum(const T left, const T right) {
     return left + right;
 }
 
-template <std::unsigned_integral T>
-constexpr auto SafeProduct(const T left, const T right) {
-    constexpr auto max = std::numeric_limits<T>::max();
-    if ((left != 0) && (right > (max / left))) {
-        throw std::bad_alloc{};
-    }
-    return left * right;
-}
-
-template <std::unsigned_integral T>
-struct SafeAugend {
-    T integer{};
-    constexpr auto operator+(const T right) const {
-        return SafeAugend{SafeSum(integer, right)};
-    }
-};
-
 [[nodiscard]] auto StartDeviceFs(
     const DeviceFsStartRequest &request) {
     auto stop_event_name = std::format(
@@ -131,46 +115,29 @@ struct SafeAugend {
         WinError("failed to create devicefs stop event '{}'", stop_event_name);
     }
 
-    const auto argument_count =
-        SafeAugend{8uz} + SafeProduct(3uz, std::size(request.sources)) +
-        (request.read_user ? 2uz : 0uz) +
-        (request.vhdx ? 1uz :
-            ((!request.rpc_endpoint && request.expose_known_data_map) ?
-                2uz : 0uz));
-    const auto argument_buffer =
-        NEW_MALLOCA_BUFFER(wil::zstring_view, argument_count.integer);
-    auto argument_index = 0uz;
-    const auto add_argument = [buffer = argument_buffer.get(), &argument_index,
-        max_arguments = argument_count.integer]
-        (auto &&...arguments) noexcept {
-        if (argument_index >= max_arguments) {
-            __fastfail(FAST_FAIL_RANGE_CHECK_FAILURE);
-        }
-        ::new (buffer + argument_index++) wil::zstring_view{
-            std::forward<decltype(arguments)>(arguments)...};
-    };
+    auto arguments = devicefs::ReallocVector<wil::zstring_view, false>{};
 
     const auto executable_path =
         Transcode<std::string>(CurrentExecutablePath().native());
-    add_argument(executable_path);
-    add_argument("--devicefs"_zv);
-    add_argument("--synthetic-free-clusters"_zv);
-    add_argument("--cache"_zv);
+    arguments.emplace_back(executable_path);
+    arguments.emplace_back("--devicefs"_zv);
+    arguments.emplace_back("--synthetic-free-clusters"_zv);
+    arguments.emplace_back("--cache"_zv);
 
     if (request.vhdx) {
-        add_argument("--vhdx"_zv);
+        arguments.emplace_back("--vhdx"_zv);
     } else if (!request.rpc_endpoint && request.expose_known_data_map) {
-        add_argument("--expose-known-data-map"_zv);
-        add_argument(ConvertNumberToString<kPbsImageChunkSize>());
+        arguments.emplace_back("--expose-known-data-map"_zv);
+        arguments.emplace_back(ConvertNumberToString<kPbsImageChunkSize>());
     }
-    add_argument("--mount"_zv);
-    add_argument(request.mount_target);
+    arguments.emplace_back("--mount"_zv);
+    arguments.emplace_back(request.mount_target);
     if (request.read_user) {
-        add_argument("--read-user"_zv);
-        add_argument(*request.read_user);
+        arguments.emplace_back("--read-user"_zv);
+        arguments.emplace_back(*request.read_user);
     }
-    add_argument("--stop-event"_zv);
-    add_argument(stop_event_name);
+    arguments.emplace_back("--stop-event"_zv);
+    arguments.emplace_back(stop_event_name);
 
     auto readiness_path = std::filesystem::path{};
     const auto source_string_count =
@@ -178,24 +145,25 @@ struct SafeAugend {
     const auto source_string_buffer = NEW_MALLOCA_BUFFER(
         std::string, source_string_count);
     const auto source_strings = source_string_buffer.CreateObjects(
-        request.sources, [&request, &readiness_path, &add_argument]
+        request.sources, [&request, &readiness_path, &arguments]
         (auto *const buffer, const auto &source) {
         if (readiness_path.empty()) {
             readiness_path = std::filesystem::path(
                 std::format("{}\\", request.mount_target)) /
                 source.name;
         }
-        add_argument("--map"_zv);
-        add_argument(source.name);
+        arguments.emplace_back("--map"_zv);
+        arguments.emplace_back(source.name);
         if (!request.rpc_endpoint) {
-            add_argument(source.source);
+            arguments.emplace_back(source.source);
             return devicefs::ObjectCreationDisposition::SkipThisObject;
         }
 
+        auto &argument = arguments.emplace_back();
         const auto &string = *::new (buffer) std::string{
             std::format("{}{}", devicefs::rpc::kDeviceSourcePrefix,
                 source.source)};
-        add_argument(string);
+        argument = string;
         return devicefs::ObjectCreationDisposition::ObjectCreated;
     });
 
@@ -208,7 +176,7 @@ struct SafeAugend {
             *request.rpc_endpoint);
     }
 
-    const auto argument_span = std::span{argument_buffer.get(), argument_index};
+    const auto argument_span = std::span<const wil::zstring_view>{arguments};
 
     devicefs::WriteToStream(
         devicefs::stdout, "Setting up virtual filesystem: {}\n",

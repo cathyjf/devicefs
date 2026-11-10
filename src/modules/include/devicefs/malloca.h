@@ -10,6 +10,21 @@ struct Allocation {
     bool is_stack_allocation = true;
 };
 
+template <class T>
+[[msvc::forceinline]]
+auto RemoveConst(T *const pointer) noexcept {
+    return pointer;
+}
+
+template <class T>
+[[msvc::forceinline]]
+auto RemoveConst(const T *const pointer) noexcept {
+    [[gsl::suppress("26465", justification:
+        "`T` is deduced without the pointee's top-level `const` qualification. "
+        "This cast removes that qualification.")]]
+    return const_cast<T *>(pointer);
+}
+
 template <class T, auto FreeFunction>
 class UniqueBuffer {
 public:
@@ -36,7 +51,7 @@ public:
     [[msvc::forceinline]]
     ~UniqueBuffer() noexcept {
         if (!is_stack_allocation_) {
-            FreeFunction(buffer_);
+            FreeFunction(RemoveConst(buffer_));
         }
     }
 private:

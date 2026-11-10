@@ -117,18 +117,17 @@ export enum class ObjectCreationDisposition {
 //   is undefined.
 export template <class T>
 auto CreateObjects(T *const buffer_, auto &&collection, auto &&callback) {
-    using ConstructedType = std::remove_const_t<T>;
-    auto *const buffer = const_cast<ConstructedType *>(buffer_);
+    auto *const buffer = const_cast<std::remove_const_t<T> *>(buffer_);
     auto guard = object_creator_detail::ExceptionGuard{buffer, 0};
     for (auto &entry : collection) {
         auto *const target = buffer + guard.index;
         if constexpr (std::is_invocable_v<
                 decltype(callback) &, decltype(entry)>) {
-            ::new (target) ConstructedType{callback(entry)};
+            ::new (target) T{callback(entry)};
         } else if constexpr (std::is_invocable_v<
                 decltype(callback) &, decltype(entry),
                 decltype(guard.index)>) {
-            ::new (target) ConstructedType{callback(entry, auto(guard.index))};
+            ::new (target) T{callback(entry, auto(guard.index))};
         } else {
             static_assert(std::is_same_v<decltype(callback(target, entry)),
                 ObjectCreationDisposition>,

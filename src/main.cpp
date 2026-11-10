@@ -50,13 +50,12 @@ auto main(
         HardenProcess();
 
         const auto length = argc - 1uz;
-        const auto buffer = NEW_MALLOCA_BUFFER(std::string_view, length);
-        return BackupSupervisorMain(
-            devicefs::CreateObjects<const std::string_view>(
-                buffer.get(), std::span{argv + 1, length},
-                [](const char *const argument) static noexcept {
-                    return std::string_view{argument};
-                }));
+        const auto buffer = NEW_MALLOCA_BUFFER(const std::string_view, length);
+        return BackupSupervisorMain(devicefs::CreateObjects(
+            buffer.get(), std::span{argv + 1, length},
+            [](const char *const argument) static noexcept {
+                return std::string_view{argument};
+            }));
     } catch (const std::exception &error) {
         const auto argv0_basename = [argv0 = argv[0]] noexcept
             -> std::string {

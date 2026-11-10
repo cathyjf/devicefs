@@ -20,7 +20,7 @@ import std;
 
 namespace devicefs {
 
-export auto CreateObjects(auto *, auto &&, auto &&);
+export extern "C++" auto CreateObjects(auto *, auto &&, auto &&);
 
 } // namespace devicefs
 
@@ -115,8 +115,9 @@ export enum class ObjectCreationDisposition {
 // Restriction:
 //   The behavior of calling `std::span<T>::operator=` on the returned object
 //   is undefined.
-export template <class T>
-auto CreateObjects(T *const buffer_, auto &&collection, auto &&callback) {
+export extern "C++" template <class T>
+auto CreateObjects(T *const buffer_, auto &&collection,
+    auto &&callback) {
     auto *const buffer = const_cast<std::remove_const_t<T> *>(buffer_);
     auto guard = object_creator_detail::ExceptionGuard{buffer, 0};
     for (auto &entry : collection) {

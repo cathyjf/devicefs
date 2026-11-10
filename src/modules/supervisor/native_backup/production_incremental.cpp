@@ -165,9 +165,8 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
     };
     const auto snapshot_buffer = NEW_MALLOCA_BUFFER(
         SnapshotPair, payload.snapshots.size());
-    const auto snapshots = devicefs::CreateObjects(snapshot_buffer.get(),
-        payload.snapshots, [&baselines](auto *const buffer,
-            const auto &snapshot) {
+    const auto snapshots = snapshot_buffer.CreateObjects(payload.snapshots,
+        [&baselines](auto *const buffer, const auto &snapshot) {
             const auto baseline = baselines.find(
                 ParseVolumeGuid(snapshot.original_volume).value());
             if (baseline == baselines.end()) {
@@ -228,8 +227,7 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
                 devicefs::FuturePolicy::CancelOnDestruction>;
         const auto futures_buffer = NEW_MALLOCA_BUFFER(
             FutureType, std::size(snapshots));
-        const auto futures = devicefs::CreateObjects(
-            futures_buffer.get(), snapshots,
+        const auto futures = futures_buffer.CreateObjects(snapshots,
             [](const auto &snapshot, const auto index) static {
                 const auto error = [&snapshot] [[noreturn]] {
                     WinError("failed to create a thread pool work object to "

@@ -3,6 +3,12 @@
 
 #pragma once
 
+namespace devicefs {
+
+extern "C++" auto CreateObjects(auto *, auto &&, auto &&);
+
+} // namespace devicefs
+
 namespace malloca_detail {
 
 struct Allocation {
@@ -46,6 +52,12 @@ public:
     [[msvc::forceinline]]
     explicit operator bool() const noexcept {
         return buffer_ != nullptr;
+    }
+
+    [[msvc::forceinline]]
+    auto CreateObjects(auto &&...arguments) const {
+        return devicefs::CreateObjects(buffer_,
+            static_cast<decltype(arguments) &&>(arguments)...);
     }
 
     [[msvc::forceinline]]

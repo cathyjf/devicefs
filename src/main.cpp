@@ -51,8 +51,8 @@ auto main(
 
         const auto length = argc - 1uz;
         const auto buffer = NEW_MALLOCA_BUFFER(const std::string_view, length);
-        return BackupSupervisorMain(devicefs::CreateObjects(
-            buffer.get(), std::span{argv + 1, length},
+        return BackupSupervisorMain(buffer.CreateObjects(
+            std::span{argv + 1, length},
             [](const char *const argument) static noexcept {
                 return std::string_view{argument};
             }));

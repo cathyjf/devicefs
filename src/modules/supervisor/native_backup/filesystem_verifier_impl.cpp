@@ -3025,7 +3025,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     const auto jobs_buffer = NEW_MALLOCA_BUFFER(VolumeJob, volumes.size());
 
     if (wil::event_is_signaled(cancellation_event)) {
-        const auto jobs = devicefs::CreateObjects(jobs_buffer.get(), volumes,
+        const auto jobs = jobs_buffer.CreateObjects(volumes,
             [percentage](const auto &volume) {
                 return VolumeJob{volume.volume_identifier, percentage,
                     std::nullopt};
@@ -3064,8 +3064,8 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
 
     const auto context_buffer = NEW_MALLOCA_BUFFER(
         VolumeContext, volumes.size());
-    const auto contexts = devicefs::CreateObjects(
-        context_buffer.get(), volumes, [&](const auto &volume) {
+    const auto contexts = context_buffer.CreateObjects(volumes,
+        [&](const auto &volume) {
         auto synthetic_vhdx = synthetic_mount / volume.filename;
         auto real_vhdx = real_mount / volume.filename;
         return VolumeContext{volume, std::move(synthetic_vhdx),
@@ -3073,8 +3073,8 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
             virtual_disk_lock, io_cancellation};
     });
 
-    const auto jobs = devicefs::CreateObjects(jobs_buffer.get(),
-        contexts, [percentage](const auto &context) {
+    const auto jobs = jobs_buffer.CreateObjects(contexts,
+        [percentage](const auto &context) {
         return VolumeJob{context.volume.volume_identifier, percentage,
             std::ref(context)};
     });

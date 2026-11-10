@@ -1518,7 +1518,7 @@ VerificationJob::VerificationJob(const VolumeReport &volume) :
     const std::size_t unprocessed_volumes,
     const std::size_t unavailable_snapshots) -> int {
     auto jobs_buffer = NEW_MALLOCA_BUFFER(VerificationJob, volumes.size());
-    auto jobs = devicefs::CreateObjects(jobs_buffer.get(), volumes,
+    auto jobs = jobs_buffer.CreateObjects(volumes,
         [cancellation_event](auto *const buffer, auto &volume) {
         if (wil::event_is_signaled(cancellation_event)) {
             return devicefs::ObjectCreationDisposition::StopCreatingObjects;

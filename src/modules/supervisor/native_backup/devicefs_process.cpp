@@ -21,17 +21,19 @@ module;
 module devicefs.supervisor.native_backup:devicefs_process;
 
 import std;
-import devicefs.file_reader;
-import devicefs.terminal.safecast;
+import <devicefs/common.h>;
+import <devicefs/malloca.h>;
 import <devicefs/windows_imports.h>;
 import :internal;
-import <devicefs/common.h>;
+import devicefs.file_reader;
+import devicefs.object_creator;
 import devicefs.rpc_constants;
 import devicefs.stream_writer;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.temporary_paths;
 import devicefs.supervisor.vshadow;
+import devicefs.terminal.safecast;
 import devicefs.terminal.transcoding;
 
 using devicefs::terminal::Transcode;
@@ -171,38 +173,60 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
     }
 }
 
+template <std::unsigned_integral T>
+auto AddWithoutOverflow(const T left, const T right) {
+    constexpr auto max = std::numeric_limits<T>::max();
+    if (right > (max - left)) {
+        throw std::bad_alloc{};
+    }
+    return left + right;
+}
+
 [[nodiscard]] auto StartDeviceFs(
     const std::span<const devicefs::vshadow::Snapshot> snapshots,
     const std::string_view read_user,
     const bool use_known_data_map,
     const SnapshotHandles &snapshot_handles,
     const std::span<const NamedFile> dirty_maps) {
-    auto inherited_handles = snapshot_handles | std::views::values |
-        std::views::transform([](const auto &handle) { return handle.get(); }) |
-        std::ranges::to<std::vector<HANDLE>>();
-    auto sources = snapshots |
-        std::views::transform([&snapshot_handles](const auto &snapshot) {
-            return DeviceFsSource{
-                .name = SnapshotImageName(snapshot),
-                .source = std::format("{}{}",
-                    devicefs::rpc::kHandleDevicePrefix,
-                    std::bit_cast<std::uintptr_t>(
-                        snapshot_handles.at(snapshot.identifier).get())),
-            };
-        }) |
-        std::ranges::to<std::vector<DeviceFsSource>>();
-    for (const auto &[name, handle] : dirty_maps) {
-        inherited_handles.push_back(handle.get());
-        sources.push_back({
+    const auto handle_count = AddWithoutOverflow(std::size(snapshot_handles),
+        std::size(dirty_maps));
+    const auto inherited_handles = NEW_MALLOCA_BUFFER(HANDLE, handle_count);
+    auto handle_index = 0uz;
+    const auto add_handle = [&handle_index, &inherited_handles]
+        (const auto &handle) noexcept {
+        inherited_handles[handle_index++] = handle.get();
+    };
+    for (const auto &handle : snapshot_handles | std::views::values) {
+        add_handle(handle);
+    }
+
+    const auto source_count = AddWithoutOverflow(std::size(snapshots),
+        std::size(dirty_maps));
+    const auto source_buffer = NEW_MALLOCA_BUFFER(DeviceFsSource, source_count);
+    const auto sources_first = source_buffer.CreateObjects(snapshots,
+        [&snapshot_handles](const auto &snapshot) {
+        return DeviceFsSource{
+            .name = SnapshotImageName(snapshot),
+            .source = std::format("{}{}",
+                devicefs::rpc::kHandleDevicePrefix,
+                std::bit_cast<std::uintptr_t>(
+                    snapshot_handles.at(snapshot.identifier).get()))};
+    });
+    const auto sources_second = devicefs::CreateObjects(
+        sources_first.data() + sources_first.size(), dirty_maps,
+        [&add_handle](const auto &entry) {
+        const auto &[name, handle] = entry;
+        add_handle(handle);
+        return DeviceFsSource{
             .name = name,
             .source = std::format("{}{}",
                 devicefs::rpc::kFileHandleDevicePrefix,
-                std::bit_cast<std::uintptr_t>(handle.get())),
-        });
-    }
+                std::bit_cast<std::uintptr_t>(handle.get()))};
+    });
+
     return StartDeviceFs(DeviceFsStartRequest{
-        .sources = sources,
-        .inherited_handles = inherited_handles,
+        .sources = std::span{source_buffer.get(), source_count},
+        .inherited_handles = std::span{inherited_handles.get(), handle_count},
         .mount_target = std::string{DeviceFsProcess::kMountTarget},
         .read_user = std::string{read_user},
         .expose_known_data_map = use_known_data_map,

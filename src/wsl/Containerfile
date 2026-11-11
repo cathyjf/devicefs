@@ -725,6 +725,20 @@ Components: main
 Signed-By: /usr/share/keyrings/microsoft-prod.asc
 EOF
 
+# PowerShell 7.7's .NET runtime rejects WSL1's missing AdvSimd capability
+# report, so we pin PowerShell 7.6.9. However, Nala treats ".deb" in a version
+# argument as a local package filename, so we select 7.6.9 through APT
+# preferences and reject other versions.
+COPY <<'EOF' /etc/apt/preferences.d/powershell
+Package: powershell
+Pin: version 7.6.9-1.deb
+Pin-Priority: 1001
+
+Package: powershell
+Pin: version *
+Pin-Priority: -1
+EOF
+
 RUN /bin/devicefs-sh <<'EOF'
 apt-get update
 nala install -y --no-autoremove --no-install-recommends \

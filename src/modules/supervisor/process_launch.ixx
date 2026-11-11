@@ -94,9 +94,10 @@ export [[nodiscard]] auto StartProcessWithHandles(
     return start(&startup.StartupInfo);
 }
 
-export template <typename Argv>
+export template <class Argv, class Callable = std::monostate>
 struct ProcessLaunchOptions {
     const Argv &argv;
+    [[msvc::no_unique_address]] Callable diagnostic;
     DWORD flags = 0;
     HANDLE standard_input = GetStdHandle(STD_INPUT_HANDLE);
     HANDLE standard_output = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -108,11 +109,15 @@ struct ProcessLaunchOptions {
 // Start the fully qualified executable in `options.argv[0]`. The child
 // receives duplicates of the current standard handles unless replacements
 // are supplied.
-export template <typename Argv>
+export template <class Argv, class Callable>
 [[nodiscard]] auto StartProcessWithHandles(
-    const ProcessLaunchOptions<Argv> &options,
+    const ProcessLaunchOptions<Argv, Callable> &options,
     auto &&...additional_attributes) {
     auto command = wil::ArgvToCommandLine(options.argv);
+    if constexpr (!std::is_same_v<decltype(options.diagnostic),
+            std::monostate>) {
+        options.diagnostic(static_cast<const decltype(command) &>(command));
+    }
     return StartProcessWithHandles(
         options.standard_input, options.standard_output, options.standard_error,
         [executable = std::string{options.argv.front()}, &command,

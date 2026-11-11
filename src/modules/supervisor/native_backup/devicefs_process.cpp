@@ -228,9 +228,6 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
                 *request.rpc_endpoint);
         }
 
-        devicefs::WriteToStream(
-            devicefs::stdout, "Setting up virtual filesystem: {}\n",
-            wil::ArgvToCommandLine(arguments));
         auto password_input = wil::unique_handle{};
         if (request.rpc_password) {
             auto password_output = wil::unique_handle{};
@@ -252,6 +249,11 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
         }
         return StartProcessWithHandles(ProcessLaunchOptions{
             .argv = arguments,
+            .diagnostic = [](const auto &command_line) static noexcept {
+                devicefs::WriteToStream(
+                    devicefs::stdout, "Setting up virtual filesystem: {}\n"sv,
+                    command_line);
+            },
             .flags = request.rpc_endpoint ? CREATE_SUSPENDED : DWORD{},
             .standard_input = password_input
                 ? password_input.get() : GetStdHandle(STD_INPUT_HANDLE),

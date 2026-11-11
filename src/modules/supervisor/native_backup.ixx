@@ -120,7 +120,7 @@ export [[nodiscard]] auto RetrieveBackupCatalog(
 export [[nodiscard]] auto RunSelectiveView(
     const HANDLE cancellation_event,
     wil::unique_tokeninfo_ptr<TOKEN_USER> view_user,
-    const std::string_view read_user,
+    const wil::zstring_view read_user,
     const std::string_view archive,
     const std::optional<std::string_view> snapshot_override,
     const std::optional<std::string_view> timestamp,
@@ -168,7 +168,7 @@ namespace internal {
 [[nodiscard]] auto RunSnapshotBackup(
     const HANDLE cancellation_event,
     const devicefs::vshadow::SnapshotSet &snapshot_set,
-    const std::string_view read_user,
+    const wil::zstring_view read_user,
     const bool use_known_data_map,
     const std::optional<std::u8string> &namespace_override) {
     if (wil::event_is_signaled(cancellation_event)) {

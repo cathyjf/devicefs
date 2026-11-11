@@ -55,7 +55,7 @@ struct DeviceFsStartRequest {
     std::span<const DeviceFsSource> sources;
     std::span<const HANDLE> inherited_handles;
     std::string mount_target;
-    std::optional<std::string> read_user;
+    wil::zstring_view read_user;
     std::optional<std::string> rpc_endpoint;
     std::optional<std::string_view> rpc_password;
     bool vhdx = false;
@@ -160,7 +160,7 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
     process{[this, &request] {
         const auto argument_count =
             SafeAugend{8uz} + SafeProduct(3uz, std::size(request.sources)) +
-            (request.read_user ? 2uz : 0uz) +
+            (request.read_user.empty() ? 0uz : 2uz) +
             (request.vhdx ? 1uz :
                 ((!request.rpc_endpoint && request.expose_known_data_map) ?
                     2uz : 0uz));
@@ -185,9 +185,9 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
         }
         arguments.emplace_back("--mount"_zv);
         arguments.emplace_back(request.mount_target);
-        if (request.read_user) {
+        if (!request.read_user.empty()) {
             arguments.emplace_back("--read-user"_zv);
-            arguments.emplace_back(*request.read_user);
+            arguments.emplace_back(request.read_user);
         }
         arguments.emplace_back("--stop-event"_zv);
         arguments.emplace_back(stop_event_name);
@@ -267,7 +267,7 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
 
 [[nodiscard]] auto StartDeviceFs(
     const std::span<const devicefs::vshadow::Snapshot> snapshots,
-    const std::string_view read_user,
+    const wil::zstring_view read_user,
     const bool use_known_data_map,
     const SnapshotHandles &snapshot_handles,
     const std::span<const NamedFile> dirty_maps) {
@@ -311,7 +311,7 @@ auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
         .sources = std::span{source_buffer.get(), source_count},
         .inherited_handles = std::span{inherited_handles.get(), handle_count},
         .mount_target = std::string{DeviceFsProcess::kMountTarget},
-        .read_user = std::string{read_user},
+        .read_user = read_user,
         .expose_known_data_map = use_known_data_map,
     }};
 }

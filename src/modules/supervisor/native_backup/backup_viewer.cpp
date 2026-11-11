@@ -162,7 +162,7 @@ auto WaitForViewSession(
 [[nodiscard]] auto RunSelectiveView(
     const HANDLE cancellation_event,
     wil::unique_tokeninfo_ptr<TOKEN_USER> view_user,
-    const std::string_view read_user,
+    const wil::zstring_view read_user,
     const std::string_view archive,
     const std::optional<std::string_view> snapshot_override,
     const std::optional<std::string_view> timestamp,
@@ -243,8 +243,7 @@ auto WaitForViewSession(
         internal::DeviceFsProcess{internal::DeviceFsStartRequest{
             .sources = source,
             .mount_target = Transcode<std::string>(devicefs_mount.native()),
-            .read_user = read_user.empty() ?
-                std::nullopt : std::optional{std::string{read_user}},
+            .read_user = read_user,
             .rpc_password = std::string_view{
                 rpc_password->data(), rpc_password->size()},
             .vhdx = true,

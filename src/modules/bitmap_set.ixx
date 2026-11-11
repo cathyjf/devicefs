@@ -147,10 +147,10 @@ private:
     })> storage_{};
 };
 
-export template <class T, std::size_t InlineCapacity>
-    requires ((requires { typename ReallocVector<T, false>; }) &&
-        (InlineCapacity > 0) &&
-        (InlineCapacity < ReallocVector<T, false>::max_size))
+export template <class T, std::size_t InlineCapacity = 0>
+    requires ((requires { typename ReallocVector<T, false>; }) && (
+        (InlineCapacity == 0) ||
+        (InlineCapacity < ReallocVector<T, false>::max_size)))
 __pragma(warning(push))
 __pragma(warning(disable : 26495, justification:
     "The inline buffer is intentionally uninitialized. Callers are responsible "
@@ -158,20 +158,33 @@ __pragma(warning(disable : 26495, justification:
 __pragma(warning(disable : 26490, justification:
     "`reinterpret_cast` is used to provide typed pointers to objects created in "
     "raw storage without needing to retain typed pointers as class members."))
-class InlineReallocVector {
+class DisjointReallocVector {
 public:
     // This user-defined constructor prevents the inline buffer from being
     // zero-initialized by value construction of this type.
     [[msvc::forceinline]]
-    InlineReallocVector() noexcept {}
+    DisjointReallocVector() noexcept requires (InlineCapacity != 0) {}
+
+    // Precondition:
+    //   `span` is nonempty.
+    //
+    // Requirement:
+    //   The buffer described by `span` must outlive every instance of
+    //   `DisjointReallocVector` that contains a view into that buffer.
+    [[msvc::forceinline]]
+    DisjointReallocVector(const std::span<T> span) noexcept
+        requires (InlineCapacity == 0) :
+            inline_{std::as_writable_bytes(span)} {}
 
     // Precondition:
     //   The preconditions for `ReallocVector::emplace_back` must be satisfied.
     [[msvc::forceinline]]
-    auto emplace_back(auto &&...arguments) -> T & {
-        if (inline_entries_ < InlineCapacity) {
-            return *::new (inline_.data() + sizeof(T) * inline_entries_++) T{
+    auto emplace_back(auto &&...arguments) -> decltype(auto) {
+        if (inline_bytes_ < inline_.size()) {
+            auto &object = *::new (inline_.data() + inline_bytes_) T{
                 std::forward<decltype(arguments)>(arguments)...};
+            inline_bytes_ += sizeof(T);
+            return (object);
         }
         return heap_.emplace_back(
             std::forward<decltype(arguments)>(arguments)...);
@@ -207,25 +220,26 @@ public:
         };
         const auto *const first =
             std::launder(reinterpret_cast<const T *>(inline_.data()));
-        if (inline_entries_ < InlineCapacity) {
+        if (inline_bytes_ < inline_.size()) {
             return ConstIterator{first};
         }
-        return ConstIterator{first, first + InlineCapacity, heap_.data()};
+        return ConstIterator{first,
+            reinterpret_cast<const T *>(inline_.data() + inline_.size()),
+            heap_.data()};
     }
 
     [[msvc::forceinline]]
     auto end() const noexcept -> const T * {
-        if (inline_entries_ < InlineCapacity) {
-            return reinterpret_cast<const T *>(
-                inline_.data() + sizeof(T) * inline_entries_);
+        if (inline_bytes_ < inline_.size()) {
+            return reinterpret_cast<const T *>(inline_.data() + inline_bytes_);
         }
         return heap_.data() + heap_.size();
     }
 private:
-    alignas(T) std::array<std::byte, sizeof(T) * InlineCapacity> inline_;
-    std::size_t inline_entries_{};
-    ReallocVector<T, false> heap_{
-        ReallocVector<T, false>::max_size - InlineCapacity};
+    alignas(T) std::conditional_t<InlineCapacity == 0, std::span<std::byte>,
+        std::array<std::byte, sizeof(T) * InlineCapacity>> inline_;
+    std::size_t inline_bytes_{};
+    ReallocVector<T, false> heap_;
 };
 __pragma(warning(pop))
 

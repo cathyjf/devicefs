@@ -104,6 +104,23 @@ constexpr auto SafeSum(const T left, const T right) {
     return left + right;
 }
 
+template <std::unsigned_integral T>
+constexpr auto SafeProduct(const T left, const T right) {
+    constexpr auto max = std::numeric_limits<T>::max();
+    if ((left != 0) && (right > (max / left))) {
+        throw std::bad_alloc{};
+    }
+    return left * right;
+}
+
+template <std::unsigned_integral T>
+struct SafeAugend {
+    T integer{};
+    constexpr auto operator+(const T right) const {
+        return SafeAugend{SafeSum(integer, right)};
+    }
+};
+
 [[nodiscard]] auto StartDeviceFs(
     const DeviceFsStartRequest &request) {
     auto stop_event_name = std::format(
@@ -115,7 +132,16 @@ constexpr auto SafeSum(const T left, const T right) {
         WinError("failed to create devicefs stop event '{}'", stop_event_name);
     }
 
-    auto arguments = devicefs::InlineReallocVector<wil::zstring_view, 36>{};
+    const auto argument_count =
+        SafeAugend{8uz} + SafeProduct(3uz, std::size(request.sources)) +
+        (request.read_user ? 2uz : 0uz) +
+        (request.vhdx ? 1uz :
+            ((!request.rpc_endpoint && request.expose_known_data_map) ?
+                2uz : 0uz));
+    const auto argument_initial_buffer =
+        NEW_MALLOCA_BUFFER(wil::zstring_view, argument_count.integer);
+    auto arguments = devicefs::DisjointReallocVector{
+        std::span{argument_initial_buffer.get(), argument_count.integer}};
 
     const auto executable_path =
         Transcode<std::string>(CurrentExecutablePath().native());

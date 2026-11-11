@@ -236,8 +236,9 @@ public:
         return heap_.data() + heap_.size();
     }
 private:
-    alignas(T) std::conditional_t<InlineCapacity == 0, std::span<std::byte>,
-        std::array<std::byte, sizeof(T) * InlineCapacity>> inline_;
+    alignas((InlineCapacity == 0) ? 0 : alignof(T))
+        std::conditional_t<InlineCapacity == 0, std::span<std::byte>,
+            std::array<std::byte, sizeof(T) * InlineCapacity>> inline_;
     std::size_t inline_bytes_{};
     ReallocVector<T, false> heap_;
 };

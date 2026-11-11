@@ -229,14 +229,11 @@ auto WaitForViewSession(
         std::string_view{devicefs::rpc::kDeviceSourcePrefix};
     static constexpr auto kTcpSourcePrefix =
         std::string_view{devicefs::rpc::kTcpSourcePrefix};
-    static constexpr auto kEndpointFormat = "{}:{}"sv;
     const auto source = std::array{
         internal::DeviceFsSource{
             .name = std::string{vhdx_filename},
-            .source = std::format(
-                devicefs::terminal::vt::Concatenate<
-                    kDeviceSourcePrefix, kTcpSourcePrefix,
-                    kEndpointFormat>(), address, port),
+            .source{devicefs::terminal::vt::Concatenate<kDeviceSourcePrefix,
+                kTcpSourcePrefix>(), address, ':', port},
         },
     };
     auto devicefs = internal::DeviceFsChild{

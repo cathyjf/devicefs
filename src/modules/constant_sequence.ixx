@@ -38,7 +38,7 @@ constexpr auto GenericSize(const auto &object) {
 [[msvc::forceinline]]
 constexpr auto GenericData(const auto &object) {
     if constexpr (IsSequence<decltype(object)>) {
-        return object.data();
+        return std::data(object);
     } else {
         return std::addressof(object);
     }
@@ -63,8 +63,10 @@ public:
             std::is_implicit_lifetime_v<typename Span::value_type>,
             "destination type must be an implicit lifetime type");
         const auto size = GenericSize(operand);
-        memcpy(span_.data(), GenericData(operand),
-            sizeof(*GenericData(operand)) * size);
+        if (size != 0) {
+            memcpy(span_.data(), GenericData(operand),
+                sizeof(*GenericData(operand)) * size);
+        }
         return SequenceJoiner{span_.subspan(size)};
     }
 private:
@@ -77,10 +79,15 @@ constexpr auto JoinSequences(const auto span, auto &&...args) {
     (SequenceJoiner{span} + ... + std::forward<decltype(args)>(args));
 }
 
+__pragma(warning(push))
+__pragma(warning(disable : 26409, justification:
+    "`std::make_unique_for_overwrite` cannot allocate uninitialized bytes "
+    "with a specified alignment."))
 template <class T>
 [[msvc::forceinline]]
 auto NewUninitializedHeapAllocation(const auto size) {
-    using AlignedDeleter = decltype([](auto *const buffer) static {
+    using AlignedDeleter = decltype([] [[msvc::forceinline]]
+        (auto *const buffer) static {
         ::operator delete(buffer, std::align_val_t{alignof(T)});
     });
     return std::unique_ptr<T[], AlignedDeleter>{
@@ -88,6 +95,7 @@ auto NewUninitializedHeapAllocation(const auto size) {
             devicefs::math::SafeProduct(sizeof(T), size),
             std::align_val_t{alignof(T)}))};
 }
+__pragma(warning(pop))
 
 template <class T>
 using HeapType = decltype(NewUninitializedHeapAllocation<T>(0uz));
@@ -107,8 +115,7 @@ __pragma(warning(disable : 26495, justification :
 class ConstantSequence : ConstantSequenceTag {
 public:
     [[msvc::forceinline]]
-    explicit ConstantSequence(auto &&...args)
-        noexcept(sizeof...(args) == 0)
+    ConstantSequence(auto &&...args) noexcept(sizeof...(args) == 0)
         requires ((!std::is_base_of_v<ConstantSequenceTag,
             std::remove_cvref_t<decltype(args)>>) && ...) :
         size_{(devicefs::math::SafeAugend{0uz} + ... +
@@ -168,7 +175,7 @@ private:
     using ByteArray = std::array<std::byte, sizeof(T) * InlineCapacity>;
 
     [[msvc::forceinline]]
-    auto ConstructInlineArray() -> decltype(auto) {
+    auto ConstructInlineArray() noexcept -> decltype(auto) {
         // Unlike `std::construct_at`, placement `new` avoids zero-initializing
         // the `ByteArray` object.
         return *::new (std::addressof(data_.inline_)) ByteArray;
@@ -189,11 +196,20 @@ private:
 };
 __pragma(warning(pop))
 
+template <class U, class T>
+concept IsRawArray =
+    std::is_array_v<std::remove_reference_t<U>> &&
+    std::same_as<
+        std::remove_cv_t<
+            std::remove_extent_t<std::remove_reference_t<U>>>,
+        std::remove_cv_t<T>>;
+
 export template <class T, std::size_t InlineCapacity>
 class ConstantString : private ConstantSequence<T, InlineCapacity> {
 public:
     [[msvc::forceinline]]
-    explicit ConstantString(auto &&...args) noexcept(sizeof...(args) == 0) :
+    explicit ConstantString(auto &&...args) noexcept(sizeof...(args) == 0)
+        requires (!IsRawArray<decltype(args), T> && ...) :
         ConstantSequence<T, InlineCapacity>{
             std::forward<decltype(args)>(args)..., T{}} {}
 
@@ -215,14 +231,18 @@ public:
     }
 
     [[msvc::forceinline]]
-    explicit constexpr operator wil::zstring_view(this auto &&self) noexcept {
+    constexpr operator wil::zstring_view(this auto &&self) noexcept {
         return {self.data(), self.size()};
     }
 
     [[msvc::forceinline]]
-    explicit constexpr operator std::string_view(this auto &&self) noexcept {
+    constexpr operator std::string_view(this auto &&self) noexcept {
         return {self.data(), self.size()};
     }
 };
 
 } // namespace devicefs
+
+template <class T, std::size_t InlineCapacity>
+class std::formatter<devicefs::ConstantString<T, InlineCapacity>> :
+    public std::formatter<std::string_view> {};

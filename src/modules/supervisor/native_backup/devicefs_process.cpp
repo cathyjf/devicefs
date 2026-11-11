@@ -50,7 +50,7 @@ using namespace wil::literals;
 
 struct DeviceFsSource {
     std::string name;
-    std::string source;
+    devicefs::ConstantString<char, 36> source;
 };
 
 struct DeviceFsStartRequest {
@@ -284,10 +284,9 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
         [&snapshot_handles](const auto &snapshot) {
         return DeviceFsSource{
             .name = SnapshotImageName(snapshot),
-            .source = std::format("{}{}",
-                devicefs::rpc::kHandleDevicePrefix,
-                std::bit_cast<std::uintptr_t>(
-                    snapshot_handles.at(snapshot.identifier).get()))};
+            .source{devicefs::rpc::kHandleDevicePrefix,
+                std::to_string(std::bit_cast<std::uintptr_t>(
+                    snapshot_handles.at(snapshot.identifier).get()))}};
     });
     const auto sources_second = devicefs::CreateObjects(
         sources_first.data() + sources_first.size(), dirty_maps,
@@ -296,9 +295,8 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
         add_handle(handle);
         return DeviceFsSource{
             .name = name,
-            .source = std::format("{}{}",
-                devicefs::rpc::kFileHandleDevicePrefix,
-                std::bit_cast<std::uintptr_t>(handle.get()))};
+            .source{devicefs::rpc::kFileHandleDevicePrefix,
+                std::to_string(std::bit_cast<std::uintptr_t>(handle.get()))}};
     });
 
     return DeviceFsProcess{DeviceFsStartRequest{

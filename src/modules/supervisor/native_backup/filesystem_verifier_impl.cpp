@@ -2852,7 +2852,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     const auto sources = std::array{
         internal::DeviceFsSource{
             .name = "device.vhdx",
-            .source = std::string{device},
+            .source{device},
         },
     };
     auto child = internal::DeviceFsChild{

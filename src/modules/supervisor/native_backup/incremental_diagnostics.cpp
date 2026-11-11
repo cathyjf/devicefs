@@ -411,11 +411,11 @@ enum class BackupViewPreparation {
 
     synthetic_sources.push_back({
         .name = filename,
-        .source = filename,
+        .source{filename},
     });
     real_sources.push_back({
         .name = filename,
-        .source = report.interval.payload_device,
+        .source{report.interval.payload_device},
     });
     verification_volumes.push_back({
         .volume_identifier = report.interval.volume_identifier,

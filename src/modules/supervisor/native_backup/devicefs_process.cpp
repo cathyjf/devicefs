@@ -50,7 +50,7 @@ using namespace wil::literals;
 
 struct DeviceFsSource {
     std::string name;
-    devicefs::ConstantString<char, 36> source;
+    devicefs::ConstantString<char, 36, std::uint32_t> source;
 };
 
 struct DeviceFsStartRequest {

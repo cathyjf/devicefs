@@ -17,9 +17,11 @@
 export module devicefs.constant_sequence;
 
 import std;
+import <devicefs/common.h>;
 import <devicefs/windows_imports.h>;
 import devicefs.allocation;
 import devicefs.supervisor.math;
+import devicefs.terminal.safecast;
 
 namespace devicefs {
 
@@ -64,7 +66,7 @@ public:
             "destination type must be an implicit lifetime type");
         const auto size = GenericSize(operand);
         if (size != 0) {
-            memcpy(span_.data(), GenericData(operand),
+            std::memcpy(span_.data(), GenericData(operand),
                 sizeof(*GenericData(operand)) * size);
         }
         return SequenceJoiner{span_.subspan(size)};
@@ -79,13 +81,34 @@ constexpr auto JoinSequences(const auto span, auto &&...args) {
     (SequenceJoiner{span} + ... + std::forward<decltype(args)>(args));
 }
 
+template <class Target, class Source>
+concept IsNarrowingRequired = requires {
+    devicefs::terminal::TryCast(std::declval<Source>(),
+        std::declval<Target &>());
+};
+
+template <class Target, class Source>
+[[msvc::forceinline]]
+auto SafeNarrow(const Source source)
+    noexcept (!IsNarrowingRequired<Target, Source>) {
+    if constexpr (IsNarrowingRequired<Target, Source>) {
+        /* [[indeterminate]] */ Target output;
+        if (!devicefs::terminal::TryCast(source, output)) {
+            throw std::bad_alloc{};
+        }
+        return output;
+    } else {
+        return source;
+    }
+}
+
 __pragma(warning(push))
 __pragma(warning(disable : 26409, justification:
     "`std::make_unique_for_overwrite` cannot allocate uninitialized bytes "
     "with a specified alignment."))
 template <class T>
 [[msvc::forceinline]]
-auto NewUninitializedHeapAllocation(const auto size) {
+auto NewUninitializedHeapAllocation(const std::size_t size) {
     using AlignedDeleter = decltype([] [[msvc::forceinline]]
         (auto *const buffer) static {
         ::operator delete(buffer, std::align_val_t{alignof(T)});
@@ -102,7 +125,8 @@ using HeapType = decltype(NewUninitializedHeapAllocation<T>(0uz));
 
 struct ConstantSequenceTag {};
 
-export template <class T, std::size_t InlineCapacity>
+export template <class T, std::size_t InlineCapacity,
+    class SizeType = std::size_t>
     requires (std::is_implicit_lifetime_v<T> &&
         std::is_trivially_copyable_v<T> &&
         (InlineCapacity > 0))
@@ -113,32 +137,48 @@ __pragma(warning(disable : 26490, justification :
 __pragma(warning(disable : 26495, justification :
     "Uninitialized elements are not exposed through the public interface."))
 class ConstantSequence : ConstantSequenceTag {
+    using HeapType = devicefs::HeapType<T>;
+    constexpr static auto layout = [] static consteval noexcept {
+        constexpr auto kBytesNeededForStorage = std::max(
+            sizeof(HeapType), sizeof(T) * InlineCapacity);
+        constexpr auto kSizeBegin =
+            devicefs::math::Ceil<kBytesNeededForStorage, alignof(SizeType)>() *
+                alignof(SizeType);
+
+        struct Layout {
+            std::size_t size_begin = kSizeBegin;
+            std::size_t array_bytes = kSizeBegin + sizeof(SizeType);
+            std::size_t array_alignment =
+                std::max({alignof(T), alignof(HeapType), alignof(SizeType)});
+        };
+        return Layout{};
+    }();
 public:
     [[msvc::forceinline]]
     ConstantSequence(auto &&...args) noexcept(sizeof...(args) == 0)
         requires ((!std::is_base_of_v<ConstantSequenceTag,
-            std::remove_cvref_t<decltype(args)>>) && ...) :
-        size_{(devicefs::math::SafeAugend{0uz} + ... +
-            GenericSize(args)).integer} {
-        JoinSequences(std::span{[this] {
-            if (size_ <= InlineCapacity) {
-                return std::launder(reinterpret_cast<T *>(
-                    ConstructInlineArray().data()));
+            std::remove_cvref_t<decltype(args)>>) && ...) {
+        const auto &size = SetSize(SafeNarrow<SizeType>(
+            (devicefs::math::SafeAugend{0uz} + ... +
+                GenericSize(args)).integer));
+        JoinSequences(std::span{[this, &size] [[msvc::forceinline]] {
+            if (size <= InlineCapacity) {
+                return GetInlineStorage();
             } else {
-                return std::construct_at(std::addressof(data_.external_),
-                    NewUninitializedHeapAllocation<T>(size_))->get();
+                return (::new (storage_.data()) HeapType{
+                    NewUninitializedHeapAllocation<T>(size)})->get();
             }
-        }(), size_}, std::forward<decltype(args)>(args)...);
+        }(), size}, std::forward<decltype(args)>(args)...);
     }
 
     [[msvc::forceinline]]
-    ConstantSequence(ConstantSequence &&other) noexcept : size_{other.size_} {
-        if (size_ <= InlineCapacity) {
-            memcpy(ConstructInlineArray().data(), other.data_.inline_.data(),
-                sizeof(T) * size_);
+    ConstantSequence(ConstantSequence &&other) noexcept {
+        const auto &size = SetSize(other.size());
+        if (size <= InlineCapacity) {
+            std::memcpy(GetInlineStorage(), other.GetInlineStorage(),
+                sizeof(T) * size);
         } else {
-            std::construct_at(std::addressof(data_.external_),
-                std::move(other.data_.external_));
+            ::new (storage_.data()) HeapType{std::move(other.GetHeap())};
         }
     }
 
@@ -148,17 +188,17 @@ public:
 
     [[msvc::forceinline]]
     auto data() const noexcept -> const T * {
-        if (size_ <= InlineCapacity) {
-            return std::launder(reinterpret_cast<const T *>(
-                data_.inline_.data()));
+        if (size() <= InlineCapacity) {
+            return GetInlineStorage();
         } else {
-            return data_.external_.get();
+            return GetHeap().get();
         }
     }
 
     [[msvc::forceinline]]
-    constexpr auto size() const noexcept {
-        return size_;
+    auto size() const noexcept {
+        return *std::launder(reinterpret_cast<const SizeType *>(
+            storage_.data() + layout.size_begin));
     }
 
     [[msvc::forceinline]]
@@ -166,34 +206,40 @@ public:
         return {data(), size()};
     }
 
+    [[gsl::suppress("26457", justification:
+        "Destructors do not return values.")]]
     [[msvc::forceinline]]
     ~ConstantSequence() {
-        if (size_ > InlineCapacity) {
-            std::destroy_at(std::addressof(data_.external_));
+        if (size() > InlineCapacity) {
+            GetHeap().~HeapType();
         }
     }
 private:
-    using ByteArray = std::array<std::byte, sizeof(T) * InlineCapacity>;
-
     [[msvc::forceinline]]
-    auto ConstructInlineArray() noexcept -> decltype(auto) {
-        // Unlike `std::construct_at`, placement `new` avoids zero-initializing
-        // the `ByteArray` object.
-        return *::new (std::addressof(data_.inline_)) ByteArray;
+    auto GetInlineStorage(this auto &self) noexcept {
+        using Element = std::conditional_t<
+            std::is_const_v<std::remove_reference_t<decltype(self)>>,
+                const T, T>;
+        return std::launder(
+            reinterpret_cast<Element *>(self.storage_.data()));
     }
 
-    union Allocation {
-        alignas(T) ByteArray inline_;
-        HeapType<T> external_;
+    [[msvc::forceinline]]
+    auto GetHeap(this auto &self) noexcept -> decltype(auto) {
+        using Element = std::conditional_t<
+            std::is_const_v<std::remove_reference_t<decltype(self)>>,
+            const HeapType, HeapType>;
+        return *std::launder(
+            reinterpret_cast<Element *>(self.storage_.data()));
+    }
 
-        Allocation() noexcept {}
-        Allocation(const Allocation &) = delete;
-        auto operator=(const Allocation &) -> Allocation & = delete;
-        Allocation(Allocation &&) = delete;
-        auto operator=(Allocation &&) -> Allocation & = delete;
-        ~Allocation() {}
-    } data_{};
-    std::size_t size_{};
+    [[msvc::forceinline]]
+    auto SetSize(const SizeType size) noexcept -> decltype(auto) {
+        return *::new (storage_.data() + layout.size_begin) SizeType{size};
+    }
+
+    alignas(layout.array_alignment) std::array<std::byte, layout.array_bytes>
+        storage_;
 };
 __pragma(warning(pop))
 
@@ -205,16 +251,17 @@ concept IsRawArray =
             std::remove_extent_t<std::remove_reference_t<U>>>,
         std::remove_cv_t<T>>;
 
-export template <class T, std::size_t InlineCapacity>
-class ConstantString : private ConstantSequence<T, InlineCapacity> {
+export template <class T, std::size_t InlineCapacity,
+    class SizeType = std::size_t>
+class ConstantString : private ConstantSequence<T, InlineCapacity, SizeType> {
+    using Base = ConstantSequence<T, InlineCapacity, SizeType>;
 public:
     [[msvc::forceinline]]
     explicit ConstantString(auto &&...args) noexcept(sizeof...(args) == 0)
         requires (!IsRawArray<decltype(args), T> && ...) :
-        ConstantSequence<T, InlineCapacity>{
-            std::forward<decltype(args)>(args)..., T{}} {}
+        Base{std::forward<decltype(args)>(args)..., T{}} {}
 
-    using ConstantSequence<T, InlineCapacity>::data;
+    using Base::data;
 
     [[msvc::forceinline]]
     constexpr auto c_str() const noexcept {
@@ -223,7 +270,7 @@ public:
 
     [[msvc::forceinline]]
     constexpr auto size() const noexcept {
-        return ConstantSequence<T, InlineCapacity>::size() - 1;
+        return Base::size() - 1uz;
     }
 
     [[msvc::forceinline]]
@@ -244,6 +291,6 @@ public:
 
 } // namespace devicefs
 
-template <class T, std::size_t InlineCapacity>
-class std::formatter<devicefs::ConstantString<T, InlineCapacity>> :
+template <class T, std::size_t InlineCapacity, class SizeType>
+class std::formatter<devicefs::ConstantString<T, InlineCapacity, SizeType>> :
     public std::formatter<std::string_view> {};

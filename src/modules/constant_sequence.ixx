@@ -122,7 +122,8 @@ public:
             GenericSize(args)).integer} {
         JoinSequences(std::span{[this] {
             if (size_ <= InlineCapacity) {
-                return reinterpret_cast<T *>(ConstructInlineArray().data());
+                return std::launder(reinterpret_cast<T *>(
+                    ConstructInlineArray().data()));
             } else {
                 return std::construct_at(std::addressof(data_.external_),
                     NewUninitializedHeapAllocation<T>(size_))->get();

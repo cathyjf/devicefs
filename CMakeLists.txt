@@ -369,6 +369,7 @@ file(GENERATE OUTPUT "${ARTIFACT_RESOURCE_SCRIPT}" CONTENT
 target_sources(backup-supervisor PRIVATE "${ARTIFACT_RESOURCE_SCRIPT}")
 target_module_interfaces(backup-supervisor PRIVATE
     src/modules/coherent_vector.ixx
+    src/modules/constant_sequence.ixx
     src/modules/crc32.ixx
     src/modules/guid_formatter.ixx
     src/modules/filesystem.ixx

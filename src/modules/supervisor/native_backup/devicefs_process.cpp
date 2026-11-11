@@ -26,12 +26,14 @@ import <devicefs/malloca.h>;
 import <devicefs/windows_imports.h>;
 import :internal;
 import devicefs.bitmap_set;
+import devicefs.constant_sequence;
 import devicefs.file_reader;
 import devicefs.guid_formatter;
 import devicefs.object_creator;
 import devicefs.rpc_constants;
 import devicefs.stream_writer;
 import devicefs.supervisor.installation;
+import devicefs.supervisor.math;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.temporary_paths;
 import devicefs.supervisor.vshadow;
@@ -128,41 +130,14 @@ consteval auto ConvertNumberToString() noexcept {
     return wil::zstring_view{kStringArray.data(), kStringArray.size() - 1};
 }
 
-template <std::unsigned_integral T>
-constexpr auto SafeSum(const T left, const T right) {
-    constexpr auto max = std::numeric_limits<T>::max();
-    if (right > (max - left)) {
-        throw std::bad_alloc{};
-    }
-    return left + right;
-}
-
-template <std::unsigned_integral T>
-constexpr auto SafeProduct(const T left, const T right) {
-    constexpr auto max = std::numeric_limits<T>::max();
-    if ((left != 0) && (right > (max / left))) {
-        throw std::bad_alloc{};
-    }
-    return left * right;
-}
-
-template <std::unsigned_integral T>
-struct SafeAugend {
-    T integer{};
-    constexpr auto operator+(const T right) const {
-        return SafeAugend{SafeSum(integer, right)};
-    }
-};
-
 auto ConstructReadinessPath(const std::string_view target,
     const std::string_view source) {
-    const auto length = SafeAugend{1uz} + target.length() + source.length();
+    const auto length = devicefs::math::SafeAugend{1uz} +
+        target.length() + source.length();
     const auto buffer = NEW_MALLOCA_BUFFER(char, length.integer);
-    memcpy(buffer.get(), target.data(), target.length());
-    buffer[target.length()] = '\\';
-    memcpy(buffer.get() + target.length() + 1, source.data(), source.length());
-    return std::filesystem::path{Transcode<std::wstring>(
-        std::span{buffer.get(), length.integer})};
+    const auto span = std::span{buffer.get(), length.integer};
+    devicefs::JoinSequences(span, target, '\\', source);
+    return std::filesystem::path{Transcode<std::wstring>(span)};
 }
 
 auto CreateRpcPasswordChannelAndWritePassword(const std::string_view password) {
@@ -187,7 +162,8 @@ auto CreateRpcPasswordChannelAndWritePassword(const std::string_view password) {
 
 auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
     const auto argument_count =
-        SafeAugend{8uz} + SafeProduct(3uz, std::size(request.sources)) +
+        devicefs::math::SafeAugend{8uz} +
+        devicefs::math::SafeProduct(3uz, std::size(request.sources)) +
         (request.read_user.empty() ? 0uz : 2uz) +
         (request.vhdx ? 1uz :
             ((!request.rpc_endpoint && request.expose_known_data_map) ?
@@ -289,8 +265,8 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
     const bool use_known_data_map,
     const SnapshotHandles &snapshot_handles,
     const std::span<const NamedFile> dirty_maps) {
-    const auto handle_count = SafeSum(std::size(snapshot_handles),
-        std::size(dirty_maps));
+    const auto handle_count = devicefs::math::SafeSum(
+        std::size(snapshot_handles), std::size(dirty_maps));
     const auto inherited_handles = NEW_MALLOCA_BUFFER(HANDLE, handle_count);
     auto handle_index = 0uz;
     const auto add_handle = [&handle_index, &inherited_handles]
@@ -301,8 +277,8 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
         add_handle(handle);
     }
 
-    const auto source_count = SafeSum(std::size(snapshots),
-        std::size(dirty_maps));
+    const auto source_count = devicefs::math::SafeSum(
+        std::size(snapshots), std::size(dirty_maps));
     const auto source_buffer = NEW_MALLOCA_BUFFER(DeviceFsSource, source_count);
     const auto sources_first = source_buffer.CreateObjects(snapshots,
         [&snapshot_handles](const auto &snapshot) {

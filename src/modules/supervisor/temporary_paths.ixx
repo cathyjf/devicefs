@@ -27,7 +27,7 @@ import devicefs.guid_formatter;
 import devicefs.stream_writer;
 import devicefs.terminal.safecast;
 
-export [[nodiscard]] auto UniqueName() {
+export [[nodiscard]] auto UniqueName() noexcept {
     return FormatGuid<false>(GenerateRandomGuid());
 }
 

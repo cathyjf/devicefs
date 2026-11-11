@@ -42,8 +42,15 @@ struct std::formatter<FormattedGuid<IncludeBraces>>
 //
 // This function is intended to preserve the last Windows error value.
 export template <bool IncludeBraces, class Character>
+[[gsl::suppress("26447", justification:
+    "Although `std::format_to_n` is not declared `noexcept` and although "
+    "it can throw exceptions in some situations, there is no identified or "
+    "plausible mechanism whereby it would throw an exception here, where the "
+    "inputs are guaranteed to be correct, and where only integer numbers are "
+    "being formatted into hexadecimal digits, and only in a locale-independent "
+    "manner.")]]
 auto FormatGuidToBuffer(const GUID &identifier,
-    const std::span<Character, GuidLength<IncludeBraces>> buffer) {
+    const std::span<Character, GuidLength<IncludeBraces>> buffer) noexcept {
     static constexpr auto text = std::to_array(
         "{{{:08x}-{:04x}-{:04x}-{:02x}{:02x}-"
         "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}}}");
@@ -64,7 +71,7 @@ auto FormatGuidToBuffer(const GUID &identifier,
 }
 
 export template <bool IncludeBraces = true>
-[[nodiscard]] auto FormatGuid(const GUID &guid) {
+[[nodiscard]] auto FormatGuid(const GUID &guid) noexcept {
     // The `result` buffer is intentionally uninitialized because the
     // subsequent call to `std::format_to_n` overwrites every byte of the
     // buffer before anything reads the buffer.

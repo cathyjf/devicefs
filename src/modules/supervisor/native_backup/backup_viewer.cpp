@@ -240,7 +240,7 @@ auto WaitForViewSession(
         },
     };
     auto devicefs = internal::DeviceFsChild{
-        internal::StartDeviceFs(internal::DeviceFsStartRequest{
+        internal::DeviceFsProcess{internal::DeviceFsStartRequest{
             .sources = source,
             .mount_target = Transcode<std::string>(devicefs_mount.native()),
             .read_user = read_user.empty() ?
@@ -248,7 +248,7 @@ auto WaitForViewSession(
             .rpc_password = std::string_view{
                 rpc_password->data(), rpc_password->size()},
             .vhdx = true,
-        }), std::ref(should_stop_pbs)};
+        }}, std::ref(should_stop_pbs)};
     rpc_password.reset();
     if (!internal::WaitForDeviceFs(
             devicefs.Process(), cancellation_event)) {

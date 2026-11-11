@@ -2310,7 +2310,7 @@ auto PrintOperationOutcome(
 auto PrintOperationComparison(
     const auto output,
     const GUID &volume_identifier,
-    const OperationComparison &comparison) -> void {
+    const OperationComparison &comparison) noexcept -> void {
     const auto matched = IsMatchedError(comparison);
     if (matched) {
         devicefs::WriteToStream(
@@ -2856,14 +2856,14 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
         },
     };
     auto child = internal::DeviceFsChild{
-        internal::StartDeviceFs(
+        internal::DeviceFsProcess{
             internal::DeviceFsStartRequest{
                 .sources = sources,
                 .mount_target =
                     Transcode<std::string>(
                         internal::TemporaryDeviceFsViewPath().native()),
                 .vhdx = true,
-            })};
+            }}};
     if (!internal::WaitForDeviceFs(
             child.Process(), cancellation_event)) {
         return ERROR_CANCELLED;

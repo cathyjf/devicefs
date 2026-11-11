@@ -500,13 +500,13 @@ enum class BackupViewPreparation {
     const auto real_mount_text = Transcode<std::string>(real_mount.native());
     auto endpoint = std::format(
         "devicefs-block-device-{}", UniqueName());
-    auto suspended_synthetic = internal::StartDeviceFs(
+    auto suspended_synthetic = internal::DeviceFsProcess{
         internal::DeviceFsStartRequest{
             .sources = synthetic_sources,
             .mount_target = synthetic_mount_text,
             .rpc_endpoint = endpoint,
             .vhdx = true,
-        });
+        }};
     auto terminate_synthetic = wil::scope_exit([&] {
         static_cast<void>(TerminateProcess(
             suspended_synthetic.process.hProcess,
@@ -523,12 +523,12 @@ enum class BackupViewPreparation {
         std::move(suspended_synthetic)};
     terminate_synthetic.release();
     auto real_devicefs = internal::DeviceFsChild{
-        internal::StartDeviceFs(
+        internal::DeviceFsProcess{
             internal::DeviceFsStartRequest{
                 .sources = real_sources,
                 .mount_target = real_mount_text,
                 .vhdx = true,
-            })};
+            }}};
     if (!internal::WaitForDeviceFs(
             synthetic_devicefs.Process(), cancellation_event) ||
         !internal::WaitForDeviceFs(
@@ -1226,7 +1226,7 @@ auto PrintStreamOwnership(
 auto PrintOwnershipUpdate(
     const auto output,
     const GUID &volume_identifier,
-    ClusterOwnershipCache &ownership) -> void {
+    ClusterOwnershipCache &ownership) noexcept -> void {
     auto wrote_heading = false;
     for (auto &[name, stream] : ownership.streams) {
         if (stream.printed_during_progress) {

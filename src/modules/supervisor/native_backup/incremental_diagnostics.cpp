@@ -518,7 +518,7 @@ enum class BackupViewPreparation {
         Transcode<std::wstring>(endpoint),
         suspended_synthetic.process.dwProcessId,
         std::move(devices));
-    internal::ResumeDeviceFs(suspended_synthetic);
+    suspended_synthetic.ResumeProcess();
     auto synthetic_devicefs = internal::DeviceFsChild{
         std::move(suspended_synthetic)};
     terminate_synthetic.release();

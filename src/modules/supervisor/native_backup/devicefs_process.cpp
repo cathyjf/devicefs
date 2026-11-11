@@ -97,6 +97,14 @@ struct DeviceFsProcess {
     wil::unique_process_information process;
 
     explicit DeviceFsProcess(const DeviceFsStartRequest &);
+
+    auto ResumeProcess() {
+        if (ResumeThread(process.hThread) == MAXDWORD) {
+            WinError("failed to resume devicefs");
+        }
+    }
+private:
+    auto StartProcess(const DeviceFsStartRequest &);
 };
 
 [[nodiscard]] auto TemporaryDeviceFsViewPath() {
@@ -177,6 +185,88 @@ auto CreateRpcPasswordChannelAndWritePassword(const std::string_view password) {
     return password_input;
 }
 
+auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
+    const auto argument_count =
+        SafeAugend{8uz} + SafeProduct(3uz, std::size(request.sources)) +
+        (request.read_user.empty() ? 0uz : 2uz) +
+        (request.vhdx ? 1uz :
+            ((!request.rpc_endpoint && request.expose_known_data_map) ?
+                2uz : 0uz));
+    const auto argument_initial_buffer =
+        NEW_MALLOCA_BUFFER(wil::zstring_view, argument_count.integer);
+    auto arguments = devicefs::DisjointReallocVector{
+        std::span{argument_initial_buffer.get(), argument_count.integer}};
+
+    const auto executable_path =
+        Transcode<std::string>(CurrentExecutablePath().native());
+    arguments.emplace_back(executable_path);
+    arguments.emplace_back("--devicefs"_zv);
+    arguments.emplace_back("--synthetic-free-clusters"_zv);
+    arguments.emplace_back("--cache"_zv);
+
+    if (request.vhdx) {
+        arguments.emplace_back("--vhdx"_zv);
+    } else if (!request.rpc_endpoint && request.expose_known_data_map) {
+        arguments.emplace_back("--expose-known-data-map"_zv);
+        arguments.emplace_back(ConvertNumberToString<
+            kPbsImageChunkSize>());
+    }
+    arguments.emplace_back("--mount"_zv);
+    arguments.emplace_back(request.mount_target);
+    if (!request.read_user.empty()) {
+        arguments.emplace_back("--read-user"_zv);
+        arguments.emplace_back(request.read_user);
+    }
+    arguments.emplace_back("--stop-event"_zv);
+    arguments.emplace_back(stop_event_name);
+
+    const auto source_string_count =
+        request.rpc_endpoint ? std::size(request.sources) : 0;
+    const auto source_string_buffer = NEW_MALLOCA_BUFFER(
+        std::string, source_string_count);
+    const auto source_strings = source_string_buffer.CreateObjects(
+        request.sources, [&request, &arguments]
+        (auto *const buffer, const auto &source) {
+        arguments.emplace_back("--map"_zv);
+        arguments.emplace_back(source.name);
+        if (!request.rpc_endpoint) {
+            arguments.emplace_back(source.source);
+            return devicefs::ObjectCreationDisposition::SkipThisObject;
+        }
+
+        auto &argument = arguments.emplace_back();
+        const auto &string = *::new (buffer) std::string{
+            std::format("{}{}", devicefs::rpc::kDeviceSourcePrefix,
+                source.source)};
+        argument = string;
+        return devicefs::ObjectCreationDisposition::ObjectCreated;
+    });
+
+    if (request.rpc_endpoint &&
+        !SetEnvironmentVariableA(
+            devicefs::rpc::kEndpointEnvironmentVariable.c_str(),
+            request.rpc_endpoint->c_str())) {
+        WinError("failed to set environment variable '{}' to RPC "
+            "endpoint '{}'", devicefs::rpc::kEndpointEnvironmentVariable,
+            *request.rpc_endpoint);
+    }
+
+    return StartProcessWithHandles(ProcessLaunchOptions{
+        .argv = arguments,
+        .diagnostic = [](const auto &command_line) static noexcept {
+            devicefs::WriteToStream(
+                devicefs::stdout, "Setting up virtual filesystem: {}\n"sv,
+                command_line);
+        },
+        .flags = request.rpc_endpoint ? CREATE_SUSPENDED : DWORD{},
+        .standard_input = request.rpc_password ?
+            CreateRpcPasswordChannelAndWritePassword(
+                *request.rpc_password).get() :
+            GetStdHandle(STD_INPUT_HANDLE),
+        .inherited_handles = request.inherited_handles,
+    });
+}
+
 // Precondition: `request.sources` is nonempty.
 DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
     stop_event{[this] {
@@ -191,93 +281,7 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
     }()},
     readiness_path{ConstructReadinessPath(
         request.mount_target, request.sources.front().name)},
-    process{[this, &request] {
-        const auto argument_count =
-            SafeAugend{8uz} + SafeProduct(3uz, std::size(request.sources)) +
-            (request.read_user.empty() ? 0uz : 2uz) +
-            (request.vhdx ? 1uz :
-                ((!request.rpc_endpoint && request.expose_known_data_map) ?
-                    2uz : 0uz));
-        const auto argument_initial_buffer =
-            NEW_MALLOCA_BUFFER(wil::zstring_view, argument_count.integer);
-        auto arguments = devicefs::DisjointReallocVector{
-            std::span{argument_initial_buffer.get(), argument_count.integer}};
-
-        const auto executable_path =
-            Transcode<std::string>(CurrentExecutablePath().native());
-        arguments.emplace_back(executable_path);
-        arguments.emplace_back("--devicefs"_zv);
-        arguments.emplace_back("--synthetic-free-clusters"_zv);
-        arguments.emplace_back("--cache"_zv);
-
-        if (request.vhdx) {
-            arguments.emplace_back("--vhdx"_zv);
-        } else if (!request.rpc_endpoint && request.expose_known_data_map) {
-            arguments.emplace_back("--expose-known-data-map"_zv);
-            arguments.emplace_back(ConvertNumberToString<
-                kPbsImageChunkSize>());
-        }
-        arguments.emplace_back("--mount"_zv);
-        arguments.emplace_back(request.mount_target);
-        if (!request.read_user.empty()) {
-            arguments.emplace_back("--read-user"_zv);
-            arguments.emplace_back(request.read_user);
-        }
-        arguments.emplace_back("--stop-event"_zv);
-        arguments.emplace_back(stop_event_name);
-
-        const auto source_string_count =
-            request.rpc_endpoint ? std::size(request.sources) : 0;
-        const auto source_string_buffer = NEW_MALLOCA_BUFFER(
-            std::string, source_string_count);
-        const auto source_strings = source_string_buffer.CreateObjects(
-            request.sources, [&request, &arguments]
-            (auto *const buffer, const auto &source) {
-            arguments.emplace_back("--map"_zv);
-            arguments.emplace_back(source.name);
-            if (!request.rpc_endpoint) {
-                arguments.emplace_back(source.source);
-                return devicefs::ObjectCreationDisposition::SkipThisObject;
-            }
-
-            auto &argument = arguments.emplace_back();
-            const auto &string = *::new (buffer) std::string{
-                std::format("{}{}", devicefs::rpc::kDeviceSourcePrefix,
-                    source.source)};
-            argument = string;
-            return devicefs::ObjectCreationDisposition::ObjectCreated;
-        });
-
-        if (request.rpc_endpoint &&
-            !SetEnvironmentVariableA(
-                devicefs::rpc::kEndpointEnvironmentVariable.c_str(),
-                request.rpc_endpoint->c_str())) {
-            WinError("failed to set environment variable '{}' to RPC "
-                "endpoint '{}'", devicefs::rpc::kEndpointEnvironmentVariable,
-                *request.rpc_endpoint);
-        }
-
-        return StartProcessWithHandles(ProcessLaunchOptions{
-            .argv = arguments,
-            .diagnostic = [](const auto &command_line) static noexcept {
-                devicefs::WriteToStream(
-                    devicefs::stdout, "Setting up virtual filesystem: {}\n"sv,
-                    command_line);
-            },
-            .flags = request.rpc_endpoint ? CREATE_SUSPENDED : DWORD{},
-            .standard_input = request.rpc_password ?
-                CreateRpcPasswordChannelAndWritePassword(
-                    *request.rpc_password).get() :
-                GetStdHandle(STD_INPUT_HANDLE),
-            .inherited_handles = request.inherited_handles,
-        });
-    }()} {}
-
-auto ResumeDeviceFs(const DeviceFsProcess &devicefs) {
-    if (ResumeThread(devicefs.process.hThread) == MAXDWORD) {
-        WinError("could not resume devicefs");
-    }
-}
+    process{StartProcess(request)} {}
 
 [[nodiscard]] auto StartDeviceFs(
     const std::span<const devicefs::vshadow::Snapshot> snapshots,

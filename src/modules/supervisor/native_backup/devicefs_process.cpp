@@ -157,6 +157,26 @@ auto ConstructReadinessPath(const std::string_view target,
         std::span{buffer.get(), length.integer})};
 }
 
+auto CreateRpcPasswordChannelAndWritePassword(const std::string_view password) {
+    auto password_input = wil::unique_handle{};
+    auto password_output = wil::unique_handle{};
+    if (!CreatePipe(password_input.addressof(),
+            password_output.addressof(), nullptr, 0)) {
+        WinError("failed to create the devicefs password channel");
+    }
+    const auto write_password = [output = password_output.get()](
+        const auto &value) {
+        if (const auto result = WriteEntireBuffer(output, value); !result) {
+            WinError("failed to write the devicefs RPC password",
+                result.error());
+        }
+    };
+    write_password(password);
+    constexpr auto newline = std::array{'\n'};
+    write_password(newline);
+    return password_input;
+}
+
 // Precondition: `request.sources` is nonempty.
 DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
     stop_event{[this] {
@@ -237,25 +257,6 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
                 *request.rpc_endpoint);
         }
 
-        auto password_input = wil::unique_handle{};
-        if (request.rpc_password) {
-            auto password_output = wil::unique_handle{};
-            if (!CreatePipe(password_input.addressof(),
-                    password_output.addressof(), nullptr, 0)) {
-                WinError("could not create the devicefs password channel");
-            }
-            const auto write_password = [output = password_output.get()](
-                const auto &value) {
-                if (const auto result = WriteEntireBuffer(output, value);
-                    !result) {
-                    WinError("failed to write the devicefs RPC password",
-                        result.error());
-                }
-            };
-            write_password(*request.rpc_password);
-            constexpr auto newline = std::array{'\n'};
-            write_password(newline);
-        }
         return StartProcessWithHandles(ProcessLaunchOptions{
             .argv = arguments,
             .diagnostic = [](const auto &command_line) static noexcept {
@@ -264,8 +265,10 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
                     command_line);
             },
             .flags = request.rpc_endpoint ? CREATE_SUSPENDED : DWORD{},
-            .standard_input = password_input
-                ? password_input.get() : GetStdHandle(STD_INPUT_HANDLE),
+            .standard_input = request.rpc_password ?
+                CreateRpcPasswordChannelAndWritePassword(
+                    *request.rpc_password).get() :
+                GetStdHandle(STD_INPUT_HANDLE),
             .inherited_handles = request.inherited_handles,
         });
     }()} {}

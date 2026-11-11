@@ -178,7 +178,8 @@ namespace internal {
     // WinFsp creates and removes the mount directory itself. Interrupted
     // backups can leave an empty directory or a junction whose volume is gone.
     // `symlink_status` sees that junction even when its target no longer exists.
-    const auto mount_target = std::filesystem::path{DeviceFsProcess::kMountTarget};
+    const auto mount_target = std::filesystem::path{std::string_view{
+        DeviceFsProcess::kMountTarget}};
     if (std::filesystem::exists(std::filesystem::symlink_status(mount_target))) {
         const auto status = std::filesystem::status(mount_target);
         if (std::filesystem::exists(status) &&

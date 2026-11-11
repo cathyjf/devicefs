@@ -56,7 +56,7 @@ struct DeviceFsSource {
 struct DeviceFsStartRequest {
     std::span<const DeviceFsSource> sources;
     std::span<const HANDLE> inherited_handles;
-    std::string mount_target;
+    wil::zstring_view mount_target;
     wil::zstring_view read_user;
     std::optional<std::string> rpc_endpoint;
     std::optional<std::string_view> rpc_password;
@@ -91,7 +91,7 @@ struct DeviceFsProcess {
     static constexpr auto kStartTimeout = 30s;
     static constexpr auto kShutdownTimeout = 60s;
     static constexpr auto kMountTarget =
-        "C:\\ProgramData\\devicefs\\backup-mount"sv;
+        "C:\\ProgramData\\devicefs\\backup-mount"_zv;
 
     DeviceFsStopEventName stop_event_name;
     wil::unique_event_nothrow stop_event;
@@ -302,7 +302,7 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
     return DeviceFsProcess{DeviceFsStartRequest{
         .sources = std::span{source_buffer.get(), source_count},
         .inherited_handles = std::span{inherited_handles.get(), handle_count},
-        .mount_target = std::string{DeviceFsProcess::kMountTarget},
+        .mount_target = DeviceFsProcess::kMountTarget,
         .read_user = read_user,
         .expose_known_data_map = use_known_data_map,
     }};

@@ -10,6 +10,7 @@
 #include <print>
 #include <ranges>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 extern "C" {
@@ -43,7 +44,7 @@ using TdbOpen = decltype(&tdb_open_ex);
      * this format. Function-local static initialization performs uname and the
      * release parsing once and synchronizes concurrent first callers.
      */
-    static const auto result = []() noexcept {
+    static const auto result = [] static noexcept {
         auto enabled = false;
         try {
             auto kernel = utsname{};
@@ -60,13 +61,13 @@ using TdbOpen = decltype(&tdb_open_ex);
 }
 
 [[nodiscard]] auto RealTdbOpen() noexcept -> TdbOpen {
-    static const auto function = []() noexcept {
+    static const auto function = [] static noexcept {
         static_cast<void>(dlerror());
         auto *const address = dlsym(RTLD_NEXT, "tdb_open_ex");
         if (const auto *const error = dlerror(); error != nullptr) {
             std::println(stderr,
-                "rpcd_devicefs: could not resolve tdb_open_ex: {}", error);
-            std::abort();
+                "rpcd_devicefs: failed to resolve `tdb_open_ex`: {}", error);
+            std::exit(1);
         }
         return reinterpret_cast<TdbOpen>(address);
     }();

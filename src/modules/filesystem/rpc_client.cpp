@@ -133,15 +133,10 @@ constexpr auto kTcpUsername = "devicefs"sv;
     // Packet integrity adds no value here because any privileged user who
     // who could tamper with these authenticated loopback packets could achieve
     // the same result through more direct methods. More importantly, despite
-    // the lack of value, packet integrity adds unnecessary overhead to a
+    // the lack of value, packet integrity would add unnecessary overhead to a
     // performance-sensitive path.
-    //
-    // Unfortunately, as of a recent Windows update (KB5132061), this request
-    // fails unless packet integrity is enabled.
-    //
-    // TODO: Investigate a better solution.
     const auto error = RpcBindingSetAuthInfoA(
-        result.get(), nullptr, RPC_C_AUTHN_LEVEL_PKT_INTEGRITY,
+        result.get(), nullptr, RPC_C_AUTHN_LEVEL_CONNECT,
         RPC_C_AUTHN_WINNT, &identity, RPC_C_AUTHZ_NONE);
     if (error != RPC_S_OK) {
         WinError("could not authenticate RPC block-device binding to '{}:{}'",

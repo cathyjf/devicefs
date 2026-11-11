@@ -146,6 +146,18 @@ struct SafeAugend {
     }
 };
 
+auto ConstructReadinessPath(const std::string_view target,
+    const std::string_view source) {
+    const auto length = SafeAugend{1uz} + target.length() + source.length();
+    const auto buffer = NEW_MALLOCA_BUFFER(char, length.integer);
+    memcpy(buffer.get(), target.data(), target.length());
+    buffer[target.length()] = '\\';
+    memcpy(buffer.get() + target.length() + 1, source.data(), source.length());
+    return std::filesystem::path{Transcode<std::wstring>(
+        std::span{buffer.get(), length.integer})};
+}
+
+// Precondition: `request.sources` is nonempty.
 DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
     stop_event{[this] {
         auto stop_event = wil::unique_event_nothrow{CreateEventExA(
@@ -157,6 +169,8 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
         }
         return stop_event;
     }()},
+    readiness_path{ConstructReadinessPath(
+        request.mount_target, request.sources.front().name)},
     process{[this, &request] {
         const auto argument_count =
             SafeAugend{8uz} + SafeProduct(3uz, std::size(request.sources)) +
@@ -197,13 +211,8 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
         const auto source_string_buffer = NEW_MALLOCA_BUFFER(
             std::string, source_string_count);
         const auto source_strings = source_string_buffer.CreateObjects(
-            request.sources, [this, &request, &arguments]
+            request.sources, [&request, &arguments]
             (auto *const buffer, const auto &source) {
-            if (readiness_path.empty()) {
-                readiness_path = std::filesystem::path(
-                    std::format("{}\\", request.mount_target)) /
-                    source.name;
-            }
             arguments.emplace_back("--map"_zv);
             arguments.emplace_back(source.name);
             if (!request.rpc_endpoint) {

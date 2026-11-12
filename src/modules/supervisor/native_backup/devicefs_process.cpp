@@ -75,11 +75,17 @@ public:
             kPrefix,
             SpecialGuidSequence<false>{GenerateRandomGuid()}, '\0');
     }
-    constexpr auto c_str() const noexcept {
+    constexpr auto data() const noexcept {
         return buffer_.data();
     }
+    constexpr auto size() const noexcept {
+        return kTotalLength;
+    }
+    constexpr auto c_str() const noexcept {
+        return data();
+    }
     constexpr operator wil::zstring_view() const noexcept {
-        return {buffer_.data(), kTotalLength};
+        return {data(), size()};
     }
 private:
     std::array<char, kTotalLength + 1> buffer_;
@@ -153,6 +159,46 @@ auto CreateRpcPasswordChannelAndWritePassword(const std::string_view password) {
     return password_input;
 }
 
+__pragma(warning(push))
+__pragma(warning(disable : 26495, justification:
+    "This object's storage is intentionally uninitialized. Consumers are "
+    "responsible for initializing it before reading from it."))
+template <class Element, class Size>
+class PackedView {
+    constexpr static auto kPointerSize = sizeof(Element *);
+public:
+    constexpr PackedView() noexcept {}
+    constexpr PackedView(const Element *const pointer, const Size size)
+        noexcept {
+        std::memcpy(storage_.data(),
+            std::addressof(pointer), kPointerSize);
+        std::memcpy(storage_.data() + kPointerSize,
+            std::addressof(size), sizeof(Size));
+    }
+    constexpr PackedView(auto &&view)
+        noexcept (noexcept(view.data()) && noexcept(view.size())) :
+        PackedView{view.data(),
+            devicefs::terminal::FailFastMaybeCast<Size>(view.size())} {}
+    operator std::basic_string_view<Element>() const noexcept {
+        return {data(), size()};
+    }
+    operator wil::basic_zstring_view<Element>() const noexcept {
+        return {data(), size()};
+    }
+    auto data() const noexcept {
+        return BitPrefixCast<const Element *>(*storage_.data());
+    }
+    auto size() const noexcept {
+        return BitPrefixCast<Size>(*(storage_.data() + kPointerSize));
+    }
+    auto operator[](const auto index) const noexcept -> decltype(auto) {
+        return data()[index];
+    }
+private:
+    std::array<std::byte, kPointerSize + sizeof(Size)> storage_;
+};
+__pragma(warning(pop))
+
 auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
     const auto argument_count =
         devicefs::math::SafeAugend{8uz} +
@@ -161,8 +207,10 @@ auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
         (request.vhdx ? 1uz :
             ((request.rpc_endpoint.empty() && request.expose_known_data_map) ?
                 2uz : 0uz));
+
+    using PackedView = PackedView<char, std::uint16_t>;
     const auto argument_initial_buffer =
-        NEW_MALLOCA_BUFFER(wil::zstring_view, argument_count.integer);
+        NEW_MALLOCA_BUFFER(PackedView, argument_count.integer);
     auto arguments = devicefs::DisjointReallocVector{
         std::span{argument_initial_buffer.get(), argument_count.integer}};
 

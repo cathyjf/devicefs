@@ -58,7 +58,7 @@ struct DeviceFsStartRequest {
     std::span<const HANDLE> inherited_handles;
     wil::zstring_view mount_target;
     wil::zstring_view read_user;
-    std::optional<std::string> rpc_endpoint;
+    wil::zstring_view rpc_endpoint;
     std::optional<std::string_view> rpc_password;
     bool vhdx = false;
     bool expose_known_data_map = false;
@@ -159,7 +159,7 @@ auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
         devicefs::math::SafeProduct(3uz, std::size(request.sources)) +
         (request.read_user.empty() ? 0uz : 2uz) +
         (request.vhdx ? 1uz :
-            ((!request.rpc_endpoint && request.expose_known_data_map) ?
+            ((request.rpc_endpoint.empty() && request.expose_known_data_map) ?
                 2uz : 0uz));
     const auto argument_initial_buffer =
         NEW_MALLOCA_BUFFER(wil::zstring_view, argument_count.integer);
@@ -175,7 +175,7 @@ auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
 
     if (request.vhdx) {
         arguments.emplace_back("--vhdx"_zv);
-    } else if (!request.rpc_endpoint && request.expose_known_data_map) {
+    } else if (request.rpc_endpoint.empty() && request.expose_known_data_map) {
         arguments.emplace_back("--expose-known-data-map"_zv);
         arguments.emplace_back(ConvertNumberToString<
             kPbsImageChunkSize>());
@@ -190,7 +190,7 @@ auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
     arguments.emplace_back(stop_event_name);
 
     const auto source_string_count =
-        request.rpc_endpoint ? std::size(request.sources) : 0;
+        request.rpc_endpoint.empty() ? 0 : std::size(request.sources);
     const auto source_string_buffer = NEW_MALLOCA_BUFFER(
         std::string, source_string_count);
     const auto source_strings = source_string_buffer.CreateObjects(
@@ -198,7 +198,7 @@ auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
         (auto *const buffer, const auto &source) {
         arguments.emplace_back("--map"_zv);
         arguments.emplace_back(source.name);
-        if (!request.rpc_endpoint) {
+        if (request.rpc_endpoint.empty()) {
             arguments.emplace_back(source.source);
             return devicefs::ObjectCreationDisposition::SkipThisObject;
         }
@@ -211,13 +211,13 @@ auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
         return devicefs::ObjectCreationDisposition::ObjectCreated;
     });
 
-    if (request.rpc_endpoint &&
+    if (!request.rpc_endpoint.empty() &&
         !SetEnvironmentVariableA(
             devicefs::rpc::kEndpointEnvironmentVariable.c_str(),
-            request.rpc_endpoint->c_str())) {
+            request.rpc_endpoint.c_str())) {
         WinError("failed to set environment variable '{}' to RPC "
             "endpoint '{}'", devicefs::rpc::kEndpointEnvironmentVariable,
-            *request.rpc_endpoint);
+            request.rpc_endpoint);
     }
 
     return StartProcessWithHandles(ProcessLaunchOptions{
@@ -227,7 +227,7 @@ auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
                 devicefs::stdout, "Setting up virtual filesystem: {}\n"sv,
                 command_line);
         },
-        .flags = request.rpc_endpoint ? CREATE_SUSPENDED : DWORD{},
+        .flags = request.rpc_endpoint.empty() ? DWORD{} : CREATE_SUSPENDED,
         .standard_input = request.rpc_password ?
             CreateRpcPasswordChannelAndWritePassword(
                 *request.rpc_password).get() :

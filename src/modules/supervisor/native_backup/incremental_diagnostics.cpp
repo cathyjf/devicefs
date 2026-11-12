@@ -498,7 +498,7 @@ enum class BackupViewPreparation {
 
     const auto synthetic_mount_text = Transcode<std::string>(synthetic_mount.native());
     const auto real_mount_text = Transcode<std::string>(real_mount.native());
-    auto endpoint = std::format(
+    const auto endpoint = std::format(
         "devicefs-block-device-{}", UniqueName());
     auto suspended_synthetic = internal::DeviceFsProcess{
         internal::DeviceFsStartRequest{

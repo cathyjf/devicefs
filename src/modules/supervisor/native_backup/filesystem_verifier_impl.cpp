@@ -2849,16 +2849,14 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
 [[nodiscard]] auto InventoryVhdx(
     const HANDLE cancellation_event,
     const std::string_view device) -> int {
-    const auto sources = std::array{
-        internal::DeviceFsSource{
-            .name = "device.vhdx",
-            .source{device},
-        },
-    };
+    using namespace wil::literals;
     auto child = internal::DeviceFsChild{
         internal::DeviceFsProcess{
             internal::DeviceFsStartRequest{
-                .sources = sources,
+                .sources = std::array{
+                    internal::DeviceFsSource{
+                        .name{"device.vhdx"_zv},
+                        .source{device}}},
                 .mount_target =
                     Transcode<std::string>(
                         internal::TemporaryDeviceFsViewPath().native()),

@@ -38,11 +38,6 @@ inline constexpr auto kPbsImageChunkSize = 4uz * 1024 * 1024;
 
 using SnapshotHandles = std::map<GUID, wil::unique_hfile, GuidLess>;
 
-struct NamedFile {
-    std::string name;
-    wil::unique_hfile handle;
-};
-
 struct ManifestVolumeMetadata {
     std::optional<std::vector<BYTE>> mount_manager_id;
     std::optional<std::wstring> file_system;
@@ -71,20 +66,28 @@ template <typename Operation>
 
 // Windows volume names have the form `\\?\Volume{GUID}\`. The braced
 // GUID starts at offset 10 and occupies 38 characters.
-[[nodiscard]] auto ParseVolumeGuid(const std::string_view volume) {
-    return ParseGuid(volume.substr(10, 38));
+template <bool IncludeBraces>
+auto ExtractTextualGuidFromVolumePath(const std::string_view volume) {
+    constexpr auto offset = IncludeBraces ? 0 : 1;
+    return volume.substr(10 + offset, 38 - offset * 2);
 }
 
+[[nodiscard]] auto ParseVolumeGuid(const std::string_view volume) {
+    return ParseGuid(ExtractTextualGuidFromVolumePath<true>(volume));
+}
+
+// TODO: Rewrite or eliminate this function using the sequences abstraction.
 [[nodiscard]] auto VolumeImageName(
     const std::string_view volume,
     const std::string_view extension) -> std::string {
-    return std::format(
-        "volume-{}{}", volume.substr(11, 36), extension);
+    return std::format("volume-{}{}",
+        ExtractTextualGuidFromVolumePath<false>(volume), extension);
 }
 
+// TODO: Rewrite or eliminate this function using the sequences abstraction.
 [[nodiscard]] auto SnapshotImageName(
     const devicefs::vshadow::Snapshot &snapshot) -> std::string {
-    return VolumeImageName(snapshot.original_volume, ".img");
+    return VolumeImageName(snapshot.original_volume, ".img"sv);
 }
 
 template <class ErrorObject>

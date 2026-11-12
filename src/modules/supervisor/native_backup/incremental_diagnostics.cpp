@@ -388,7 +388,7 @@ enum class BackupViewPreparation {
         return BackupViewPreparation::Failed;
     }
 
-    auto filename = internal::VolumeImageName(
+    const auto filename = internal::VolumeImageName(
         report.interval.volume, ".vhdx");
     devicefs::WriteToStream(output,
         "\n  File: {}\n"
@@ -410,11 +410,11 @@ enum class BackupViewPreparation {
         report.map->block_offsets.size(), report.map->descriptor_store_count);
 
     synthetic_sources.push_back({
-        .name = filename,
+        .name{filename},
         .source{filename},
     });
     real_sources.push_back({
-        .name = filename,
+        .name{filename},
         .source{report.interval.payload_device},
     });
     verification_volumes.push_back({

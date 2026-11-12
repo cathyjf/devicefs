@@ -131,7 +131,7 @@ constexpr auto kTcpUsername = "devicefs"sv;
         .Flags = SEC_WINNT_AUTH_IDENTITY_ANSI,
     };
     // Packet integrity adds no value here because any privileged user who
-    // who could tamper with these authenticated loopback packets could achieve
+    // could tamper with these authenticated loopback packets could achieve
     // the same result through more direct methods. More importantly, despite
     // the lack of value, packet integrity would add unnecessary overhead to a
     // performance-sensitive path.

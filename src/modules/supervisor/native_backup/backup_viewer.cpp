@@ -38,6 +38,7 @@ import devicefs.terminal.vt;
 
 using devicefs::terminal::Transcode;
 
+using namespace wil::literals;
 using namespace std::string_view_literals;
 
 namespace internal {
@@ -185,8 +186,9 @@ auto WaitForViewSession(
     auto devicefs_directory = internal::MakeViewDirectory(
         L"devicefs-view", user->User.Sid);
     const auto devicefs_mount = devicefs_directory.path / "view";
-    constexpr auto vhdx_filename = "view.vhdx"sv;
-    const auto projected_vhdx = devicefs_mount / vhdx_filename;
+    constexpr auto vhdx_filename = "view.vhdx"_zv;
+    const auto projected_vhdx = devicefs_mount /
+        std::string_view{vhdx_filename};
     auto volume_directory = internal::MakeViewDirectory(
         L"devicefs-view-volume", user->User.Sid);
 
@@ -231,7 +233,7 @@ auto WaitForViewSession(
         std::string_view{devicefs::rpc::kTcpSourcePrefix};
     const auto source = std::array{
         internal::DeviceFsSource{
-            .name = std::string{vhdx_filename},
+            .name{vhdx_filename},
             .source{devicefs::terminal::vt::Concatenate<kDeviceSourcePrefix,
                 kTcpSourcePrefix>(), address, ':', port},
         },

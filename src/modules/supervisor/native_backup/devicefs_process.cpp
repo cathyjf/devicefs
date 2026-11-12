@@ -49,7 +49,7 @@ using namespace std::string_view_literals;
 using namespace wil::literals;
 
 struct DeviceFsSource {
-    std::string name;
+    devicefs::ConstantString<char, 62, std::uint16_t> name;
     devicefs::ConstantString<char, 36, std::uint32_t> source;
 };
 
@@ -252,12 +252,13 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
         request.mount_target, request.sources.front().name)},
     process{StartProcess(request)} {}
 
+template <class DirtyMapType, auto DirtyMapExtent>
 [[nodiscard]] auto StartDeviceFs(
     const std::span<const devicefs::vshadow::Snapshot> snapshots,
     const wil::zstring_view read_user,
     const bool use_known_data_map,
     const SnapshotHandles &snapshot_handles,
-    const std::span<const NamedFile> dirty_maps) {
+    const std::span<DirtyMapType, DirtyMapExtent> dirty_maps) {
     const auto handle_count = devicefs::math::SafeSum(
         std::size(snapshot_handles), std::size(dirty_maps));
     const auto inherited_handles = NEW_MALLOCA_BUFFER(HANDLE, handle_count);
@@ -276,7 +277,10 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
     const auto sources_first = source_buffer.CreateObjects(snapshots,
         [&snapshot_handles](const auto &snapshot) {
         return DeviceFsSource{
-            .name = SnapshotImageName(snapshot),
+            .name{"volume-"sv,
+                ExtractTextualGuidFromVolumePath<false>(
+                    snapshot.original_volume),
+                ".img"sv},
             .source{devicefs::rpc::kHandleDevicePrefix,
                 devicefs::TextualNumber{std::bit_cast<std::uintptr_t>(
                     snapshot_handles.at(snapshot.identifier).get())}}};
@@ -284,10 +288,13 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
     const auto sources_second = devicefs::CreateObjects(
         sources_first.data() + sources_first.size(), dirty_maps,
         [&add_handle](const auto &entry) {
-        const auto &[name, handle] = entry;
+        const auto &[snapshot, handle] = entry;
         add_handle(handle);
         return DeviceFsSource{
-            .name = name,
+            .name{"volume-"sv,
+                ExtractTextualGuidFromVolumePath<false>(
+                    snapshot.original_volume),
+                ".img.dirty.bitmap"sv},
             .source{devicefs::rpc::kFileHandleDevicePrefix,
                 devicefs::TextualNumber{
                     std::bit_cast<std::uintptr_t>(handle.get())}}};

@@ -213,7 +213,7 @@ namespace internal {
         }) | std::ranges::to<SnapshotHandles>();
     const auto devicefs = DeviceFsChild{StartDeviceFs(
         snapshot_set.snapshots, read_user, use_known_data_map,
-        snapshot_handles, dirty_maps.files)};
+        snapshot_handles, std::span{dirty_maps.files})};
 
     if (!WaitForDeviceFs(devicefs.Process(), cancellation_event)) {
         return kCancelledExitCode;

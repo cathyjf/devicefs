@@ -26,9 +26,14 @@ import devicefs.vss_block_descriptors;
 
 namespace internal {
 
+struct SnapshotDirtyMap {
+    const devicefs::vshadow::Snapshot &snapshot;
+    wil::unique_hfile file;
+};
+
 struct PreparedDirtyMaps {
     std::optional<std::int64_t> previous_backup_time;
-    std::vector<NamedFile> files;
+    std::vector<SnapshotDirtyMap> files;
 };
 
 namespace {
@@ -48,11 +53,11 @@ auto MakeDirtyBitmap(const DirtyBlockMap &map) {
 }
 
 auto TryPrepareAndWriteDirtyMapForSnapshot(const auto &snapshot,
-    const auto &baseline) -> NamedFile {
-    const auto name = SnapshotImageName(snapshot);
-    const auto write_error = [&name](const auto &error) {
+    const auto &baseline) -> wil::unique_hfile {
+    const auto write_error = [&snapshot](const auto &error) {
         TryWriteNonFatalError(std::format(
-            "failed to prepare the dirty map for '{}'", name), error);
+            "failed to prepare the dirty map for '{}'",
+            SnapshotImageName(snapshot)), error);
     };
     using MapAndPath = std::pair<DirtyBlockMap, std::filesystem::path>;
     const auto maybe_map_and_path = [&snapshot, &baseline, &write_error]
@@ -117,10 +122,7 @@ auto TryPrepareAndWriteDirtyMapForSnapshot(const auto &snapshot,
     // The reopened handle keeps the map readable after the writer
     // closes. Delete-on-close removes the file when the last handle
     // closes, after both the supervisor and DeviceFs release it.
-    return {
-        .name = name + ".dirty.bitmap",
-        .handle = std::move(read_handle),
-    };
+    return read_handle;
 }
 
 } // namespace
@@ -185,7 +187,7 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
         [](const auto &snapshot_pair) static {
             return snapshot_pair.payload.original_volume;
         }) | std::ranges::to<std::vector>();
-    auto files = std::vector<NamedFile>{};
+    auto files = std::vector<SnapshotDirtyMap>{};
     files.reserve(std::size(snapshots));
     // VSS descriptor metadata is read through the payload snapshots. Creating
     // a newer snapshot on each volume makes that metadata readable. The maps
@@ -240,9 +242,9 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
                 return FutureType{&snapshot, index != 0, error};
             });
         // Collect the futures.
-        for (auto &future : futures) {
-            if (auto &file = future.Get(); file.handle) {
-                files.push_back(std::move(file));
+        for (auto i = 0uz; i < futures.size(); ++i) {
+            if (auto &file = futures[i].Get()) {
+                files.emplace_back(snapshots[i].payload, std::move(file));
             }
         }
         return kReturnValue;

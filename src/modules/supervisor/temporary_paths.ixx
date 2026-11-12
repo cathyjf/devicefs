@@ -23,6 +23,7 @@ export module devicefs.supervisor.temporary_paths;
 import std;
 import <devicefs/common.h>;
 import <devicefs/windows_imports.h>;
+import devicefs.constant_sequence;
 import devicefs.guid_formatter;
 import devicefs.stream_writer;
 import devicefs.terminal.safecast;
@@ -79,14 +80,9 @@ export [[nodiscard]] auto TemporarySystemDirectoryPath(
         [&path, suffix_length](const auto windows_length) {
         path.resize(windows_length + suffix_length + 1);
     });
-    *cursor = L'\\';
-    const auto caller_prefix_cursor =
-        std::copy(system_temp.begin(), system_temp.end(), cursor + 1);
-    const auto guid_cursor =
-        std::copy(prefix.begin(), prefix.end(), caller_prefix_cursor);
-    *guid_cursor = L'-';
-    FormatGuidToBuffer<false>(GenerateRandomGuid(),
-        std::span<wchar_t, guid_length>{guid_cursor + 1, guid_length});
+    devicefs::JoinSequences(std::addressof(*cursor),
+        L'\\', system_temp, prefix, L'-',
+        SpecialGuidSequence<false>{GenerateRandomGuid()});
 
     return std::filesystem::path{std::move(path)};
 }

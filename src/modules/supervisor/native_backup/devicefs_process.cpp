@@ -71,10 +71,9 @@ class DeviceFsStopEventName {
     constexpr static auto kTotalLength = kPrefixLength + kSuffixLength;
 public:
     explicit DeviceFsStopEventName() noexcept {
-        memcpy(buffer_.data(), kPrefix.data(), kPrefixLength);
-        FormatGuidToBuffer<false>(GenerateRandomGuid(),
-            std::span{buffer_}.subspan<kPrefixLength, kSuffixLength>());
-        buffer_[kTotalLength] = '\0';
+        devicefs::JoinSequences(buffer_.data(),
+            kPrefix,
+            SpecialGuidSequence<false>{GenerateRandomGuid()}, '\0');
     }
     constexpr auto c_str() const noexcept {
         return buffer_.data();

@@ -86,6 +86,29 @@ export template <bool IncludeBraces = true>
 template auto FormatGuid<true>(const GUID &);
 template auto FormatGuid<false>(const GUID &);
 
+export template <bool IncludeBraces>
+class SpecialGuidSequence {
+public:
+    constexpr auto static kIsSpecialSequence = true;
+
+    constexpr SpecialGuidSequence(const GUID &guid) noexcept :
+        guid_{guid} {}
+
+    static constexpr auto size() noexcept {
+        return GuidLength<IncludeBraces>;
+    }
+
+    auto operator()(auto *const cursor) const noexcept {
+        using Character = std::remove_cvref_t<decltype(*cursor)>;
+        auto *const last = cursor + size();
+        FormatGuidToBuffer<IncludeBraces>(guid_,
+            std::span<Character, size()>{cursor, last});
+        return last;
+    }
+private:
+    const GUID &guid_;
+};
+
 // Parse a GUID with or without enclosing braces.
 export [[nodiscard]] auto ParseGuid(const std::string_view value)
 -> std::expected<GUID, HRESULT> {

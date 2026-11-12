@@ -28,11 +28,10 @@ namespace devicefs {
 template <class T>
 concept IsSequence = requires { std::size(std::declval<T>()); };
 
-struct SpecialSequenceTag {};
-
 template <class T>
-concept IsSpecialSequence = std::is_base_of_v<SpecialSequenceTag,
-    std::remove_cvref_t<T>>;
+concept IsSpecialSequence = requires {
+    requires static_cast<bool>(std::remove_cvref_t<T>::kIsSpecialSequence);
+};
 
 [[msvc::forceinline]]
 constexpr auto GenericSize(const auto &object) {
@@ -55,8 +54,10 @@ constexpr auto GenericData(const auto &object) {
 export template <std::uint64_t Base = 10,
     std::unsigned_integral T = std::uint64_t>
     requires ((Base >= 2) && (Base <= 36))
-class TextualNumber : SpecialSequenceTag {
+class TextualNumber {
 public:
+    constexpr auto static kIsSpecialSequence = true;
+
     [[msvc::forceinline]]
     constexpr TextualNumber(const T integer) noexcept :
         integer_{integer},
@@ -113,6 +114,11 @@ public:
         }
         return SequenceJoiner{cursor_ + size};
     }
+
+    [[msvc::forceinline]]
+    constexpr auto GetCursor() const noexcept {
+        return cursor_;
+    }
 private:
     T *const cursor_;
 };
@@ -120,7 +126,8 @@ private:
 export
 [[msvc::forceinline]]
 constexpr auto JoinSequences(auto *const buffer, auto &&...args) {
-    (SequenceJoiner{buffer} + ... + std::forward<decltype(args)>(args));
+    return (SequenceJoiner{buffer} + ... +
+        std::forward<decltype(args)>(args)).GetCursor();
 }
 
 template <class Target, class Source>

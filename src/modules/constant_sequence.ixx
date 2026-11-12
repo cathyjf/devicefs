@@ -257,10 +257,15 @@ export template <class T, std::size_t InlineCapacity,
 class ConstantString : private ConstantSequence<T, InlineCapacity, SizeType> {
     using Base = ConstantSequence<T, InlineCapacity, SizeType>;
 public:
+    // When this constructor used the abbreviated `auto` template syntax,
+    // MSVC failed to inline it at some call sites. Using the longer
+    // traditional template syntax instead caused MSVC to inline this
+    // constructor at each call site.
+    template <class... Args>
     [[msvc::forceinline]]
-    explicit ConstantString(auto &&...args) noexcept(sizeof...(args) == 0)
-        requires (!IsRawArray<decltype(args), T> && ...) :
-        Base{std::forward<decltype(args)>(args)..., T{}} {}
+    explicit ConstantString(Args &&...args) noexcept(sizeof...(args) == 0)
+        requires (!IsRawArray<Args, T> && ...) :
+        Base{std::forward<Args>(args)..., T{}} {}
 
     using Base::data;
 

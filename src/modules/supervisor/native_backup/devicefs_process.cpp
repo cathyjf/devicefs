@@ -136,7 +136,7 @@ auto ConstructReadinessPath(const std::string_view target,
         target.length() + source.length();
     const auto buffer = NEW_MALLOCA_BUFFER(char, length.integer);
     const auto span = std::span{buffer.get(), length.integer};
-    devicefs::JoinSequences(span, target, '\\', source);
+    devicefs::JoinSequences(span.data(), target, '\\', source);
     return std::filesystem::path{Transcode<std::wstring>(span)};
 }
 

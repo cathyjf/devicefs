@@ -46,39 +46,40 @@ constexpr auto GenericData(const auto &object) {
     }
 }
 
-template <class Span>
+template <class T>
 class SequenceJoiner {
 public:
     [[msvc::forceinline]]
-    constexpr SequenceJoiner(const Span span) noexcept : span_{span} {}
+    constexpr SequenceJoiner(T *const cursor) noexcept : cursor_{cursor} {}
 
     [[msvc::forceinline]]
     constexpr auto operator+(auto &&operand) const noexcept {
         static_assert(
-            sizeof(*GenericData(operand)) == sizeof(typename Span::value_type),
+            sizeof(*GenericData(operand)) == sizeof(*cursor_),
             "source and destination elements must have the same size");
         static_assert(
             std::is_trivially_copyable_v<std::remove_cvref_t<
                 decltype(*GenericData(operand))>>,
             "source type must be trivially copyable");
         static_assert(
-            std::is_implicit_lifetime_v<typename Span::value_type>,
+            std::is_implicit_lifetime_v<std::remove_cvref_t<
+                decltype(*cursor_)>>,
             "destination type must be an implicit lifetime type");
         const auto size = GenericSize(operand);
         if (size != 0) {
-            std::memcpy(span_.data(), GenericData(operand),
+            std::memcpy(cursor_, GenericData(operand),
                 sizeof(*GenericData(operand)) * size);
         }
-        return SequenceJoiner{span_.subspan(size)};
+        return SequenceJoiner{cursor_ + size};
     }
 private:
-    const Span span_;
+    T *const cursor_;
 };
 
 export
 [[msvc::forceinline]]
-constexpr auto JoinSequences(const auto span, auto &&...args) {
-    (SequenceJoiner{span} + ... + std::forward<decltype(args)>(args));
+constexpr auto JoinSequences(auto *const buffer, auto &&...args) {
+    (SequenceJoiner{buffer} + ... + std::forward<decltype(args)>(args));
 }
 
 template <class Target, class Source>
@@ -161,14 +162,14 @@ public:
         const auto &size = SetSize(SafeNarrow<SizeType>(
             (devicefs::math::SafeAugend{0uz} + ... +
                 GenericSize(args)).integer));
-        JoinSequences(std::span{[this, &size] [[msvc::forceinline]] {
+        JoinSequences([this, &size] [[msvc::forceinline]] {
             if (size <= InlineCapacity) {
                 return GetInlineStorage();
             } else {
                 return (::new (storage_.data()) HeapType{
                     NewUninitializedHeapAllocation<T>(size)})->get();
             }
-        }(), size}, std::forward<decltype(args)>(args)...);
+        }(), std::forward<decltype(args)>(args)...);
     }
 
     [[msvc::forceinline]]

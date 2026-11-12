@@ -28,6 +28,12 @@ namespace devicefs {
 template <class T>
 concept IsSequence = requires { std::size(std::declval<T>()); };
 
+struct SpecialSequenceTag {};
+
+template <class T>
+concept IsSpecialSequence = std::is_base_of_v<SpecialSequenceTag,
+    std::remove_cvref_t<T>>;
+
 [[msvc::forceinline]]
 constexpr auto GenericSize(const auto &object) {
     if constexpr (IsSequence<decltype(object)>) {
@@ -46,6 +52,33 @@ constexpr auto GenericData(const auto &object) {
     }
 }
 
+export template <std::uint64_t Base = 10,
+    std::unsigned_integral T = std::uint64_t>
+    requires ((Base >= 2) && (Base <= 36))
+class TextualNumber : SpecialSequenceTag {
+public:
+    [[msvc::forceinline]]
+    constexpr TextualNumber(const T integer) noexcept :
+        integer_{integer},
+        digits_{devicefs::math::CountDigits<Base>(integer)} {}
+
+    [[msvc::forceinline]]
+    constexpr auto size() const noexcept {
+        return digits_;
+    }
+
+    [[msvc::forceinline]]
+    constexpr auto operator()(auto *const cursor) const noexcept {
+        static_assert(sizeof(*cursor) == sizeof(char),
+            "textual numbers require one-byte destination elements");
+        auto *const first = ByteViewCast<char *>(cursor);
+        return std::to_chars(first, first + digits_, integer_, Base).ptr;
+    }
+private:
+    const T integer_;
+    const std::uint8_t digits_;
+};
+
 template <class T>
 class SequenceJoiner {
 public:
@@ -53,7 +86,15 @@ public:
     constexpr SequenceJoiner(T *const cursor) noexcept : cursor_{cursor} {}
 
     [[msvc::forceinline]]
-    constexpr auto operator+(auto &&operand) const noexcept {
+    constexpr auto operator+(auto &&operand) const noexcept
+        requires (IsSpecialSequence<decltype(operand)>) {
+        return devicefs::SequenceJoiner{std::invoke(
+            std::forward<decltype(operand)>(operand), cursor_)};
+    }
+
+    [[msvc::forceinline]]
+    constexpr auto operator+(auto &&operand) const noexcept
+        requires (!IsSpecialSequence<decltype(operand)>) {
         static_assert(
             sizeof(*GenericData(operand)) == sizeof(*cursor_),
             "source and destination elements must have the same size");

@@ -116,13 +116,7 @@ private:
 template <std::unsigned_integral auto Number>
 consteval auto ConvertNumberToString() noexcept {
     static constexpr auto kStringArray = [] static consteval noexcept {
-        constexpr auto digit_count = [] static consteval noexcept {
-            auto count = std::size_t{1};
-            for (auto value = Number; value >= 10; value /= 10) {
-                ++count;
-            }
-            return count;
-        }();
+        constexpr auto digit_count = devicefs::math::CountDigits(Number);
         auto text = std::array<char, digit_count + 1>{};
         std::to_chars(text.data(), text.data() + digit_count, Number);
         return text;
@@ -285,8 +279,8 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
         return DeviceFsSource{
             .name = SnapshotImageName(snapshot),
             .source{devicefs::rpc::kHandleDevicePrefix,
-                std::to_string(std::bit_cast<std::uintptr_t>(
-                    snapshot_handles.at(snapshot.identifier).get()))}};
+                devicefs::TextualNumber{std::bit_cast<std::uintptr_t>(
+                    snapshot_handles.at(snapshot.identifier).get())}}};
     });
     const auto sources_second = devicefs::CreateObjects(
         sources_first.data() + sources_first.size(), dirty_maps,
@@ -296,7 +290,8 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
         return DeviceFsSource{
             .name = name,
             .source{devicefs::rpc::kFileHandleDevicePrefix,
-                std::to_string(std::bit_cast<std::uintptr_t>(handle.get()))}};
+                devicefs::TextualNumber{
+                    std::bit_cast<std::uintptr_t>(handle.get())}}};
     });
 
     return DeviceFsProcess{DeviceFsStartRequest{

@@ -147,6 +147,45 @@ private:
     })> storage_{};
 };
 
+export template <class T>
+class DisjointIterator {
+public:
+    [[msvc::forceinline]]
+    DisjointIterator(T *const cursor) noexcept :
+        cursor_{cursor} {}
+
+    // Precondition: `first` is a nonempty span.
+    template <auto Extent>
+    [[msvc::forceinline]]
+    DisjointIterator(const std::span<T, Extent> first, auto *const tail) noexcept :
+        cursor_{first.data()},
+        crossover_{first.data() + first.size()},
+        tail_{tail} {}
+
+    [[gsl::suppress("26445", justification:
+        "This code dereferences a pointer generically. No benefit would be "
+        "gained by adding special treatment for `std::string_view`.")]]
+    [[msvc::forceinline]]
+    auto operator*() const noexcept -> decltype(auto) {
+        return *cursor_;
+    }
+    [[msvc::forceinline]]
+    auto operator++() noexcept -> decltype(auto) {
+        if (++cursor_ == crossover_) {
+            cursor_ = tail_;
+        }
+        return *this;
+    }
+    [[msvc::forceinline]]
+    auto operator!=(const T *const other) const noexcept {
+        return cursor_ != other;
+    }
+private:
+    T *cursor_{};
+    T *const crossover_{};
+    T *const tail_{};
+};
+
 export template <class T, std::size_t InlineCapacity = 0>
     requires ((requires { typename ReallocVector<T, false>; }) && (
         (InlineCapacity == 0) ||
@@ -197,34 +236,16 @@ public:
 
     [[msvc::forceinline]]
     auto begin() const noexcept {
-        struct ConstIterator {
-            const T *cursor{};
-            const T *const crossover{};
-            const T *const heap{};
-
-            [[msvc::forceinline]]
-            auto operator*() const noexcept -> decltype(auto) {
-                return *cursor;
-            }
-            [[msvc::forceinline]]
-            auto operator++() noexcept -> decltype(auto) {
-                if (++cursor == crossover) {
-                    cursor = heap;
-                }
-                return *this;
-            }
-            [[msvc::forceinline]]
-            auto operator!=(const T *const other) const noexcept {
-                return cursor != other;
-            }
-        };
         const auto *const first =
             std::launder(reinterpret_cast<const T *>(inline_.data()));
         if (inline_bytes_ < inline_.size()) {
-            return ConstIterator{first};
+            return DisjointIterator{first};
         }
-        return ConstIterator{first,
-            reinterpret_cast<const T *>(inline_.data() + inline_.size()),
+        constexpr auto extent = (InlineCapacity != 0) ?
+            InlineCapacity : std::dynamic_extent;
+        return DisjointIterator{
+            std::span<const T, extent>{first,
+                reinterpret_cast<const T *>(inline_.data() + inline_.size())},
             heap_.data()};
     }
 

@@ -21,13 +21,12 @@ module;
 module devicefs.supervisor.native_backup:pbs;
 
 import std;
-import devicefs.file_reader;
-import devicefs.terminal.safecast;
+import <devicefs/common.h>;
 import <devicefs/windows_imports.h>;
 import :internal;
-import devicefs.supervisor.process_privileges;
 import :s4u_logon;
-import <devicefs/common.h>;
+import devicefs.bitmap_set;
+import devicefs.file_reader;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
 import devicefs.supervisor.configuration;
@@ -35,7 +34,9 @@ import devicefs.supervisor.embedded_artifacts;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.materialize_oci;
 import devicefs.supervisor.process_launch;
+import devicefs.supervisor.process_privileges;
 import devicefs.supervisor.temporary_paths;
+import devicefs.terminal.safecast;
 import devicefs.terminal.transcoding;
 
 using devicefs::terminal::Transcode;
@@ -331,9 +332,21 @@ struct WslProcess {
     const auto wsl_path = WslExecutablePath();
     const auto wsl_path_text = Transcode<std::string>(wsl_path.native());
     auto command = wil::ArgvToCommandLine([&wsl_path_text, arguments] {
-        auto argv = std::vector<std::string_view>{wsl_path_text};
-        argv.append_range(arguments);
-        return argv;
+        struct ArgumentRange {
+            std::string_view wsl_path_text_view;
+            std::span<const std::string_view> arguments;
+
+            auto begin() const noexcept {
+                return devicefs::DisjointIterator{
+                    std::span<const std::string_view, 1>{
+                        std::addressof(wsl_path_text_view), 1},
+                    arguments.data()};
+            }
+            auto end() const noexcept {
+                return arguments.data() + arguments.size();
+            }
+        };
+        return ArgumentRange{wsl_path_text, arguments};
     }());
     const auto wsl_directory = wsl_path.parent_path();
     const auto windows_username =

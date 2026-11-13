@@ -160,25 +160,23 @@ auto CreateRpcPasswordChannelAndWritePassword(const std::string_view password) {
 }
 
 __pragma(warning(push))
-__pragma(warning(disable : 26495, justification:
-    "This object's storage is intentionally uninitialized. Consumers are "
-    "responsible for initializing it before reading from it."))
+__pragma(warning(disable : 26495, justification :
+    "Uninitialized storage is not exposed through the public interface."))
 template <class Element, class Size>
 class PackedView {
     constexpr static auto kPointerSize = sizeof(Element *);
 public:
-    constexpr PackedView() noexcept {}
-    constexpr PackedView(const Element *const pointer, const Size size)
+    constexpr PackedView(const Element *const pointer, const auto size)
         noexcept {
         std::memcpy(storage_.data(),
             std::addressof(pointer), kPointerSize);
+        const auto size_ = devicefs::terminal::FailFastMaybeCast<Size>(size);
         std::memcpy(storage_.data() + kPointerSize,
-            std::addressof(size), sizeof(Size));
+            std::addressof(size_), sizeof(size_));
     }
     constexpr PackedView(auto &&view)
         noexcept (noexcept(view.data()) && noexcept(view.size())) :
-        PackedView{view.data(),
-            devicefs::terminal::FailFastMaybeCast<Size>(view.size())} {}
+        PackedView{view.data(), view.size()} {}
     operator std::basic_string_view<Element>() const noexcept {
         return {data(), size()};
     }
@@ -237,27 +235,30 @@ auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
     arguments.emplace_back("--stop-event"_zv);
     arguments.emplace_back(stop_event_name);
 
-    const auto source_string_count =
-        request.rpc_endpoint.empty() ? 0 : std::size(request.sources);
-    const auto source_string_buffer = NEW_MALLOCA_BUFFER(
-        std::string, source_string_count);
-    const auto source_strings = source_string_buffer.CreateObjects(
-        request.sources, [&request, &arguments]
-        (auto *const buffer, const auto &source) {
+    const auto rpc_source_buffer_length = request.rpc_endpoint.empty() ? 0uz :
+        std::ranges::fold_left(request.sources, devicefs::math::SafeAugend{0uz},
+            [](const auto length, const auto &source) static {
+                return length + source.source.length() +
+                    devicefs::rpc::kDeviceSourcePrefix.length() + 1;
+            }).integer;
+    const auto rpc_source_buffer =
+        NEW_MALLOCA_BUFFER(char, rpc_source_buffer_length);
+    auto rpc_source_cursor = rpc_source_buffer.get();
+
+    for (const auto &source : request.sources) {
         arguments.emplace_back("--map"_zv);
         arguments.emplace_back(source.name);
         if (request.rpc_endpoint.empty()) {
             arguments.emplace_back(source.source);
-            return devicefs::ObjectCreationDisposition::SkipThisObject;
+            continue;
         }
 
-        auto &argument = arguments.emplace_back();
-        const auto &string = *::new (buffer) std::string{
-            std::format("{}{}", devicefs::rpc::kDeviceSourcePrefix,
-                source.source)};
-        argument = string;
-        return devicefs::ObjectCreationDisposition::ObjectCreated;
-    });
+        const auto *const first = rpc_source_cursor;
+        rpc_source_cursor = devicefs::JoinSequences(rpc_source_cursor,
+            devicefs::rpc::kDeviceSourcePrefix,
+            std::string_view{source.source}, '\0');
+        arguments.emplace_back(first, rpc_source_cursor - first - 1);
+    }
 
     if (!request.rpc_endpoint.empty() &&
         !SetEnvironmentVariableA(

@@ -685,7 +685,7 @@ public:
     constexpr NullTerminatedSequence(const Sequence &sequence) noexcept :
         sequence_{sequence} {}
     constexpr auto size() const noexcept {
-        return std::size(sequence_) + 1;
+        return devicefs::SequenceLength(sequence_) + 1;
     }
     constexpr auto operator()(auto *const cursor) const noexcept {
         return devicefs::JoinSequences(cursor, sequence_, '\0');
@@ -748,7 +748,7 @@ private:
     // `start-pbs.fish` consumes these ten null-delimited records in order,
     // followed, when requested, by the key document that proxmox-backup-client
     // reads from its inherited standard input.
-    const auto fish_stdin_records = std::make_tuple(
+    const auto fish_stdin_records = devicefs::DeferredSequence{
         NullTerminatedSequence{configuration.wsl.client_path},
         NullTerminatedSequence{configuration.pbs_server},
         NullTerminatedSequence{textual_pbs_server_port},
@@ -759,33 +759,34 @@ private:
         NullTerminatedSequence{configuration.pbs_authentication_secret},
         NullTerminatedSequence{manifest},
         NullTerminatedSequence{request.rpc_password},
-        encryption_key_view);
-    const auto fish_stdin_length =
-        devicefs::TupleSequenceLength(fish_stdin_records);
+        encryption_key_view};
+    const auto fish_stdin_length = devicefs::SequenceLength(fish_stdin_records);
     const auto fish_stdin_buffer =
         NEW_MALLOCA_BUFFER(char8_t, fish_stdin_length);
     const auto clear_fish_stdin_buffer = wil::scope_exit(
         [buffer = fish_stdin_buffer.get(), fish_stdin_length] {
         SecureZeroMemory(buffer, fish_stdin_length);
     });
-    devicefs::JoinTupleSequences(fish_stdin_buffer.get(), fish_stdin_records);
+    devicefs::JoinSequences(fish_stdin_buffer.get(), fish_stdin_records);
     const auto fish_stdin_span = std::span<const char8_t>{
         std::start_lifetime_as_array<char8_t>(
             fish_stdin_buffer.get(), fish_stdin_length),
         fish_stdin_length};
 
-    const auto initial_fish_program = std::string_view{StartPbsProgram()};
-    const auto program_length = devicefs::math::SafeAugend{0uz} +
-        initial_fish_program.length() + 1 + request.additional_program.length();
-    const auto program_buffer =
-        NEW_MALLOCA_BUFFER(char, program_length.integer);
-    devicefs::JoinSequences(program_buffer.get(),
-        initial_fish_program, '\n', request.additional_program);
+    const auto fish_program_sequence = devicefs::DeferredSequence{
+        StartPbsProgram(), '\n', request.additional_program};
+    const auto fish_program_length =
+        devicefs::SequenceLength(fish_program_sequence);
+    const auto fish_program_buffer =
+        NEW_MALLOCA_BUFFER(char, fish_program_length);
+    devicefs::JoinSequences(fish_program_buffer.get(), fish_program_sequence);
+    const auto fish_program_span = std::span<const char>{
+        fish_program_buffer.get(), fish_program_length};
 
     return PbsFishOperation{
         .process = StartWslFish(
             std::move(started),
-            std::span<const char>{program_buffer.get(), program_length.integer},
+            fish_program_span,
             fish_stdin_span,
             request.standard_output),
         .pid_file = std::move(pid_file),

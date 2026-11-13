@@ -58,7 +58,7 @@ export template <std::uint64_t Base = 10,
     requires ((Base >= 2) && (Base <= 36))
 class TextualNumber {
 public:
-    constexpr auto static kIsSpecialSequence = true;
+    constexpr static auto kIsSpecialSequence = true;
 
     [[msvc::forceinline]]
     constexpr TextualNumber(const T integer) noexcept :
@@ -132,15 +132,6 @@ constexpr auto JoinSequences(auto *const buffer, auto &&...args) {
         std::forward<decltype(args)>(args)).GetCursor();
 }
 
-export template <class... Types>
-[[msvc::forceinline]]
-constexpr auto JoinTupleSequences(auto *const buffer,
-    const std::tuple<Types...> &tuple) {
-    return std::apply([buffer] [[msvc::forceinline]] (const auto &...args) {
-        return JoinSequences(buffer, args...);
-    }, tuple);
-}
-
 template <class Target, class Source>
 concept IsNarrowingRequired = requires {
     devicefs::terminal::TryCast(std::declval<Source>(),
@@ -170,12 +161,34 @@ constexpr auto SequenceLength(auto &&...args) {
 }
 
 export template <class... Types>
-[[msvc::forceinline]]
-constexpr auto TupleSequenceLength(const std::tuple<Types...> &tuple) {
-    return std::apply([] [[msvc::forceinline]] (const auto &...args) static {
-        return SequenceLength(args...);
-    }, tuple);
-}
+class DeferredSequence {
+public:
+    constexpr static auto kIsSpecialSequence = true;
+
+    [[msvc::forceinline]]
+    constexpr DeferredSequence(Types &&...args) :
+        tuple_{std::forward<Types>(args)...} {}
+
+    [[msvc::forceinline]]
+    constexpr auto size() const {
+        return std::apply([] [[msvc::forceinline]] (const auto &...args)
+            static {
+            return SequenceLength(args...);
+        }, tuple_);
+    }
+
+    [[msvc::forceinline]]
+    constexpr auto operator()(this auto &&self, auto *const cursor) noexcept {
+        return std::apply([cursor] [[msvc::forceinline]] (auto &&...args) {
+            return JoinSequences(cursor, std::forward<decltype(args)>(args)...);
+        }, std::forward<decltype(self)>(self).tuple_);
+    }
+private:
+    std::tuple<Types...> tuple_;
+};
+
+template <class... Types>
+DeferredSequence(Types &&...) -> DeferredSequence<Types...>;
 
 __pragma(warning(push))
 __pragma(warning(disable : 26409, justification:

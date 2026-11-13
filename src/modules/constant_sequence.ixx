@@ -38,6 +38,8 @@ constexpr auto GenericSize(const auto &object) {
     if constexpr (IsSequence<decltype(object)>) {
         return std::size(object);
     } else {
+        static_assert(!IsSpecialSequence<decltype(object)>,
+            "a special sequence must define a `size` function");
         return 1uz;
     }
 }
@@ -130,6 +132,15 @@ constexpr auto JoinSequences(auto *const buffer, auto &&...args) {
         std::forward<decltype(args)>(args)).GetCursor();
 }
 
+export template <class... Types>
+[[msvc::forceinline]]
+constexpr auto JoinTupleSequences(auto *const buffer,
+    const std::tuple<Types...> &tuple) {
+    return std::apply([buffer] [[msvc::forceinline]] (const auto &...args) {
+        return JoinSequences(buffer, args...);
+    }, tuple);
+}
+
 template <class Target, class Source>
 concept IsNarrowingRequired = requires {
     devicefs::terminal::TryCast(std::declval<Source>(),
@@ -138,7 +149,7 @@ concept IsNarrowingRequired = requires {
 
 template <class Target, class Source>
 [[msvc::forceinline]]
-auto SafeNarrow(const Source source)
+constexpr auto SafeNarrow(const Source source)
     noexcept (!IsNarrowingRequired<Target, Source>) {
     if constexpr (IsNarrowingRequired<Target, Source>) {
         /* [[indeterminate]] */ Target output;
@@ -149,6 +160,21 @@ auto SafeNarrow(const Source source)
     } else {
         return source;
     }
+}
+
+export template <class SizeType = std::size_t>
+[[msvc::forceinline]]
+constexpr auto SequenceLength(auto &&...args) {
+    return SafeNarrow<SizeType>((devicefs::math::SafeAugend{0uz} + ... +
+        GenericSize(args)).integer);
+}
+
+export template <class... Types>
+[[msvc::forceinline]]
+constexpr auto TupleSequenceLength(const std::tuple<Types...> &tuple) {
+    return std::apply([] [[msvc::forceinline]] (const auto &...args) static {
+        return SequenceLength(args...);
+    }, tuple);
 }
 
 __pragma(warning(push))
@@ -207,9 +233,7 @@ public:
     ConstantSequence(auto &&...args) noexcept(sizeof...(args) == 0)
         requires ((!std::is_base_of_v<ConstantSequenceTag,
             std::remove_cvref_t<decltype(args)>>) && ...) {
-        const auto &size = SetSize(SafeNarrow<SizeType>(
-            (devicefs::math::SafeAugend{0uz} + ... +
-                GenericSize(args)).integer));
+        const auto &size = SetSize(SequenceLength<SizeType>(args...));
         JoinSequences([this, &size] [[msvc::forceinline]] {
             if (size <= InlineCapacity) {
                 return GetInlineStorage();

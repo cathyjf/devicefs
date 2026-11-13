@@ -678,6 +678,22 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
     }
 }
 
+template <class Sequence>
+class NullTerminatedSequence {
+public:
+    constexpr static auto kIsSpecialSequence = true;
+    constexpr NullTerminatedSequence(const Sequence &sequence) noexcept :
+        sequence_{sequence} {}
+    constexpr auto size() const noexcept {
+        return std::size(sequence_) + 1;
+    }
+    constexpr auto operator()(auto *const cursor) const noexcept {
+        return devicefs::JoinSequences(cursor, sequence_, '\0');
+    }
+private:
+    const Sequence &sequence_;
+};
+
 [[nodiscard]] auto StartPbsFish(
     const BackupConfiguration &configuration,
     const std::optional<std::u8string> &namespace_override,
@@ -716,34 +732,47 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
     // Launching WSL loads the user's profile, so the OCI lookup below can
     // read the distribution registration before the manifest is serialized.
     auto started = StartWslFishProcess(configuration, argument_range);
-    auto input = SecureUtf8String{};
-    // start-pbs.fish consumes these ten NUL-delimited records in order,
+    const auto textual_pbs_server_port =
+        devicefs::TextualNumber{configuration.pbs_port};
+    const auto namespace_view = std::u8string_view{namespace_override ?
+        *namespace_override : configuration.pbs_namespace};
+    const auto manifest = request.snapshot_manifest ?
+        request.snapshot_manifest(
+            ReadWslOciLayerDigest(configuration.wsl.distribution,
+                started.process.process.hProcess)) :
+        std::u8string{};
+    const auto encryption_key_view = request.send_encryption_key ?
+        std::u8string_view{configuration.pbs_encryption_key} :
+        std::u8string_view{};
+
+    // `start-pbs.fish` consumes these ten null-delimited records in order,
     // followed, when requested, by the key document that proxmox-backup-client
     // reads from its inherited standard input.
-    const auto append_record = [&](const std::u8string_view value) {
-        input.append(value);
-        input.push_back(u8'\0');
-    };
-    append_record(configuration.wsl.client_path);
-    append_record(configuration.pbs_server);
-    const auto port = std::to_string(configuration.pbs_port);
-    append_record(std::u8string{port.begin(), port.end()});
-    append_record(configuration.pbs_datastore);
-    append_record(configuration.pbs_auth_id);
-    append_record(namespace_override
-        ? *namespace_override : configuration.pbs_namespace);
-    append_record(configuration.pbs_fingerprint);
-    append_record(configuration.pbs_authentication_secret);
-    append_record(request.snapshot_manifest
-        ? request.snapshot_manifest(ReadWslOciLayerDigest(
-            configuration.wsl.distribution, started.process.process.hProcess))
-        : std::u8string{});
-    input.append(
-        request.rpc_password.begin(), request.rpc_password.end());
-    input.push_back(u8'\0');
-    if (request.send_encryption_key) {
-        input.append(configuration.pbs_encryption_key);
-    }
+    const auto fish_stdin_records = std::make_tuple(
+        NullTerminatedSequence{configuration.wsl.client_path},
+        NullTerminatedSequence{configuration.pbs_server},
+        NullTerminatedSequence{textual_pbs_server_port},
+        NullTerminatedSequence{configuration.pbs_datastore},
+        NullTerminatedSequence{configuration.pbs_auth_id},
+        NullTerminatedSequence{namespace_view},
+        NullTerminatedSequence{configuration.pbs_fingerprint},
+        NullTerminatedSequence{configuration.pbs_authentication_secret},
+        NullTerminatedSequence{manifest},
+        NullTerminatedSequence{request.rpc_password},
+        encryption_key_view);
+    const auto fish_stdin_length =
+        devicefs::TupleSequenceLength(fish_stdin_records);
+    const auto fish_stdin_buffer =
+        NEW_MALLOCA_BUFFER(char8_t, fish_stdin_length);
+    const auto clear_fish_stdin_buffer = wil::scope_exit(
+        [buffer = fish_stdin_buffer.get(), fish_stdin_length] {
+        SecureZeroMemory(buffer, fish_stdin_length);
+    });
+    devicefs::JoinTupleSequences(fish_stdin_buffer.get(), fish_stdin_records);
+    const auto fish_stdin_span = std::span<const char8_t>{
+        std::start_lifetime_as_array<char8_t>(
+            fish_stdin_buffer.get(), fish_stdin_length),
+        fish_stdin_length};
 
     const auto initial_fish_program = std::string_view{StartPbsProgram()};
     const auto program_length = devicefs::math::SafeAugend{0uz} +
@@ -757,7 +786,7 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
         .process = StartWslFish(
             std::move(started),
             std::span<const char>{program_buffer.get(), program_length.integer},
-            std::span<const char8_t>{input.data(), input.size()},
+            fish_stdin_span,
             request.standard_output),
         .pid_file = std::move(pid_file),
         .stop_file = std::move(stop_file),

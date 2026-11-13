@@ -27,6 +27,7 @@ import <devicefs/windows_imports.h>;
 import :internal;
 import :s4u_logon;
 import devicefs.bitmap_set;
+import devicefs.constant_sequence;
 import devicefs.file_reader;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
@@ -34,6 +35,7 @@ import devicefs.supervisor.configuration;
 import devicefs.supervisor.embedded_artifacts;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.materialize_oci;
+import devicefs.supervisor.math;
 import devicefs.supervisor.process_launch;
 import devicefs.supervisor.process_privileges;
 import devicefs.supervisor.temporary_paths;
@@ -448,7 +450,7 @@ auto CreateUniquePipe() {
 
 [[nodiscard]] auto StartWslFishProcess(
     const BackupConfiguration &configuration,
-    const std::span<const std::string_view> arguments) -> StartedWslFish {
+    const auto &arguments) -> StartedWslFish {
     auto input = CreateUniquePipe();
     auto output = CreateUniquePipe();
     auto error = CreateUniquePipe();
@@ -696,16 +698,24 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
         }
         return Transcode<std::string>(value);
     }();
-    auto arguments = std::vector<std::string_view>{
-        pid_file, stop_file, computer_name};
+
+    const auto argument_count = 3uz + (parallel_images ? 1uz : 0uz);
+    const auto argument_buffer =
+        NEW_MALLOCA_BUFFER(std::string_view, argument_count);
+    auto arguments = devicefs::DisjointReallocVector{
+        std::span{argument_buffer.get(), argument_count}};
+    arguments.emplace_back(pid_file);
+    arguments.emplace_back(stop_file);
+    arguments.emplace_back(computer_name);
     if (parallel_images) {
-        arguments.push_back("--parallel-images");
+        arguments.emplace_back("--parallel-images"sv);
     }
-    arguments.append_range(request.additional_arguments);
+    const auto argument_range = devicefs::DisjointRange{
+        arguments, request.additional_arguments};
 
     // Launching WSL loads the user's profile, so the OCI lookup below can
     // read the distribution registration before the manifest is serialized.
-    auto started = StartWslFishProcess(configuration, arguments);
+    auto started = StartWslFishProcess(configuration, argument_range);
     auto input = SecureUtf8String{};
     // start-pbs.fish consumes these ten NUL-delimited records in order,
     // followed, when requested, by the key document that proxmox-backup-client
@@ -734,18 +744,21 @@ auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
     if (request.send_encryption_key) {
         input.append(configuration.pbs_encryption_key);
     }
-    const auto program = std::array{
-        std::string_view{StartPbsProgram()},
-        "\n"sv,
-        request.additional_program,
-    } | std::views::join | std::ranges::to<std::vector>();
-    auto process = StartWslFish(
-        std::move(started),
-        program,
-        std::span<const char8_t>{input.data(), input.size()},
-        request.standard_output);
+
+    const auto initial_fish_program = std::string_view{StartPbsProgram()};
+    const auto program_length = devicefs::math::SafeAugend{0uz} +
+        initial_fish_program.length() + 1 + request.additional_program.length();
+    const auto program_buffer =
+        NEW_MALLOCA_BUFFER(char, program_length.integer);
+    devicefs::JoinSequences(program_buffer.get(),
+        initial_fish_program, '\n', request.additional_program);
+
     return PbsFishOperation{
-        .process = std::move(process),
+        .process = StartWslFish(
+            std::move(started),
+            std::span<const char>{program_buffer.get(), program_length.integer},
+            std::span<const char8_t>{input.data(), input.size()},
+            request.standard_output),
         .pid_file = std::move(pid_file),
         .stop_file = std::move(stop_file),
         .term_grace = request.term_grace,

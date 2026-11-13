@@ -162,6 +162,7 @@ export template <class PrefixIterator,
 class DisjointIterator {
     constexpr static auto kHasSimpleTail =
         std::is_pointer_v<std::remove_reference_t<PrefixIterator>> &&
+        std::is_pointer_v<std::remove_reference_t<PrefixEndIterator>> &&
         std::is_pointer_v<std::remove_reference_t<TailIterator>>;
 public:
     [[msvc::forceinline]]
@@ -204,6 +205,7 @@ public:
         if constexpr (kHasSimpleTail) {
             if (++cursor_ == crossover_) {
                 cursor_ = tail_;
+                crossover_ = nullptr;
             }
         } else if (cursor_ != crossover_) {
             ++cursor_;
@@ -215,14 +217,14 @@ public:
     [[msvc::forceinline]]
     auto operator!=(const auto other) const noexcept {
         if constexpr (kHasSimpleTail) {
-            return cursor_ != other;
+            return (cursor_ != other) || crossover_;
         } else {
             return (cursor_ != crossover_) || (tail_ != other);
         }
     }
 private:
     PrefixIterator cursor_{};
-    const PrefixEndIterator crossover_{};
+    PrefixEndIterator crossover_{};
     std::conditional_t<kHasSimpleTail,
         const TailIterator, TailIterator> tail_{};
 };

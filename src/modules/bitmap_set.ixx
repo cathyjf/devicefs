@@ -31,6 +31,9 @@ public:
     // Precondition:
     //   The construction of a new `T` from the provided arguments must not
     //   access any memory within the existing elements of this container.
+    [[gsl::suppress("26445", justification:
+        "This code creates objects generically. No benefit would be "
+        "gained by adding special treatment for `std::string_view`.")]]
     [[msvc::forceinline]]
     _Pre_satisfies_(size_ < max_size_)
     auto emplace_back(auto &&...arguments) -> T &
@@ -147,22 +150,40 @@ private:
     })> storage_{};
 };
 
-export template <class T, class TailIterator = T *>
+template <class T>
+concept StorageExposingRange = requires {
+    std::data(std::declval<T>());
+    std::size(std::declval<T>());
+};
+
+export template <class PrefixIterator,
+    class PrefixEndIterator = PrefixIterator,
+    class TailIterator = PrefixIterator>
 class DisjointIterator {
     constexpr static auto kHasSimpleTail =
+        std::is_pointer_v<std::remove_reference_t<PrefixIterator>> &&
         std::is_pointer_v<std::remove_reference_t<TailIterator>>;
 public:
     [[msvc::forceinline]]
-    DisjointIterator(T *const cursor) noexcept :
+    DisjointIterator(const PrefixIterator cursor) noexcept :
         cursor_{cursor} {}
 
     // Precondition: `first` is a nonempty span.
-    template <auto Extent>
+    template <class Range>
+        requires StorageExposingRange<const Range &>
     [[msvc::forceinline]]
-    DisjointIterator(const std::span<T, Extent> first,
-        const TailIterator tail) noexcept :
-        cursor_{first.data()},
-        crossover_{first.data() + first.size()},
+    DisjointIterator(const Range &first, const TailIterator tail) noexcept :
+        cursor_{std::data(first)},
+        crossover_{std::data(first) + std::size(first)},
+        tail_{tail} {}
+
+    // Precondition: `first` is a nonempty range.
+    template <class Range>
+        requires (!StorageExposingRange<const Range &>)
+    [[msvc::forceinline]]
+    DisjointIterator(const Range &first, const TailIterator tail) noexcept :
+        cursor_{first.begin()},
+        crossover_{first.end()},
         tail_{tail} {}
 
     [[gsl::suppress("26445", justification:
@@ -172,7 +193,7 @@ public:
     auto operator*() const noexcept -> decltype(auto) {
         if constexpr (kHasSimpleTail) {
             return *cursor_;
-        } else if (!in_tail_) {
+        } else if (cursor_ != crossover_) {
             return *cursor_;
         } else {
             return *tail_;
@@ -184,10 +205,10 @@ public:
             if (++cursor_ == crossover_) {
                 cursor_ = tail_;
             }
-        } else if (in_tail_) {
+        } else if (cursor_ != crossover_) {
+            ++cursor_;
+        } else {
             ++tail_;
-        } else if (++cursor_ == crossover_) {
-            in_tail_ = true;
         }
         return *this;
     }
@@ -196,16 +217,53 @@ public:
         if constexpr (kHasSimpleTail) {
             return cursor_ != other;
         } else {
-            return !in_tail_ || (tail_ != other);
+            return (cursor_ != crossover_) || (tail_ != other);
         }
     }
 private:
-    T *cursor_{};
-    T *const crossover_{};
+    PrefixIterator cursor_{};
+    const PrefixEndIterator crossover_{};
     std::conditional_t<kHasSimpleTail,
         const TailIterator, TailIterator> tail_{};
-    [[msvc::no_unique_address]] std::conditional_t<
-        kHasSimpleTail, std::monostate, bool> in_tail_{};
+};
+
+template <class Range, class TailIterator>
+    requires StorageExposingRange<const Range &>
+DisjointIterator(const Range &, TailIterator) -> DisjointIterator<
+    decltype(std::data(std::declval<const Range &>())),
+    decltype(std::data(std::declval<const Range &>())),
+    TailIterator>;
+
+template <class Range, class TailIterator>
+    requires (!StorageExposingRange<const Range &>)
+DisjointIterator(const Range &, TailIterator) -> DisjointIterator<
+    decltype(std::declval<const Range &>().begin()),
+    decltype(std::declval<const Range &>().end()),
+    TailIterator>;
+
+export template <class Prefix, class Tail>
+class DisjointRange {
+    constexpr static auto kTailExposesStorage =
+        StorageExposingRange<const Tail &>;
+public:
+    const Prefix &prefix;
+    const Tail &tail;
+
+    // Precondition: `prefix` is nonempty.
+    auto begin() const noexcept {
+        if constexpr (kTailExposesStorage) {
+            return devicefs::DisjointIterator{prefix, std::data(tail)};
+        } else {
+            return devicefs::DisjointIterator{prefix, tail.begin()};
+        }
+    }
+    auto end() const noexcept {
+        if constexpr (kTailExposesStorage) {
+            return std::data(tail) + std::size(tail);
+        } else {
+            return tail.end();
+        }
+    }
 };
 
 export template <class T, std::size_t InlineCapacity = 0>
@@ -239,6 +297,9 @@ public:
 
     // Precondition:
     //   The preconditions for `ReallocVector::emplace_back` must be satisfied.
+    [[gsl::suppress("26445", justification:
+        "This code creates objects generically. No benefit would be "
+        "gained by adding special treatment for `std::string_view`.")]]
     [[msvc::forceinline]]
     auto emplace_back(auto &&...arguments) -> decltype(auto) {
         if (inline_bytes_ < inline_.size()) {
@@ -257,7 +318,7 @@ public:
     }
 
     [[msvc::forceinline]]
-    auto begin() const noexcept -> DisjointIterator<const T> {
+    auto begin() const noexcept -> DisjointIterator<const T *> {
         const auto *const first =
             std::launder(reinterpret_cast<const T *>(inline_.data()));
         if (inline_bytes_ < inline_.size()) {

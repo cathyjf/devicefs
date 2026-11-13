@@ -22,6 +22,7 @@ module devicefs.supervisor.native_backup:pbs;
 
 import std;
 import <devicefs/common.h>;
+import <devicefs/malloca.h>;
 import <devicefs/windows_imports.h>;
 import :internal;
 import :s4u_logon;
@@ -323,32 +324,6 @@ struct WslProcess {
     }
 };
 
-template <class T, auto Extent, class Tail>
-class DisjointRange {
-    constexpr static auto kTailExposesStorage =
-        requires { std::data(std::declval<const Tail &>()); } &&
-        requires { std::size(std::declval<const Tail &>()); };
-public:
-    const std::span<T, Extent> span;
-    const Tail &tail;
-
-    // Precondition: `span` is nonempty.
-    auto begin() const noexcept {
-        if constexpr (kTailExposesStorage) {
-            return devicefs::DisjointIterator{span, std::data(tail)};
-        } else {
-            return devicefs::DisjointIterator{span, tail.begin()};
-        }
-    }
-    auto end() const noexcept {
-        if constexpr (kTailExposesStorage) {
-            return std::data(tail) + std::size(tail);
-        } else {
-            return tail.end();
-        }
-    }
-};
-
 [[nodiscard]] auto StartWslAsConfiguredUser(
     const BackupConfiguration &configuration,
     const auto &arguments,
@@ -359,7 +334,7 @@ public:
     const auto wsl_path_text = Transcode<std::string>(wsl_path.native());
     const auto wsl_path_text_view = std::string_view{wsl_path_text};
     auto command = wil::ArgvToCommandLine(
-        DisjointRange{std::span<const std::string_view, 1>{
+        devicefs::DisjointRange{std::span<const std::string_view, 1>{
             std::addressof(wsl_path_text_view), 1}, arguments});
     const auto wsl_directory = wsl_path.parent_path();
     const auto windows_username =
@@ -477,23 +452,29 @@ auto CreateUniquePipe() {
     auto input = CreateUniquePipe();
     auto output = CreateUniquePipe();
     auto error = CreateUniquePipe();
-    auto wsl_arguments = std::vector<std::string_view>{
-        "--distribution", configuration.wsl.distribution,
+
+    const auto argument_initial_buffer = 8uz +
+        (configuration.wsl.linux_user ? 2uz : 0uz);
+    const auto wsl_argument_buffer =
+        NEW_MALLOCA_BUFFER(std::string_view, argument_initial_buffer);
+    auto wsl_arguments = devicefs::DisjointReallocVector{
+        std::span{wsl_argument_buffer.get(), argument_initial_buffer}};
+    const auto emplace_many = [&wsl_arguments](auto &&...args) {
+        (wsl_arguments.emplace_back(std::forward<decltype(args)>(args)), ...);
     };
+
+    emplace_many("--distribution"sv, configuration.wsl.distribution);
     if (configuration.wsl.linux_user) {
-        wsl_arguments.push_back("--user");
-        wsl_arguments.push_back(*configuration.wsl.linux_user);
+        emplace_many("--user"sv, *configuration.wsl.linux_user);
     }
-    wsl_arguments.append_range(std::to_array<std::string_view>({
-        "--exec",
-        "/usr/local/bin/devicefs-wsl-startup-broker", "--no-config", "-c",
-        "read --null --global DEVICEFS_FISH_PROGRAM && eval $DEVICEFS_FISH_PROGRAM",
-        "--",
-    }));
+    emplace_many("--exec"sv, "/usr/local/bin/devicefs-wsl-startup-broker"sv,
+        "--no-config"sv, "-c"sv,
+        "read --null --global DEVICEFS_FISH_PROGRAM && eval $DEVICEFS_FISH_PROGRAM"sv,
+        "--"sv);
+
     auto process = StartWslAsConfiguredUser(
         configuration,
-        DisjointRange{
-            std::span<const std::string_view>{wsl_arguments}, arguments},
+        devicefs::DisjointRange{wsl_arguments, arguments},
         input.read.get(),
         output.write.get(),
         error.write.get());

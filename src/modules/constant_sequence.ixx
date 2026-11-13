@@ -155,7 +155,7 @@ constexpr auto SafeNarrow(const Source source)
 
 export template <class SizeType = std::size_t>
 [[msvc::forceinline]]
-constexpr auto SequenceLength(auto &&...args) {
+constexpr auto SequenceLength(const auto &...args) {
     return SafeNarrow<SizeType>((devicefs::math::SafeAugend{0uz} + ... +
         GenericSize(args)).integer);
 }
@@ -189,6 +189,18 @@ private:
 
 template <class... Types>
 DeferredSequence(Types &&...) -> DeferredSequence<Types...>;
+
+export template <class T = std::string>
+auto StringFromSequence(auto &&...sequence) {
+    const auto length = SequenceLength(sequence...);
+    auto string = T{};
+    string.resize_and_overwrite(length,
+        [&sequence...](auto *const buffer, const auto length) noexcept {
+        JoinSequences(buffer, std::forward<decltype(sequence)>(sequence)...);
+        return length;
+    });
+    return string;
+}
 
 __pragma(warning(push))
 __pragma(warning(disable : 26409, justification:

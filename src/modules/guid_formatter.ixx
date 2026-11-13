@@ -28,6 +28,14 @@ template <bool IncludeBraces>
 struct FormattedGuid {
     std::array<char, GuidLength<IncludeBraces>> characters;
 
+    static constexpr auto size() noexcept {
+        return std::tuple_size_v<decltype(characters)>;
+    }
+
+    constexpr auto data() const noexcept {
+        return characters.data();
+    }
+
     [[nodiscard]] constexpr operator std::string_view() const noexcept {
         return {characters.data(), characters.size()};
     }
@@ -91,7 +99,7 @@ class SpecialGuidSequence {
 public:
     constexpr auto static kIsSpecialSequence = true;
 
-    constexpr SpecialGuidSequence(const GUID &guid) noexcept :
+    constexpr SpecialGuidSequence(const GUID guid) noexcept :
         guid_{guid} {}
 
     static constexpr auto size() noexcept {
@@ -106,7 +114,7 @@ public:
         return last;
     }
 private:
-    const GUID &guid_;
+    const GUID guid_;
 };
 
 // Parse a GUID with or without enclosing braces.

@@ -71,9 +71,8 @@ class DeviceFsStopEventName {
     constexpr static auto kTotalLength = kPrefixLength + kSuffixLength;
 public:
     explicit DeviceFsStopEventName() noexcept {
-        devicefs::JoinSequences(buffer_.data(),
-            kPrefix,
-            SpecialGuidSequence<false>{GenerateRandomGuid()}, '\0');
+        devicefs::JoinSequences(buffer_.data(), kPrefix,
+            UniqueNameSequence(), '\0');
     }
     constexpr auto data() const noexcept {
         return buffer_.data();
@@ -326,10 +325,7 @@ template <class DirtyMapType, auto DirtyMapExtent>
     const auto sources_first = source_buffer.CreateObjects(snapshots,
         [&snapshot_handles](const auto &snapshot) {
         return DeviceFsSource{
-            .name{"volume-"sv,
-                ExtractTextualGuidFromVolumePath<false>(
-                    snapshot.original_volume),
-                ".img"sv},
+            .name{SnapshotImageNameSequence(snapshot)},
             .source{devicefs::rpc::kHandleDevicePrefix,
                 devicefs::TextualNumber{std::bit_cast<std::uintptr_t>(
                     snapshot_handles.at(snapshot.identifier).get())}}};
@@ -340,10 +336,7 @@ template <class DirtyMapType, auto DirtyMapExtent>
         const auto &[snapshot, handle] = entry;
         add_handle(handle);
         return DeviceFsSource{
-            .name{"volume-"sv,
-                ExtractTextualGuidFromVolumePath<false>(
-                    snapshot.original_volume),
-                ".img.dirty.bitmap"sv},
+            .name{SnapshotImageNameSequence(snapshot), ".dirty.bitmap"sv},
             .source{devicefs::rpc::kFileHandleDevicePrefix,
                 devicefs::TextualNumber{
                     std::bit_cast<std::uintptr_t>(handle.get())}}};

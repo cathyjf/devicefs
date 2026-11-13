@@ -699,10 +699,10 @@ private:
     const std::optional<std::u8string> &namespace_override,
     const PbsFishRequest &request,
     const bool parallel_images) {
-    const auto control_path = std::format(
-        "/tmp/devicefs-{}", UniqueName());
-    auto pid_file = std::format("{}.pid", control_path);
-    auto stop_file = std::format("{}.stop", control_path);
+    const auto control_path = devicefs::DeferredSequence{
+        "/tmp/devicefs-"sv, UniqueName()};
+    auto pid_file = devicefs::StringFromSequence(control_path, ".pid"sv);
+    auto stop_file = devicefs::StringFromSequence(control_path, ".stop"sv);
     const auto computer_name = [] {
         constexpr auto name = L"COMPUTERNAME";
         auto value = std::wstring{};

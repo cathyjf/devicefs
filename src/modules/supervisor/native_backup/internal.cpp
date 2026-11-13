@@ -23,6 +23,7 @@ module devicefs.supervisor.native_backup:internal;
 import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import devicefs.constant_sequence;
 import devicefs.guid_formatter;
 import devicefs.stream_writer;
 import devicefs.supervisor.vshadow;
@@ -76,18 +77,30 @@ auto ExtractTextualGuidFromVolumePath(const std::string_view volume) {
     return ParseGuid(ExtractTextualGuidFromVolumePath<true>(volume));
 }
 
-// TODO: Rewrite or eliminate this function using the sequences abstraction.
+auto VolumeImageNameSequence(const std::string_view volume,
+    const std::string_view extension) {
+    using namespace std::string_view_literals;
+    return devicefs::DeferredSequence{"volume-"sv,
+        ExtractTextualGuidFromVolumePath<false>(volume), auto(extension)};
+}
+
+[[nodiscard]] auto SnapshotImageNameSequence(
+    const devicefs::vshadow::Snapshot &snapshot) {
+    return VolumeImageNameSequence(snapshot.original_volume, ".img"sv);
+}
+
+// TODO: Eliminate this function.
 [[nodiscard]] auto VolumeImageName(
     const std::string_view volume,
     const std::string_view extension) -> std::string {
-    return std::format("volume-{}{}",
-        ExtractTextualGuidFromVolumePath<false>(volume), extension);
+    return devicefs::StringFromSequence(
+        VolumeImageNameSequence(volume, extension));
 }
 
-// TODO: Rewrite or eliminate this function using the sequences abstraction.
+// TODO: Eliminate this function.
 [[nodiscard]] auto SnapshotImageName(
     const devicefs::vshadow::Snapshot &snapshot) -> std::string {
-    return VolumeImageName(snapshot.original_volume, ".img"sv);
+    return devicefs::StringFromSequence(SnapshotImageNameSequence(snapshot));
 }
 
 template <class ErrorObject>

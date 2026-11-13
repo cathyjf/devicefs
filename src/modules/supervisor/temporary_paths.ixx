@@ -28,6 +28,10 @@ import devicefs.guid_formatter;
 import devicefs.stream_writer;
 import devicefs.terminal.safecast;
 
+export [[nodiscard]] auto UniqueNameSequence() noexcept {
+    return SpecialGuidSequence<false>{GenerateRandomGuid()};
+}
+
 export [[nodiscard]] auto UniqueName() noexcept {
     return FormatGuid<false>(GenerateRandomGuid());
 }
@@ -81,8 +85,7 @@ export [[nodiscard]] auto TemporarySystemDirectoryPath(
         path.resize(windows_length + suffix_length + 1);
     });
     devicefs::JoinSequences(std::addressof(*cursor),
-        L'\\', system_temp, prefix, L'-',
-        SpecialGuidSequence<false>{GenerateRandomGuid()});
+        L'\\', system_temp, prefix, L'-', UniqueNameSequence());
 
     return std::filesystem::path{std::move(path)};
 }

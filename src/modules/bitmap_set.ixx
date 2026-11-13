@@ -147,8 +147,10 @@ private:
     })> storage_{};
 };
 
-export template <class T>
+export template <class T, class TailIterator = T *>
 class DisjointIterator {
+    constexpr static auto kHasSimpleTail =
+        std::is_pointer_v<std::remove_reference_t<TailIterator>>;
 public:
     [[msvc::forceinline]]
     DisjointIterator(T *const cursor) noexcept :
@@ -157,7 +159,8 @@ public:
     // Precondition: `first` is a nonempty span.
     template <auto Extent>
     [[msvc::forceinline]]
-    DisjointIterator(const std::span<T, Extent> first, auto *const tail) noexcept :
+    DisjointIterator(const std::span<T, Extent> first,
+        const TailIterator tail) noexcept :
         cursor_{first.data()},
         crossover_{first.data() + first.size()},
         tail_{tail} {}
@@ -167,23 +170,42 @@ public:
         "gained by adding special treatment for `std::string_view`.")]]
     [[msvc::forceinline]]
     auto operator*() const noexcept -> decltype(auto) {
-        return *cursor_;
+        if constexpr (kHasSimpleTail) {
+            return *cursor_;
+        } else if (!in_tail_) {
+            return *cursor_;
+        } else {
+            return *tail_;
+        }
     }
     [[msvc::forceinline]]
     auto operator++() noexcept -> decltype(auto) {
-        if (++cursor_ == crossover_) {
-            cursor_ = tail_;
+        if constexpr (kHasSimpleTail) {
+            if (++cursor_ == crossover_) {
+                cursor_ = tail_;
+            }
+        } else if (in_tail_) {
+            ++tail_;
+        } else if (++cursor_ == crossover_) {
+            in_tail_ = true;
         }
         return *this;
     }
     [[msvc::forceinline]]
-    auto operator!=(const T *const other) const noexcept {
-        return cursor_ != other;
+    auto operator!=(const auto other) const noexcept {
+        if constexpr (kHasSimpleTail) {
+            return cursor_ != other;
+        } else {
+            return !in_tail_ || (tail_ != other);
+        }
     }
 private:
     T *cursor_{};
     T *const crossover_{};
-    T *const tail_{};
+    std::conditional_t<kHasSimpleTail,
+        const TailIterator, TailIterator> tail_{};
+    [[msvc::no_unique_address]] std::conditional_t<
+        kHasSimpleTail, std::monostate, bool> in_tail_{};
 };
 
 export template <class T, std::size_t InlineCapacity = 0>
@@ -235,15 +257,15 @@ public:
     }
 
     [[msvc::forceinline]]
-    auto begin() const noexcept {
+    auto begin() const noexcept -> DisjointIterator<const T> {
         const auto *const first =
             std::launder(reinterpret_cast<const T *>(inline_.data()));
         if (inline_bytes_ < inline_.size()) {
-            return DisjointIterator{first};
+            return {first};
         }
         constexpr auto extent = (InlineCapacity != 0) ?
             InlineCapacity : std::dynamic_extent;
-        return DisjointIterator{
+        return {
             std::span<const T, extent>{first,
                 reinterpret_cast<const T *>(inline_.data() + inline_.size())},
             heap_.data()};

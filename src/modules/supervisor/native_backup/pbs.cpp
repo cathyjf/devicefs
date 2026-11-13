@@ -323,31 +323,44 @@ struct WslProcess {
     }
 };
 
+template <class T, auto Extent, class Tail>
+class DisjointRange {
+    constexpr static auto kTailExposesStorage =
+        requires { std::data(std::declval<const Tail &>()); } &&
+        requires { std::size(std::declval<const Tail &>()); };
+public:
+    const std::span<T, Extent> span;
+    const Tail &tail;
+
+    // Precondition: `span` is nonempty.
+    auto begin() const noexcept {
+        if constexpr (kTailExposesStorage) {
+            return devicefs::DisjointIterator{span, std::data(tail)};
+        } else {
+            return devicefs::DisjointIterator{span, tail.begin()};
+        }
+    }
+    auto end() const noexcept {
+        if constexpr (kTailExposesStorage) {
+            return std::data(tail) + std::size(tail);
+        } else {
+            return tail.end();
+        }
+    }
+};
+
 [[nodiscard]] auto StartWslAsConfiguredUser(
     const BackupConfiguration &configuration,
-    const std::span<const std::string_view> arguments,
+    const auto &arguments,
     const HANDLE standard_input,
     const HANDLE standard_output,
     const HANDLE standard_error) {
     const auto wsl_path = WslExecutablePath();
     const auto wsl_path_text = Transcode<std::string>(wsl_path.native());
-    auto command = wil::ArgvToCommandLine([&wsl_path_text, arguments] {
-        struct ArgumentRange {
-            std::string_view wsl_path_text_view;
-            std::span<const std::string_view> arguments;
-
-            auto begin() const noexcept {
-                return devicefs::DisjointIterator{
-                    std::span<const std::string_view, 1>{
-                        std::addressof(wsl_path_text_view), 1},
-                    arguments.data()};
-            }
-            auto end() const noexcept {
-                return arguments.data() + arguments.size();
-            }
-        };
-        return ArgumentRange{wsl_path_text, arguments};
-    }());
+    const auto wsl_path_text_view = std::string_view{wsl_path_text};
+    auto command = wil::ArgvToCommandLine(
+        DisjointRange{std::span<const std::string_view, 1>{
+            std::addressof(wsl_path_text_view), 1}, arguments});
     const auto wsl_directory = wsl_path.parent_path();
     const auto windows_username =
         Transcode<std::wstring>(
@@ -477,10 +490,10 @@ auto CreateUniquePipe() {
         "read --null --global DEVICEFS_FISH_PROGRAM && eval $DEVICEFS_FISH_PROGRAM",
         "--",
     }));
-    wsl_arguments.append_range(arguments);
     auto process = StartWslAsConfiguredUser(
         configuration,
-        wsl_arguments,
+        DisjointRange{
+            std::span<const std::string_view>{wsl_arguments}, arguments},
         input.read.get(),
         output.write.get(),
         error.write.get());

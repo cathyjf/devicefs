@@ -139,6 +139,10 @@ concept IsNarrowingRequired = requires {
 };
 
 template <class Target, class Source>
+[[gsl::suppress("26494", justification:
+    "Either the `output` variable will be fully written by `TryCast` or an "
+    "exception will be thrown by this function. An uninitialized value will "
+    "not be returned.")]]
 [[msvc::forceinline]]
 constexpr auto SafeNarrow(const Source source)
     noexcept (!IsNarrowingRequired<Target, Source>) {

@@ -21,6 +21,7 @@ module;
 export module devicefs.supervisor.native_backup;
 
 import std;
+import <devicefs/common.h>;
 import <devicefs/windows_imports.h>;
 import :internal;
 import :devicefs_process;
@@ -28,7 +29,6 @@ export import :incremental_diagnostics;
 export import :manifest;
 import :pbs;
 import :production_incremental;
-import <devicefs/common.h>;
 import devicefs.filesystem.ioctl;
 import devicefs.filesystem.mount_manager;
 import devicefs.file_reader;
@@ -206,10 +206,23 @@ namespace internal {
     const auto dirty_maps = PrepareDirtyMaps(
         cancellation_event, snapshot_set, namespace_override);
     const auto snapshot_handles = snapshot_set.snapshots |
-        std::views::transform([](const auto &snapshot) {
+        std::views::transform([](const auto &snapshot) static {
+            // This snapshot description is purely used for displaying error
+            // messages. A better design would be to pass along only the
+            // `DeferredSequence` object, or a view of it, and let the eventual
+            // error formatter materialize the sequence.
+            //
+            // TODO: Implement the better design.
+            const auto snapshot_description =
+                devicefs::ConstantSequence<char, 52, std::uint32_t>{
+                    SnapshotImageNameSequence(snapshot)};
+            const auto snapshot_description_view = std::string_view{
+                snapshot_description.data(), snapshot_description.size()};
+
             return std::pair{snapshot.identifier,
-                devicefs::OpenBlockDevice(std::filesystem::path{snapshot.device},
-                    SnapshotImageName(snapshot), true)};
+                devicefs::OpenBlockDevice(
+                    std::filesystem::path{snapshot.device},
+                    snapshot_description_view, true)};
         }) | std::ranges::to<SnapshotHandles>();
     const auto devicefs = DeviceFsChild{StartDeviceFs(
         snapshot_set.snapshots, read_user, use_known_data_map,

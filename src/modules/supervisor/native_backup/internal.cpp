@@ -89,15 +89,6 @@ auto VolumeImageNameSequence(const std::string_view volume,
     return VolumeImageNameSequence(snapshot.original_volume, ".img"sv);
 }
 
-// TODO: Eliminate this function.
-[[nodiscard]] auto VolumeImageName(
-    const std::string_view volume,
-    const std::string_view extension) -> std::string {
-    return devicefs::StringFromSequence(
-        VolumeImageNameSequence(volume, extension));
-}
-
-// TODO: Eliminate this function.
 [[nodiscard]] auto SnapshotImageName(
     const devicefs::vshadow::Snapshot &snapshot) -> std::string {
     return devicefs::StringFromSequence(SnapshotImageNameSequence(snapshot));

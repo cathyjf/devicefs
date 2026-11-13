@@ -31,6 +31,7 @@ import :internal;
 import :manifest;
 import devicefs.allocation;
 import devicefs.byte_comparison;
+import devicefs.constant_sequence;
 import devicefs.filesystem;
 import devicefs.guid_formatter;
 import devicefs.object_creator;
@@ -388,8 +389,8 @@ enum class BackupViewPreparation {
         return BackupViewPreparation::Failed;
     }
 
-    const auto filename = internal::VolumeImageName(
-        report.interval.volume, ".vhdx");
+    const auto filename = devicefs::StringFromSequence(
+        internal::VolumeImageNameSequence(report.interval.volume, ".vhdx"));
     devicefs::WriteToStream(output,
         "\n  File: {}\n"
         "    Volume ID: {}\n"

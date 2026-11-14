@@ -235,8 +235,10 @@ export enum class FuturePolicy {
     Default = 0,
     AllowSynchronousCallback = 1,
     CancelOnDestruction = 2,
-    ProvideAtomicReadiness = 4,
-    AllowMultipleRetrieval = 8
+    DetachOnDestruction = 4,
+    ProvideAtomicReadiness = 8,
+    AllowMultipleRetrieval = 16,
+    AllocateExternalState = 32,
 };
 
 export constexpr auto operator&(const FuturePolicy policy,
@@ -250,54 +252,84 @@ export constexpr auto operator|(const FuturePolicy left,
         std::to_underlying(left) | std::to_underlying(right));
 }
 
+template <class FutureState>
+struct ExternalFutureState{
+    [[msvc::no_unique_address]] FutureState state;
+    [[msvc::no_unique_address]] AtomicReadinessFlag released{};
+};
+
 export template <class Callable, class Context,
     FuturePolicy Policy = FuturePolicy::CancelOnDestruction>
 class LightweightFuture {
     using UniqueWork = std::conditional_t<
         Policy & FuturePolicy::CancelOnDestruction,
             wil::unique_threadpool_work,
-            wil::unique_threadpool_work_nocancel>;
-public:
+            std::conditional_t<
+                Policy & FuturePolicy::DetachOnDestruction,
+                    wil::unique_threadpool_work_nowait,
+                    wil::unique_threadpool_work_nocancel>>;
     using ResultType = std::invoke_result_t<Callable, Context &>;
+    static constexpr auto kCallbackExecutionIsNonthrowing =
+        std::is_nothrow_invocable_v<Callable, Context &>;
+    using FutureState = devicefs::FutureState<Context,
+        std::conditional_t<std::is_void_v<ResultType>,
+            VoidSentinel, ResultType>,
+        Policy & FuturePolicy::ProvideAtomicReadiness,
+        !kCallbackExecutionIsNonthrowing>;
+    using ExternalFutureState = devicefs::ExternalFutureState<FutureState>;
+public:
     static_assert(!std::is_same_v<ResultType, VoidSentinel>);
     static_assert(std::is_void_v<ResultType> ||
         std::is_nothrow_destructible_v<Context>);
 
-    // The `AllowSynchronousCallback` and `AllowMultipleRetrieval` policies are
-    // not supported at the same time as each other.
     static_assert(!(Policy & FuturePolicy::AllowSynchronousCallback) ||
         !(Policy & FuturePolicy::AllowMultipleRetrieval));
+    static_assert(!(Policy & FuturePolicy::CancelOnDestruction) ||
+        !(Policy & FuturePolicy::DetachOnDestruction));
+    static_assert(!(Policy & FuturePolicy::DetachOnDestruction) ||
+        (Policy & FuturePolicy::AllocateExternalState));
 
-    // Precondition: if an `error` callable is supplied, invoking it must not
-    // return normally.
+    // This combination could conceptually be allowed, but it is not
+    // supported by the current implementation.
+    static_assert(!(Policy & FuturePolicy::AllowSynchronousCallback) ||
+        !(Policy & FuturePolicy::AllocateExternalState));
+
+    // The `CancelOnDestruction` policy would complicate the implementation
+    // of the externally-allocated state requested by `AllocateExternalState`.
+    // policy cannot be combined with `AllocateExternalState`. Therefore, this
+    // combination is not currently supported.
+    static_assert(!(Policy & FuturePolicy::CancelOnDestruction) ||
+        !(Policy & FuturePolicy::AllocateExternalState));
+
+    // Precondition of all constructors accepting an `error`:
+    //   If an `error` callable is supplied, invoking it must not return
+    //   normally.
+
+    // Inline state constructor.
     LightweightFuture(Context &&context, const bool async = true,
-        auto &&...error) requires (sizeof...(error) <= 1) :
+        auto &&...error)
+            requires (!(Policy & FuturePolicy::AllocateExternalState) &&
+                (sizeof...(error) <= 1)) :
         state_{std::forward<Context>(context)},
-        work_{[this, async, &...error_ = error] -> UniqueWork {
-            if constexpr (Policy & FuturePolicy::AllowSynchronousCallback) {
-                if (!async) {
-                    return nullptr;
-                }
-            }
-            if (const auto work =
-                    CreateThreadpoolWork(WorkCallback, this, nullptr); work) {
-                SubmitThreadpoolWork(work);
-                return UniqueWork{work};
-            }
-            if constexpr (sizeof...(error_) == 0) {
-                [] [[noreturn, msvc::noinline]] static {
-                    WinError("failed to create a `LightweightFuture` object");
-                }();
-            } else {
-                (error_(), ...);
-            }
-        }()} {}
+        work_{MakeWork(&state_, async, error...)} {}
 
-    // Precondition without `AllowMultipleRetrieval`:
-    //   `Get` has never previously been called on this object.
+    // External state constructor.
+    LightweightFuture(Context &&context, auto &&...error)
+            requires ((Policy & FuturePolicy::AllocateExternalState) &&
+                (sizeof...(error) <= 1)) {
+        auto state = std::make_unique<ExternalFutureState>(
+            std::forward<Context>(context));
+        work_ = MakeWork(state.get(), true, error...);
+        state_ = state.release();
+    }
+
+    // Precondition for all invocations:
+    //   Execution is occurring on the same thread where `*this` was created.
     //
-    // Precondition with `AllowMultipleRetrieval`:
-    //   `this->Get()` is not executing on any other thread.
+    // Additional precondition without `AllowMultipleRetrieval`:
+    //   `Get` has never previously been called on this object or on any
+    //   moved-from object that was associated with the same task as this
+    //   object.
     //
     // If any parameters are supplied, they are set to `true` the first time
     // that a state change is observed.
@@ -310,83 +342,148 @@ public:
         requires (AllowStateChange ||
             (Policy & FuturePolicy::AllowMultipleRetrieval))
     auto Get(auto &&...observers)
-        noexcept(noexcept(RunCallback()) &&
+        noexcept(noexcept(RunCallback(GetState())) &&
             (AllowStateChange ?
                 (noexcept(observers = true) && ...) :
                 std::is_nothrow_constructible_v<
                     ResultType, std::add_lvalue_reference_t<ResultType>>))
         -> decltype(auto) {
         using OptionalReturn = std::optional<ResultType>;
+        auto &state = GetState();
         if (!(Policy & (FuturePolicy::AllowSynchronousCallback |
                 FuturePolicy::AllowMultipleRetrieval)) || work_) {
             if constexpr (AllowStateChange) {
                 std::ignore = wil::unique_threadpool_work_nocancel{
                     work_.release()};
                 ((observers = true), ...);
-                return state_.template GetResult<true>();
+                return state.template GetResult<true>();
             } else {
                 return OptionalReturn{};
             }
         }
         if constexpr (Policy & FuturePolicy::AllowMultipleRetrieval) {
             if constexpr (AllowStateChange) {
-                return state_.template GetResult<true>();
+                return state.template GetResult<true>();
             } else {
-                return OptionalReturn{state_.template GetResult<true>()};
+                return OptionalReturn{state.template GetResult<true>()};
             }
         } else {
-            RunCallback();
+            RunCallback(state);
             ((observers = true), ...);
-            return state_.template GetResult<false>();
+            return state.template GetResult<false>();
         }
     }
 
     auto IsReady() const noexcept
         requires (Policy & FuturePolicy::ProvideAtomicReadiness) {
-        return state_.HasResult();
+        return GetState().HasResult();
     }
 
-private:
-    LightweightFuture(LightweightFuture &&) = delete;
+    LightweightFuture(const LightweightFuture &) = delete;
+    auto operator=(const LightweightFuture &) -> LightweightFuture & = delete;
+    auto operator=(LightweightFuture &&) -> LightweightFuture & = delete;
 
-    [[gsl::suppress("26429", justification:
-        "The function prototype must match the requirements of the relevant "
-        "Windows APIs, including the use of the nullable `context_`.")]]
-    static auto CALLBACK WorkCallback(_Inout_ PTP_CALLBACK_INSTANCE,
-        _Inout_opt_ PVOID context_, _Inout_ PTP_WORK) noexcept -> void {
-        static_cast<LightweightFuture *>(context_)->TryRunCallback();
-    }
+    LightweightFuture(LightweightFuture &&)
+        requires (!(Policy &FuturePolicy::AllocateExternalState)) = delete;
 
-    static constexpr auto kCallbackExecutionIsNonthrowing =
-        std::is_nothrow_invocable_v<Callable, Context &>;
+    // Postcondition:
+    //   The moved-from object is left in an unspecified state. No member
+    //   functions should be called on the moved-from object (other than its
+    //   destructor).
+    LightweightFuture(LightweightFuture &&other) noexcept
+        requires (Policy & FuturePolicy::AllocateExternalState) :
+            state_{std::exchange(other.state_, nullptr)},
+            work_{std::move(other.work_)} {}
 
-    auto RunCallback() noexcept(kCallbackExecutionIsNonthrowing) {
-        auto &context = state_.GetContext();
-        if constexpr (std::is_void_v<ResultType>) {
-            Callable::operator()(context);
-            state_.SetResult();
-        } else {
-            state_.template SetResult<false>(Callable::operator()(context));
-        }
-    }
-
-    auto TryRunCallback() noexcept {
-        if constexpr (kCallbackExecutionIsNonthrowing) {
-            RunCallback();
-        } else {
-            try {
-                RunCallback();
-            } catch (...) {
-                state_.template SetResult<true>(std::current_exception());
+    ~LightweightFuture() {
+        if constexpr (Policy & FuturePolicy::AllocateExternalState) {
+            if (state_) {
+                MaybeFreeExternalState(*state_);
             }
         }
     }
 
-    [[msvc::no_unique_address]] FutureState<Context,
-        std::conditional_t<std::is_void_v<ResultType>,
-            VoidSentinel, ResultType>,
-        Policy & FuturePolicy::ProvideAtomicReadiness,
-        !kCallbackExecutionIsNonthrowing> state_;
+private:
+    auto MakeWork(const auto state, const bool async,
+        auto &...error) -> UniqueWork {
+        if constexpr (Policy & FuturePolicy::AllowSynchronousCallback) {
+            if (!async) {
+                return nullptr;
+            }
+        }
+        if (const auto work =
+                CreateThreadpoolWork(WorkCallback, state, nullptr); work) {
+            SubmitThreadpoolWork(work);
+            return UniqueWork{work};
+        }
+        if constexpr (sizeof...(error) == 0) {
+            [] [[noreturn, msvc::noinline]] static {
+                WinError("failed to create a `LightweightFuture` object");
+            }();
+        } else {
+            (error(), ...);
+        }
+    }
+
+    auto GetState(this auto &self) noexcept -> decltype(auto) {
+        if constexpr (Policy & FuturePolicy::AllocateExternalState) {
+            return (self.state_->state);
+        } else {
+            return (self.state_);
+        }
+    }
+
+    static auto CALLBACK WorkCallback(_Inout_ PTP_CALLBACK_INSTANCE,
+        _In_ PVOID context_, _Inout_ PTP_WORK) noexcept -> void {
+        if constexpr (!(Policy & FuturePolicy::AllocateExternalState)) {
+            TryRunCallback(*static_cast<FutureState *>(context_));
+        } else {
+            auto &state = *static_cast<ExternalFutureState *>(context_);
+            TryRunCallback(state.state);
+            MaybeFreeExternalState(state);
+        }
+    }
+
+    static auto MaybeFreeExternalState(ExternalFutureState &state) noexcept {
+        const auto should_free_state = [&state] noexcept {
+            constexpr auto order = std::memory_order_acq_rel;
+            if constexpr (IsAtomicFlagType<decltype(state.released)>) {
+                return state.released.test_and_set(order);
+            } else {
+                return state.released.exchange(true, order);
+            }
+        }();
+        if (should_free_state) {
+            std::default_delete<ExternalFutureState>{}(std::addressof(state));
+        }
+    }
+
+    static auto RunCallback(FutureState &state)
+        noexcept(kCallbackExecutionIsNonthrowing) {
+        auto &context = state.GetContext();
+        if constexpr (std::is_void_v<ResultType>) {
+            Callable::operator()(context);
+            state.SetResult();
+        } else {
+            state.template SetResult<false>(Callable::operator()(context));
+        }
+    }
+
+    static auto TryRunCallback(FutureState &state) noexcept {
+        if constexpr (kCallbackExecutionIsNonthrowing) {
+            RunCallback(state);
+        } else {
+            try {
+                RunCallback(state);
+            } catch (...) {
+                state.template SetResult<true>(std::current_exception());
+            }
+        }
+    }
+
+    [[msvc::no_unique_address]] std::conditional_t<
+        Policy & FuturePolicy::AllocateExternalState,
+            ExternalFutureState *, FutureState> state_;
     [[msvc::no_unique_address]] UniqueWork work_;
 };
 

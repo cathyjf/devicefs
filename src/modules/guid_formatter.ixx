@@ -118,8 +118,9 @@ private:
 };
 
 // Parse a GUID with or without enclosing braces.
-export [[nodiscard]] auto ParseGuid(const std::string_view value)
+export [[nodiscard]] auto ParseGuid(const auto &view)
 -> std::expected<GUID, HRESULT> {
+    const auto value = std::string_view{view.data(), view.size()};
     const auto text = value.starts_with('{') ?
         std::string{value} : std::format("{{{}}}", value);
     auto identifier = GUID{};

@@ -343,7 +343,45 @@ private:
     alignas(layout.array_alignment) std::array<std::byte, layout.array_bytes>
         storage_;
 };
+
+template <class T, auto Size>
+class MaterializedExactSequence {
+public:
+    [[msvc::forceinline]]
+    constexpr MaterializedExactSequence(auto &&...sequence)
+        noexcept(sizeof...(sequence) == 0) {
+        if constexpr (Size != 0) {
+            devicefs::JoinSequences(
+                std::launder(reinterpret_cast<T *>(storage_.data())),
+                std::forward<decltype(sequence)>(sequence)...);
+        }
+    }
+
+    [[msvc::forceinline]]
+    constexpr auto data() const noexcept -> const T * {
+        if constexpr (Size == 0) {
+            return nullptr;
+        } else {
+            return std::launder(reinterpret_cast<const T *>(storage_.data()));
+        }
+    }
+
+    [[msvc::forceinline]]
+    constexpr static auto size() noexcept {
+        return Size;
+    }
+private:
+    alignas(T) std::array<std::byte, sizeof(T) * Size> storage_;
+};
 __pragma(warning(pop))
+
+// Precondition: the length of `sequence...` is evaluable at compile time.
+export template <class T>
+constexpr auto MakeExactSequence(auto &&...sequence) {
+    constexpr static auto length = SequenceLength(sequence...);
+    return MaterializedExactSequence<T, length>{
+        std::forward<decltype(sequence)>(sequence)...};
+}
 
 template <class U, class T>
 concept IsRawArray =

@@ -65,28 +65,39 @@ template <typename Operation>
     }
 }
 
+namespace volume_guid_detail {
+
 // Windows volume names have the form `\\?\Volume{GUID}\`. The braced
 // GUID starts at offset 10 and occupies 38 characters.
 template <bool IncludeBraces>
-auto ExtractTextualGuidFromVolumePath(const std::string_view volume) {
+constexpr auto ExtractTextualGuid(const std::string_view volume) {
     constexpr auto offset = IncludeBraces ? 0 : 1;
-    return volume.substr(10 + offset, 38 - offset * 2);
+    constexpr auto length = 38 - offset * 2;
+    return std::span<const char, length>{volume.data() + 10 + offset, length};
 }
+
+} // namespace volume_guid_detail
 
 [[nodiscard]] auto ParseVolumeGuid(const std::string_view volume) {
-    return ParseGuid(ExtractTextualGuidFromVolumePath<true>(volume));
+    return ParseGuid(volume_guid_detail::ExtractTextualGuid<true>(volume));
 }
 
-auto VolumeImageNameSequence(const std::string_view volume,
-    const std::string_view extension) {
-    using namespace std::string_view_literals;
-    return devicefs::DeferredSequence{"volume-"sv,
-        ExtractTextualGuidFromVolumePath<false>(volume), auto(extension)};
+template <std::size_t N>
+constexpr auto LiteralText(const char (&text)[N]) noexcept {
+    return std::span{text}.template first<N - 1>();
 }
 
-[[nodiscard]] auto SnapshotImageNameSequence(
+template <std::size_t ExtensionLength>
+constexpr auto VolumeImageNameSequence(const std::string_view volume,
+    const char (&extension)[ExtensionLength]) {
+    return devicefs::DeferredSequence{LiteralText("volume-"),
+        volume_guid_detail::ExtractTextualGuid<false>(volume),
+        LiteralText(extension)};
+}
+
+[[nodiscard]] constexpr auto SnapshotImageNameSequence(
     const devicefs::vshadow::Snapshot &snapshot) {
-    return VolumeImageNameSequence(snapshot.original_volume, ".img"sv);
+    return VolumeImageNameSequence(snapshot.original_volume, ".img");
 }
 
 [[nodiscard]] auto SnapshotImageName(

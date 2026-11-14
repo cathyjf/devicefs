@@ -214,8 +214,8 @@ namespace internal {
             //
             // TODO: Implement the better design.
             const auto snapshot_description =
-                devicefs::ConstantSequence<char, 52, std::uint32_t>{
-                    SnapshotImageNameSequence(snapshot)};
+                devicefs::MakeExactSequence<char>(
+                    SnapshotImageNameSequence(snapshot));
             const auto snapshot_description_view = std::string_view{
                 snapshot_description.data(), snapshot_description.size()};
 

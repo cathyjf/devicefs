@@ -296,8 +296,7 @@ public:
 
     // The `CancelOnDestruction` policy would complicate the implementation
     // of the externally-allocated state requested by `AllocateExternalState`.
-    // policy cannot be combined with `AllocateExternalState`. Therefore, this
-    // combination is not currently supported.
+    // Therefore, this combination is not currently supported.
     static_assert(!(Policy & FuturePolicy::CancelOnDestruction) ||
         !(Policy & FuturePolicy::AllocateExternalState));
 
@@ -454,6 +453,7 @@ private:
             }
         }();
         if (should_free_state) {
+            static_assert(std::is_nothrow_destructible_v<ExternalFutureState>);
             std::default_delete<ExternalFutureState>{}(std::addressof(state));
         }
     }

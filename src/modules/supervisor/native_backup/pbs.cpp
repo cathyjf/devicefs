@@ -29,6 +29,7 @@ import :s4u_logon;
 import devicefs.bitmap_set;
 import devicefs.constant_sequence;
 import devicefs.file_reader;
+import devicefs.lightweight_future;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
 import devicefs.supervisor.configuration;
@@ -167,111 +168,87 @@ struct CapturePipeOutput {
     std::u8string output;
 };
 
-template <typename Operation>
+template <class Operation>
 class PipeReader {
-    using Result = decltype(std::declval<Operation &>().Finish(DWORD{}));
-
-public:
-    PipeReader(wil::unique_handle source, Operation operation) {
-        auto task = std::packaged_task<Result()>(
-            [source = std::move(source),
-                operation = std::move(operation)]() mutable {
-                const auto error = ReadPipeOutput(source.get(), operation);
-                return operation.Finish(error);
-            });
-        result_ = task.get_future();
-        worker_ = std::thread(std::move(task));
-    }
-
-    PipeReader(const PipeReader &) = delete;
-    auto operator=(const PipeReader &) -> PipeReader & = delete;
-    PipeReader(PipeReader &&) = default;
-    auto operator=(PipeReader &&) -> PipeReader & = delete;
-
-    [[gsl::suppress("26447",
-        justification: "A still-running pipe reader must be detached when its WSL operation is abandoned.")]]
-    ~PipeReader() {
-        if (worker_.joinable()) {
-            worker_.detach();
+    struct PipeReaderTask {
+        wil::unique_handle source;
+        Operation operation;
+        auto operator()() noexcept(noexcept(operation.Finish(
+                ReadPipeOutput(source.get(), operation)))) -> decltype(auto) {
+            return operation.Finish(ReadPipeOutput(source.get(), operation));
         }
-    }
+    };
+public:
+    PipeReader(wil::unique_handle source, Operation operation) :
+        future_{PipeReaderTask{std::move(source), std::move(operation)}} {}
 
-    auto Finish() {
-        worker_.join();
-        return result_.get();
+    [[nodiscard]]
+    auto Finish() noexcept(noexcept(auto(std::move(future_.Get())))) {
+        return std::move(future_.Get());
     }
-
 private:
-    std::future<Result> result_;
-    std::thread worker_;
+    devicefs::AsyncFuture<PipeReaderTask,
+        devicefs::FuturePolicy::DetachOnDestruction |
+            devicefs::FuturePolicy::AllocateExternalState> future_;
 };
 
 using PipeCopy = PipeReader<ForwardPipeOutput>;
 using PipeCapture = PipeReader<CapturePipeOutput>;
 
 class SambaReadinessReader {
+    struct SambaTask {
+        wil::unique_handle source;
+        wil::unique_event_nothrow completion_signal;
+        auto operator()() noexcept -> DWORD {
+            const auto result = [this] noexcept -> DWORD {
+                auto data_received = char{};
+                auto number_of_bytes_read = DWORD{};
+                if (!ReadFile(source.get(),
+                        &data_received, sizeof(data_received),
+                        &number_of_bytes_read, nullptr)) {
+                    return GetLastError();
+                }
+                return (number_of_bytes_read == 1) ?
+                    ERROR_SUCCESS : ERROR_BROKEN_PIPE;
+            }();
+            completion_signal.SetEvent();
+            return result;
+        }
+    };
 public:
-    explicit SambaReadinessReader(wil::unique_handle source) {
-        if (!completion_.try_create(
-                wil::EventOptions::ManualReset, nullptr)) {
-            WinError("could not create the Samba-readiness event");
-        }
-        auto completion_signal = wil::unique_event_nothrow{};
-        if (!DuplicateHandle(
-                GetCurrentProcess(), completion_.get(),
-                GetCurrentProcess(), completion_signal.addressof(),
-                0, FALSE, DUPLICATE_SAME_ACCESS)) {
-            WinError("could not duplicate the Samba-readiness event");
-        }
-        auto task = std::packaged_task<DWORD()>(
-            [source = std::move(source),
-                completion_signal = std::move(completion_signal)] {
-                auto ready = char{};
-                auto read = DWORD{};
-                const auto result = [&] {
-                    if (!ReadFile(source.get(), &ready, 1, &read, nullptr)) {
-                        return GetLastError();
-                    }
-                    return read == 1
-                        ? DWORD{ERROR_SUCCESS} : DWORD{ERROR_BROKEN_PIPE};
-                }();
-                completion_signal.SetEvent();
-                return result;
-            });
-        result_ = task.get_future();
-        worker_ = std::thread(std::move(task));
-    }
+    explicit SambaReadinessReader(wil::unique_handle source) :
+        completion_{[] static {
+            auto event = wil::unique_event_nothrow{};
+            if (!event.try_create(
+                    wil::EventOptions::ManualReset, nullptr)) {
+                WinError("failed to create the Samba-readiness event");
+            }
+            return event;
+        }()},
+        future_{SambaTask{std::move(source), [this] {
+            auto completion_signal = wil::unique_event_nothrow{};
+            if (!DuplicateHandle(
+                    GetCurrentProcess(), completion_.get(),
+                    GetCurrentProcess(), completion_signal.addressof(),
+                    0, FALSE, DUPLICATE_SAME_ACCESS)) {
+                WinError("failed to duplicate the Samba-readiness event");
+            }
+            return completion_signal;
+        }()}} {}
 
-    SambaReadinessReader(const SambaReadinessReader &) = delete;
-    auto operator=(const SambaReadinessReader &)
-        -> SambaReadinessReader & = delete;
-    SambaReadinessReader(SambaReadinessReader &&) = default;
-    auto operator=(SambaReadinessReader &&)
-        -> SambaReadinessReader & = delete;
-
-    [[gsl::suppress("26447",
-        justification:
-            "A still-running Samba-readiness read must be detached when its "
-            "WSL operation is abandoned.")]]
-    ~SambaReadinessReader() {
-        if (worker_.joinable()) {
-            worker_.detach();
-        }
-    }
-
-    [[nodiscard]] auto Event() const noexcept {
+    auto GetEvent() const noexcept {
         return completion_.get();
     }
 
-    [[nodiscard]] auto Finish() {
-        worker_.join();
-        return result_.get();
+    [[nodiscard]]
+    auto Finish() noexcept(noexcept(auto(std::move(future_.Get())))) {
+        return std::move(future_.Get());
     }
-
 private:
     wil::unique_event_nothrow completion_;
-    std::future<DWORD> result_;
-    std::thread worker_;
+    devicefs::AsyncFuture<SambaTask,
+        devicefs::FuturePolicy::DetachOnDestruction |
+            devicefs::FuturePolicy::AllocateExternalState> future_;
 };
 
 struct WslProcess {
@@ -614,8 +591,8 @@ struct PbsFishOperation {
     PbsFishOperation &operation,
     const HANDLE cancellation_event) {
     auto &readiness = *operation.process.samba_readiness;
-    const auto result = wil::wait_any_failfast(
-        readiness.Event(), operation.Process(), cancellation_event).status();
+    const auto result = wil::wait_any_failfast(readiness.GetEvent(),
+        operation.Process(), cancellation_event).status();
     if (result == WAIT_OBJECT_0) {
         const auto error = readiness.Finish();
         operation.process.samba_readiness.reset();

@@ -189,7 +189,8 @@ public:
 private:
     devicefs::AsyncFuture<PipeReaderTask,
         devicefs::FuturePolicy::DetachOnDestruction |
-            devicefs::FuturePolicy::AllocateExternalState> future_;
+            devicefs::FuturePolicy::AllocateExternalState |
+            devicefs::FuturePolicy::UseLongRunningCallbackHint> future_;
 };
 
 using PipeCopy = PipeReader<ForwardPipeOutput>;

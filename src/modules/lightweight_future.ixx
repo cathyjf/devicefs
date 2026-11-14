@@ -239,6 +239,7 @@ export enum class FuturePolicy {
     ProvideAtomicReadiness = 8,
     AllowMultipleRetrieval = 16,
     AllocateExternalState = 32,
+    UseLongRunningCallbackHint = 64
 };
 
 export constexpr auto operator&(const FuturePolicy policy,
@@ -257,6 +258,39 @@ struct ExternalFutureState{
     [[msvc::no_unique_address]] FutureState state;
     [[msvc::no_unique_address]] AtomicReadinessFlag released{};
 };
+
+__pragma(warning(push))
+__pragma(warning(disable : 26495, justification :
+    "Uninitialized members are not exposed through the public interface."))
+template <bool EmptyEnvironment>
+class CallbackEnvironment {
+public:
+    constexpr CallbackEnvironment() noexcept {
+        if constexpr (!EmptyEnvironment) {
+            InitializeThreadpoolEnvironment(&environment_);
+        }
+    }
+    CallbackEnvironment(const CallbackEnvironment &) = delete;
+    CallbackEnvironment(CallbackEnvironment &&) = delete;
+    auto operator=(const CallbackEnvironment &) -> CallbackEnvironment & = delete;
+    auto operator=(CallbackEnvironment &&) -> CallbackEnvironment & = delete;
+    constexpr auto Get(this auto &self) {
+        if constexpr (EmptyEnvironment) {
+            return nullptr;
+        } else {
+            return &self.environment_;
+        }
+    }
+    ~CallbackEnvironment() {
+        if constexpr (!EmptyEnvironment) {
+            DestroyThreadpoolEnvironment(&environment_);
+        }
+    }
+private:
+    [[msvc::no_unique_address]] std::conditional_t<EmptyEnvironment,
+        std::monostate, TP_CALLBACK_ENVIRON> environment_;
+};
+__pragma(warning(pop))
 
 export template <class Callable, class Context,
     FuturePolicy Policy = FuturePolicy::CancelOnDestruction>
@@ -403,15 +437,21 @@ public:
     }
 
 private:
-    auto MakeWork(const auto state, const bool async,
+    static auto MakeWork(const auto state, const bool async,
         auto &...error) -> UniqueWork {
         if constexpr (Policy & FuturePolicy::AllowSynchronousCallback) {
             if (!async) {
                 return nullptr;
             }
         }
-        if (const auto work =
-                CreateThreadpoolWork(WorkCallback, state, nullptr); work) {
+        constexpr auto static kCallbackHint =
+            Policy & FuturePolicy::UseLongRunningCallbackHint;
+        auto environment = CallbackEnvironment<!kCallbackHint>{};
+        if constexpr (kCallbackHint) {
+            SetThreadpoolCallbackRunsLong(environment.Get());
+        }
+        if (const auto work = CreateThreadpoolWork(WorkCallback, state,
+                environment.Get()); work) {
             SubmitThreadpoolWork(work);
             return UniqueWork{work};
         }

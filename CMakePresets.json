@@ -24,10 +24,8 @@
         "VSCMD_SKIP_SENDTELEMETRY": "1"
       },
       "warnings": {
+        "dev": true,
         "uninitialized": true
-      },
-      "errors": {
-        "dev": true
       }
     },
     {

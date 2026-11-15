@@ -57,10 +57,11 @@ enum class PbsStandardOutput {
     Readiness,
 };
 
+template <class ManifestCallable = std::monostate>
 struct PbsFishRequest {
     std::span<const std::string_view> additional_arguments{};
     std::string_view additional_program{};
-    std::function<std::u8string(std::string_view)> snapshot_manifest;
+    [[msvc::no_unique_address]] ManifestCallable snapshot_manifest;
     std::string_view rpc_password{};
     // If true, append the encryption-key document to the WSL input for
     // an operation that encrypts or decrypts backup data.
@@ -410,7 +411,7 @@ struct StartedWslFish {
     WslProcess process;
 };
 
-namespace {
+namespace wsl_fish_detail {
 
 auto CreateUniquePipe() {
     struct {
@@ -424,14 +425,14 @@ auto CreateUniquePipe() {
     return pipe;
 }
 
-} // namespace
+} // namespace wsl_fish_detail
 
 [[nodiscard]] auto StartWslFishProcess(
     const BackupConfiguration &configuration,
     const auto &arguments) -> StartedWslFish {
-    auto input = CreateUniquePipe();
-    auto output = CreateUniquePipe();
-    auto error = CreateUniquePipe();
+    auto input = wsl_fish_detail::CreateUniquePipe();
+    auto output = wsl_fish_detail::CreateUniquePipe();
+    auto error = wsl_fish_detail::CreateUniquePipe();
 
     const auto argument_initial_buffer = 8uz +
         (configuration.wsl.linux_user ? 2uz : 0uz);
@@ -696,10 +697,11 @@ private:
     const Sequence &sequence_;
 };
 
+template <class ManifestCallable>
 [[nodiscard]] auto StartPbsFish(
     const BackupConfiguration &configuration,
     const std::optional<std::u8string> &namespace_override,
-    const PbsFishRequest &request,
+    const PbsFishRequest<ManifestCallable> &request,
     const bool parallel_images) {
     const auto computer_name = [] {
         constexpr auto name = L"COMPUTERNAME";
@@ -736,11 +738,16 @@ private:
         devicefs::TextualNumber{configuration.pbs_port};
     const auto namespace_view = std::u8string_view{namespace_override ?
         *namespace_override : configuration.pbs_namespace};
-    const auto manifest = request.snapshot_manifest ?
-        request.snapshot_manifest(
-            ReadWslOciLayerDigest(configuration.wsl.distribution,
-                started.process.process.hProcess)) :
-        std::u8string{};
+    const auto manifest = [&request, &configuration,
+        &started = std::as_const(started)] {
+        if constexpr (std::same_as<ManifestCallable, std::monostate>) {
+            return std::string_view{};
+        } else {
+            return request.snapshot_manifest(ReadWslOciLayerDigest(
+                configuration.wsl.distribution,
+                started.process.process.hProcess));
+        }
+    }();
     const auto encryption_key_view = request.send_encryption_key ?
         std::u8string_view{configuration.pbs_encryption_key} :
         std::u8string_view{};
@@ -827,10 +834,11 @@ private:
         false);
 }
 
+template <class ManifestCallable>
 [[nodiscard]] auto RunPbsFish(
     const HANDLE cancellation_event,
     const std::optional<std::u8string> &namespace_override,
-    const PbsFishRequest &request) -> PbsFishResult {
+    const PbsFishRequest<ManifestCallable> &request) -> PbsFishResult {
     constexpr auto kPollInterval = 100ms;
     auto operation = [&] {
         const auto persistent = ResolvePersistentPaths();

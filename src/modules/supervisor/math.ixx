@@ -13,6 +13,17 @@ struct CountDigitsEntry {
     T threshold;
 };
 
+[[gsl::suppress("26497", justification:
+    "A `consteval` function is already a `constexpr` function.")]]
+consteval auto CountDigitsByDivision(const std::uintmax_t maximum,
+    const std::uintmax_t base) noexcept {
+    auto digits = std::uintmax_t{1};
+    for (auto number = maximum; number >= base; number /= base) {
+        ++digits;
+    }
+    return digits;
+}
+
 template <std::uint64_t Base,
     std::unsigned_integral Result,
     std::unsigned_integral T>
@@ -23,13 +34,7 @@ constexpr auto CountDigitsTable = [] static consteval noexcept {
     constexpr auto maximum = std::numeric_limits<T>::max();
     constexpr auto base = T{Base};
 
-    constexpr auto maximum_digits = [] static consteval noexcept {
-        auto digits = std::uintmax_t{1};
-        for (auto number = maximum; number >= base; number /= base) {
-            ++digits;
-        }
-        return digits;
-    }();
+    constexpr auto maximum_digits = CountDigitsByDivision(maximum, base);
     static_assert(maximum_digits <= std::numeric_limits<Result>::max(),
         "result type cannot represent the maximum digit count");
 

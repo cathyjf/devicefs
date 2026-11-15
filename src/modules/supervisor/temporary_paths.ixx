@@ -70,23 +70,18 @@ auto WriteWindowsDirectoryToBuffer(std::wstring &path, auto &&resize) {
 // The function does not create an object in the file system.
 export [[nodiscard]] auto TemporarySystemDirectoryPath(
     const std::wstring_view prefix) {
-    using namespace std::string_view_literals;
-    constexpr auto likely_windows_length = L"C:\\Windows\\"sv.length();
-    constexpr auto system_temp = L"SystemTemp\\"sv;
-    const auto caller_prefix_length = prefix.length() + 1;
-    constexpr auto guid_length = GuidLength<false>;
-    const auto suffix_length =
-        system_temp.length() + caller_prefix_length + guid_length;
-    const auto minimum_length = likely_windows_length + suffix_length;
+    using namespace devicefs::literals;
+    auto suffix_sequence = devicefs::DeferredSequence{
+        L"\\SystemTemp\\"_text, prefix, L'-', UniqueNameSequence()};
+    const auto suffix_length = devicefs::SequenceLength(suffix_sequence);
+    const auto minimum_length = L"C:\\Windows"_text.size() + suffix_length;
 
     auto path = std::wstring(minimum_length, L'\0');
     const auto cursor = WriteWindowsDirectoryToBuffer(path,
         [&path, suffix_length](const auto windows_length) {
-        path.resize(windows_length + suffix_length + 1);
+        path.resize(windows_length + suffix_length);
     });
-    devicefs::JoinSequences(std::addressof(*cursor),
-        L'\\', system_temp, prefix, L'-', UniqueNameSequence());
-
+    devicefs::JoinSequences(std::addressof(*cursor), suffix_sequence);
     return std::filesystem::path{std::move(path)};
 }
 

@@ -123,11 +123,11 @@ consteval auto ConvertNumberToString() noexcept {
 
 auto ConstructReadinessPath(const std::string_view target,
     const std::string_view source) {
-    const auto length = devicefs::math::SafeAugend{1uz} +
-        target.length() + source.length();
-    const auto buffer = NEW_MALLOCA_BUFFER(char, length.integer);
-    const auto span = std::span{buffer.get(), length.integer};
-    devicefs::JoinSequences(span.data(), target, '\\', source);
+    const auto sequence = devicefs::DeferredSequence{target, '\\', source};
+    const auto length = devicefs::SequenceLength(sequence);
+    const auto buffer = NEW_MALLOCA_BUFFER(char, length);
+    const auto span = std::span{buffer.get(), length};
+    devicefs::JoinSequences(span.data(), sequence);
     return std::filesystem::path{Transcode<std::wstring>(span)};
 }
 

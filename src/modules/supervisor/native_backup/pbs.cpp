@@ -576,14 +576,36 @@ auto TrySendPbsFishSignal(
     }
 }
 
+auto MakeFishControlPathSequences() noexcept {
+    using namespace devicefs::literals;
+    const auto control_path = devicefs::MakeExactSequence<char>(
+        "/tmp/devicefs-"_text, UniqueNameSequence());
+    return std::pair{
+        devicefs::MakeExactSequence<char>(control_path, ".pid"_text),
+        devicefs::MakeExactSequence<char>(control_path, ".stop"_text),
+    };
+}
+
+class FishControlPaths {
+public:
+    auto GetPidFile() const noexcept {
+        return std::string_view{paths_.first.data(), paths_.first.size()};
+    }
+    auto GetStopFile() const noexcept {
+        return std::string_view{paths_.second.data(), paths_.second.size()};
+    }
+private:
+    decltype(MakeFishControlPathSequences()) paths_ =
+        MakeFishControlPathSequences();
+};
+
 struct PbsFishOperation {
     [[nodiscard]] auto Process() const noexcept {
         return process.process.hProcess;
     }
 
     WslProcess process;
-    std::string pid_file;
-    std::string stop_file;
+    FishControlPaths control_paths;
     std::chrono::milliseconds term_grace;
     std::chrono::milliseconds kill_grace;
 };
@@ -624,12 +646,14 @@ struct PbsFishOperation {
 [[nodiscard]] auto StopPbsFish(PbsFishOperation &operation) {
     if (!WaitForProcess(operation.Process(), 0ms)) {
         TrySendPbsFishSignal(
-            operation.pid_file, operation.stop_file,
+            operation.control_paths.GetPidFile(),
+            operation.control_paths.GetStopFile(),
             PbsFishSignal::Term);
         if (!WaitForProcess(
                 operation.Process(), operation.term_grace)) {
             TrySendPbsFishSignal(
-                operation.pid_file, operation.stop_file,
+                operation.control_paths.GetPidFile(),
+                operation.control_paths.GetStopFile(),
                 PbsFishSignal::Kill);
             if (!WaitForProcess(
                     operation.Process(), operation.kill_grace)) {
@@ -677,10 +701,6 @@ private:
     const std::optional<std::u8string> &namespace_override,
     const PbsFishRequest &request,
     const bool parallel_images) {
-    const auto control_path = devicefs::DeferredSequence{
-        "/tmp/devicefs-"sv, UniqueName()};
-    auto pid_file = devicefs::StringFromSequence(control_path, ".pid"sv);
-    auto stop_file = devicefs::StringFromSequence(control_path, ".stop"sv);
     const auto computer_name = [] {
         constexpr auto name = L"COMPUTERNAME";
         auto value = std::wstring{};
@@ -693,13 +713,15 @@ private:
         return Transcode<std::string>(value);
     }();
 
+    auto control_paths = FishControlPaths{};
+
     const auto argument_count = 3uz + (parallel_images ? 1uz : 0uz);
     const auto argument_buffer =
         NEW_MALLOCA_BUFFER(std::string_view, argument_count);
     auto arguments = devicefs::DisjointReallocVector{
         std::span{argument_buffer.get(), argument_count}};
-    arguments.emplace_back(pid_file);
-    arguments.emplace_back(stop_file);
+    arguments.emplace_back(control_paths.GetPidFile());
+    arguments.emplace_back(control_paths.GetStopFile());
     arguments.emplace_back(computer_name);
     if (parallel_images) {
         arguments.emplace_back("--parallel-images"sv);
@@ -767,8 +789,7 @@ private:
             fish_program_span,
             fish_stdin_span,
             request.standard_output),
-        .pid_file = std::move(pid_file),
-        .stop_file = std::move(stop_file),
+        .control_paths = std::move(control_paths),
         .term_grace = request.term_grace,
         .kill_grace = request.kill_grace,
     };

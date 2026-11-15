@@ -350,6 +350,7 @@ public:
     [[msvc::forceinline]]
     constexpr MaterializedExactSequence(auto &&...sequence)
         noexcept(sizeof...(sequence) == 0) {
+        static_assert(SequenceLength(sequence...) == Size);
         if constexpr (Size != 0) {
             devicefs::JoinSequences(
                 std::launder(reinterpret_cast<T *>(storage_.data())),

@@ -435,6 +435,41 @@ public:
     }
 };
 
+template <class T>
+constexpr auto kIsFixedTextSequence = false;
+
+template <class Character, std::size_t SizeIncludingNull>
+class FixedTextSequenceImpl {
+public:
+    consteval FixedTextSequenceImpl(const Character(&text)[SizeIncludingNull])
+        noexcept {
+        std::copy_n(text, SizeIncludingNull - 1, storage_.begin());
+    }
+    constexpr auto data() const noexcept {
+        return storage_.data();
+    }
+    constexpr auto size() const noexcept {
+        return SizeIncludingNull - 1;
+    }
+    std::array<Character, SizeIncludingNull - 1> storage_;
+};
+
+template <class Character, std::size_t SizeIncludingNull>
+constexpr auto kIsFixedTextSequence<FixedTextSequenceImpl<
+    Character, SizeIncludingNull>> = true;
+
+export template <class T>
+concept FixedTextSequence = kIsFixedTextSequence<T>;
+
+namespace literals {
+
+export template <FixedTextSequenceImpl sequence>
+consteval auto operator""_text() noexcept -> const auto & {
+    return sequence;
+}
+
+} // namespace literals
+
 } // namespace devicefs
 
 template <class T, std::size_t InlineCapacity, class SizeType>

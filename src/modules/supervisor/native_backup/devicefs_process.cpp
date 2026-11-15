@@ -65,30 +65,22 @@ struct DeviceFsStartRequest {
     bool expose_known_data_map = false;
 };
 
+auto MakeStopEventNameSequence() noexcept {
+    using namespace devicefs::literals;
+    return MakeExactSequence<char>("Global\\devicefs-stop-"_text,
+        UniqueNameSequence(), '\0');
+}
+
 class DeviceFsStopEventName {
-    constexpr static auto kPrefix = "Global\\devicefs-stop-"sv;
-    constexpr static auto kPrefixLength = kPrefix.length();
-    constexpr static auto kSuffixLength = GuidLength<false>;
-    constexpr static auto kTotalLength = kPrefixLength + kSuffixLength;
 public:
-    explicit DeviceFsStopEventName() noexcept {
-        devicefs::JoinSequences(buffer_.data(), kPrefix,
-            UniqueNameSequence(), '\0');
-    }
-    constexpr auto data() const noexcept {
-        return buffer_.data();
-    }
-    constexpr auto size() const noexcept {
-        return kTotalLength;
-    }
     constexpr auto c_str() const noexcept {
-        return data();
+        return name_.data();
     }
     constexpr operator wil::zstring_view() const noexcept {
-        return {data(), size()};
+        return {name_.data(), name_.size() - 1};
     }
 private:
-    std::array<char, kTotalLength + 1> buffer_;
+    decltype(MakeStopEventNameSequence()) name_ = MakeStopEventNameSequence();
 };
 
 struct DeviceFsProcess {
@@ -195,7 +187,7 @@ auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
         arguments.emplace_back(request.read_user);
     }
     arguments.emplace_back("--stop-event"_zv);
-    arguments.emplace_back(stop_event_name);
+    arguments.emplace_back(wil::zstring_view{stop_event_name});
 
     const auto rpc_source_buffer_length = request.rpc_endpoint.empty() ? 0uz :
         std::ranges::fold_left(request.sources, devicefs::math::SafeAugend{0uz},

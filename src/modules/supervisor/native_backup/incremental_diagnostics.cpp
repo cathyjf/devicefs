@@ -389,8 +389,10 @@ enum class BackupViewPreparation {
         return BackupViewPreparation::Failed;
     }
 
+    using namespace devicefs::literals;
     const auto filename = devicefs::StringFromSequence(
-        internal::VolumeImageNameSequence(report.interval.volume, ".vhdx"));
+        internal::VolumeImageNameSequence(report.interval.volume,
+            ".vhdx"_text));
     devicefs::WriteToStream(output,
         "\n  File: {}\n"
         "    Volume ID: {}\n"

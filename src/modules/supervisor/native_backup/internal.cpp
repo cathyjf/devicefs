@@ -82,22 +82,18 @@ constexpr auto ExtractTextualGuid(const std::string_view volume) {
     return ParseGuid(volume_guid_detail::ExtractTextualGuid<true>(volume));
 }
 
-template <std::size_t N>
-constexpr auto LiteralText(const char (&text)[N]) noexcept {
-    return std::span{text}.template first<N - 1>();
-}
-
-template <std::size_t ExtensionLength>
 constexpr auto VolumeImageNameSequence(const std::string_view volume,
-    const char (&extension)[ExtensionLength]) {
-    return devicefs::DeferredSequence{LiteralText("volume-"),
+    const devicefs::FixedTextSequence auto &extension) {
+    using namespace devicefs::literals;
+    return devicefs::DeferredSequence{"volume-"_text,
         volume_guid_detail::ExtractTextualGuid<false>(volume),
-        LiteralText(extension)};
+        extension};
 }
 
 [[nodiscard]] constexpr auto SnapshotImageNameSequence(
     const devicefs::vshadow::Snapshot &snapshot) {
-    return VolumeImageNameSequence(snapshot.original_volume, ".img");
+    using namespace devicefs::literals;
+    return VolumeImageNameSequence(snapshot.original_volume, ".img"_text);
 }
 
 [[nodiscard]] auto SnapshotImageName(

@@ -17,6 +17,7 @@
 export module devicefs.packed_view;
 
 import std;
+import <devicefs/common.h>;
 import <devicefs/windows_imports.h>;
 
 namespace devicefs {

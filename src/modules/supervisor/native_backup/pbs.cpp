@@ -543,7 +543,7 @@ auto SendPbsFishSignal(
     const auto text = SignalText(signal);
     const auto arguments = std::array{
         pid_file, stop_file, text};
-    auto request = [&] {
+    auto request = [&arguments, program] {
         const auto persistent = ResolvePersistentPaths();
         const auto configuration =
             ReadBackupConfiguration(persistent.configuration);
@@ -581,10 +581,11 @@ auto MakeFishControlPathSequences() noexcept {
     using namespace devicefs::literals;
     const auto control_path = devicefs::MakeExactSequence<char>(
         "/tmp/devicefs-"_text, UniqueNameSequence());
-    return std::pair{
-        devicefs::MakeExactSequence<char>(control_path, ".pid"_text),
-        devicefs::MakeExactSequence<char>(control_path, ".stop"_text),
-    };
+    return [](const auto &...args) static noexcept {
+        return std::pair<decltype(devicefs::MakeExactSequence<char>(args))...>{
+            std::piecewise_construct, std::forward_as_tuple(args)...};
+    }(devicefs::DeferredSequence{control_path, ".pid"_text},
+        devicefs::DeferredSequence{control_path, ".stop"_text});
 }
 
 class FishControlPaths {
@@ -601,14 +602,24 @@ private:
 };
 
 struct PbsFishOperation {
-    [[nodiscard]] auto Process() const noexcept {
-        return process.process.hProcess;
-    }
-
-    WslProcess process;
     FishControlPaths control_paths;
     std::chrono::milliseconds term_grace;
     std::chrono::milliseconds kill_grace;
+    WslProcess process;
+
+    PbsFishOperation(const BackupConfiguration &configuration,
+        const std::optional<std::u8string> &namespace_override,
+        const auto &request, const bool parallel_images) :
+            term_grace{request.term_grace},
+            kill_grace{request.kill_grace},
+            process{MakeProcess(configuration, namespace_override,
+                request, parallel_images)} {}
+
+    [[nodiscard]] auto Process() const noexcept {
+        return process.process.hProcess;
+    }
+private:
+    auto MakeProcess(const auto &, const auto &, const auto &, const bool);
 };
 
 [[nodiscard]] auto WaitForSambaReadiness(
@@ -697,13 +708,10 @@ private:
     const Sequence &sequence_;
 };
 
-template <class... RequestTypes>
-[[nodiscard]] auto StartPbsFish(
-    const BackupConfiguration &configuration,
-    const std::optional<std::u8string> &namespace_override,
-    const PbsFishRequest<RequestTypes...> &request,
+auto PbsFishOperation::MakeProcess(const auto &configuration,
+    const auto &namespace_override, const auto &request,
     const bool parallel_images) {
-    const auto computer_name = [] {
+    const auto computer_name = [] static {
         constexpr auto name = L"COMPUTERNAME";
         auto value = std::wstring{};
         if (const auto result = wil::GetEnvironmentVariableW(name, value);
@@ -714,8 +722,6 @@ template <class... RequestTypes>
         }
         return Transcode<std::string>(value);
     }();
-
-    auto control_paths = FishControlPaths{};
 
     const auto argument_count = 3uz + (parallel_images ? 1uz : 0uz);
     const auto argument_buffer =
@@ -791,16 +797,8 @@ template <class... RequestTypes>
     const auto fish_program_span = std::span<const char>{
         fish_program_buffer.get(), fish_program_length};
 
-    return PbsFishOperation{
-        .process = StartWslFish(
-            std::move(started),
-            fish_program_span,
-            fish_stdin_span,
-            request.standard_output),
-        .control_paths = std::move(control_paths),
-        .term_grace = request.term_grace,
-        .kill_grace = request.kill_grace,
-    };
+    return StartWslFish(std::move(started), fish_program_span, fish_stdin_span,
+        request.standard_output);
 }
 
 [[nodiscard]] auto StartViewFish(
@@ -824,7 +822,7 @@ template <class... RequestTypes>
     if (timestamp) {
         arguments.push_back(*timestamp);
     }
-    return StartPbsFish(
+    return PbsFishOperation{
         configuration, namespace_override,
         PbsFishRequest{
             .additional_arguments = arguments,
@@ -832,22 +830,20 @@ template <class... RequestTypes>
             .send_encryption_key = true,
             .standard_output = PbsStandardOutput::Readiness,
         },
-        false);
+        false};
 }
 
-template <class... RequestTypes>
-[[nodiscard]] auto RunPbsFish(
-    const HANDLE cancellation_event,
+[[nodiscard]] auto RunPbsFish(const HANDLE cancellation_event,
     const std::optional<std::u8string> &namespace_override,
-    const PbsFishRequest<RequestTypes...> &request) -> PbsFishResult {
+    const auto &request) -> PbsFishResult {
     constexpr auto kPollInterval = 100ms;
-    auto operation = [&] {
+    auto operation = [&namespace_override, &request] {
         const auto persistent = ResolvePersistentPaths();
         const auto configuration =
             ReadBackupConfiguration(persistent.configuration);
-        return StartPbsFish(
+        return PbsFishOperation{
             configuration, namespace_override, request,
-            configuration.pbs_parallelize_image_upload);
+            configuration.pbs_parallelize_image_upload};
     }();
 
     while (true) {

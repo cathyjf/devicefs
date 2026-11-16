@@ -120,7 +120,7 @@ export template <class Argv, class Callable>
     }
     return StartProcessWithHandles(
         options.standard_input, options.standard_output, options.standard_error,
-        [executable = std::string{options.argv.front()}, &command,
+        [executable = std::string{*options.argv.begin()}, &command,
         flags = options.flags](STARTUPINFOA *const startup) {
             auto process = wil::unique_process_information{};
             if (!CreateProcessA(executable.c_str(),

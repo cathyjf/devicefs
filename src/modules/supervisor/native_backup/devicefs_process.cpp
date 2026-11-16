@@ -152,42 +152,33 @@ auto CreateRpcPasswordChannelAndWritePassword(const std::string_view password) {
 }
 
 auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
-    const auto argument_count =
-        devicefs::math::SafeAugend{8uz} +
-        devicefs::math::SafeProduct(3uz, std::size(request.sources)) +
-        (request.read_user.empty() ? 0uz : 2uz) +
-        (request.vhdx ? 1uz :
-            ((request.rpc_endpoint.empty() && request.expose_known_data_map) ?
-                2uz : 0uz));
-
     using PackedView = devicefs::PackedView<char, 3>;
-    const auto argument_initial_buffer =
-        NEW_MALLOCA_BUFFER(PackedView, argument_count.integer);
-    auto arguments = devicefs::DisjointReallocVector{
-        std::span{argument_initial_buffer.get(), argument_count.integer}};
+    using Arguments = std::initializer_list<PackedView>;
 
     const auto executable_path =
         Transcode<std::string>(CurrentExecutablePath().native());
-    arguments.emplace_back(executable_path);
-    arguments.emplace_back("--devicefs"_zv);
-    arguments.emplace_back("--synthetic-free-clusters"_zv);
-    arguments.emplace_back("--cache"_zv);
+    const auto range_one = std::to_array<PackedView>({
+        executable_path,
+        "--devicefs"_zv,
+        "--synthetic-free-clusters"_zv,
+        "--cache"_zv,
+        "--mount"_zv, request.mount_target,
+        "--stop-event"_zv, wil::zstring_view{stop_event_name}});
+    const auto range_two = request.vhdx ?
+        Arguments{"--vhdx"_zv} :
+            ((request.rpc_endpoint.empty() && request.expose_known_data_map) ?
+                Arguments{"--expose-known-data-map"_zv,
+                    ConvertNumberToString<kPbsImageChunkSize>()} :
+                Arguments{});
+    const auto range_three = (!request.read_user.empty()) ?
+        Arguments{"--read-user"_zv, request.read_user} : Arguments{};
 
-    if (request.vhdx) {
-        arguments.emplace_back("--vhdx"_zv);
-    } else if (request.rpc_endpoint.empty() && request.expose_known_data_map) {
-        arguments.emplace_back("--expose-known-data-map"_zv);
-        arguments.emplace_back(ConvertNumberToString<
-            kPbsImageChunkSize>());
-    }
-    arguments.emplace_back("--mount"_zv);
-    arguments.emplace_back(request.mount_target);
-    if (!request.read_user.empty()) {
-        arguments.emplace_back("--read-user"_zv);
-        arguments.emplace_back(request.read_user);
-    }
-    arguments.emplace_back("--stop-event"_zv);
-    arguments.emplace_back(wil::zstring_view{stop_event_name});
+    const auto source_argument_count =
+        devicefs::math::SafeProduct(3uz, std::size(request.sources));
+    const auto source_argument_initial_buffer =
+        NEW_MALLOCA_BUFFER(PackedView, source_argument_count);
+    auto source_arguments = devicefs::DisjointReallocVector{std::span{
+        source_argument_initial_buffer.get(), source_argument_count}};
 
     const auto rpc_source_buffer_length = request.rpc_endpoint.empty() ? 0uz :
         std::ranges::fold_left(request.sources, devicefs::math::SafeAugend{0uz},
@@ -200,10 +191,10 @@ auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
     auto rpc_source_cursor = rpc_source_buffer.get();
 
     for (const auto &source : request.sources) {
-        arguments.emplace_back("--map"_zv);
-        arguments.emplace_back(source.name);
+        source_arguments.emplace_back("--map"_zv);
+        source_arguments.emplace_back(source.name);
         if (request.rpc_endpoint.empty()) {
-            arguments.emplace_back(source.source);
+            source_arguments.emplace_back(source.source);
             continue;
         }
 
@@ -211,7 +202,7 @@ auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
         rpc_source_cursor = devicefs::JoinSequences(rpc_source_cursor,
             devicefs::rpc::kDeviceSourcePrefix,
             std::string_view{source.source}, '\0');
-        arguments.emplace_back(first, rpc_source_cursor - first - 1);
+        source_arguments.emplace_back(first, rpc_source_cursor - first - 1);
     }
 
     if (!request.rpc_endpoint.empty() &&
@@ -224,7 +215,8 @@ auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
     }
 
     return StartProcessWithHandles(ProcessLaunchOptions{
-        .argv = arguments,
+        .argv = devicefs::DisjointRange{range_one, range_two} +
+            range_three + source_arguments,
         .diagnostic = [](const auto &command_line) static noexcept {
             devicefs::WriteToStream(
                 devicefs::stdout, "Setting up virtual filesystem: {}\n"sv,

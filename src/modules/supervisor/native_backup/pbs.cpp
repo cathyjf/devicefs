@@ -428,6 +428,27 @@ auto CreateUniquePipe() {
 
 } // namespace wsl_fish_detail
 
+template <class T, std::size_t MaxLength>
+class VariableLengthArray : std::array<T, MaxLength> {
+public:
+    constexpr VariableLengthArray(auto &&...args)
+        noexcept(noexcept(std::array<T, MaxLength>{
+            std::forward<decltype(args)>(args)...}))
+        requires ((sizeof...(args) <= MaxLength) &&
+            (!std::same_as<std::remove_cvref_t<decltype(args)>,
+                VariableLengthArray> && ...)) :
+        std::array<T, MaxLength>{std::forward<decltype(args)>(args)...},
+        size_{sizeof...(args)} {}
+
+    using std::array<T, MaxLength>::data;
+
+    constexpr auto size() const noexcept {
+        return size_;
+    }
+private:
+    std::size_t size_;
+};
+
 [[nodiscard]] auto StartWslFishProcess(
     const BackupConfiguration &configuration,
     const auto &arguments) -> StartedWslFish {
@@ -438,12 +459,11 @@ auto CreateUniquePipe() {
     const auto range_one = std::array{"--distribution"sv,
         std::string_view{configuration.wsl.distribution}};
 
-    using View = std::span<const std::string_view>;
-    const auto wsl_user_view = configuration.wsl.linux_user ?
-        std::string_view{*configuration.wsl.linux_user} : std::string_view{};
-    const auto maybe_range_two_data = std::array{"--user"sv, wsl_user_view};
+    using RangeTwoType = VariableLengthArray<std::string_view, 2>;
     const auto range_two = configuration.wsl.linux_user ?
-        View{maybe_range_two_data} : View{};
+        RangeTwoType{"--user"sv,
+            std::string_view{*configuration.wsl.linux_user}} :
+        RangeTwoType{};
 
     constexpr auto range_three = std::array{
         "--exec"sv, "/usr/local/bin/devicefs-wsl-startup-broker"sv,

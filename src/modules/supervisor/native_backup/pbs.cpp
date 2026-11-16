@@ -435,28 +435,29 @@ auto CreateUniquePipe() {
     auto output = wsl_fish_detail::CreateUniquePipe();
     auto error = wsl_fish_detail::CreateUniquePipe();
 
-    const auto argument_initial_buffer = 8uz +
-        (configuration.wsl.linux_user ? 2uz : 0uz);
-    const auto wsl_argument_buffer =
-        NEW_MALLOCA_BUFFER(std::string_view, argument_initial_buffer);
-    auto wsl_arguments = devicefs::DisjointReallocVector{
-        std::span{wsl_argument_buffer.get(), argument_initial_buffer}};
-    const auto emplace_many = [&wsl_arguments](auto &&...args) {
-        (wsl_arguments.emplace_back(std::forward<decltype(args)>(args)), ...);
-    };
+    const auto range_one = std::array{"--distribution"sv,
+        std::string_view{configuration.wsl.distribution}};
 
-    emplace_many("--distribution"sv, configuration.wsl.distribution);
-    if (configuration.wsl.linux_user) {
-        emplace_many("--user"sv, *configuration.wsl.linux_user);
-    }
-    emplace_many("--exec"sv, "/usr/local/bin/devicefs-wsl-startup-broker"sv,
+    using View = std::span<const std::string_view>;
+    const auto wsl_user_view = configuration.wsl.linux_user ?
+        std::string_view{*configuration.wsl.linux_user} : std::string_view{};
+    const auto maybe_range_two_data = std::array{"--user"sv, wsl_user_view};
+    const auto range_two = configuration.wsl.linux_user ?
+        View{maybe_range_two_data} : View{};
+
+    constexpr auto range_three = std::array{
+        "--exec"sv, "/usr/local/bin/devicefs-wsl-startup-broker"sv,
         "--no-config"sv, "-c"sv,
         "read --null --global DEVICEFS_FISH_PROGRAM && eval $DEVICEFS_FISH_PROGRAM"sv,
-        "--"sv);
+        "--"sv};
 
     auto process = StartWslAsConfiguredUser(
         configuration,
-        devicefs::DisjointRange{wsl_arguments, arguments},
+        devicefs::DisjointRange{
+            devicefs::DisjointRange{
+                devicefs::DisjointRange{range_one, range_two},
+                range_three},
+            arguments},
         input.read.get(),
         output.write.get(),
         error.write.get());

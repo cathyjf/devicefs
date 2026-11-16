@@ -809,23 +809,23 @@ auto PbsFishOperation::MakeProcess(const auto &configuration,
     const std::string_view address,
     const std::string_view port,
     const std::string_view rpc_password) {
-    const auto persistent = ResolvePersistentPaths();
     const auto configuration =
-        ReadBackupConfiguration(persistent.configuration);
-    const auto snapshot_override_argument =
-        snapshot_override.value_or(std::string_view{});
-    auto arguments = std::vector<std::string_view>{
-        "--view", "--", snapshot_override_argument, archive, address, port,
-        configuration.wsl.rpc_helper_path,
-        configuration.wsl.samba_dcerpcd_path,
+        ReadBackupConfiguration(ResolvePersistentPaths().configuration);
+    const auto arguments = std::array{
+        "--view"sv, "--"sv,
+        snapshot_override.value_or(std::string_view{}),
+        archive, address, port,
+        std::string_view{configuration.wsl.rpc_helper_path},
+        std::string_view{configuration.wsl.samba_dcerpcd_path},
     };
-    if (timestamp) {
-        arguments.push_back(*timestamp);
-    }
+    using TailView = std::span<const std::string_view>;
+    const auto argument_tail = timestamp ?
+        TailView{std::addressof(*timestamp), 1} : TailView{};
     return PbsFishOperation{
         configuration, namespace_override,
         PbsFishRequest{
-            .additional_arguments = arguments,
+            .additional_arguments = devicefs::DisjointRange{
+                arguments, argument_tail},
             .rpc_password = rpc_password,
             .send_encryption_key = true,
             .standard_output = PbsStandardOutput::Readiness,

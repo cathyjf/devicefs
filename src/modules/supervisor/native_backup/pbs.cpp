@@ -140,17 +140,6 @@ constexpr auto kWslCreationFlags = DWORD{
     return process;
 }
 
-struct ProfileCloser {
-    HANDLE token = nullptr;
-
-    auto operator()(void *const profile) const noexcept {
-        static_cast<void>(UnloadUserProfile(token, profile));
-    }
-};
-
-using LoadedProfile =
-    std::unique_ptr<std::remove_pointer_t<HANDLE>, ProfileCloser>;
-
 struct CapturePipeOutput {
     [[nodiscard]] auto operator()(const std::span<const char8_t> data)
         -> PipeOutputConsumption {
@@ -254,15 +243,28 @@ private:
 };
 
 struct WslProcess {
-    wil::unique_handle token;
-    LoadedProfile profile;
+    struct ProfileCloser {
+        using pointer = HANDLE;
+        wil::unique_handle token;
+
+        auto operator()(const HANDLE profile) const noexcept {
+            UnloadUserProfile(token.get(), profile);
+        }
+    };
+
+    std::unique_ptr<HANDLE, ProfileCloser> profile;
     wil::unique_process_information process;
     std::optional<PipeCopy> standard_output;
     std::optional<PipeCapture> captured_standard_output;
     std::optional<SambaReadinessReader> samba_readiness;
     std::optional<PipeCopy> standard_error;
 
+    constexpr auto GetToken(this auto &self) noexcept -> auto & {
+        return self.profile.get_deleter().token;
+    }
+
     WslProcess() noexcept = default;
+
     WslProcess(const WslProcess &) = delete;
     auto operator=(const WslProcess &) -> WslProcess & = delete;
     WslProcess(WslProcess &&) = default;
@@ -274,8 +276,8 @@ struct WslProcess {
             // UnloadUserProfile must not run until the child has exited. An
             // abandoned WSL process therefore retains the loaded profile and
             // its associated token until this process exits.
-            static_cast<void>(profile.release());
-            static_cast<void>(token.release());
+            GetToken().release();
+            profile.release();
         }
     }
 
@@ -332,31 +334,30 @@ struct WslProcess {
     }
 
     auto result = WslProcess{};
-    result.token = LogOnWindowsAccountWithS4u(windows_username);
-    result.profile = [&windows_username, token_ = result.token.get()] {
+    result.profile = [&windows_username] -> decltype(result.profile) {
+        auto token = LogOnWindowsAccountWithS4u(windows_username);
         auto profile = PROFILEINFOW{
             .dwSize = sizeof(PROFILEINFOW),
             .dwFlags = PI_NOUI,
             .lpUserName = [username_ = windows_username.c_str()] noexcept {
-                [[gsl::suppress("type.3",
-                    justification:
-                        "LoadUserProfileW retains a mutable historical parameter "
-                        "for an input-only username.")]]
+                [[gsl::suppress("type.3", justification:
+                    "LoadUserProfileW retains a mutable historical parameter "
+                    "for an input-only username.")]]
                 return const_cast<PWSTR>(username_);
             }()
         };
-        auto privileges = ProcessPrivilegeEnabler{
+        const auto privileges = ProcessPrivilegeEnabler{
             GetCurrentProcess(),
             std::array{
                 wil::zwstring_view(SE_BACKUP_NAME),
                 wil::zwstring_view(SE_RESTORE_NAME),
             },
             "the user profile privileges"sv};
-        if (!LoadUserProfileW(token_, &profile)) {
+        if (!LoadUserProfileW(token.get(), &profile)) {
             WinError("failed to load the profile for configured WSL account '{}'",
                 std::wstring_view{windows_username});
         }
-        return LoadedProfile{profile.hProfile, ProfileCloser{token_}};
+        return {profile.hProfile, WslProcess::ProfileCloser{std::move(token)}};
     }();
 
     // The default environment for a process created by `CreateProcessAsUser`
@@ -364,7 +365,7 @@ struct WslProcess {
     // because the supervisor is running as a different, elevated user
     // compared to the user that will execute the WSL process. Therefore, we
     // create a new environment block to supply to `CreateProcessAsUser`.
-    auto environment = [token_ = result.token.get(), &windows_username] {
+    auto environment = [token_ = result.GetToken().get(), &windows_username] {
         auto environment = wil::unique_environment_block{};
         if (!CreateEnvironmentBlock(environment.addressof(), token_, FALSE)) {
             WinError("failed to create an environment block for configured "
@@ -385,7 +386,7 @@ struct WslProcess {
         standard_input,
         standard_output,
         standard_error,
-        [token = result.token.get(), environment_ = environment.get(),
+        [token = result.GetToken().get(), environment_ = environment.get(),
         &wsl_path_text, &command, &wsl_directory, &windows_username](
             STARTUPINFOA *const startup) {
             if (auto process = wil::unique_process_information{};

@@ -473,11 +473,7 @@ private:
 
     auto process = StartWslAsConfiguredUser(
         configuration,
-        devicefs::DisjointRange{
-            devicefs::DisjointRange{
-                devicefs::DisjointRange{range_one, range_two},
-                range_three},
-            arguments},
+        devicefs::DisjointRange{range_one, range_two} + range_three + arguments,
         input.read.get(),
         output.write.get(),
         error.write.get());
@@ -757,9 +753,9 @@ auto PbsFishOperation::MakeProcess(const auto &configuration,
     // Preparing the manifest below requires a token to identify the user who
     // will run `wsl.exe`. Starting `wsl.exe` here (before preparing the
     // manifest) allows the process handle to be used to obtain that token.
-    auto started = StartWslFishProcess(configuration, devicefs::DisjointRange{
-        devicefs::DisjointRange{range_one, range_two},
-        request.additional_arguments});
+    auto started = StartWslFishProcess(configuration,
+        devicefs::DisjointRange{range_one, range_two} +
+            request.additional_arguments);
 
     const auto textual_pbs_server_port =
         devicefs::TextualNumber{configuration.pbs_port};

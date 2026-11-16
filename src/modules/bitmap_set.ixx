@@ -268,6 +268,19 @@ public:
     }
 };
 
+// Effect:
+//   The returned `DisjointRange` borrows both operands and does not extend
+//   their lifetimes.
+//
+// Note:
+//   Defining this `operator+` as a member function of `DisjointRange` was
+//   observed to lead to MSVC crashing.
+export template <class Prefix, class Tail>
+constexpr auto operator+(const DisjointRange<Prefix, Tail> &left,
+    const auto &right) noexcept {
+    return devicefs::DisjointRange{left, right};
+}
+
 export template <class T, std::size_t InlineCapacity = 0>
     requires ((requires { typename ReallocVector<T, false>; }) && (
         (InlineCapacity == 0) ||

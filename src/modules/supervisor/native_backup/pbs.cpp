@@ -745,23 +745,22 @@ auto PbsFishOperation::MakeProcess(const auto &configuration,
         return Transcode<std::string>(value);
     }();
 
-    const auto argument_count = 3uz + (parallel_images ? 1uz : 0uz);
-    const auto argument_buffer =
-        NEW_MALLOCA_BUFFER(std::string_view, argument_count);
-    auto arguments = devicefs::DisjointReallocVector{
-        std::span{argument_buffer.get(), argument_count}};
-    arguments.emplace_back(control_paths.GetPidFile());
-    arguments.emplace_back(control_paths.GetStopFile());
-    arguments.emplace_back(computer_name);
-    if (parallel_images) {
-        arguments.emplace_back("--parallel-images"sv);
-    }
-    const auto argument_range = devicefs::DisjointRange{
-        arguments, request.additional_arguments};
+    const auto range_one = std::array{
+        control_paths.GetPidFile(),
+        control_paths.GetStopFile(),
+        std::string_view{computer_name}};
 
-    // Launching WSL loads the user's profile, so the OCI lookup below can
-    // read the distribution registration before the manifest is serialized.
-    auto started = StartWslFishProcess(configuration, argument_range);
+    using RangeTwoType = VariableLengthArray<std::string_view, 1>;
+    const auto range_two = parallel_images ?
+        RangeTwoType{"--parallel-images"sv} : RangeTwoType{};
+
+    // Preparing the manifest below requires a token to identify the user who
+    // will run `wsl.exe`. Starting `wsl.exe` here (before preparing the
+    // manifest) allows the process handle to be used to obtain that token.
+    auto started = StartWslFishProcess(configuration, devicefs::DisjointRange{
+        devicefs::DisjointRange{range_one, range_two},
+        request.additional_arguments});
+
     const auto textual_pbs_server_port =
         devicefs::TextualNumber{configuration.pbs_port};
     const auto namespace_view = std::u8string_view{namespace_override ?

@@ -70,9 +70,6 @@ public:
     operator std::basic_string_view<Element>() const noexcept {
         return {data(), size()};
     }
-    operator wil::basic_zstring_view<Element>() const noexcept {
-        return {data(), size()};
-    }
     auto data() const noexcept {
         return BitPrefixCast<const Element *>(*storage_.data());
     }

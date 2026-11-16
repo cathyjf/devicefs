@@ -57,9 +57,9 @@ enum class PbsStandardOutput {
     Readiness,
 };
 
-template <class ManifestCallable = std::monostate>
+template <class ArgumentRange, class ManifestCallable = std::monostate>
 struct PbsFishRequest {
-    std::span<const std::string_view> additional_arguments{};
+    const ArgumentRange &additional_arguments;
     std::string_view additional_program{};
     [[msvc::no_unique_address]] ManifestCallable snapshot_manifest;
     std::string_view rpc_password{};
@@ -697,11 +697,11 @@ private:
     const Sequence &sequence_;
 };
 
-template <class ManifestCallable>
+template <class... RequestTypes>
 [[nodiscard]] auto StartPbsFish(
     const BackupConfiguration &configuration,
     const std::optional<std::u8string> &namespace_override,
-    const PbsFishRequest<ManifestCallable> &request,
+    const PbsFishRequest<RequestTypes...> &request,
     const bool parallel_images) {
     const auto computer_name = [] {
         constexpr auto name = L"COMPUTERNAME";
@@ -740,7 +740,8 @@ template <class ManifestCallable>
         *namespace_override : configuration.pbs_namespace};
     const auto manifest = [&request, &configuration,
         &started = std::as_const(started)] {
-        if constexpr (std::same_as<ManifestCallable, std::monostate>) {
+        if constexpr (std::same_as<decltype(request.snapshot_manifest),
+                std::monostate>) {
             return std::string_view{};
         } else {
             return request.snapshot_manifest(ReadWslOciLayerDigest(
@@ -834,11 +835,11 @@ template <class ManifestCallable>
         false);
 }
 
-template <class ManifestCallable>
+template <class... RequestTypes>
 [[nodiscard]] auto RunPbsFish(
     const HANDLE cancellation_event,
     const std::optional<std::u8string> &namespace_override,
-    const PbsFishRequest<ManifestCallable> &request) -> PbsFishResult {
+    const PbsFishRequest<RequestTypes...> &request) -> PbsFishResult {
     constexpr auto kPollInterval = 100ms;
     auto operation = [&] {
         const auto persistent = ResolvePersistentPaths();

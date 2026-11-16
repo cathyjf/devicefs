@@ -449,7 +449,10 @@ public:
         return storage_.data();
     }
     constexpr auto size() const noexcept {
-        return SizeIncludingNull - 1;
+        return std::tuple_size_v<decltype(storage_)>;
+    }
+    constexpr operator std::basic_string_view<Character>() const noexcept {
+        return {data(), size()};
     }
     std::array<Character, SizeIncludingNull - 1> storage_;
 };

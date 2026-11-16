@@ -29,6 +29,8 @@ export import :incremental_diagnostics;
 export import :manifest;
 import :pbs;
 import :production_incremental;
+import devicefs.bitmap_set;
+import devicefs.constant_sequence;
 import devicefs.filesystem.ioctl;
 import devicefs.filesystem.mount_manager;
 import devicefs.file_reader;
@@ -61,15 +63,11 @@ export [[nodiscard]] auto RunFishProgram(
         WinError("failed to open or read the Fish program: {}",
             std::wstring_view{path.native()}, program.error());
     }
-    const auto fish_arguments = std::array{
-        std::span<const std::string_view>{
-            std::array{std::string_view{"--run-fish-program"}}},
-        arguments,
-    } | std::views::join | std::ranges::to<std::vector>();
     return internal::RunPbsFish(
         cancellation_event, std::nullopt,
         internal::PbsFishRequest{
-            .additional_arguments = fish_arguments,
+            .additional_arguments = devicefs::DisjointRange{
+                std::array{"--run-fish-program"sv}, arguments},
             .additional_program = *program,
             .send_encryption_key = true,
         }).exit_code;
@@ -100,11 +98,10 @@ export [[nodiscard]] auto RetrieveBackupCatalog(
     const HANDLE cancellation_event,
     const std::optional<std::u8string> &namespace_override)
     -> std::u8string {
-    constexpr auto arguments = std::to_array<std::string_view>({"--list-backups"});
     auto result = internal::RunPbsFish(
         cancellation_event, namespace_override,
         internal::PbsFishRequest{
-            .additional_arguments = arguments,
+            .additional_arguments = std::array{"--list-backups"sv},
             .standard_output = internal::PbsStandardOutput::Capture,
         });
     if (result.exit_code != 0) {
@@ -231,18 +228,19 @@ namespace internal {
     if (!WaitForDeviceFs(devicefs.Process(), cancellation_event)) {
         return kCancelledExitCode;
     }
-    const auto previous_backup_time = dirty_maps.previous_backup_time
-        ? std::to_string(*dirty_maps.previous_backup_time) : std::string{};
-    const auto previous_arguments = std::array{
-        "--"sv, "--previous-backup-time"sv,
-        std::string_view{previous_backup_time}};
+    using ArgumentSpan = std::span<const std::string_view>;
+    [[gsl::suppress("26449", justification:
+        "All string view temporaries are consumed before the end of the "
+        "enclosing statement.")]]
     return RunPbsFish(
         cancellation_event,
         namespace_override,
         PbsFishRequest{
-            .additional_arguments = std::span{previous_arguments}.first(
-                dirty_maps.previous_backup_time
-                    ? previous_arguments.size() : 0),
+            .additional_arguments = dirty_maps.previous_backup_time ?
+                ArgumentSpan{std::array{"--"sv, "--previous-backup-time"sv,
+                    std::string_view{std::to_string(
+                        *dirty_maps.previous_backup_time)}}} :
+                ArgumentSpan{},
             .snapshot_manifest = [&snapshot_set, &snapshot_handles](
                 const std::string_view layer) {
                 return SerializeSnapshotManifest(

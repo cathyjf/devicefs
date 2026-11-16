@@ -778,10 +778,8 @@ auto PbsFishOperation::MakeProcess(const auto &configuration,
     const auto fish_stdin_length = devicefs::SequenceLength(fish_stdin_records);
     const auto fish_stdin_buffer =
         NEW_MALLOCA_BUFFER(char8_t, fish_stdin_length);
-    const auto clear_fish_stdin_buffer = wil::scope_exit(
-        [buffer = fish_stdin_buffer.get(), fish_stdin_length] {
-        SecureZeroMemory(buffer, fish_stdin_length);
-    });
+    const auto clear_fish_stdin_buffer = wil::SecureZeroMemory_scope_exit(
+        fish_stdin_buffer.get(), fish_stdin_length);
     devicefs::JoinSequences(fish_stdin_buffer.get(), fish_stdin_records);
     const auto fish_stdin_span = std::span<const char8_t>{
         std::start_lifetime_as_array<char8_t>(

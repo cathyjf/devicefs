@@ -428,27 +428,6 @@ auto CreateUniquePipe() {
 
 } // namespace wsl_fish_detail
 
-template <class T, std::size_t MaxLength>
-class VariableLengthArray : std::array<T, MaxLength> {
-public:
-    constexpr VariableLengthArray(auto &&...args)
-        noexcept(noexcept(std::array<T, MaxLength>{
-            std::forward<decltype(args)>(args)...}))
-        requires ((sizeof...(args) <= MaxLength) &&
-            (!std::same_as<std::remove_cvref_t<decltype(args)>,
-                VariableLengthArray> && ...)) :
-        std::array<T, MaxLength>{std::forward<decltype(args)>(args)...},
-        size_{sizeof...(args)} {}
-
-    using std::array<T, MaxLength>::data;
-
-    constexpr auto size() const noexcept {
-        return size_;
-    }
-private:
-    std::size_t size_;
-};
-
 [[nodiscard]] auto StartWslFishProcess(
     const BackupConfiguration &configuration,
     const auto &arguments) -> StartedWslFish {
@@ -459,7 +438,7 @@ private:
     const auto range_one = std::array{"--distribution"sv,
         std::string_view{configuration.wsl.distribution}};
 
-    using RangeTwoType = VariableLengthArray<std::string_view, 2>;
+    using RangeTwoType = std::initializer_list<std::string_view>;
     const auto range_two = configuration.wsl.linux_user ?
         RangeTwoType{"--user"sv,
             std::string_view{*configuration.wsl.linux_user}} :
@@ -746,7 +725,7 @@ auto PbsFishOperation::MakeProcess(const auto &configuration,
         control_paths.GetStopFile(),
         std::string_view{computer_name}};
 
-    using RangeTwoType = VariableLengthArray<std::string_view, 1>;
+    using RangeTwoType = std::initializer_list<std::string_view>;
     const auto range_two = parallel_images ?
         RangeTwoType{"--parallel-images"sv} : RangeTwoType{};
 

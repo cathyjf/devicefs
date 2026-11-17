@@ -152,7 +152,7 @@ auto CreateRpcPasswordChannelAndWritePassword(const std::string_view password) {
 }
 
 auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
-    using PackedView = devicefs::PackedView<char, 3>;
+    using PackedView = devicefs::PackedTerminatedStringView<char, 3>;
     using Arguments = std::initializer_list<PackedView>;
 
     const auto executable_path =

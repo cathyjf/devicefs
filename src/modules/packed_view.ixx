@@ -91,4 +91,23 @@ private:
 };
 __pragma(warning(pop))
 
+export template <class Element, std::size_t SizeBytes>
+class PackedTerminatedStringView : public PackedView<Element, SizeBytes> {
+    using Base = PackedView<Element, SizeBytes>;
+public:
+    constexpr PackedTerminatedStringView(auto &&...args)
+        noexcept(noexcept(Base{std::forward<decltype(args)>(args)...})) :
+        Base{std::forward<decltype(args)>(args)...} {}
+
+    // Precondition:
+    //   `(this->size() == 0) || (this->data()[this->size()] == 0)` is true.
+    constexpr operator wil::basic_zstring_view<Element>() const noexcept {
+        if (Base::size() != 0) {
+            return {Base::data(), Base::size()};
+        } else {
+            return {};
+        }
+    }
+};
+
 } // namespace devicefs

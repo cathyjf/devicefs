@@ -23,11 +23,13 @@ export module devicefs.supervisor.native_backup:manifest;
 import std;
 import <devicefs/common.h>;
 import <devicefs/malloca.h>;
+import <devicefs/malloca_list.h>;
 import <devicefs/windows_imports.h>;
 import <devicefs/winrt_imports.h>;
-import devicefs.guid_formatter;
 import :internal;
 import :pbs;
+import devicefs.bitmap_set;
+import devicefs.guid_formatter;
 import devicefs.supervisor.installation;
 import devicefs.supervisor.vshadow;
 import devicefs.supervisor.winrt_apartment;
@@ -307,16 +309,19 @@ export [[nodiscard]] auto RetrieveBackupManifest(
     const std::optional<std::string_view> snapshot = std::nullopt,
     const bool include_backup_time = false)
     -> PreviousBackupManifestResult {
-    auto arguments = std::vector{"--print-manifest"sv, "--"sv};
-    if (include_backup_time) {
-        arguments.push_back("--timestamp"sv);
-    }
-    arguments.append_range(std::array{"--"sv, snapshot.value_or(""sv)});
+    using View = std::string_view;
+    constexpr auto range_one = std::array{"--print-manifest"sv, "--"sv};
+    const auto range_two = include_backup_time ?
+        MALLOCA_LIST(View, "--timestamp"sv) : MALLOCA_LIST(View);
+    const auto range_three = snapshot ?
+        MALLOCA_LIST(View, "--"sv, *snapshot) : MALLOCA_LIST(View);
+
     auto result = internal::RunPbsFish(
         cancellation_event,
         namespace_override,
         internal::PbsFishRequest{
-            .additional_arguments = arguments,
+            .additional_arguments = devicefs::DisjointRange{
+                range_one, range_two} + range_three,
             .send_encryption_key = true,
             .standard_output = internal::PbsStandardOutput::Capture,
         });

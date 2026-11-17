@@ -183,10 +183,6 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
     if (snapshots.empty()) {
         return {};
     }
-    const auto volumes = snapshots | std::views::transform(
-        [](const auto &snapshot_pair) static {
-            return snapshot_pair.payload.original_volume;
-        }) | std::ranges::to<std::vector>();
     auto files = std::vector<SnapshotDirtyMap>{};
     files.reserve(std::size(snapshots));
     // VSS descriptor metadata is read through the payload snapshots. Creating
@@ -250,10 +246,15 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
         return kReturnValue;
     };
     try {
+        const auto volume_range = snapshots |
+            std::views::transform(
+                [](const auto &snapshot_pair) static -> const auto & {
+                    return snapshot_pair.payload.original_volume;
+                });
         std::ignore = RunVssOperation(cancellation_event,
-            [cancellation_event, &volumes, &build_maps] {
+            [cancellation_event, &volume_range, &build_maps] {
                 return devicefs::vshadow::Run(
-                    cancellation_event, false, volumes, build_maps);
+                    cancellation_event, false, volume_range, build_maps);
             });
     } catch (const std::runtime_error &error) {
         TryWriteNonFatalError(

@@ -263,7 +263,7 @@ export namespace devicefs::vshadow {
 [[nodiscard]] auto Run(
     const HANDLE cancellation_event,
     const bool use_writers,
-    const std::span<const std::string> volumes,
+    const auto &volumes,
     SnapshotOperation auto &&operation) -> int {
     const auto canonical_volumes = volumes |
         std::views::transform(ResolveVolumeName) |

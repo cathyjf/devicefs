@@ -354,6 +354,11 @@ public:
         }
         return heap_.data() + heap_.size();
     }
+
+    [[msvc::forceinline]]
+    auto size() const noexcept {
+        return (inline_bytes_ / sizeof(T)) + heap_.size();
+    }
 private:
     alignas((InlineCapacity == 0) ? 0 : alignof(T))
         std::conditional_t<InlineCapacity == 0, std::span<std::byte>,

@@ -1,5 +1,18 @@
 // SPDX-FileCopyrightText: Copyright 2026 Cathy J. Fitzpatrick <cathy@cathyjf.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 module;
 
@@ -14,6 +27,7 @@ import <devicefs/windows_imports.h>;
 import :incremental;
 import :internal;
 import :manifest;
+import devicefs.bitmap_set;
 import devicefs.byte_comparison;
 import devicefs.file_reader;
 import devicefs.lightweight_future;
@@ -26,14 +40,67 @@ import devicefs.vss_block_descriptors;
 
 namespace internal {
 
-struct SnapshotDirtyMap {
-    const devicefs::vshadow::Snapshot &snapshot;
-    wil::unique_hfile file;
+template <class T, class Closer>
+class ClosingContainer : public T {
+public:
+    ClosingContainer(auto &&...args)
+        noexcept(noexcept(T{std::forward<decltype(args)>(args)...})) :
+        T{std::forward<decltype(args)>(args)...} {}
+
+    ClosingContainer(const ClosingContainer &) = delete;
+    ClosingContainer(ClosingContainer &&) = delete;
+    auto operator=(const ClosingContainer &) -> ClosingContainer & = delete;
+    auto operator=(ClosingContainer &&) -> ClosingContainer & = delete;
+
+    ~ClosingContainer() noexcept(noexcept(
+            Closer::operator()(*this->begin()))) {
+        for (const auto &entry : *this) {
+            Closer::operator()(entry);
+        }
+    }
+};
+
+class DirtyMapContainer {
+    struct Entry {
+        const devicefs::vshadow::Snapshot *const snapshot;
+        HANDLE file;
+    };
+public:
+    DirtyMapContainer() noexcept {}
+    DirtyMapContainer(auto &range) {
+        for (auto &entry : range) {
+            storage_.emplace_back(std::addressof(entry.payload),
+                entry.result_file.get());
+            entry.result_file.release();
+        }
+    }
+    auto begin() const noexcept {
+        return storage_.begin();
+    }
+    auto end() const noexcept {
+        return storage_.end();
+    }
+    auto size() const noexcept {
+        return storage_.size();
+    }
+private:
+    struct Closer {
+        static auto operator()(const auto &entry) noexcept {
+            std::ignore = wil::unique_hfile{entry.file};
+        }
+    };
+    ClosingContainer<devicefs::DisjointReallocVector<Entry, 4>, Closer>
+        storage_;
 };
 
 struct PreparedDirtyMaps {
+    PreparedDirtyMaps() noexcept {}
+    PreparedDirtyMaps(auto &range, const auto timestamp) :
+        files{range},
+        previous_backup_time{(files.size() != 0) ? timestamp : std::nullopt} {}
+
+    DirtyMapContainer files;
     std::optional<std::int64_t> previous_backup_time;
-    std::vector<SnapshotDirtyMap> files;
 };
 
 namespace {
@@ -161,12 +228,13 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
     // The cache contains the properties collected by that enumeration, so the
     // manifest's snapshot IDs can be looked up without another VSS query.
     const auto baselines = previous->QuerySnapshotVolumes(true);
-    struct SnapshotPair {
+    struct SnapshotTuple {
         const typename decltype(payload.snapshots)::value_type &payload;
         const typename decltype(baselines)::value_type::second_type &baseline;
+        wil::unique_hfile result_file;
     };
     const auto snapshot_buffer = NEW_MALLOCA_BUFFER(
-        SnapshotPair, payload.snapshots.size());
+        SnapshotTuple, payload.snapshots.size());
     const auto snapshots = snapshot_buffer.CreateObjects(payload.snapshots,
         [&baselines](auto *const buffer, const auto &snapshot) {
             const auto baseline = baselines.find(
@@ -174,7 +242,7 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
             if (baseline == baselines.end()) {
                 return devicefs::ObjectCreationDisposition::SkipThisObject;
             }
-            ::new (buffer) SnapshotPair{
+            ::new (buffer) SnapshotTuple{
                 .payload = snapshot,
                 .baseline = baseline->second,
             };
@@ -183,13 +251,11 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
     if (snapshots.empty()) {
         return {};
     }
-    auto files = std::vector<SnapshotDirtyMap>{};
-    files.reserve(std::size(snapshots));
     // VSS descriptor metadata is read through the payload snapshots. Creating
     // a newer snapshot on each volume makes that metadata readable. The maps
     // are built in the callback so the temporary snapshots still exist during
     // those reads.
-    const auto build_maps = [snapshots, &files](
+    const auto build_maps = [&snapshots](
         const devicefs::vshadow::SnapshotSet &) {
         // `vshadow::Run` retains the set when its callback returns zero.
         // A return value of 1 instead makes it attempt to delete these
@@ -215,18 +281,18 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
             return kReturnValue;
         }
 
-        using FutureCallable = decltype([](const auto *const pair) static {
-            return TryPrepareAndWriteDirtyMapForSnapshot(
-                pair->payload, pair->baseline);
+        using FutureCallable = decltype([](auto *const tuple) static {
+            tuple->result_file = TryPrepareAndWriteDirtyMapForSnapshot(
+                tuple->payload, tuple->baseline);
         });
         using FutureType = devicefs::LightweightFuture<
-            FutureCallable, const SnapshotPair *,
+            FutureCallable, SnapshotTuple *,
             devicefs::FuturePolicy::AllowSynchronousCallback |
                 devicefs::FuturePolicy::CancelOnDestruction>;
         const auto futures_buffer = NEW_MALLOCA_BUFFER(
             FutureType, std::size(snapshots));
         const auto futures = futures_buffer.CreateObjects(snapshots,
-            [](const auto &snapshot, const auto index) static {
+            [](auto &snapshot, const auto index) static {
                 const auto error = [&snapshot] [[noreturn]] {
                     WinError("failed to create a thread pool work object to "
                         "prepare a dirty map for volume '{}'",
@@ -238,18 +304,16 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
                 return FutureType{&snapshot, index != 0, error};
             });
         // Collect the futures.
-        for (auto i = 0uz; i < futures.size(); ++i) {
-            if (auto &file = futures[i].Get()) {
-                files.emplace_back(snapshots[i].payload, std::move(file));
-            }
+        for (auto &future : futures) {
+            future.Get();
         }
         return kReturnValue;
     };
     try {
         const auto volume_range = snapshots |
             std::views::transform(
-                [](const auto &snapshot_pair) static -> const auto & {
-                    return snapshot_pair.payload.original_volume;
+                [](const auto &snapshot_tuple) static -> const auto & {
+                    return snapshot_tuple.payload.original_volume;
                 });
         std::ignore = RunVssOperation(cancellation_event,
             [cancellation_event, &volume_range, &build_maps] {
@@ -262,11 +326,11 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
             "successor snapshot set failed", error);
         return {};
     }
-    return {
-        .previous_backup_time = files.empty()
-            ? std::nullopt : previous->backup_time,
-        .files = std::move(files),
-    };
+    auto dirty_map_range = snapshots |
+        std::views::filter([](const auto &entry) static {
+            return static_cast<bool>(entry.result_file);
+        });
+    return {dirty_map_range, previous->backup_time};
 }
 
 } // namespace internal

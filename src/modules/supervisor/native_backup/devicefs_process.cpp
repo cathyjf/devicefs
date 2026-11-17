@@ -248,23 +248,22 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
         request.mount_target, request.sources.front().name)},
     process{StartProcess(request)} {}
 
-template <class DirtyMapType, auto DirtyMapExtent>
 [[nodiscard]] auto StartDeviceFs(
     const std::span<const devicefs::vshadow::Snapshot> snapshots,
     const wil::zstring_view read_user,
     const bool use_known_data_map,
     const SnapshotHandles &snapshot_handles,
-    const std::span<DirtyMapType, DirtyMapExtent> dirty_maps) {
+    const auto &dirty_maps) {
     const auto handle_count = devicefs::math::SafeSum(
         std::size(snapshot_handles), std::size(dirty_maps));
     const auto inherited_handles = NEW_MALLOCA_BUFFER(HANDLE, handle_count);
     auto handle_index = 0uz;
     const auto add_handle = [&handle_index, &inherited_handles]
         (const auto &handle) noexcept {
-        inherited_handles[handle_index++] = handle.get();
+        inherited_handles[handle_index++] = handle;
     };
     for (const auto &handle : snapshot_handles | std::views::values) {
-        add_handle(handle);
+        add_handle(handle.get());
     }
 
     const auto source_count = devicefs::math::SafeSum(
@@ -284,10 +283,10 @@ template <class DirtyMapType, auto DirtyMapExtent>
         const auto &[snapshot, handle] = entry;
         add_handle(handle);
         return DeviceFsSource{
-            .name{SnapshotImageNameSequence(snapshot), ".dirty.bitmap"sv},
+            .name{SnapshotImageNameSequence(*snapshot), ".dirty.bitmap"sv},
             .source{devicefs::rpc::kFileHandleDevicePrefix,
                 devicefs::TextualNumber{
-                    std::bit_cast<std::uintptr_t>(handle.get())}}};
+                    std::bit_cast<std::uintptr_t>(handle)}}};
     });
 
     return DeviceFsProcess{DeviceFsStartRequest{

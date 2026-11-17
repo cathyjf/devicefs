@@ -38,7 +38,11 @@ auto RemoveConst(const T *const pointer) noexcept {
     return const_cast<T *>(pointer);
 }
 
-template <class T, auto FreeFunction>
+template <class T, auto FreeFunction, class SizeType>
+__pragma(warning(push))
+__pragma(warning(disable : 26495, justification :
+    "The `size_` member is intentionally uninitialized because it is used only "
+    "by `MallocaList`. It is never read without first being initialized."))
 class UniqueBuffer {
 public:
     [[msvc::forceinline]]
@@ -90,7 +94,13 @@ private:
 
     T *const buffer_;
     bool is_stack_allocation_;
+
+    // This `size_` member is used only by `MallocaList`.
+    // Defining it in this class allows it to be stored in the tail padding
+    // that would otherwise exist after the `is_stack_allocation_` member.
+    SizeType size_;
 };
+__pragma(warning(pop))
 
 template <class T>
 concept IsError = requires {
@@ -140,7 +150,7 @@ constexpr auto ShouldUseStack(const auto length) noexcept {
 #define PRIVATE_IMPLEMENTATION_DETAIL_NEW_MALLOCA_BUFFER(T, Error, length) \
     __pragma(warning(push)) \
     __pragma(warning(disable : 6255 26408)) \
-    malloca_detail::UniqueBuffer<T, std::free>{ \
+    malloca_detail::UniqueBuffer<T, std::free, std::uint32_t>{ \
         ((length) > (SIZE_MAX / sizeof(T))) ? \
             malloca_detail::Allocation{malloca_detail::HandleNull<Error>()} : \
             malloca_detail::ShouldUseStack<T>(length) ? \

@@ -4,6 +4,7 @@
 #pragma once
 
 import std;
+import <devicefs/common.h>;
 import <devicefs/malloca.h>;
 import devicefs.object_creator;
 
@@ -18,12 +19,13 @@ public:
         noexcept((std::is_nothrow_convertible_v<decltype(args), T> && ...))
         requires ((sizeof...(args) == 0) ||
             (alignof(T) <= __STDCPP_DEFAULT_NEW_ALIGNMENT__)) :
-        buffer_{std::forward<Buffer>(buffer)},
-        size_{sizeof...(args)} {
+        buffer_{std::forward<Buffer>(buffer)} {
         if constexpr (sizeof...(args) > 0) {
             ::new (buffer_.get()) T[sizeof...(args)]{
                 std::forward<decltype(args)>(args)...};
         }
+        buffer_.size_ = CompileTimeCast<decltype(buffer_.size_),
+            sizeof...(args)>();
     }
 
     [[msvc::forceinline]]
@@ -33,7 +35,7 @@ public:
 
     [[msvc::forceinline]]
     constexpr auto size() const noexcept {
-        return size_;
+        return buffer_.size_;
     }
 
     // Moving this object is not recommended but MSVC fails to compile certain
@@ -41,8 +43,9 @@ public:
     // unless this constructor is defined and accessible.
     [[msvc::forceinline]]
     MallocaList(MallocaList &&other) noexcept :
-        buffer_{std::move(other.buffer_)},
-        size_{std::exchange(other.size_, 0)} {}
+        buffer_{std::move(other.buffer_)} {
+        buffer_.size_ = std::exchange(other.buffer_.size_, 0);
+    }
 
     [[msvc::forceinline]]
     ~MallocaList() noexcept(noexcept(
@@ -55,7 +58,6 @@ private:
     auto operator=(MallocaList &&) -> MallocaList & = delete;
 
     Buffer buffer_;
-    std::size_t size_;
 };
 
 template <class... Args>
@@ -72,7 +74,14 @@ auto MallocaListSizeHelper(Args &&...) -> char(&)[sizeof...(Args) + 1];
 // in the backing array at the end of the statement that declares the
 // `initializer_list` instead of when the `initializer_list` goes out of scope,
 // contrary to the C++ standard.
+//
+// Warning C4244 complains about an alleged possible loss of data when
+// assigning the value of `buffer_.size_` in the `MallocaList` constructor.
+// However, no data can be lost because the assignment uses `CompileTimeCast`.
 #define MALLOCA_LIST(T, ...) \
+    __pragma(warning(push)) \
+    __pragma(warning(disable : 4244)) \
     malloca_list_detail::MallocaList{ \
         NEW_MALLOCA_BUFFER(T, PRIVATE_MALLOCA_LIST_SIZE(__VA_ARGS__)) \
-            __VA_OPT__(,) __VA_ARGS__}
+            __VA_OPT__(,) __VA_ARGS__} \
+    __pragma(warning(pop))

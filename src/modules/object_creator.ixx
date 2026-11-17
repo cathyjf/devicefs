@@ -22,12 +22,13 @@ namespace devicefs {
 
 export extern "C++" auto CreateObjects(auto *, auto &&, auto &&);
 
+export
+template <class T, bool NoExceptionGuard = std::is_nothrow_destructible_v<T>>
+auto DestroyObjects(T *, std::size_t) noexcept(NoExceptionGuard) -> void;
+
 } // namespace devicefs
 
 namespace devicefs::object_creator_detail {
-
-template <class T, bool NoExceptionGuard = std::is_nothrow_destructible_v<T>>
-auto DestroyObjects(T *, std::size_t) noexcept(NoExceptionGuard) -> void;
 
 __pragma(warning(push))
 __pragma(warning(disable : 26432, justification:
@@ -43,31 +44,10 @@ struct ExceptionGuard {
     }
     ~ExceptionGuard() noexcept {
         if (index != 0) {
-            DestroyObjects<T, true>(buffer, index);
+            ::devicefs::DestroyObjects<T, true>(buffer, index);
         }
     }
 };
-__pragma(warning(pop))
-
-// Destroy a sequence of objects using the same algorithm as if the objects
-// were stored in a fixed-size array that is going out of scope.
-__pragma(warning(push))
-__pragma(warning(disable : 26457, justification:
-    "Destructors do not return values."))
-template <class T, bool NoExceptionGuard>
-auto DestroyObjects(T *const buffer, const std::size_t length)
-    noexcept(NoExceptionGuard) -> void {
-    if constexpr (NoExceptionGuard) {
-        for (auto i = length; i > 0;) {
-            (buffer + --i)->~T();
-        }
-    } else {
-        auto guard = ExceptionGuard{buffer, length};
-        while (guard.index > 0) {
-            (buffer + --guard.index)->~T();
-        }
-    }
-}
 __pragma(warning(pop))
 
 __pragma(warning(push))
@@ -80,7 +60,7 @@ template <class T>
 class ManagedObjects : public std::span<T> {
 public:
     ~ManagedObjects() noexcept(std::is_nothrow_destructible_v<T>) {
-        object_creator_detail::DestroyObjects(
+        ::devicefs::DestroyObjects(
             std::span<T>::data(), std::span<T>::size());
     }
 private:
@@ -98,6 +78,28 @@ __pragma(warning(pop))
 } // namespace devicefs::object_creator_detail
 
 namespace devicefs {
+
+// Destroy a sequence of objects using the same algorithm as if the objects
+// were stored in a fixed-size array that is going out of scope.
+__pragma(warning(push))
+__pragma(warning(disable : 26457, justification:
+    "Destructors do not return values."))
+export template <class T, bool NoExceptionGuard>
+auto DestroyObjects(T *const buffer, const std::size_t length)
+    noexcept(NoExceptionGuard) -> void {
+    if constexpr (NoExceptionGuard) {
+        for (auto i = length; i > 0;) {
+            (buffer + --i)->~T();
+        }
+    } else {
+        auto guard = devicefs::object_creator_detail::ExceptionGuard{
+            buffer, length};
+        while (guard.index > 0) {
+            (buffer + --guard.index)->~T();
+        }
+    }
+}
+__pragma(warning(pop))
 
 export enum class ObjectCreationDisposition {
     ObjectCreated,

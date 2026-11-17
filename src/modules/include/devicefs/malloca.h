@@ -9,6 +9,13 @@ extern "C++" auto CreateObjects(auto *, auto &&, auto &&);
 
 } // namespace devicefs
 
+namespace malloca_list_detail {
+
+template <class>
+class MallocaList;
+
+} // malloca_list_detail
+
 namespace malloca_detail {
 
 struct Allocation {
@@ -67,13 +74,22 @@ public:
         }
     }
 private:
-    T *const buffer_;
-    const bool is_stack_allocation_;
+    [[msvc::forceinline]]
+    UniqueBuffer(UniqueBuffer &&other) noexcept :
+        buffer_{other.buffer_},
+        is_stack_allocation_{other.is_stack_allocation_} {
+        other.is_stack_allocation_ = true;
+    }
+
+    template <class>
+    friend class ::malloca_list_detail::MallocaList;
 
     UniqueBuffer(const UniqueBuffer &) = delete;
     auto operator=(const UniqueBuffer &) -> UniqueBuffer & = delete;
-    UniqueBuffer(UniqueBuffer &&) = delete;
     auto operator=(UniqueBuffer &&) -> UniqueBuffer & = delete;
+
+    T *const buffer_;
+    bool is_stack_allocation_;
 };
 
 template <class T>

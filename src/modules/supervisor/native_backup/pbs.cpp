@@ -23,6 +23,7 @@ module devicefs.supervisor.native_backup:pbs;
 import std;
 import <devicefs/common.h>;
 import <devicefs/malloca.h>;
+import <devicefs/malloca_list.h>;
 import <devicefs/windows_imports.h>;
 import :internal;
 import :s4u_logon;
@@ -438,11 +439,10 @@ auto CreateUniquePipe() {
     const auto range_one = std::array{"--distribution"sv,
         std::string_view{configuration.wsl.distribution}};
 
-    using RangeTwoType = std::initializer_list<std::string_view>;
     const auto range_two = configuration.wsl.linux_user ?
-        RangeTwoType{"--user"sv,
-            std::string_view{*configuration.wsl.linux_user}} :
-        RangeTwoType{};
+        MALLOCA_LIST(std::string_view, "--user"sv,
+            std::string_view{*configuration.wsl.linux_user}) :
+        MALLOCA_LIST(std::string_view);
 
     constexpr auto range_three = std::array{
         "--exec"sv, "/usr/local/bin/devicefs-wsl-startup-broker"sv,
@@ -725,9 +725,9 @@ auto PbsFishOperation::MakeProcess(const auto &configuration,
         control_paths.GetStopFile(),
         std::string_view{computer_name}};
 
-    using RangeTwoType = std::initializer_list<std::string_view>;
     const auto range_two = parallel_images ?
-        RangeTwoType{"--parallel-images"sv} : RangeTwoType{};
+        MALLOCA_LIST(std::string_view, "--parallel-images"sv) :
+        MALLOCA_LIST(std::string_view);
 
     // Preparing the manifest below requires a token to identify the user who
     // will run `wsl.exe`. Starting `wsl.exe` here (before preparing the

@@ -23,6 +23,7 @@ module devicefs.supervisor.native_backup:devicefs_process;
 import std;
 import <devicefs/common.h>;
 import <devicefs/malloca.h>;
+import <devicefs/malloca_list.h>;
 import <devicefs/windows_imports.h>;
 import :internal;
 import devicefs.bitmap_set;
@@ -153,7 +154,6 @@ auto CreateRpcPasswordChannelAndWritePassword(const std::string_view password) {
 
 auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
     using PackedView = devicefs::PackedTerminatedStringView<char, 3>;
-    using Arguments = std::initializer_list<PackedView>;
 
     const auto executable_path =
         Transcode<std::string>(CurrentExecutablePath().native());
@@ -165,13 +165,14 @@ auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
         "--mount"_zv, request.mount_target,
         "--stop-event"_zv, wil::zstring_view{stop_event_name}});
     const auto range_two = request.vhdx ?
-        Arguments{"--vhdx"_zv} :
+        MALLOCA_LIST(PackedView, "--vhdx"_zv) :
             ((request.rpc_endpoint.empty() && request.expose_known_data_map) ?
-                Arguments{"--expose-known-data-map"_zv,
-                    ConvertNumberToString<kPbsImageChunkSize>()} :
-                Arguments{});
+                MALLOCA_LIST(PackedView, "--expose-known-data-map"_zv,
+                    ConvertNumberToString<kPbsImageChunkSize>()) :
+                MALLOCA_LIST(PackedView));
     const auto range_three = (!request.read_user.empty()) ?
-        Arguments{"--read-user"_zv, request.read_user} : Arguments{};
+        MALLOCA_LIST(PackedView, "--read-user"_zv, request.read_user) :
+        MALLOCA_LIST(PackedView);
 
     const auto source_argument_count =
         devicefs::math::SafeProduct(3uz, std::size(request.sources));

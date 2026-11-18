@@ -182,13 +182,14 @@ struct BackupGroup {
     if (!manifest) {
         return std::nullopt;
     }
-    const auto descriptions = [&manifest] {
+    const auto descriptions =
+        [manifest = std::u8string_view{manifest->data(), manifest->size()}] {
         try {
-            return ReadBackupVolumeDescriptions(*manifest);
+            return ReadBackupVolumeDescriptions(manifest);
         } catch (const std::invalid_argument &) {
             // Invalid UTF-8 or an unpaired surrogate in a JSON string
             // leaves this menu with the original image names.
-            return decltype(ReadBackupVolumeDescriptions(*manifest)){};
+            return decltype(ReadBackupVolumeDescriptions(manifest)){};
         }
     }();
     return archives | std::views::transform([&descriptions](const auto &archive) {

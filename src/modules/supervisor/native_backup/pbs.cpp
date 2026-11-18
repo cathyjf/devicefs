@@ -74,7 +74,7 @@ struct PbsFishRequest {
 
 struct PbsFishResult {
     int exit_code;
-    std::optional<std::u8string> standard_output;
+    std::optional<devicefs::ReallocUtf8String> standard_output;
 };
 
 constexpr auto kLocalDomain = L"."_zv;
@@ -144,7 +144,7 @@ constexpr auto kWslCreationFlags = DWORD{
 struct CapturePipeOutput {
     [[nodiscard]] auto operator()(const std::span<const char8_t> data)
         -> PipeOutputConsumption {
-        output.append(data.data(), data.size());
+        output.append(data);
         return data.size();
     }
 
@@ -156,7 +156,7 @@ struct CapturePipeOutput {
         return std::move(output);
     }
 
-    std::u8string output;
+    devicefs::ReallocUtf8String output{};
 };
 
 template <class Operation>
@@ -282,7 +282,7 @@ struct WslProcess {
         }
     }
 
-    auto FinishOutput() -> std::optional<std::u8string> {
+    auto FinishOutput() -> std::optional<devicefs::ReallocUtf8String> {
         using finish_forwarding = decltype([](auto &reader,
             const std::string_view context) static {
             if (!reader) {

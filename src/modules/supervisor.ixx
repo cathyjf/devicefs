@@ -23,6 +23,7 @@ export module devicefs.supervisor;
 import std;
 import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import devicefs.bitmap_set;
 import devicefs.filesystem;
 import devicefs.guid_formatter;
 import devicefs.stream_writer;
@@ -481,20 +482,23 @@ struct CancellableOutputOperation {
 [[nodiscard]] auto RunBrowseMode(
     std::optional<std::u8string> namespace_override) {
     auto terminal = devicefs::terminal::WindowsConsole{};
-    auto catalog = std::u8string{};
+    auto catalog = devicefs::ReallocUtf8String{};
     const auto result = RunFastOperation(terminal, "Load backup catalog",
         [&catalog, &namespace_override](const HANDLE cancellation_event) {
-            catalog = RetrieveBackupCatalog(cancellation_event, namespace_override);
+            catalog = RetrieveBackupCatalog(
+                cancellation_event, namespace_override);
             return EXIT_SUCCESS;
         });
     if (result != EXIT_SUCCESS) {
         return result;
     }
     const auto screen = terminal.EnterScreen();
-    auto selection = SelectBackup(terminal, catalog,
+    auto selection = SelectBackup(terminal,
+        std::u8string_view{catalog.data(), catalog.size()},
         [&terminal](const std::u8string_view namespace_name,
-            const std::string_view snapshot) -> std::optional<std::u8string> {
-            auto manifest = std::u8string{};
+            const std::string_view snapshot)
+            -> std::optional<devicefs::ReallocUtf8String> {
+            auto manifest = devicefs::ReallocUtf8String{};
             std::ignore = RunFastOperation(
                 terminal, "Load backup manifest",
                 [snapshot, namespace_name, &manifest](

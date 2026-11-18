@@ -99,7 +99,7 @@ export [[nodiscard]] auto VerifyMountedFilesystems(
 export [[nodiscard]] auto RetrieveBackupCatalog(
     const HANDLE cancellation_event,
     const std::optional<std::u8string> &namespace_override)
-    -> std::u8string {
+    -> devicefs::ReallocUtf8String {
     auto result = internal::RunPbsFish(
         cancellation_event, namespace_override,
         internal::PbsFishRequest{

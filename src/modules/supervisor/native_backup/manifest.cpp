@@ -39,7 +39,7 @@ using devicefs::terminal::Transcode;
 
 export struct PreviousBackupManifestResult {
     int exit_code;
-    std::u8string manifest;
+    devicefs::ReallocUtf8String manifest{};
 
     struct SnapshotManifest {
         struct SnapshotVolume {
@@ -209,7 +209,8 @@ using namespace wil::literals;
 auto PreviousBackupManifestResult::ParseManifest() const
     -> SnapshotManifest {
     try {
-        return ParseSnapshotManifest(manifest);
+        return ParseSnapshotManifest(std::u8string_view{
+            manifest.data(), manifest.size()});
     } catch (const winrt::hresult_error &error) {
         WinError(
             "the Windows Runtime failed while parsing the backup manifest: {}",

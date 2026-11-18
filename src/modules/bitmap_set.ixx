@@ -28,6 +28,12 @@ constexpr auto is_size_constant<
 
 namespace devicefs {
 
+template <class T>
+concept StorageExposingRange = requires {
+    std::data(std::declval<T>());
+    std::size(std::declval<T>());
+};
+
 // Constraint on `T` if `ZeroInitialize` is `true`:
 //   An all-zero object representation must be a valid `T`.
 export template <class T, bool ZeroInitialize = true,
@@ -75,6 +81,23 @@ public:
         resize(size_ + 1);
         return *::new (storage_.get() + index) T{
             std::forward<decltype(arguments)>(arguments)...};
+    }
+
+    // Precondition:
+    //   The input range must not intersect this container's storage.
+    auto append(const auto &range)
+        requires (StorageExposingRange<decltype(range)> &&
+            (sizeof(*std::data(range)) == sizeof(T))) {
+        const auto growth = std::size(range);
+        if (growth == 0) {
+            return;
+        } else if (growth > (max_size_ - size_)) [[unlikely]] {
+            throw std::bad_alloc{};
+        }
+        const auto index = size_;
+        resize(size_ + growth);
+        std::memcpy(storage_.get() + index, std::data(range),
+            sizeof(T) * growth);
     }
 
     // Precondition: `new_size <= max_size_` is true.
@@ -176,11 +199,8 @@ private:
     })> storage_{};
 };
 
-template <class T>
-concept StorageExposingRange = requires {
-    std::data(std::declval<T>());
-    std::size(std::declval<T>());
-};
+export
+using ReallocUtf8String = devicefs::ReallocVector<char8_t, false>;
 
 export template <class PrefixIterator,
     class PrefixEndIterator = PrefixIterator,

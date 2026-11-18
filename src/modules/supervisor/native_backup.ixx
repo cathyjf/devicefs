@@ -233,7 +233,7 @@ namespace internal {
     const auto devicefs = DeviceFsChild{snapshot_handles, read_user,
         use_known_data_map, dirty_maps.files};
 
-    if (!WaitForDeviceFs(devicefs.Process(), cancellation_event)) {
+    if (!devicefs.Process().WaitUntilReady(cancellation_event)) {
         return kCancelledExitCode;
     }
 

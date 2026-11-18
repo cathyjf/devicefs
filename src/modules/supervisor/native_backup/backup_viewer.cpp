@@ -248,8 +248,7 @@ auto WaitForViewSession(
             .vhdx = true,
         }, std::ref(should_stop_pbs)};
     rpc_password.reset();
-    if (!internal::WaitForDeviceFs(
-            devicefs.Process(), cancellation_event)) {
+    if (!devicefs.Process().WaitUntilReady(cancellation_event)) {
         devicefs::WriteToStream(
             devicefs::stdout, "Closing the selective-view operation.\n");
         return internal::kCancelledExitCode;

@@ -66,11 +66,15 @@ struct DeviceFsStartRequest {
     bool expose_known_data_map = false;
 };
 
-auto MakeStopEventNameSequence() noexcept {
+namespace stop_event_detail {
+
+auto MakeSequence() noexcept {
     using namespace devicefs::literals;
     return MakeExactSequence<char>("Global\\devicefs-stop-"_text,
         UniqueNameSequence(), '\0');
 }
+
+} // namespace stop_event_detail
 
 class DeviceFsStopEventName {
 public:
@@ -81,7 +85,8 @@ public:
         return {name_.data(), name_.size() - 1};
     }
 private:
-    decltype(MakeStopEventNameSequence()) name_ = MakeStopEventNameSequence();
+    decltype(stop_event_detail::MakeSequence()) name_ =
+        stop_event_detail::MakeSequence();
 };
 
 struct DeviceFsProcess {
@@ -97,19 +102,13 @@ struct DeviceFsProcess {
     wil::unique_process_information process;
 
     explicit DeviceFsProcess(const DeviceFsStartRequest &);
-
-    auto ResumeProcess() {
-        if (ResumeThread(process.hThread) == MAXDWORD) {
-            WinError("failed to resume devicefs");
-        }
-    }
-private:
-    auto StartProcess(const DeviceFsStartRequest &);
+    auto Resume();
+    [[nodiscard]] auto WaitUntilReady(const HANDLE cancellation_event) const;
+    [[nodiscard]] auto WaitForExit(const HANDLE cancellation_event,
+        const auto &...other_devicefs_processes) const;
 };
 
-[[nodiscard]] auto TemporaryDeviceFsViewPath() {
-    return TemporarySystemDirectoryPath(L"devicefs-view");
-}
+namespace devicefs_process_detail {
 
 template <std::unsigned_integral auto Number>
 consteval auto ConvertNumberToString() noexcept {
@@ -152,7 +151,8 @@ auto CreateRpcPasswordChannelAndWritePassword(const std::string_view password) {
     return password_input;
 }
 
-auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
+auto StartProcess(const DeviceFsStartRequest &request,
+    const DeviceFsStopEventName &stop_event_name) {
     using PackedView = devicefs::PackedTerminatedStringView<char, 3>;
 
     const auto executable_path =
@@ -232,6 +232,8 @@ auto DeviceFsProcess::StartProcess(const DeviceFsStartRequest &request) {
     });
 }
 
+} // namespace devicefs_process_detail
+
 // Precondition: `request.sources` is nonempty.
 DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
     stop_event{[this] {
@@ -244,9 +246,15 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
         }
         return stop_event;
     }()},
-    readiness_path{ConstructReadinessPath(
+    readiness_path{devicefs_process_detail::ConstructReadinessPath(
         request.mount_target, request.sources.front().name)},
-    process{StartProcess(request)} {}
+    process{devicefs_process_detail::StartProcess(request, stop_event_name)} {}
+
+auto DeviceFsProcess::Resume() {
+    if (ResumeThread(process.hThread) == MAXDWORD) {
+        WinError("failed to resume devicefs");
+    }
+}
 
 namespace devicefs_child_detail {
 
@@ -300,58 +308,63 @@ namespace devicefs_child_detail {
 
 } // namespace devicefs_child_detail
 
-[[nodiscard]] auto WaitForDeviceFs(
-    const DeviceFsProcess &devicefs,
-    const HANDLE cancellation_event) {
+[[nodiscard]] auto DeviceFsProcess::WaitUntilReady(
+    const HANDLE cancellation_event) const {
     const auto deadline =
         std::chrono::steady_clock::now() + DeviceFsProcess::kStartTimeout;
     while (true) {
-        if (WaitForProcess(devicefs.process.hProcess,
+        if (WaitForProcess(process.hProcess,
                 DeviceFsProcess::kPollInterval)) {
             throw std::runtime_error(std::format(
                 "devicefs exited with code {} before creating readiness path '{}'",
-                ProcessExitCode(devicefs.process.hProcess),
-                Transcode<std::string>(devicefs.readiness_path.native())));
+                ProcessExitCode(process.hProcess),
+                Transcode<std::string>(readiness_path.native())));
         }
         if (wil::event_is_signaled(cancellation_event)) {
             return false;
         }
         auto exists_error = std::error_code{};
-        if (std::filesystem::is_regular_file(
-                devicefs.readiness_path, exists_error)) {
+        if (std::filesystem::is_regular_file(readiness_path, exists_error)) {
             return true;
         }
         if (std::chrono::steady_clock::now() >= deadline) {
             throw std::runtime_error(std::format(
                 "devicefs did not create readiness path '{}' within {} seconds",
-                Transcode<std::string>(devicefs.readiness_path.native()),
+                Transcode<std::string>(readiness_path.native()),
                 std::chrono::duration_cast<std::chrono::seconds>(
                     DeviceFsProcess::kStartTimeout).count()));
         }
     }
 }
 
-struct DeviceFsExit {
-    std::size_t process_index;
-    DWORD exit_code;
-};
+namespace devicefs_process_detail {
 
-[[nodiscard]] auto WaitForDeviceFsExitOrCancellation(
-    const HANDLE cancellation_event,
-    const auto &...devicefs_processes) -> std::optional<DeviceFsExit> {
+[[nodiscard]] auto WaitForExitOrCancellation(
+    const HANDLE cancellation_event, const auto &...devicefs_processes) {
+    struct DeviceFsExit {
+        std::size_t process_index;
+        DWORD exit_code;
+    };
+    using Return = std::optional<DeviceFsExit>;
     const auto result = wil::wait_any_failfast(
         devicefs_processes.process.hProcess..., cancellation_event);
     const auto process_index =
         CompileTimeCast<std::size_t>(result.status() - WAIT_OBJECT_0);
     if (process_index < sizeof...(devicefs_processes)) {
         const auto processes = std::array{&devicefs_processes...};
-        return DeviceFsExit{
-            .process_index = process_index,
-            .exit_code = ProcessExitCode(
-                processes[process_index]->process.hProcess),
-        };
+        return Return{std::in_place, process_index,
+            ProcessExitCode(processes[process_index]->process.hProcess)};
     }
-    return std::nullopt;
+    return Return{};
+}
+
+} // namespace devicefs_process_detail
+
+[[nodiscard]] auto DeviceFsProcess::WaitForExit(
+    const HANDLE cancellation_event,
+    const auto &...other_devicefs_processes) const {
+    return devicefs_process_detail::WaitForExitOrCancellation(
+        cancellation_event, *this, other_devicefs_processes...);
 }
 
 class DeviceFsChild {
@@ -419,8 +432,7 @@ public:
                 ExplicitWin32Error{ERROR_TIMEOUT}));
     }
 
-    [[nodiscard]] auto Process() const noexcept
-        -> const DeviceFsProcess & {
+    auto Process() const noexcept -> const auto & {
         return devicefs_;
     }
 

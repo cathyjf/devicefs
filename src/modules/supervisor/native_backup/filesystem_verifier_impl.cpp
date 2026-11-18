@@ -28,14 +28,15 @@ import :filesystem_verifier;
 import :devicefs_process;
 import :internal;
 import :vhdx_attachment;
-import devicefs.lightweight_future;
-import devicefs.supervisor.process_launch;
-import devicefs.supervisor.process_privileges;
-import devicefs.terminal.safecast;
 import devicefs.byte_comparison;
 import devicefs.guid_formatter;
+import devicefs.lightweight_future;
 import devicefs.object_creator;
 import devicefs.stream_writer;
+import devicefs.supervisor.process_launch;
+import devicefs.supervisor.process_privileges;
+import devicefs.supervisor.temporary_paths;
+import devicefs.terminal.safecast;
 import devicefs.terminal.transcoding;
 
 using devicefs::terminal::Transcode;
@@ -2857,12 +2858,10 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                     .name{"device.vhdx"_zv},
                     .source{device}}},
             .mount_target =
-                Transcode<std::string>(
-                    internal::TemporaryDeviceFsViewPath().native()),
+                Transcode<std::string>(TemporaryDeviceFsViewPath().native()),
             .vhdx = true,
         }};
-    if (!internal::WaitForDeviceFs(
-            child.Process(), cancellation_event)) {
+    if (!child.Process().WaitUntilReady(cancellation_event)) {
         return ERROR_CANCELLED;
     }
     const auto preserve_for_manual_mount =
@@ -2883,8 +2882,7 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
                     L"to stop devicefs.\n",
                     child.Process().readiness_path.native());
                 const auto result =
-                    internal::WaitForDeviceFsExitOrCancellation(
-                        cancellation_event, child.Process());
+                    child.Process().WaitForExit(cancellation_event);
                 if (result) {
                     devicefs::WriteToStream(devicefs::stdout,
                         "devicefs exited with code {}.\n",

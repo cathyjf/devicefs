@@ -471,11 +471,11 @@ enum class BackupViewPreparation {
             break;
         }
     }
-    const auto mount_root = mount_root_override
-        ? *mount_root_override
-        : internal::TemporaryDeviceFsViewPath();
-    const auto synthetic_mount = mount_root / L"synthetic";
-    const auto real_mount = mount_root / L"real";
+    const auto mount_root = mount_root_override ?
+        *mount_root_override :
+        TemporaryDeviceFsViewPath();
+    const auto synthetic_mount = mount_root / L"synthetic"sv;
+    const auto real_mount = mount_root / L"real"sv;
     if (devices.empty()) {
         if (verification_percentage) {
             return VerifyFilesystemViews(
@@ -484,8 +484,7 @@ enum class BackupViewPreparation {
                 *verification_percentage,
                 optimization_unavailable, preparation_failures);
         }
-        throw std::runtime_error(
-            "no synthetic backup VHDX could be exposed");
+        throw std::runtime_error("no synthetic backup VHDX could be exposed");
     }
 
     // WinFsp creates and removes the leaf mount directories. Only their
@@ -521,7 +520,7 @@ enum class BackupViewPreparation {
         Transcode<std::wstring>(endpoint),
         suspended_synthetic.process.dwProcessId,
         std::move(devices));
-    suspended_synthetic.ResumeProcess();
+    suspended_synthetic.Resume();
     auto synthetic_devicefs = internal::DeviceFsChild{
         std::move(suspended_synthetic)};
     terminate_synthetic.release();
@@ -531,10 +530,8 @@ enum class BackupViewPreparation {
             .mount_target = real_mount_text,
             .vhdx = true,
         }};
-    if (!internal::WaitForDeviceFs(
-            synthetic_devicefs.Process(), cancellation_event) ||
-        !internal::WaitForDeviceFs(
-            real_devicefs.Process(), cancellation_event)) {
+    if (!synthetic_devicefs.Process().WaitUntilReady(cancellation_event) ||
+        !real_devicefs.Process().WaitUntilReady(cancellation_event)) {
         if (verification_percentage) {
             return VerifyFilesystemViews(
                 cancellation_event, verification_volumes,
@@ -566,9 +563,8 @@ enum class BackupViewPreparation {
         "Press Ctrl+C to stop.\n",
         synthetic_sources.size(), synthetic_mount_text,
         real_mount_text);
-    const auto exit = internal::WaitForDeviceFsExitOrCancellation(
-        cancellation_event, synthetic_devicefs.Process(),
-        real_devicefs.Process());
+    const auto exit = synthetic_devicefs.Process().WaitForExit(
+        cancellation_event, real_devicefs.Process());
     if (exit) {
         constexpr auto kChildNames =
             std::array{"synthetic", "real"};

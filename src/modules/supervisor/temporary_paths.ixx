@@ -85,6 +85,10 @@ export [[nodiscard]] auto TemporarySystemDirectoryPath(
     return std::filesystem::path{std::move(path)};
 }
 
+export [[nodiscard]] auto TemporaryDeviceFsViewPath() {
+    return TemporarySystemDirectoryPath(L"devicefs-view");
+}
+
 extern "C" auto NTAPI RtlDosPathNameToNtPathName_U_WithStatus(
     _In_ PCWSTR windows_path_name, _Out_ PUNICODE_STRING nt_path_name,
     _Outptr_opt_result_maybenull_ PWSTR *, _Reserved_ PVOID) -> NTSTATUS;

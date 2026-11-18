@@ -230,8 +230,8 @@ namespace internal {
     auto volume_metadata = devicefs::async([&snapshot_handles] {
         native_backup_detail::PopulateSnapshotVolumeMetadata(snapshot_handles);
     });
-    const auto devicefs = DeviceFsChild{StartDeviceFs(
-        snapshot_handles, read_user, use_known_data_map, dirty_maps.files)};
+    const auto devicefs = DeviceFsChild{snapshot_handles, read_user,
+        use_known_data_map, dirty_maps.files};
 
     if (!WaitForDeviceFs(devicefs.Process(), cancellation_event)) {
         return kCancelledExitCode;

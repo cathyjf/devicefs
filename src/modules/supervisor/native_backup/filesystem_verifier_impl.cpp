@@ -2851,17 +2851,16 @@ auto PrintProgress(const std::span<VolumeJob> jobs) -> void {
     const std::string_view device) -> int {
     using namespace wil::literals;
     auto child = internal::DeviceFsChild{
-        internal::DeviceFsProcess{
-            internal::DeviceFsStartRequest{
-                .sources = std::array{
-                    internal::DeviceFsSource{
-                        .name{"device.vhdx"_zv},
-                        .source{device}}},
-                .mount_target =
-                    Transcode<std::string>(
-                        internal::TemporaryDeviceFsViewPath().native()),
-                .vhdx = true,
-            }}};
+        internal::DeviceFsStartRequest{
+            .sources = std::array{
+                internal::DeviceFsSource{
+                    .name{"device.vhdx"_zv},
+                    .source{device}}},
+            .mount_target =
+                Transcode<std::string>(
+                    internal::TemporaryDeviceFsViewPath().native()),
+            .vhdx = true,
+        }};
     if (!internal::WaitForDeviceFs(
             child.Process(), cancellation_event)) {
         return ERROR_CANCELLED;

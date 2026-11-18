@@ -526,12 +526,11 @@ enum class BackupViewPreparation {
         std::move(suspended_synthetic)};
     terminate_synthetic.release();
     auto real_devicefs = internal::DeviceFsChild{
-        internal::DeviceFsProcess{
-            internal::DeviceFsStartRequest{
-                .sources = real_sources,
-                .mount_target = real_mount_text,
-                .vhdx = true,
-            }}};
+        internal::DeviceFsStartRequest{
+            .sources = real_sources,
+            .mount_target = real_mount_text,
+            .vhdx = true,
+        }};
     if (!internal::WaitForDeviceFs(
             synthetic_devicefs.Process(), cancellation_event) ||
         !internal::WaitForDeviceFs(

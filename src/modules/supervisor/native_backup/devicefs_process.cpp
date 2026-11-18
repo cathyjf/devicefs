@@ -248,6 +248,8 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
         request.mount_target, request.sources.front().name)},
     process{StartProcess(request)} {}
 
+namespace devicefs_child_detail {
+
 [[nodiscard]] auto StartDeviceFs(
     const auto &snapshot_handles,
     const wil::zstring_view read_user,
@@ -295,6 +297,8 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
         .expose_known_data_map = use_known_data_map,
     }};
 }
+
+} // namespace devicefs_child_detail
 
 [[nodiscard]] auto WaitForDeviceFs(
     const DeviceFsProcess &devicefs,
@@ -352,21 +356,32 @@ struct DeviceFsExit {
 
 class DeviceFsChild {
 public:
-    explicit DeviceFsChild(DeviceFsProcess devicefs,
+    explicit DeviceFsChild(auto &&...args)
+        requires ((!std::is_same_v<std::remove_cvref_t<decltype(args)>,
+            DeviceFsStartRequest> && ...) && requires {
+                devicefs_child_detail::StartDeviceFs(
+                    std::forward<decltype(args)>(args)...);
+            }) :
+        devicefs_{devicefs_child_detail::StartDeviceFs(
+            std::forward<decltype(args)>(args)...)} {}
+
+    explicit DeviceFsChild(const DeviceFsStartRequest &request,
         std::optional<std::reference_wrapper<bool>> exit_confirmed =
-            std::nullopt) noexcept
-        : devicefs_{std::move(devicefs)}, exit_confirmed_{exit_confirmed} {
+            std::nullopt) :
+        devicefs_{request},
+        exit_confirmed_{exit_confirmed} {
         if (exit_confirmed_) {
             exit_confirmed_->get() = false;
         }
     }
 
+    explicit DeviceFsChild(DeviceFsProcess &&process) noexcept :
+        devicefs_{std::move(process)} {}
+
     DeviceFsChild(const DeviceFsChild &) = delete;
-    auto operator=(const DeviceFsChild &)
-        -> DeviceFsChild & = delete;
     DeviceFsChild(DeviceFsChild &&) = delete;
-    auto operator=(DeviceFsChild &&)
-        -> DeviceFsChild & = delete;
+    auto operator=(const DeviceFsChild &) -> DeviceFsChild & = delete;
+    auto operator=(DeviceFsChild &&) -> DeviceFsChild & = delete;
 
     ~DeviceFsChild() {
         // Windows must still be able to read a VHDX's backing file to detach

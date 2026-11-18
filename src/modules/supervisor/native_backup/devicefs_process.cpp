@@ -267,7 +267,7 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
     const auto source_buffer = NEW_MALLOCA_BUFFER(DeviceFsSource, source_count);
     const auto sources_first = source_buffer.CreateObjects(snapshot_handles,
         [&add_handle](const auto &entry) {
-        const auto &[snapshot, file] = entry;
+        const auto &[snapshot, file, _] = entry;
         add_handle(file.get());
         return DeviceFsSource{
             .name{SnapshotImageNameSequence(snapshot)},

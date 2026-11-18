@@ -37,14 +37,6 @@ inline constexpr auto kCancelledExitCode = 130;
 // will identify the chunks that PBS will read.
 inline constexpr auto kPbsImageChunkSize = 4uz * 1024 * 1024;
 
-struct ManifestVolumeMetadata {
-    std::optional<std::vector<BYTE>> mount_manager_id;
-    std::optional<std::wstring> file_system;
-};
-
-using ManifestVolumeMetadataMap =
-    std::map<GUID, ManifestVolumeMetadata, GuidLess>;
-
 template <typename Operation>
 [[nodiscard]] auto RunVssOperation(
     const HANDLE cancellation_event,

@@ -36,6 +36,7 @@ import devicefs.filesystem.ioctl;
 import devicefs.filesystem.mount_manager;
 import devicefs.file_reader;
 import devicefs.guid_formatter;
+import devicefs.lightweight_future;
 import devicefs.stream_writer;
 import devicefs.supervisor.configuration;
 import devicefs.supervisor.launch_powershell;
@@ -125,12 +126,15 @@ export [[nodiscard]] auto RunSelectiveView(
     const std::string_view address,
     const std::optional<std::u8string> &namespace_override) -> int;
 
-namespace internal {
+namespace native_backup_detail {
 
-[[nodiscard]] auto QuerySnapshotManifestVolumeMetadata(
-    const auto &snapshot_handles) {
-    auto metadata_map = ManifestVolumeMetadataMap{};
-    for (const auto &[snapshot, file] : snapshot_handles) {
+struct ManifestVolumeMetadata {
+    std::optional<std::vector<BYTE>> mount_manager_id;
+    std::optional<std::wstring> file_system;
+};
+
+auto PopulateSnapshotVolumeMetadata(auto &snapshot_handles) {
+    for (auto &[snapshot, file, metadata] : snapshot_handles) {
         const auto get_metadata = [handle = file.get(),
             device_name = std::basic_string_view{snapshot.device}]
             <auto function>(const auto description) {
@@ -140,26 +144,31 @@ namespace internal {
             if (result) {
                 return ReturnType{std::move(*result)};
             }
-            TryWriteNonFatalError("failed to collect snapshot metadata",
-                TryConstructWinError(
+            internal::TryWriteNonFatalError(
+                "failed to collect snapshot metadata", TryConstructWinError(
                     "failed to retrieve the {} for snapshot device '{}'",
                     description, device_name,
                     ExplicitWin32Error{result.error()}));
             return ReturnType{};
         };
-        metadata_map.emplace(snapshot.identifier, ManifestVolumeMetadata{
-            .mount_manager_id =
-                get_metadata.template operator()<
-                    devicefs::filesystem::QueryMountManagerId>(
-                        "mount manager ID"sv),
-            .file_system =
-                get_metadata.template operator()<
-                    devicefs::filesystem::QueryVolumeFileSystem>(
-                        "file system format"sv),
-        });
+        metadata.mount_manager_id = get_metadata.template operator()<
+            devicefs::filesystem::QueryMountManagerId>(
+                "mount manager ID"sv);
+        metadata.file_system = get_metadata.template operator()<
+            devicefs::filesystem::QueryVolumeFileSystem>(
+                "file system format"sv);
     }
-    return metadata_map;
 }
+
+struct SnapshotHandleTuple {
+    const devicefs::vshadow::Snapshot &snapshot;
+    wil::unique_hfile file;
+    ManifestVolumeMetadata metadata{};
+};
+
+} // namespace native_backup_detail
+
+namespace internal {
 
 [[nodiscard]] auto RunSnapshotBackup(
     const HANDLE cancellation_event,
@@ -202,9 +211,8 @@ namespace internal {
     const auto dirty_maps = PrepareDirtyMaps(cancellation_event,
         snapshot_set, namespace_override);
 
-    using SnapshotHandlePair = std::pair<
-        const devicefs::vshadow::Snapshot &, wil::unique_hfile>;
-    const auto snapshot_handle_buffer = NEW_MALLOCA_BUFFER(SnapshotHandlePair,
+    const auto snapshot_handle_buffer = NEW_MALLOCA_BUFFER(
+        native_backup_detail::SnapshotHandleTuple,
         std::size(snapshot_set.snapshots));
     const auto snapshot_handles = snapshot_handle_buffer.CreateObjects(
         snapshot_set.snapshots, [](const auto &snapshot) static {
@@ -214,17 +222,21 @@ namespace internal {
             const auto snapshot_description_view = std::string_view{
                 snapshot_description.data(), snapshot_description.size()};
 
-            return SnapshotHandlePair{snapshot,
-                devicefs::OpenBlockDevice(
+            return native_backup_detail::SnapshotHandleTuple{
+                snapshot, devicefs::OpenBlockDevice(
                     std::filesystem::path{snapshot.device},
                     snapshot_description_view, true)};
         });
+    auto volume_metadata = devicefs::async([&snapshot_handles] {
+        native_backup_detail::PopulateSnapshotVolumeMetadata(snapshot_handles);
+    });
     const auto devicefs = DeviceFsChild{StartDeviceFs(
         snapshot_handles, read_user, use_known_data_map, dirty_maps.files)};
 
     if (!WaitForDeviceFs(devicefs.Process(), cancellation_event)) {
         return kCancelledExitCode;
     }
+
     using ArgumentSpan = std::span<const std::string_view>;
     [[gsl::suppress("26449", justification:
         "All string view temporaries are consumed before the end of the "
@@ -238,11 +250,12 @@ namespace internal {
                     std::string_view{std::to_string(
                         *dirty_maps.previous_backup_time)}}} :
                 ArgumentSpan{},
-            .snapshot_manifest = [&snapshot_set, &snapshot_handles](
+            .snapshot_manifest = [&identifier = snapshot_set.identifier,
+                &snapshot_handles, &volume_metadata](
                 const std::string_view layer) {
-                return SerializeSnapshotManifest(snapshot_set,
-                    QuerySnapshotManifestVolumeMetadata(snapshot_handles),
-                    layer);
+                volume_metadata.Get();
+                return SerializeSnapshotManifest(identifier,
+                    snapshot_handles, layer);
             },
             .send_encryption_key = true,
         }).exit_code;

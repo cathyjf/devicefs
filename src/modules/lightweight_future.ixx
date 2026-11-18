@@ -417,7 +417,7 @@ public:
     auto operator=(LightweightFuture &&) -> LightweightFuture & = delete;
 
     LightweightFuture(LightweightFuture &&)
-        requires (!(Policy &FuturePolicy::AllocateExternalState)) = delete;
+        requires (!(Policy & FuturePolicy::AllocateExternalState)) = delete;
 
     // Postcondition:
     //   The moved-from object is left in an unspecified state. No member

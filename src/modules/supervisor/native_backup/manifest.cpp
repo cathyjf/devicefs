@@ -60,10 +60,7 @@ export struct PreviousBackupManifestResult {
     [[nodiscard]] auto ParseManifest() const -> SnapshotManifest;
 };
 
-namespace {
-
-using namespace std::string_view_literals;
-using namespace wil::literals;
+namespace manifest_detail {
 
 [[nodiscard]] auto VolumeMountPoints(const std::wstring &volume)
     -> std::vector<std::wstring> {
@@ -102,6 +99,13 @@ using namespace wil::literals;
     }
     return std::wstring{label.data()};
 }
+
+} // namespace manifest_detail
+
+namespace {
+
+using namespace std::string_view_literals;
+using namespace wil::literals;
 
 [[nodiscard]] auto ParseSnapshotManifest(
     const std::u8string_view manifest) {
@@ -334,12 +338,12 @@ export [[nodiscard]] auto RetrieveBackupManifest(
 namespace internal {
 
 [[nodiscard]] auto SerializeSnapshotManifest(
-    const devicefs::vshadow::SnapshotSet &snapshot_set,
-    const ManifestVolumeMetadataMap &metadata_map,
+    const auto &snapshot_set_identifier,
+    const auto &snapshot_tuples,
     const std::string_view wsl_oci_layer) -> std::u8string {
     try {
         const auto apartment = WinrtApartment{
-            "could not initialize the Windows Runtime while serializing "
+            "failed to initialize the Windows Runtime while serializing "
             "the backup manifest"};
         using winrt::Windows::Data::Json::JsonObject;
         using winrt::Windows::Data::Json::JsonArray;
@@ -347,50 +351,38 @@ namespace internal {
         using winrt::Windows::Security::Cryptography::CryptographicBuffer;
 
         auto volumes = JsonObject{};
-        for (const auto &snapshot : snapshot_set.snapshots) {
+        for (const auto &[snapshot, _, metadata] : snapshot_tuples) {
             const auto original_volume = Transcode<std::wstring>(
                 snapshot.original_volume);
             auto mount_points = JsonArray{};
             for (const auto &mount_point :
-                VolumeMountPoints(original_volume)) {
+                manifest_detail::VolumeMountPoints(original_volume)) {
                 mount_points.Append(
                     JsonValue::CreateStringValue(mount_point));
             }
 
-            // The metadata map cannot currently be missing entries. However,
-            // that design might change in the future.
-            const auto metadata = [&metadata_map,
-                &identifier = snapshot.identifier] -> std::optional<
-                    std::reference_wrapper<const ManifestVolumeMetadata>> {
-                if (const auto metadata_entry = metadata_map.find(identifier);
-                    metadata_entry != metadata_map.end()) {
-                    return std::cref(metadata_entry->second);
-                }
-                return std::nullopt;
-            }();
-
             auto notes = JsonObject{};
             notes.SetNamedValue(L"mount-points", mount_points);
             notes.SetNamedValue(L"volume-label", JsonValue::CreateStringValue(
-                VolumeLabel(original_volume)));
+                manifest_detail::VolumeLabel(original_volume)));
             notes.SetNamedValue(L"snapshot-device",
                 JsonValue::CreateStringValue(
                     Transcode<std::wstring>(snapshot.device)));
-            if (metadata && metadata->get().mount_manager_id) {
+            if (metadata.mount_manager_id) {
                 notes.SetNamedValue(L"snapshot-mount-manager-id",
                     JsonValue::CreateStringValue(
                         CryptographicBuffer::EncodeToHexString(
                             CryptographicBuffer::CreateFromByteArray(
-                                *metadata->get().mount_manager_id))));
+                                *metadata.mount_manager_id))));
             }
 
             auto volume = JsonObject{};
             volume.SetNamedValue(L"snapshot-id", JsonValue::CreateStringValue(
                 winrt::to_hstring(snapshot.identifier)));
-            if (metadata && metadata->get().file_system) {
+            if (metadata.file_system) {
                 volume.SetNamedValue(L"file-system",
                     JsonValue::CreateStringValue(
-                        *metadata->get().file_system));
+                        *metadata.file_system));
             }
             volume.SetNamedValue(L"notes", notes);
             volumes.SetNamedValue(Transcode<std::wstring>(
@@ -401,7 +393,7 @@ namespace internal {
         result.SetNamedValue(
             L"version", JsonValue::CreateNumberValue(1));
         result.SetNamedValue(L"snapshot-set", JsonValue::CreateStringValue(
-            winrt::to_hstring(snapshot_set.identifier)));
+            winrt::to_hstring(snapshot_set_identifier)));
         result.SetNamedValue(L"volumes", volumes);
 
         const auto notes = [wsl_oci_layer] {

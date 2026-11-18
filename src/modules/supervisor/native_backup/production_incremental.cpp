@@ -52,9 +52,9 @@ public:
     auto operator=(const ClosingContainer &) -> ClosingContainer & = delete;
     auto operator=(ClosingContainer &&) -> ClosingContainer & = delete;
 
-    ~ClosingContainer() noexcept(noexcept(
-            Closer::operator()(*this->begin()))) {
+    ~ClosingContainer() {
         for (const auto &entry : *this) {
+            static_assert(noexcept(Closer::operator()(entry)));
             Closer::operator()(entry);
         }
     }

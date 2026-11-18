@@ -11,31 +11,57 @@ import devicefs.terminal.safecast;
 import <isa_availability.h>;
 #endif
 
+namespace realloc_vector_detail {
+
+template <class T>
+constexpr auto max_size =
+    std::numeric_limits<std::size_t>::max() / sizeof(T);
+
+template <class T>
+constexpr auto is_size_constant = false;
+
+template <std::size_t Value>
+constexpr auto is_size_constant<
+    std::integral_constant<std::size_t, Value>> = true;
+
+} // namespace realloc_vector_detail
+
 namespace devicefs {
 
 // Constraint on `T` if `ZeroInitialize` is `true`:
 //   An all-zero object representation must be a valid `T`.
-export template <class T, bool ZeroInitialize = true>
+export template <class T, bool ZeroInitialize = true,
+    class MaxSizeType = std::integral_constant<
+        std::size_t, realloc_vector_detail::max_size<T>>>
     requires (std::is_implicit_lifetime_v<T> &&
         std::is_trivially_copyable_v<T> &&
-        (alignof(T) <= alignof(std::max_align_t)))
+        (alignof(T) <= __STDCPP_DEFAULT_NEW_ALIGNMENT__) &&
+        (realloc_vector_detail::is_size_constant<MaxSizeType> ||
+            (std::is_same_v<MaxSizeType, std::size_t>)))
 class ReallocVector {
 public:
-    constexpr static auto max_size =
-        std::numeric_limits<std::size_t>::max() / sizeof(T);
+    constexpr static auto max_size = realloc_vector_detail::max_size<T>;
 
-    explicit constexpr ReallocVector(
-        const std::size_t maximum_size = max_size) noexcept :
-            max_size_{std::min(maximum_size, max_size)} {}
+    explicit constexpr ReallocVector() noexcept
+        requires (realloc_vector_detail::is_size_constant<MaxSizeType>) :
+        max_size_{} {
+        static_assert(MaxSizeType::value <= max_size);
+    }
 
-    // Precondition:
-    //   The construction of a new `T` from the provided arguments must not
-    //   access any memory within the existing elements of this container.
+    explicit constexpr ReallocVector(const std::size_t maximum_size = max_size)
+        noexcept
+        requires (!realloc_vector_detail::is_size_constant<MaxSizeType>) :
+        max_size_{std::min(maximum_size, max_size)} {}
+
+    // Preconditions:
+    //   (1) The construction of a new `T` from the provided arguments must not
+    //       access any memory within the existing elements of this container.
+    //
+    //   (2) `size_ < max_size_` is true.
     [[gsl::suppress("26445", justification:
         "This code creates objects generically. No benefit would be "
         "gained by adding special treatment for `std::string_view`.")]]
     [[msvc::forceinline]]
-    _Pre_satisfies_(size_ < max_size_)
     auto emplace_back(auto &&...arguments) -> T &
         requires (noexcept(T{std::forward<decltype(arguments)>(arguments)...})) {
         if constexpr (sizeof(T) == 1) {
@@ -51,8 +77,8 @@ public:
             std::forward<decltype(arguments)>(arguments)...};
     }
 
+    // Precondition: `new_size <= max_size_` is true.
     [[msvc::forceinline]]
-    _Pre_satisfies_(new_size <= max_size_)
     auto resize(const std::size_t new_size) -> void {
         if ((new_size >= size_) && (new_size <= reservation_)) [[likely]] {
             size_ = new_size;
@@ -87,8 +113,8 @@ public:
     }
 
 private:
+    // Precondition: `new_size <= max_size_` is true.
     [[msvc::noinline]]
-    _Pre_satisfies_(new_size <= max_size_)
     auto resize_allocation(const std::size_t new_size) -> void {
         // MSVC has been observed at times to prioritize the body of the first
         // `if` statement within a function, regardless of whether it is
@@ -96,7 +122,7 @@ private:
         // common `new_size != 0` case appears first even though its source
         // is much longer than the alternative case.
         if (new_size != 0) [[likely]] {
-            if (std::cmp_greater(new_size, max_size_)) [[unlikely]] {
+            if (new_size > max_size_) [[unlikely]] {
                 throw std::bad_alloc{};
             }
             const auto new_reservation = new_reservation_size(new_size);
@@ -110,7 +136,7 @@ private:
             storage_.release();
             storage_.reset(buffer);
             if constexpr (ZeroInitialize) {
-                if (std::cmp_greater(new_reservation, reservation_)) {
+                if (new_reservation > reservation_) {
                     std::memset(buffer + reservation_, 0,
                         (new_reservation - reservation_) * sizeof(T));
                 }
@@ -128,7 +154,7 @@ private:
         if (new_size < size_) {
             return new_size;
         }
-        const auto minimum_reservation = std::min(10uz, max_size_);
+        const auto minimum_reservation = std::min<std::size_t>(10uz, max_size_);
         constexpr auto geometric_factor = 2uz;
         const auto fraction_max_size = max_size_ / geometric_factor;
         const auto proposed_max = (reservation_ > fraction_max_size) ?
@@ -140,7 +166,7 @@ private:
             minimum_reservation : proposed_max;
     }
 
-    std::size_t max_size_;
+    [[msvc::no_unique_address]] MaxSizeType max_size_;
     std::size_t size_{};
     std::size_t reservation_{};
     std::unique_ptr<T[], decltype([](auto *const buffer) static noexcept {
@@ -662,7 +688,7 @@ private:
         return std::uint64_t{1} << (bit & (kBitsPerWord - 1));
     }
 
-    ReallocVector<std::uint64_t> words_;
+    ReallocVector<std::uint64_t, true, std::size_t> words_;
     size_type size_ = 0;
 };
 

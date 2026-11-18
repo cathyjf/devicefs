@@ -22,6 +22,7 @@ export module devicefs.supervisor.native_backup;
 
 import std;
 import <devicefs/common.h>;
+import <devicefs/malloca.h>;
 import <devicefs/windows_imports.h>;
 import :internal;
 import :devicefs_process;
@@ -127,12 +128,10 @@ export [[nodiscard]] auto RunSelectiveView(
 namespace internal {
 
 [[nodiscard]] auto QuerySnapshotManifestVolumeMetadata(
-    const std::span<const devicefs::vshadow::Snapshot> snapshots,
-    const SnapshotHandles &snapshot_handles) {
+    const auto &snapshot_handles) {
     auto metadata_map = ManifestVolumeMetadataMap{};
-    for (const auto &snapshot : snapshots) {
-        const auto get_metadata = [
-            handle = snapshot_handles.at(snapshot.identifier).get(),
+    for (const auto &[snapshot, file] : snapshot_handles) {
+        const auto get_metadata = [handle = file.get(),
             device_name = std::basic_string_view{snapshot.device}]
             <auto function>(const auto description) {
             auto result = std::invoke(function, handle);
@@ -200,30 +199,28 @@ namespace internal {
         std::filesystem::remove(mount_target);
     }
 
-    const auto dirty_maps = PrepareDirtyMaps(
-        cancellation_event, snapshot_set, namespace_override);
-    const auto snapshot_handles = snapshot_set.snapshots |
-        std::views::transform([](const auto &snapshot) static {
-            // This snapshot description is purely used for displaying error
-            // messages. A better design would be to pass along only the
-            // `DeferredSequence` object, or a view of it, and let the eventual
-            // error formatter materialize the sequence.
-            //
-            // TODO: Implement the better design.
+    const auto dirty_maps = PrepareDirtyMaps(cancellation_event,
+        snapshot_set, namespace_override);
+
+    using SnapshotHandlePair = std::pair<
+        const devicefs::vshadow::Snapshot &, wil::unique_hfile>;
+    const auto snapshot_handle_buffer = NEW_MALLOCA_BUFFER(SnapshotHandlePair,
+        std::size(snapshot_set.snapshots));
+    const auto snapshot_handles = snapshot_handle_buffer.CreateObjects(
+        snapshot_set.snapshots, [](const auto &snapshot) static {
             const auto snapshot_description =
                 devicefs::MakeExactSequence<char>(
                     SnapshotImageNameSequence(snapshot));
             const auto snapshot_description_view = std::string_view{
                 snapshot_description.data(), snapshot_description.size()};
 
-            return std::pair{snapshot.identifier,
+            return SnapshotHandlePair{snapshot,
                 devicefs::OpenBlockDevice(
                     std::filesystem::path{snapshot.device},
                     snapshot_description_view, true)};
-        }) | std::ranges::to<SnapshotHandles>();
+        });
     const auto devicefs = DeviceFsChild{StartDeviceFs(
-        snapshot_set.snapshots, read_user, use_known_data_map,
-        snapshot_handles, dirty_maps.files)};
+        snapshot_handles, read_user, use_known_data_map, dirty_maps.files)};
 
     if (!WaitForDeviceFs(devicefs.Process(), cancellation_event)) {
         return kCancelledExitCode;
@@ -243,9 +240,9 @@ namespace internal {
                 ArgumentSpan{},
             .snapshot_manifest = [&snapshot_set, &snapshot_handles](
                 const std::string_view layer) {
-                return SerializeSnapshotManifest(
-                    snapshot_set, QuerySnapshotManifestVolumeMetadata(
-                        snapshot_set.snapshots, snapshot_handles), layer);
+                return SerializeSnapshotManifest(snapshot_set,
+                    QuerySnapshotManifestVolumeMetadata(snapshot_handles),
+                    layer);
             },
             .send_encryption_key = true,
         }).exit_code;

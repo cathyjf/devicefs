@@ -249,10 +249,9 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
     process{StartProcess(request)} {}
 
 [[nodiscard]] auto StartDeviceFs(
-    const std::span<const devicefs::vshadow::Snapshot> snapshots,
+    const auto &snapshot_handles,
     const wil::zstring_view read_user,
     const bool use_known_data_map,
-    const SnapshotHandles &snapshot_handles,
     const auto &dirty_maps) {
     const auto handle_count = devicefs::math::SafeSum(
         std::size(snapshot_handles), std::size(dirty_maps));
@@ -262,20 +261,19 @@ DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
         (const auto &handle) noexcept {
         inherited_handles[handle_index++] = handle;
     };
-    for (const auto &handle : snapshot_handles | std::views::values) {
-        add_handle(handle.get());
-    }
 
     const auto source_count = devicefs::math::SafeSum(
-        std::size(snapshots), std::size(dirty_maps));
+        std::size(snapshot_handles), std::size(dirty_maps));
     const auto source_buffer = NEW_MALLOCA_BUFFER(DeviceFsSource, source_count);
-    const auto sources_first = source_buffer.CreateObjects(snapshots,
-        [&snapshot_handles](const auto &snapshot) {
+    const auto sources_first = source_buffer.CreateObjects(snapshot_handles,
+        [&add_handle](const auto &entry) {
+        const auto &[snapshot, file] = entry;
+        add_handle(file.get());
         return DeviceFsSource{
             .name{SnapshotImageNameSequence(snapshot)},
             .source{devicefs::rpc::kHandleDevicePrefix,
-                devicefs::TextualNumber{std::bit_cast<std::uintptr_t>(
-                    snapshot_handles.at(snapshot.identifier).get())}}};
+                devicefs::TextualNumber{
+                    std::bit_cast<std::uintptr_t>(file.get())}}};
     });
     const auto sources_second = devicefs::CreateObjects(
         sources_first.data() + sources_first.size(), dirty_maps,

@@ -254,9 +254,8 @@ struct WslProcess {
 
     std::unique_ptr<HANDLE, ProfileCloser> profile;
     wil::unique_process_information process;
-    std::optional<PipeCopy> standard_output;
-    std::optional<PipeCapture> captured_standard_output;
-    std::optional<SambaReadinessReader> samba_readiness;
+    std::variant<std::monostate,
+        PipeCopy, PipeCapture, SambaReadinessReader> standard_output;
     std::optional<PipeCopy> standard_error;
 
     constexpr auto GetToken(this auto &self) noexcept -> auto & {
@@ -281,29 +280,33 @@ struct WslProcess {
         }
     }
 
-    auto FinishOutput() -> std::optional<devicefs::ReallocUtf8String> {
-        using finish_forwarding = decltype([](auto &reader,
+    auto FinishOutput() {
+        using FinishForwarding = decltype([](auto &reader,
             const std::string_view context) static {
-            if (!reader) {
-                return;
-            }
-            if (const auto error = reader->Finish(); error != ERROR_SUCCESS) {
+            if (const auto error = reader.Finish(); error != ERROR_SUCCESS) {
                 TryWriteNonFatalError(context,
                     TryConstructWinError("", ExplicitWin32Error{error}));
             }
         });
-        finish_forwarding::operator()(standard_output,
-            "failed to forward WSL standard output");
-        if (samba_readiness) {
-            samba_readiness->Finish();
-            samba_readiness.reset();
+        if (standard_error) {
+            FinishForwarding::operator()(*standard_error,
+                "failed to forward WSL standard error");
         }
-        finish_forwarding::operator()(standard_error,
-            "failed to forward WSL standard error");
-        if (captured_standard_output) {
-            return std::move(captured_standard_output->Finish());
-        }
-        return std::nullopt;
+        return std::visit([]<class T>(T &reader) static
+            -> std::optional<devicefs::ReallocUtf8String> {
+            if constexpr (std::is_same_v<T, PipeCapture>) {
+                return std::move(reader.Finish());
+            } else if constexpr (std::is_same_v<T, PipeCopy>) {
+                FinishForwarding::operator()(reader,
+                    "failed to forward WSL standard output");
+                return {};
+            } else if constexpr (std::is_same_v<T, SambaReadinessReader>) {
+                reader.Finish();
+                return {};
+            } else {
+                return {};
+            }
+        }, standard_output);
     }
 };
 
@@ -472,15 +475,15 @@ auto CreateUniquePipe() {
     const std::span<const char8_t> standard_input,
     const PbsStandardOutput standard_output = PbsStandardOutput::Forward) {
     if (standard_output == PbsStandardOutput::Forward) {
-        started.process.standard_output.emplace(
+        started.process.standard_output.emplace<PipeCopy>(
             std::move(started.standard_output),
             ForwardPipeOutput{
                 .destination = GetStdHandle(STD_OUTPUT_HANDLE)});
     } else if (standard_output == PbsStandardOutput::Capture) {
-        started.process.captured_standard_output.emplace(
+        started.process.standard_output.emplace<PipeCapture>(
             std::move(started.standard_output), CapturePipeOutput{});
     } else {
-        started.process.samba_readiness.emplace(
+        started.process.standard_output.emplace<SambaReadinessReader>(
             std::move(started.standard_output));
     }
     started.process.standard_error.emplace(
@@ -618,15 +621,18 @@ private:
     auto MakeProcess(const auto &, const auto &, const auto &, const bool);
 };
 
+// Precondition:
+//   `operation.process.standard_output` holds a `SambaReadinessReader`.
 [[nodiscard]] auto WaitForSambaReadiness(
     PbsFishOperation &operation,
     const HANDLE cancellation_event) {
-    auto &readiness = *operation.process.samba_readiness;
+    auto &readiness = std::get<SambaReadinessReader>(
+        operation.process.standard_output);
     const auto result = wil::wait_any_failfast(readiness.GetEvent(),
         operation.Process(), cancellation_event).status();
     if (result == WAIT_OBJECT_0) {
         const auto error = readiness.Finish();
-        operation.process.samba_readiness.reset();
+        operation.process.standard_output.emplace<std::monostate>();
         if (error != ERROR_SUCCESS) {
             if (WaitForProcess(operation.Process(), 0ms)) {
                 throw std::runtime_error(std::format(

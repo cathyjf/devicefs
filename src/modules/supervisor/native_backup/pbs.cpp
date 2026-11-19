@@ -170,12 +170,12 @@ class PipeReader {
         }
     };
 public:
-    PipeReader(wil::unique_handle source, Operation operation) :
+    PipeReader(wil::unique_handle &&source, Operation &&operation) :
         future_{PipeReaderTask{std::move(source), std::move(operation)}} {}
 
     [[nodiscard]]
-    auto Finish() noexcept(noexcept(auto(std::move(future_.Get())))) {
-        return std::move(future_.Get());
+    auto Finish() noexcept(noexcept(future_.Get())) -> decltype(auto) {
+        return future_.Get();
     }
 private:
     devicefs::AsyncFuture<PipeReaderTask,
@@ -208,7 +208,7 @@ class SambaReadinessReader {
         }
     };
 public:
-    explicit SambaReadinessReader(wil::unique_handle source) :
+    explicit SambaReadinessReader(wil::unique_handle &&source) :
         completion_{[] static {
             auto event = wil::unique_event_nothrow{};
             if (!event.try_create(
@@ -232,9 +232,8 @@ public:
         return completion_.get();
     }
 
-    [[nodiscard]]
-    auto Finish() noexcept(noexcept(auto(std::move(future_.Get())))) {
-        return std::move(future_.Get());
+    auto Finish() noexcept(noexcept(future_.Get())) -> decltype(auto) {
+        return future_.Get();
     }
 private:
     wil::unique_event_nothrow completion_;
@@ -296,13 +295,13 @@ struct WslProcess {
         finish_forwarding::operator()(standard_output,
             "failed to forward WSL standard output");
         if (samba_readiness) {
-            static_cast<void>(samba_readiness->Finish());
+            samba_readiness->Finish();
             samba_readiness.reset();
         }
         finish_forwarding::operator()(standard_error,
             "failed to forward WSL standard error");
         if (captured_standard_output) {
-            return captured_standard_output->Finish();
+            return std::move(captured_standard_output->Finish());
         }
         return std::nullopt;
     }

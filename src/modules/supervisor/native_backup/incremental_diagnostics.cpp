@@ -18,7 +18,7 @@ module;
 
 #include <devicefs/strsafe_compat.h>
 
-module devicefs.supervisor.native_backup;
+module devicefs.supervisor.native_backup:incremental_diagnostics_impl;
 
 import std;
 import <devicefs/common.h>;
@@ -27,6 +27,7 @@ import <devicefs/windows_imports.h>;
 import :devicefs_process;
 import :filesystem_verifier;
 import :incremental;
+import :incremental_diagnostics;
 import :internal;
 import :manifest;
 import devicefs.allocation;

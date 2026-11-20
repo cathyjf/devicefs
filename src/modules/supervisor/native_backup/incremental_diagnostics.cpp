@@ -501,13 +501,16 @@ enum class BackupViewPreparation {
 
     const auto synthetic_mount_text = Transcode<std::string>(synthetic_mount.native());
     const auto real_mount_text = Transcode<std::string>(real_mount.native());
-    const auto endpoint = std::format(
-        "devicefs-block-device-{}", UniqueName());
+    using namespace devicefs::literals;
+    const auto endpoint = devicefs::MakeExactSequence<char>(
+        "devicefs-block-device-"_text, UniqueNameSequence(), '\0');
+    const auto endpoint_view = wil::zstring_view{
+        endpoint.data(), endpoint.size() - 1};
     auto suspended_synthetic = internal::DeviceFsProcess{
         internal::DeviceFsStartRequest{
             .sources = synthetic_sources,
             .mount_target = synthetic_mount_text,
-            .rpc_endpoint = endpoint,
+            .rpc_endpoint = endpoint_view,
             .vhdx = true,
         }};
     auto terminate_synthetic = wil::scope_exit([&] {
@@ -518,7 +521,7 @@ enum class BackupViewPreparation {
     // The child owners must be destroyed before the RPC server because
     // unmounting the synthetic VHDX can issue final block-device reads.
     auto server = SyntheticBackupServer::Start(
-        Transcode<std::wstring>(endpoint),
+        Transcode<std::wstring>(endpoint_view),
         suspended_synthetic.process.dwProcessId,
         std::move(devices));
     suspended_synthetic.Resume();

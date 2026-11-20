@@ -113,6 +113,10 @@ private:
         NeedsErrorStorage, bool, EmptyError> has_error_{};
 };
 
+template <class T>
+using AdaptReference = std::conditional_t<std::is_reference_v<T>,
+    std::reference_wrapper<std::remove_reference_t<T>>, T>;
+
 template <class Context, class Result, bool AtomicReadiness,
     bool NeedsErrorStorage>
 using Discriminator = std::conditional_t<
@@ -155,8 +159,8 @@ public:
         }
     }
 
-    auto GetContext() noexcept -> decltype(auto) {
-        return (state_.context);
+    auto GetContext() noexcept -> Context & {
+        return state_.context;
     }
 
     template <bool TestForError>
@@ -168,7 +172,7 @@ public:
             }
         }
         if constexpr (!std::is_same_v<Result, VoidSentinel>) {
-            return (state_.result);
+            return static_cast<Result &>(state_.result);
         }
     }
 
@@ -202,7 +206,7 @@ private:
     template <class T>
     static auto Construct(T &buffer, auto &&...arguments)
         noexcept(std::is_nothrow_constructible_v<T, decltype(arguments)...>) {
-        ::new (std::addressof(buffer)) T{
+        ::new (const_cast<std::remove_const_t<T> *>(std::addressof(buffer))) T{
             std::forward<decltype(arguments)>(arguments)...};
     }
 
@@ -215,8 +219,8 @@ private:
         "Construction and destruction of the union members is handled by "
         "the enclosing class."))
     [[msvc::no_unique_address]] union StateUnion {
-        Context context;
-        Result result;
+        AdaptReference<Context> context;
+        AdaptReference<Result> result;
         Error error;
 
         StateUnion() noexcept {}
@@ -381,7 +385,7 @@ public:
                 std::is_nothrow_constructible_v<
                     ResultType, std::add_lvalue_reference_t<ResultType>>))
         -> decltype(auto) {
-        using OptionalReturn = std::optional<ResultType>;
+        using OptionalReturn = std::optional<AdaptReference<ResultType>>;
         auto &state = GetState();
         if (!(Policy & (FuturePolicy::AllowSynchronousCallback |
                 FuturePolicy::AllowMultipleRetrieval)) || work_) {
@@ -529,21 +533,16 @@ private:
 
 export template <FuturePolicy Policy = FuturePolicy::Default, class Callable>
 auto async(Callable callback) {
-    // Note: If we later add support for returning a reference from the
-    // callback, the return type of this lambda should be changed to
-    // `decltype(auto)` and the noexcept expression should be changed to
-    // `noexcept(std::is_nothrow_invocable_v<Callable &>)`.
     using FutureCallback = decltype([](Callable &callback_) static
-        noexcept(std::is_nothrow_invocable_r_v<
-            std::decay_t<std::invoke_result_t<Callable &>>, Callable &>) {
-        return callback_();
+        noexcept(std::is_nothrow_invocable_v<Callable &>) -> decltype(auto) {
+        return std::invoke(callback_);
     });
     return LightweightFuture<FutureCallback, Callable, Policy>{
-        std::move(callback)};
+        std::forward<Callable>(callback)};
 }
 
 export template <class Callable, FuturePolicy Policy = FuturePolicy::Default>
 using AsyncFuture = decltype(
-    devicefs::async<Policy>(std::declval<Callable>()));
+    devicefs::async<Policy, Callable>(std::declval<Callable>()));
 
 } // namespace devicefs

@@ -281,12 +281,12 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
             return kReturnValue;
         }
 
-        using FutureCallable = decltype([](auto *const tuple) static {
-            tuple->result_file = TryPrepareAndWriteDirtyMapForSnapshot(
-                tuple->payload, tuple->baseline);
+        using FutureCallable = decltype([](auto &tuple) static {
+            tuple.result_file = TryPrepareAndWriteDirtyMapForSnapshot(
+                tuple.payload, tuple.baseline);
         });
         using FutureType = devicefs::LightweightFuture<
-            FutureCallable, SnapshotTuple *,
+            FutureCallable, SnapshotTuple &,
             devicefs::FuturePolicy::AllowSynchronousCallback |
                 devicefs::FuturePolicy::CancelOnDestruction>;
         const auto futures_buffer = NEW_MALLOCA_BUFFER(
@@ -301,7 +301,7 @@ auto PrepareDirtyMaps(const HANDLE cancellation_event,
                 // The first task will run on this thread once it is collected
                 // below. If there is more than one task, each additional task
                 // may run on a separate thread.
-                return FutureType{&snapshot, index != 0, error};
+                return FutureType{snapshot, index != 0, error};
             });
         // Collect the futures.
         for (auto &future : futures) {

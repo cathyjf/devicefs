@@ -1049,15 +1049,15 @@ public:
         };
         Queue(std::move(initial));
 
-        using FutureCallable = decltype([](auto *const self) static {
-            self->Worker();
+        using FutureCallable = decltype([](auto &self) static {
+            self.Worker();
         });
         auto workers = std::array<std::optional<
-            devicefs::LightweightFuture<FutureCallable, decltype(this)>>,
+            devicefs::LightweightFuture<FutureCallable, decltype(*this) &>>,
             kVerificationWorkerCount>{};
         try {
             for (auto &worker : workers) {
-                worker.emplace(this);
+                worker.emplace(*this);
             }
         } catch (...) {
             Fail(std::current_exception());
@@ -1967,18 +1967,15 @@ auto RunComparisonWorkers(
         }
     };
 
-    using FutureCallable = decltype([](const auto run) static {
-        return std::invoke(*run);
-    });
-    auto workers = std::array<
-        std::optional<devicefs::LightweightFuture<
-            FutureCallable, decltype(std::addressof(run))>>,
+    using WorkerFuture = devicefs::AsyncFuture<decltype(run) &,
+        devicefs::FuturePolicy::CancelOnDestruction>;
+    auto workers = std::array<std::optional<WorkerFuture>,
         kVerificationWorkerCount>{};
     const auto worker_count = std::min(
         std::tuple_size_v<decltype(workers)>, plan.tasks.size());
     try {
         for (auto index = 0uz; index < worker_count; ++index) {
-            workers[index].emplace(std::addressof(run));
+            workers[index].emplace(run);
         }
     } catch (...) {
         state.Fail(std::current_exception());

@@ -115,7 +115,8 @@ export [[nodiscard]] auto RunForegroundOperation(auto &&operation) {
                 "console input mode"));
     });
 
-    auto result = devicefs::async(std::move(foreground_task));
+    auto result = devicefs::async<devicefs::FuturePolicy::Default,
+        decltype(foreground_task) &>(foreground_task);
     auto cancel_on_monitor_failure =
         context->cancellation_event.SetEvent_scope_exit();
     // The first signaled handle wins, giving completion priority over input.

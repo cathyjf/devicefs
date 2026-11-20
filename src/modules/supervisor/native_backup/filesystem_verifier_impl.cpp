@@ -1968,22 +1968,21 @@ auto RunComparisonWorkers(
     };
 
     using WorkerFuture = devicefs::AsyncFuture<decltype(run) &,
-        devicefs::FuturePolicy::CancelOnDestruction>;
-    auto workers = std::array<std::optional<WorkerFuture>,
-        kVerificationWorkerCount>{};
+        devicefs::FuturePolicy::CancelOnDestruction |
+            devicefs::FuturePolicy::AllowInertConstruction>;
+    auto workers = std::array<WorkerFuture, kVerificationWorkerCount>{};
     const auto worker_count = std::min(
         std::tuple_size_v<decltype(workers)>, plan.tasks.size());
+    auto worker_index = 0uz;
     try {
-        for (auto index = 0uz; index < worker_count; ++index) {
-            workers[index].emplace(run);
+        for (; worker_index < worker_count; ++worker_index) {
+            workers[worker_index].Start(run);
         }
     } catch (...) {
         state.Fail(std::current_exception());
     }
-    for (auto &worker : workers) {
-        if (worker) {
-            worker->Get();
-        }
+    for (auto i = 0uz; i < worker_index; ++i) {
+        workers[i].Get();
     }
     return !state.Failed() &&
         !wil::event_is_signaled(cancellation_event) &&

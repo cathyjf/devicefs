@@ -68,8 +68,7 @@ public:
         "This code creates objects generically. No benefit would be "
         "gained by adding special treatment for `std::string_view`.")]]
     [[msvc::forceinline]]
-    auto emplace_back(auto &&...arguments) -> T &
-        requires (noexcept(T{std::forward<decltype(arguments)>(arguments)...})) {
+    auto emplace_back(auto &&...arguments) -> auto & {
         if constexpr (sizeof(T) == 1) {
             // This check needs to protect only against integer overflow.
             // It does not need to duplicate the logic of `resize`.
@@ -79,8 +78,12 @@ public:
         }
         const auto index = size_;
         resize(size_ + 1);
-        return *::new (storage_.get() + index) T{
+        auto restore_previous_size = make_size_rollback_guard<
+            noexcept(T{std::forward<decltype(arguments)>(arguments)...})>();
+        auto &object = *::new (storage_.get() + index) T{
             std::forward<decltype(arguments)>(arguments)...};
+        restore_previous_size.release();
+        return object;
     }
 
     // Precondition:
@@ -136,6 +139,25 @@ public:
     }
 
 private:
+    template <bool NoThrowConstruction>
+    [[msvc::forceinline]]
+    auto make_size_rollback_guard() noexcept {
+        if constexpr (NoThrowConstruction) {
+            struct EmptyGuard {
+                [[msvc::forceinline]]
+                constexpr auto release() const noexcept {}
+            };
+            return EmptyGuard{};
+        } else {
+            return wil::scope_exit([this] [[msvc::forceinline]] noexcept {
+                --size_;
+                if constexpr (ZeroInitialize) {
+                    std::memset(storage_.get() + size_, 0, sizeof(T));
+                }
+            });
+        }
+    }
+
     // Precondition: `new_size <= max_size_` is true.
     [[msvc::noinline]]
     auto resize_allocation(const std::size_t new_size) -> void {

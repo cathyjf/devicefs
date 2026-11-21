@@ -51,9 +51,10 @@ auto SetFlag(T &flag, const std::memory_order order) noexcept {
 struct VoidSentinel {};
 
 struct EmptyError {
-    explicit constexpr operator bool() const noexcept {
-        return false;
-    }
+    constexpr EmptyError(auto &&...) noexcept {}
+    explicit constexpr operator bool() const noexcept { return false; }
+    constexpr auto operator=(auto) const noexcept {}
+    constexpr auto operator==(auto) const noexcept { return false; }
 };
 
 class EmptyDiscriminator {
@@ -96,29 +97,33 @@ private:
     [[msvc::no_unique_address]] std::uint8_t value_ = kHasContext;
 };
 
-template <bool NeedsErrorStorage>
+template <bool NeedsErrorStorage, bool AllowInertState>
 class AtomicDiscriminator {
+    static auto constexpr kInitialValue = 0;
+    static auto constexpr kHasError = 1;
+    static auto constexpr kIsInert = 2;
 public:
+    constexpr AtomicDiscriminator() noexcept {}
+    constexpr AtomicDiscriminator(auto) noexcept : value_{kIsInert} {}
     auto SetSuccessfulResult() noexcept {
         SetFlag(has_result_, std::memory_order_release);
     }
     auto SetErrorResult() noexcept {
-        has_error_ = true;
+        value_ = kHasError;
         SetSuccessfulResult();
     }
     auto HasResult(const std::memory_order order) const noexcept {
         return ReadFlag(has_result_, order);
     }
-    constexpr auto HasError() const noexcept {
-        return has_error_;
-    }
-    constexpr const auto IsInert() noexcept {
-        return false;
-    }
+    constexpr auto HasError() const noexcept { return value_ == kHasError; }
+    constexpr auto IsInert() const noexcept { return value_ == kIsInert; }
+    constexpr auto SetInert() noexcept { value_ = kIsInert; }
+    constexpr auto SetHasContext() noexcept { value_ = kInitialValue; }
 private:
     [[msvc::no_unique_address]] AtomicReadinessFlag has_result_{};
     [[msvc::no_unique_address]] std::conditional_t<
-        NeedsErrorStorage, bool, EmptyError> has_error_{};
+        NeedsErrorStorage || AllowInertState, std::uint8_t, EmptyError>
+            value_ = kInitialValue;
 };
 
 template <class T>
@@ -129,7 +134,7 @@ template <class Context, class Result, bool AtomicReadiness,
     bool NeedsErrorStorage, bool AllowInertState>
 using Discriminator = std::conditional_t<
     AtomicReadiness,
-    AtomicDiscriminator<NeedsErrorStorage>,
+    AtomicDiscriminator<NeedsErrorStorage, AllowInertState>,
     std::conditional_t<
         NeedsErrorStorage || AllowInertState ||
             (!std::is_same_v<Result, VoidSentinel> &&
@@ -344,7 +349,8 @@ class LightweightFuture {
             VoidSentinel, ResultType>,
         Policy & FuturePolicy::ProvideAtomicReadiness,
         !kCallbackExecutionIsNonthrowing,
-        Policy & FuturePolicy::AllowInertConstruction>;
+        (Policy & FuturePolicy::AllowInertConstruction) &&
+            !(Policy & FuturePolicy::AllocateExternalState)>;
     using ExternalFutureState = devicefs::ExternalFutureState<FutureState>;
 public:
     static_assert(!std::is_same_v<ResultType, VoidSentinel>);
@@ -383,10 +389,7 @@ public:
     // External state constructor.
     LightweightFuture(Context &&context, auto &&...error)
         requires (Policy & FuturePolicy::AllocateExternalState) {
-        auto state = std::make_unique<ExternalFutureState>(
-            std::forward<Context>(context));
-        work_ = MakeWork(state.get(), true, error...);
-        state_ = state.release();
+        StartWithExternalState(std::forward<Context>(context), error...);
     }
 
     // Inert constructor.
@@ -397,12 +400,7 @@ public:
     //   been called and has returned successfully.
     LightweightFuture() noexcept
         requires (Policy & FuturePolicy::AllowInertConstruction) :
-        state_{} {
-        // The following policies are currently unsupported in combination with
-        // the `AllowInertConstruction` policy.
-        static_assert(!(Policy & FuturePolicy::AllocateExternalState));
-        static_assert(!(Policy & FuturePolicy::ProvideAtomicReadiness));
-    }
+        state_{} {}
 
     // Precondition:
     //   This future is currently inert.
@@ -412,13 +410,18 @@ public:
     //   If an exception is thrown, this future remains inert.
     auto Start(Context &&context, const bool async = true, auto &&...error)
         requires (Policy & FuturePolicy::AllowInertConstruction) {
-        state_.ConstructContext(std::forward<Context>(context));
-        auto restore_inertness = wil::scope_exit([this] noexcept {
-            static_assert(noexcept(state_.MakeInert()));
-            state_.MakeInert();
-        });
-        work_ = MakeWork(&state_, async, error...);
-        restore_inertness.release();
+        if constexpr (Policy & FuturePolicy::AllocateExternalState) {
+            std::ignore = async;
+            StartWithExternalState(std::forward<Context>(context), error...);
+        } else {
+            state_.ConstructContext(std::forward<Context>(context));
+            auto restore_inertness = wil::scope_exit([this] noexcept {
+                static_assert(noexcept(state_.MakeInert()));
+                state_.MakeInert();
+            });
+            work_ = MakeWork(&state_, async, error...);
+            restore_inertness.release();
+        }
     }
 
     // Precondition for all invocations:
@@ -502,6 +505,14 @@ public:
     }
 
 private:
+    auto StartWithExternalState(Context &&context, auto &&...error)
+        requires (Policy & FuturePolicy::AllocateExternalState) {
+        auto state = std::make_unique<ExternalFutureState>(
+            std::forward<Context>(context));
+        work_ = MakeWork(state.get(), true, error...);
+        state_ = state.release();
+    }
+
     static auto MakeWork(const auto state, const bool async,
         auto &...error) -> UniqueWork
         requires (sizeof...(error) <= 1) {

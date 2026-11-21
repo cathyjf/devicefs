@@ -231,7 +231,12 @@ class DisjointIterator {
     constexpr static auto kHasSimpleTail =
         std::is_pointer_v<std::remove_reference_t<PrefixIterator>> &&
         std::is_pointer_v<std::remove_reference_t<PrefixEndIterator>> &&
-        std::is_pointer_v<std::remove_reference_t<TailIterator>>;
+        std::is_pointer_v<std::remove_reference_t<TailIterator>> &&
+        std::is_convertible_v<
+            std::remove_pointer_t<std::remove_reference_t<
+                TailIterator>>(*)[],
+            std::remove_pointer_t<std::remove_reference_t<
+                PrefixIterator>>(*)[]>;
 public:
     [[msvc::forceinline]]
     DisjointIterator(const PrefixIterator cursor) noexcept :
@@ -259,14 +264,20 @@ public:
         "This code dereferences a pointer generically. No benefit would be "
         "gained by adding special treatment for `std::string_view`.")]]
     [[msvc::forceinline]]
-    auto operator*() const noexcept -> decltype(auto) {
+    auto operator*(this auto &&self) noexcept
+        -> std::common_reference_t<
+            decltype(*self.cursor_), decltype(*self.tail_)> {
         if constexpr (kHasSimpleTail) {
-            return *cursor_;
-        } else if (cursor_ != crossover_) {
-            return *cursor_;
+            return *self.cursor_;
+        } else if (self.cursor_ != self.crossover_) {
+            return *self.cursor_;
         } else {
-            return *tail_;
+            return *self.tail_;
         }
+    }
+    [[msvc::forceinline]]
+    auto operator->(this auto &&self) noexcept {
+        return std::addressof(*self);
     }
     [[msvc::forceinline]]
     auto operator++() noexcept -> decltype(auto) {

@@ -286,7 +286,7 @@ auto Usage(const auto output) noexcept {
 }
 
 [[nodiscard]] auto ParseArgs(
-    const std::span<const std::string_view> args) {
+    const std::span<const wil::zstring_view> args) {
     auto result = Options{};
     const auto next = [&](auto &i) {
         if (++i == args.size()) {
@@ -1154,7 +1154,7 @@ auto Run(const Options &options) {
 
 export namespace devicefs {
 
-auto Main(const std::span<const std::string_view> arguments) -> int {
+auto Main(const std::span<const wil::zstring_view> arguments) -> int {
     FurtherHardenProcess();
     auto options = Options{};
     try {

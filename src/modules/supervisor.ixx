@@ -50,9 +50,10 @@ using devicefs::terminal::Transcode;
 namespace {
 
 using namespace std::string_view_literals;
+using namespace wil::literals;
 
 constexpr auto kRunInConsoleOption = "--internal-run-in-console"sv;
-constexpr auto kInstallOption = "--install"sv;
+constexpr auto kInstallOption = "--install"_zv;
 
 struct ForegroundOptions {
     bool no_writers = false;
@@ -89,7 +90,7 @@ struct SelectiveViewOptions {
 }
 
 [[nodiscard]] auto ParseBackupOverride(
-    const std::span<const std::string_view> arguments,
+    const std::span<const wil::zstring_view> arguments,
     std::size_t &index, auto &options) {
     const auto argument = arguments[index];
     if ((argument != "--namespace") && (argument != "--volume") &&
@@ -98,7 +99,7 @@ struct SelectiveViewOptions {
     }
     if (++index == arguments.size()) {
         throw std::invalid_argument(std::format("{} requires a value",
-            argument == "--namespace" ? argument : "--volume/--volumes"sv));
+            (argument == "--namespace") ? argument : "--volume/--volumes"_zv));
     }
     if (argument == "--namespace") {
         options.namespace_override.emplace(
@@ -110,7 +111,7 @@ struct SelectiveViewOptions {
 }
 
 [[nodiscard]] auto ParseForegroundOptions(
-    const std::span<const std::string_view> arguments) {
+    const std::span<const wil::zstring_view> arguments) {
     auto result = ForegroundOptions{};
     for (auto index = 0uz; index < arguments.size(); ++index) {
         const auto argument = arguments[index];
@@ -128,7 +129,7 @@ struct SelectiveViewOptions {
 }
 
 [[nodiscard]] auto ParseSelectiveViewOptions(
-    const std::span<const std::string_view> arguments) {
+    const std::span<const wil::zstring_view> arguments) {
     if (arguments.empty()) {
         throw std::invalid_argument("--view requires ARCHIVE");
     }
@@ -177,7 +178,7 @@ struct SelectiveViewOptions {
 }
 
 [[nodiscard]] auto ParseIncrementalDiagnosticOptions(
-    const std::span<const std::string_view> arguments) {
+    const std::span<const wil::zstring_view> arguments) {
     auto result = IncrementalDiagnosticOptions{};
     auto verification_percentage_supplied = false;
     for (auto index = 0uz; index < arguments.size(); ++index) {
@@ -194,14 +195,14 @@ struct SelectiveViewOptions {
             if (((index + 1) < arguments.size()) &&
                 !arguments[index + 1].starts_with("--")) {
                 result.backup_view_mount_root =
-                    std::filesystem::path{arguments[++index]};
+                    std::filesystem::path{std::string_view{arguments[++index]}};
             }
         } else if (argument == "--verify-synthetic-backup") {
             result.verify_synthetic_backup = true;
             if (((index + 1) < arguments.size()) &&
                 !arguments[index + 1].starts_with("--")) {
                 result.backup_view_mount_root =
-                    std::filesystem::path{arguments[++index]};
+                    std::filesystem::path{std::string_view{arguments[++index]}};
             }
         } else if (argument == "--verify-percentage") {
             if (++index == arguments.size()) {
@@ -247,7 +248,7 @@ struct SelectiveViewOptions {
 }
 
 [[nodiscard]] auto ParseNamespaceOverride(
-    const std::span<const std::string_view> arguments)
+    const std::span<const wil::zstring_view> arguments)
     -> std::optional<std::u8string> {
     const auto option = std::ranges::find(arguments, "--namespace");
     const auto value = std::ranges::next(option, 1, arguments.end());
@@ -271,7 +272,7 @@ struct SelectiveViewOptions {
 }
 
 [[nodiscard]] auto RunInConsoleMode(
-    const std::span<const std::string_view> arguments) {
+    const std::span<const wil::zstring_view> arguments) {
     if ((arguments.size() < 2) || (arguments.front() != "--")) {
         throw std::invalid_argument(std::format(
             "{} requires -- COMMAND [ARGUMENT ...]", kRunInConsoleOption));
@@ -280,26 +281,25 @@ struct SelectiveViewOptions {
         devicefs::WriteToStream(devicefs::stdout, output);
         return ERROR_SUCCESS;
     });
-    const auto process = console.StartProcess(
-        std::to_array<std::span<const std::string_view>>({
-            std::views::single(std::string_view{[command = arguments[1]] {
-                auto path = std::wstring{};
-                if (const auto status = wil::SearchPathW(nullptr,
-                        Transcode<wchar_t>(command).data(), L".exe", path);
-                    FAILED(status)) {
-                    WinError("failed to find executable '{}'",
-                        command, ExplicitHresult{status});
-                }
-                return Transcode<char>(path);
-            }()}),
-            arguments.subspan(2),
-        }) | std::views::join | std::ranges::to<std::vector<std::string>>());
+    const auto argv0 = [command = arguments[1]] {
+        auto path = std::wstring{};
+        if (const auto status = wil::SearchPathW(nullptr,
+                Transcode<wchar_t>(command).data(), L".exe", path);
+            FAILED(status)) {
+            WinError("failed to find executable '{}'",
+                command, ExplicitHresult{status});
+        }
+        return Transcode<char>(path);
+    }();
+    const auto process = console.StartProcess(devicefs::DisjointRange{
+        std::array{wil::zstring_view{argv0.data(), argv0.size()}},
+        arguments.subspan(2)});
     wil::handle_wait(process.hProcess);
     return ProcessExitCode(process.hProcess);
 }
 
 [[nodiscard]] auto RunFishProgramMode(
-    const std::span<const std::string_view> arguments) {
+    const std::span<const wil::zstring_view> arguments) {
     if (arguments.empty() ||
         ((arguments.size() > 1) && (arguments[1] != "--"))) {
         throw std::invalid_argument(
@@ -308,7 +308,7 @@ struct SelectiveViewOptions {
     return RunForegroundOperation(
         [arguments](const HANDLE cancellation_event) {
             return RunFishProgram(cancellation_event,
-                std::filesystem::path{arguments.front()},
+                std::filesystem::path{std::string_view{arguments.front()}},
                 arguments.subspan(1));
         });
 }
@@ -325,7 +325,7 @@ struct SelectiveViewOptions {
 }
 
 [[nodiscard]] auto RunQueryManifest(
-    const std::span<const std::string_view> arguments) {
+    const std::span<const wil::zstring_view> arguments) {
     return RunForegroundOperation(
         [namespace_override = ParseNamespaceOverride(arguments),
             query_vss = std::ranges::contains(arguments, "--vss"),
@@ -546,7 +546,7 @@ struct CancellableOutputOperation {
 }
 
 [[nodiscard]] auto RunVerifyFilesystems(
-    const std::span<const std::string_view> arguments) {
+    const std::span<const wil::zstring_view> arguments) {
     if ((arguments.size() != 3) &&
         ((arguments.size() != 5) || (arguments[3] != "--verify-percentage"))) {
         throw std::invalid_argument(
@@ -556,9 +556,9 @@ struct CancellableOutputOperation {
     const auto percentage = arguments.size() == 5
         ? ParseVerificationPercentage(arguments[4]) : 100.0;
     return RunForegroundOperation(
-        [synthetic = std::filesystem::path{arguments[1]},
-            real = std::filesystem::path{arguments[2]}, percentage](
-            const HANDLE cancellation_event) {
+        [synthetic = std::filesystem::path{std::string_view{arguments[1]}},
+        real = std::filesystem::path{std::string_view{arguments[2]}},
+        percentage](const HANDLE cancellation_event) {
             return VerifyMountedFilesystems(
                 cancellation_event, synthetic, real, percentage);
         });
@@ -571,7 +571,8 @@ auto RunInstallerInScrollingView(auto &&terminal) {
             const auto executable = Transcode<std::string>(
                 CurrentExecutablePath().native());
             const auto process = StartProcessWithHandles(ProcessLaunchOptions{
-                .argv = std::array{std::string_view{executable}, kInstallOption},
+                .argv = std::array{
+                    wil::zstring_view{executable}, kInstallOption},
                 .flags = CREATE_NO_WINDOW,
             });
             if (wil::wait_any_failfast(process.hProcess,
@@ -745,7 +746,7 @@ namespace supervisor_detail::hashing {
 } // namespace supervisor_detail::hashing
 
 export extern "C++" auto BackupSupervisorMain(
-    const std::span<const std::string_view> arguments) -> int {
+    const std::span<const wil::zstring_view> arguments) -> int {
     using namespace supervisor_detail::hashing;
 
     if (arguments.empty()) {
@@ -846,7 +847,8 @@ export extern "C++" auto BackupSupervisorMain(
                 "expected {} DISTRIBUTION [--oci FILENAME]", kMaterializeOciOption));
         }
         const auto oci = (arguments.size() == 4) ?
-            std::optional{std::filesystem::path{arguments[3]}} : std::nullopt;
+            std::optional{std::filesystem::path{
+                std::string_view{arguments[3]}}} : std::nullopt;
         return MaterializeOci(arguments[1], oci) ? 0 : 1;
     }
     case "--foreground"_h:

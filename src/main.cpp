@@ -26,7 +26,7 @@ import devicefs.terminal.transcoding;
 // the `main` function can move into a supervisor module file. Until then, this
 // separate `main.cpp` file remains necessary.
 
-auto BackupSupervisorMain(const std::span<const std::string_view>) -> int;
+auto BackupSupervisorMain(const std::span<const wil::zstring_view>) -> int;
 
 [[gsl::suppress("26429",
     justification:
@@ -50,11 +50,11 @@ auto main(
         HardenProcess();
 
         const auto length = argc - 1uz;
-        const auto buffer = NEW_MALLOCA_BUFFER(const std::string_view, length);
+        const auto buffer = NEW_MALLOCA_BUFFER(const wil::zstring_view, length);
         return BackupSupervisorMain(buffer.CreateObjects(
             std::span{argv + 1, length},
             [](const char *const argument) static noexcept {
-                return std::string_view{argument};
+                return wil::zstring_view{argument};
             }));
     } catch (const std::exception &error) {
         const auto argv0_basename = [argv0 = argv[0]] noexcept

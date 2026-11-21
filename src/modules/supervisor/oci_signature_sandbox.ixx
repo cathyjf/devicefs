@@ -38,7 +38,7 @@ export constexpr auto kVerifyOpenPgpDetachedSignatureOption =
 // materializer's filesystem or network access.
 // https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-isolation
 export auto RunOciSignatureWorker(
-    const std::span<const std::string_view> arguments) -> int {
+    const std::span<const wil::zstring_view> arguments) -> int {
     if (arguments.size() != 2) {
         throw std::invalid_argument(
             std::format("{} requires DIGEST SIGNATURE",

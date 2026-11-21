@@ -59,17 +59,18 @@ export constexpr auto kCancelledExitCode = internal::kCancelledExitCode;
 export [[nodiscard]] auto RunFishProgram(
     const HANDLE cancellation_event,
     const std::filesystem::path &path,
-    const std::span<const std::string_view> arguments) -> int {
+    const std::span<const wil::zstring_view> arguments) -> int {
     const auto program = ReadEntireFile(path);
     if (!program) {
         WinError("failed to open or read the Fish program: {}",
             std::wstring_view{path.native()}, program.error());
     }
+    using namespace wil::literals;
     return internal::RunPbsFish(
         cancellation_event, std::nullopt,
         internal::PbsFishRequest{
             .additional_arguments = devicefs::DisjointRange{
-                std::array{"--run-fish-program"sv}, arguments},
+                std::array{"--run-fish-program"_zv}, arguments},
             .additional_program = *program,
             .send_encryption_key = true,
         }).exit_code;

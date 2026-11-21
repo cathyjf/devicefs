@@ -17,6 +17,7 @@
 export module devicefs.vss_block_descriptors.cli;
 
 import std;
+import <devicefs/windows_imports.h>;
 import devicefs.count_zeros;
 import devicefs.guid_formatter;
 import devicefs.svi_extents;
@@ -56,7 +57,7 @@ auto Usage(const auto output) noexcept {
 }
 
 [[nodiscard]] auto ParseOptions(
-    const std::span<const std::string_view> arguments) {
+    const std::span<const wil::zstring_view> arguments) {
     auto result = Options{};
     const auto next = [&](auto &index) {
         if (++index == arguments.size()) {
@@ -197,7 +198,7 @@ auto WriteOutput(const std::string_view output) {
     return output;
 }
 
-auto Run(const std::span<const std::string_view> arguments) {
+auto Run(const std::span<const wil::zstring_view> arguments) {
     const auto options = ParseOptions(arguments);
     if (options.help) {
         Usage(devicefs::stdout);
@@ -256,7 +257,7 @@ auto Run(const std::span<const std::string_view> arguments) {
 } // namespace
 
 export auto VssDescriptorDumpMain(
-    const std::span<const std::string_view> arguments) -> int {
+    const std::span<const wil::zstring_view> arguments) -> int {
     try {
         return Run(arguments);
     } catch (const std::invalid_argument &error) {

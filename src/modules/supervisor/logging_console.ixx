@@ -311,12 +311,12 @@ public:
         };
         auto command = wil::ArgvToCommandLine(argv);
         auto process = wil::unique_process_information{};
-        if (!CreateProcessA(argv.front().c_str(), command.data(),
+        if (!CreateProcessA(argv.begin()->c_str(), command.data(),
                 nullptr, nullptr, FALSE,
                 flags | EXTENDED_STARTUPINFO_PRESENT,
                 nullptr, nullptr,
                 &startup.StartupInfo, &process)) {
-            WinError("failed to start program '{}'", argv.front());
+            WinError("failed to start program '{}'", *argv.begin());
         }
         input_read_.reset();
         output_write_.reset();

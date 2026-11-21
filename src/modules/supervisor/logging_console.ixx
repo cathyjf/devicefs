@@ -279,7 +279,7 @@ public:
             WinError("failed to create a console for the program",
                 ExplicitHresult{result});
         }
-        output_task_.emplace(OutputReader{
+        output_task_.Start({
             .output_read = std::move(output_read),
             .write_output = std::move(write_output),
         });
@@ -326,7 +326,7 @@ public:
     auto Finish() {
         input_write_.reset();
         console_.reset();
-        const auto error = output_task_->Get();
+        const auto error = output_task_.Get();
         if (error != ERROR_SUCCESS) {
             WinError("failed to record the program's console output",
                 ExplicitWin32Error{error});
@@ -345,7 +345,9 @@ private:
 
     // Destruction is in reverse order, so the reader remains active while
     // ClosePseudoConsole emits and closes its final output.
-    std::optional<devicefs::AsyncFuture<OutputReader>> output_task_;
+    devicefs::AsyncFuture<OutputReader,
+        devicefs::FuturePolicy::UseLongRunningCallbackHint |
+            devicefs::FuturePolicy::AllowInertConstruction> output_task_;
     unique_pseudoconsole console_;
     wil::unique_handle input_read_;
     wil::unique_handle input_write_;

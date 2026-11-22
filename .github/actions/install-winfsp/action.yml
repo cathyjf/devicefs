@@ -10,6 +10,6 @@ runs:
     - name: Download, verify, and install WinFsp
       uses: $/.github/actions/install-msi
       with:
-        uri: https://github.com/winfsp/winfsp/releases/download/v2.2B4/winfsp-2.2.26215.msi
-        sha256: 2ECB5C89405488A95BBD8A01875E02C48534FD37BBDFD84488F7590464D65944
+        uri: https://github.com/winfsp/winfsp/releases/download/v2.2/winfsp-2.2.26323.msi
+        sha256: 36CE01F9EEDBBE6842B7FB4BEDC79D7D4F71983E8ACEB6877B46A07B331C7E19
         arguments: ADDLOCAL=F.Main,F.User,F.Developer

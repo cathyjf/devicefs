@@ -46,12 +46,12 @@ namespace {
 // certificate chain checked by `VerifyWslMsi` before installation.
 //
 // The WinFsp release page publishes the version and SHA-256 recorded here:
-// https://github.com/winfsp/winfsp/releases/tag/v2.2B4
-constexpr auto kWinFspVersion = std::array{2u, 2u, 26215u};
+// https://github.com/winfsp/winfsp/releases/tag/v2.2
+constexpr auto kWinFspVersion = std::array{2u, 2u, 26323u};
 constexpr auto kWinFspRelease =
-    "https://github.com/winfsp/winfsp/releases/download/v2.2B4"sv;
+    "https://github.com/winfsp/winfsp/releases/download/v2.2"sv;
 constexpr auto kWinFspSha256 =
-    "2ECB5C89405488A95BBD8A01875E02C48534FD37BBDFD84488F7590464D65944"sv;
+    "36CE01F9EEDBBE6842B7FB4BEDC79D7D4F71983E8ACEB6877B46A07B331C7E19"sv;
 
 auto VerifyWslMsi(const std::filesystem::path &path) {
     // WSL acquisition is an automatic prerequisite of DeviceFs installation.

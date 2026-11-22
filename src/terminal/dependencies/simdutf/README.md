@@ -1,7 +1,7 @@
 # simdutf
 
-`simdutf.h` and `simdutf.cpp` come from the simdutf 9.3.0
-[single-header release archive](https://github.com/simdutf/simdutf/releases/download/v9.3.0/singleheader.zip).
+`simdutf.h` and `simdutf.cpp` come from the simdutf 9.4.0
+[single-header release archive](https://github.com/simdutf/simdutf/releases/download/v9.4.0/singleheader.zip).
 Both files are preserved unchanged in their original layout.
 
 The build runs [`GenerateSimdutf.cmake`](../../cmake/GenerateSimdutf.cmake) to
@@ -33,7 +33,7 @@ declarations when they follow the import. The preamble also uses
 same character-type substitutions as the C++ implementation.
 
 Archive SHA-256:
-`17e72138bd1525452573abcb44c353b3621937133786f69e272bd8a10672714e`.
+`d780c2576f3baeb8e2f24c63a117be90cd130e7ce1a487f5855ac38e1b7f6004`.
 
 `LICENSE-MIT` and `LICENSE-APACHE` are copied from the
-[same release tag](https://github.com/simdutf/simdutf/tree/v9.3.0).
+[same release tag](https://github.com/simdutf/simdutf/tree/v9.4.0).

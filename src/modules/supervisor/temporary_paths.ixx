@@ -140,11 +140,11 @@ export auto MakeTemporaryDirectory(std::filesystem::path path) {
             std::wstring_view{path.native()},
             ExplicitHresult{HRESULT_FROM_NT(status)});
     }
-    struct {
+    struct Directory {
         wil::unique_hfile handle;
         std::filesystem::path path;
-    } directory = {std::move(handle), std::move(path)};
-    return directory;
+    };
+    return Directory{std::move(handle), std::move(path)};
 }
 
 // This function is useful in situations where this program cannot retain a

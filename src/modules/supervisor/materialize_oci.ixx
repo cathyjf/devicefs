@@ -22,9 +22,10 @@ export module devicefs.supervisor.materialize_oci;
 
 import std;
 import devicefs.terminal.safecast;
-import <devicefs/windows_imports.h>;
 import <devicefs/common.h>;
+import <devicefs/windows_imports.h>;
 import <devicefs/winrt_imports.h>;
+import devicefs.constant_sequence;
 import devicefs.file_reader;
 import devicefs.stream_writer;
 import devicefs.supervisor.account_management;
@@ -322,7 +323,7 @@ auto ExtractArchiveMemberToHandle(
                 ExplicitHresult{error.code()});
         }
     }();
-    const auto layer = [&]() -> std::optional<std::tuple<Uri, std::string,
+    const auto layer = [&] -> std::optional<std::tuple<Uri, std::string,
         winrt::Windows::Data::Json::JsonObject>> {
         try {
             const auto index = ReadRegistryJson(client, Uri{std::format(
@@ -552,23 +553,27 @@ export [[nodiscard]] auto MaterializeOci(
     }();
 
     SetDefaultTokenAcl();
-    const auto temporary = MakeTemporaryDirectory(
-        std::filesystem::temp_directory_path() /
-            std::format("devicefs-oci-{}", UniqueName()));
-    const auto rootfs = temporary.path / "rootfs.tar";
+    const auto temporary = MakeTemporaryDirectory([] static {
+        using namespace devicefs::literals;
+        const auto suffix = devicefs::MakeExactSequence<wchar_t>(
+            L"devicefs-oci-"_text, UniqueNameSequence());
+        return std::filesystem::temp_directory_path() /
+            std::wstring_view{suffix.data(), suffix.size()};
+    }());
+    const auto rootfs = temporary.path / L"rootfs.tar"sv;
     const auto [digest, rootfs_file] =
         [&oci, &rootfs, &previous_digest, &temporary, distribution]()
         -> std::pair<std::optional<std::string>, wil::unique_hfile> {
         if (!oci) {
             return DownloadGhcrRootfsIfChanged(rootfs, previous_digest);
         }
-        const auto tar = [] {
+        const auto tar = [] static {
             auto directory = std::wstring{};
             if (const auto result = wil::GetSystemDirectoryW(directory); FAILED(result)) {
                 WinError("could not find the Windows directory containing tar.exe",
                     ExplicitHresult{result});
             }
-            return std::filesystem::path{directory} / "tar.exe";
+            return std::filesystem::path{directory} / L"tar.exe"sv;
         }();
         const auto archive = std::filesystem::absolute(*oci);
         devicefs::WriteToStream(devicefs::stdout,

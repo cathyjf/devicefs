@@ -52,7 +52,7 @@ FROM debian:trixie AS bash-base
 #
 COPY --chmod=0755 <<'EOF' /bin/devicefs-sh
 #!/usr/bin/env bash
-exec "$BASH" -O inherit_errexit -efux -o pipefail
+exec "$BASH" -O inherit_errexit -efux -o pipefail "$@"
 EOF
 
 #
@@ -241,6 +241,29 @@ Components: main
 Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
 EOF
 
+# This build requires a recent version of debcargo so that Proxmox crates can
+# be packaged before their dependencies are installed. The version of debcargo
+# available in the Trixie repositorities is insufficiently recent, so we acquire
+# debcargo from Sid instead.
+# https://manpages.debian.org/trixie/apt/apt_preferences.5.en.html
+COPY <<'EOF' /etc/apt/sources.list.d/debcargo-sid.sources
+Types: deb
+URIs: https://deb.debian.org/debian
+Suites: sid
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EOF
+
+COPY <<'EOF' /etc/apt/preferences.d/debcargo-sid
+Package: debcargo
+Pin: release n=sid
+Pin-Priority: 990
+
+Package: *
+Pin: release n=sid
+Pin-Priority: 100
+EOF
+
 #
 # mk-build-deps comes from devscripts and uses equivs to turn debian/control
 # into a temporary dependency package. debcargo is installed explicitly because
@@ -262,10 +285,12 @@ RUN /bin/devicefs-sh <<'EOF'
 apt-get update
 nala install -y --no-autoremove --no-install-recommends \
     binutils \
+    build-essential \
     cargo-auditable \
     clang \
     debcargo \
     devscripts \
+    dh-cargo \
     dpkg-dev \
     equivs \
     mold
@@ -297,6 +322,33 @@ wait "$git_job_proxmox"
 wait "$git_job_proxmox_backup"
 EOF
 
+# The proxmox-backup checkout can require packages that the configured APT
+# repositories do not yet provide. We therefore build Debian packages from the
+# proxmox checkout and make them available through a local APT repository.
+# APT can then install them when resolving proxmox-backup's build dependencies.
+#
+# These packages contain Rust source code. Disabling tests allows us to package
+# the sources before installing the dependencies needed to compile the crates:
+# https://rust-team.pages.debian.net/book/packaging-tools.html
+WORKDIR /usr/src/proxmox
+RUN /bin/devicefs-sh <<'EOF'
+export DEB_BUILD_PROFILES=nocheck DEB_BUILD_OPTIONS=nocheck NOTEST=1
+find . -maxdepth 3 -path './*/debian/debcargo.toml' -print0 |
+    cut -z -d/ -f2 |
+    xargs -0 -r -n1 -P0 /bin/devicefs-sh +x -c \
+        './build.sh "$1" 2>&1 |
+            awk -v prefix="[$1] " "{ print prefix \$0; fflush() }"' argv0
+cd build
+# `Packages` is the index APT reads to find the .deb files in this directory.
+# APT accepts an uncompressed index for a local `file:` repository:
+# https://manpages.debian.org/trixie/dpkg-dev/dpkg-scanpackages.1.en.html
+dpkg-scanpackages . > Packages
+EOF
+
+COPY <<'EOF' /etc/apt/sources.list.d/proxmox-checkout.list
+deb [trusted=yes] file:/usr/src/proxmox/build ./
+EOF
+
 WORKDIR /usr/src/proxmox-backup
 
 #
@@ -307,18 +359,9 @@ WORKDIR /usr/src/proxmox-backup
 # mk-build-deps installs everything needed by the source tree's current
 # debian/control. That includes the Debian crate registry under
 # /usr/share/cargo/registry and protoc for the checked-in gRPC protocol. The
-# temporary copy omits pbs-api-types because the live Proxmox checkout supplies
-# that crate. The other packaged Proxmox crates may still be installed as build
-# dependencies, but Cargo's path overrides select the live checkout instead.
-# Some packaged Proxmox crates lag behind the required source versions. The
-# temporary control file omits their package version requirements so they can
-# still supply transitive dependencies; Cargo enforces the source versions.
-#
-# The ARM64 repository supplies notify 1.x rather than 2.x. Dependencies on its
-# default and PBS-context packages therefore omit the major version. Those
-# packages supply the external dependencies shared by both versions;
-# serde-regex is added for notify 2.x. The legacy-matchers feature adds no
-# dependencies, so its package requirement is omitted.
+# local package index supplies the current Proxmox crates, so their package
+# requirements and version constraints can be used unchanged. Cargo's path
+# overrides still select the live checkout when compiling the client.
 #
 # mk-build-deps normally enables APT's dependency-resolver diagnostics. The
 # explicit noninteractive APT command below retains that option so a repository
@@ -333,21 +376,17 @@ WORKDIR /usr/src/proxmox-backup
 # https://bitbucket.org/cathyjf/proxmox-backup/src/main/README.rst
 #
 RUN /bin/devicefs-sh <<'EOF'
-sed -E \
-    -e '/librust-pbs-api-types-1\+default-dev/d' \
-    -e '/librust-proxmox-notify-2\+legacy-matchers-dev/d' \
-    -e 's/librust-proxmox-notify-2\+/librust-proxmox-notify+/' \
-    -e 's/^Build-Depends:/Build-Depends: librust-serde-regex-1+default-dev (>= 1.1-~~),/' \
-    -e 's/(librust-proxmox-(io|ldap|network-api|rate-limiter|rest-server|s3-client)-1\+[^ ,]+) \(>= [^)]*\)/\1/' \
-    debian/control > /tmp/proxmox-backup-control
-apt-get update
+apt-get \
+    -o Acquire::CompressionTypes::uncompressed=. \
+    -o Acquire::CompressionTypes::Order=uncompressed \
+    update
 apt_tool='nala install -y --no-install-recommends -o Debug::pkgProblemResolver=yes'
 DEB_BUILD_PROFILES=nodoc DEB_BUILD_OPTIONS=nodoc \
     mk-build-deps \
         --install \
         --remove \
         --tool "$apt_tool" \
-        /tmp/proxmox-backup-control
+        debian/control
 rm -rf /var/lib/apt/lists
 EOF
 

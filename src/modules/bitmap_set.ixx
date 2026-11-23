@@ -154,6 +154,9 @@ private:
                 if constexpr (ZeroInitialize) {
                     std::memset(storage_.get() + size_, 0, sizeof(T));
                 }
+                // Re-enable implicit object creation in the slot where
+                // construction failed.
+                ::operator new(sizeof(T), storage_.get() + size_);
             });
         }
     }

@@ -73,7 +73,7 @@ export [[nodiscard]] auto StartProcessWithHandles(
     std::ranges::copy(additional_handles,
         std::ranges::transform(
             child_handles, inherited_handles.get(),
-            [](const auto &handle) { return handle.get(); }).out);
+            [](const auto &handle) static { return handle.get(); }).out);
     const auto attributes = ProcessAttributeList{
         std::tuple{PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
             inherited_handles.get(),
@@ -143,28 +143,26 @@ export template <class Argv, class Callable>
 }
 
 export using PipeOutputConsumption = std::expected<std::size_t, DWORD>;
+using CharacterSpan = std::span<const char8_t>;
 
-export template <typename Consumer>
-    requires std::is_invocable_v<
-        Consumer &, std::span<const char8_t>>
-[[nodiscard]] auto ReadPipeOutput(
-    const HANDLE source,
-    Consumer &&consumer) noexcept(std::is_nothrow_invocable_v<
-        Consumer &, std::span<const char8_t>>) -> DWORD {
+export template <class Consumer>
+[[nodiscard]] auto ReadPipeOutput(const HANDLE source, Consumer &&consumer)
+    noexcept(noexcept(consumer(std::declval<const CharacterSpan &>()))) -> DWORD
+    requires std::same_as<
+        decltype(consumer(std::declval<const CharacterSpan &>())),
+        PipeOutputConsumption> {
     constexpr auto kBufferSize = DWORD{4096};
     /* [[indeterminate]] */ std::array<char8_t, kBufferSize> buffer;
-    const auto read_output = [&]() noexcept
-        -> std::expected<std::span<const char8_t>, DWORD> {
+    const auto read_output = [source, &buffer] noexcept
+        -> std::expected<CharacterSpan, DWORD> {
         auto read = DWORD{};
-        if (!ReadFile(source, buffer.data(), kBufferSize,
-                &read, nullptr)) {
-            const auto error = GetLastError();
-            if (error != ERROR_BROKEN_PIPE) {
-                return std::unexpected{error};
-            }
-            return std::span<const char8_t>{};
+        if (ReadFile(source, buffer.data(), kBufferSize, &read, nullptr)) {
+            return std::span{buffer}.first(read);
         }
-        return std::span{buffer}.first(read);
+        if (const auto error = GetLastError(); error != ERROR_BROKEN_PIPE) {
+            return std::unexpected{error};
+        }
+        return CharacterSpan{};
     };
 
     auto first_write_error = DWORD{ERROR_SUCCESS};
@@ -172,7 +170,7 @@ export template <typename Consumer>
     while (pending && !pending->empty()) {
         const auto consumed = [&first_write_error,
             &pending_ = std::as_const(*pending),
-            consumed_ = consumer(*pending)] {
+            consumed_ = consumer(std::as_const(*pending))] {
             if (consumed_) {
                 return *consumed_;
             }
@@ -200,8 +198,7 @@ export template <typename Consumer>
 export struct ForwardPipeOutput {
     HANDLE destination;
 
-    [[nodiscard]] auto operator()(
-        const std::span<const char8_t> data) const noexcept
+    [[nodiscard]] auto operator()(const CharacterSpan data) const noexcept
         -> PipeOutputConsumption {
         const auto size =
             devicefs::terminal::FailFastCast<DWORD>(data.size_bytes());

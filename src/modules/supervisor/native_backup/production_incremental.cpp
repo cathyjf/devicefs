@@ -62,15 +62,14 @@ public:
 
 class DirtyMapContainer {
     struct Entry {
-        const devicefs::vshadow::Snapshot *const snapshot;
+        const devicefs::vshadow::Snapshot &snapshot;
         HANDLE file;
     };
 public:
     DirtyMapContainer() noexcept {}
     DirtyMapContainer(auto &range) {
         for (auto &entry : range) {
-            storage_.emplace_back(std::addressof(entry.payload),
-                entry.result_file.get());
+            storage_.emplace_back(entry.payload, entry.result_file.get());
             entry.result_file.release();
         }
     }

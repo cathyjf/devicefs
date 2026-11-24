@@ -291,7 +291,7 @@ namespace devicefs_child_detail {
         const auto &[snapshot, handle] = entry;
         add_handle(handle);
         return DeviceFsSource{
-            .name{SnapshotImageNameSequence(*snapshot), ".dirty.bitmap"sv},
+            .name{SnapshotImageNameSequence(snapshot), ".dirty.bitmap"sv},
             .source{devicefs::rpc::kFileHandleDevicePrefix,
                 devicefs::TextualNumber{
                     std::bit_cast<std::uintptr_t>(handle)}}};

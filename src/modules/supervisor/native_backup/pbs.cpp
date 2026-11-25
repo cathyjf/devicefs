@@ -469,9 +469,13 @@ auto CreateUniquePipe() {
     };
 }
 
-[[nodiscard]] auto StartWslFish(
-    StartedWslFish started,
-    const std::span<const char> program,
+template <class T>
+concept FishProgramRange = std::same_as<
+    std::remove_cvref_t<decltype(*std::declval<T>().begin())>,
+    std::span<const char>>;
+
+[[nodiscard]] auto StartWslFish(StartedWslFish &&started,
+    const FishProgramRange auto &programs,
     const std::span<const char8_t> standard_input,
     const PbsStandardOutput standard_output = PbsStandardOutput::Forward) {
     if (standard_output == PbsStandardOutput::Forward) {
@@ -498,8 +502,10 @@ auto CreateUniquePipe() {
             WinError("failed to write the WSL input", result.error());
         }
     };
+    for (const auto program : programs) {
+        write_input(program);
+    }
     constexpr auto kProgramTerminator = std::array{char{0}};
-    write_input(program);
     write_input(kProgramTerminator);
     write_input(standard_input);
     started.standard_input.reset();
@@ -548,7 +554,7 @@ auto SendPbsFishSignal(
             ReadBackupConfiguration(persistent.configuration);
         return StartWslFish(
             StartWslFishProcess(configuration, arguments),
-            std::span<const char>{program},
+            std::array{std::span<const char>{program}},
             std::span<const char8_t>{});
     }();
     if (!WaitForProcess(
@@ -786,17 +792,15 @@ auto PbsFishOperation::MakeProcess(const auto &configuration,
             fish_stdin_buffer.get(), fish_stdin_length),
         fish_stdin_length};
 
-    const auto fish_program_sequence = devicefs::DeferredSequence{
-        StartPbsProgram(), '\n', request.additional_program};
-    const auto fish_program_length =
-        devicefs::SequenceLength(fish_program_sequence);
-    const auto fish_program_buffer =
-        NEW_MALLOCA_BUFFER(char, fish_program_length);
-    devicefs::JoinSequences(fish_program_buffer.get(), fish_program_sequence);
-    const auto fish_program_span = std::span<const char>{
-        fish_program_buffer.get(), fish_program_length};
+    using FishProgram = std::span<const char>;
+    const auto fish_program_one = std::array{StartPbsProgram()};
+    const auto fish_program_two = request.additional_program.empty() ?
+        MALLOCA_LIST(FishProgram) :
+        MALLOCA_LIST(FishProgram, "\n"sv, request.additional_program);
 
-    return StartWslFish(std::move(started), fish_program_span, fish_stdin_span,
+    return StartWslFish(std::move(started),
+        devicefs::DisjointRange{fish_program_one, fish_program_two},
+        fish_stdin_span,
         request.standard_output);
 }
 

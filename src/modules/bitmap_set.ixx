@@ -6,6 +6,7 @@ export module devicefs.bitmap_set;
 import std;
 import <devicefs/windows_imports.h>;
 import devicefs.terminal.safecast;
+import devicefs.supervisor.math;
 
 #ifdef _M_X64
 import <isa_availability.h>;
@@ -240,7 +241,13 @@ class DisjointIterator {
                 TailIterator>>(*)[],
             std::remove_pointer_t<std::remove_reference_t<
                 PrefixIterator>>(*)[]>;
+    using dereference_type = std::common_reference_t<
+        std::iter_reference_t<PrefixIterator>,
+        std::iter_reference_t<TailIterator>>;
 public:
+    using difference_type = std::ptrdiff_t;
+    using value_type = std::remove_cvref_t<dereference_type>;
+
     [[msvc::forceinline]]
     DisjointIterator(const PrefixIterator cursor) noexcept :
         cursor_{cursor} {}
@@ -267,9 +274,7 @@ public:
         "This code dereferences a pointer generically. No benefit would be "
         "gained by adding special treatment for `std::string_view`.")]]
     [[msvc::forceinline]]
-    auto operator*(this auto &&self) noexcept
-        -> std::common_reference_t<
-            decltype(*self.cursor_), decltype(*self.tail_)> {
+    auto operator*(this auto &&self) noexcept -> dereference_type {
         if constexpr (kHasSimpleTail) {
             return *self.cursor_;
         } else if (self.cursor_ != self.crossover_) {
@@ -297,6 +302,13 @@ public:
         return *this;
     }
     [[msvc::forceinline]]
+    auto operator++(this auto &self, int) noexcept {
+        auto previous = self;
+        ++self;
+        return previous;
+    }
+    // Precondition: `other` is the end sentinel for this range.
+    [[msvc::forceinline]]
     auto operator!=(const auto other) const noexcept {
         if constexpr (kHasSimpleTail) {
             return (cursor_ != other) || crossover_;
@@ -304,11 +316,15 @@ public:
             return (cursor_ != crossover_) || (tail_ != other);
         }
     }
+    // Precondition: `other` is the end sentinel for this range.
+    [[msvc::forceinline]]
+    auto operator==(this auto &&self, auto &&other) noexcept {
+        return !self.operator!=(std::forward<decltype(other)>(other));
+    }
 private:
     PrefixIterator cursor_{};
     PrefixEndIterator crossover_{};
-    std::conditional_t<kHasSimpleTail,
-        const TailIterator, TailIterator> tail_{};
+    TailIterator tail_{};
 };
 
 template <class Range, class TailIterator>
@@ -347,6 +363,13 @@ public:
         } else {
             return tail.end();
         }
+    }
+    auto size() const requires requires {
+        devicefs::math::SafeSum<std::size_t>(
+            std::size(prefix), std::size(tail));
+    } {
+        return devicefs::math::SafeSum<std::size_t>(
+            std::size(prefix), std::size(tail));
     }
 };
 

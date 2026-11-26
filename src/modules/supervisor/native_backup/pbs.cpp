@@ -72,11 +72,6 @@ struct PbsFishRequest {
     std::chrono::milliseconds kill_grace = 30s;
 };
 
-struct PbsFishResult {
-    int exit_code;
-    std::optional<devicefs::ReallocUtf8String> standard_output;
-};
-
 constexpr auto kLocalDomain = L"."_zv;
 constexpr auto kWslCreationFlags = DWORD{
     CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT};
@@ -262,8 +257,6 @@ struct WslProcess {
         return self.profile.get_deleter().token;
     }
 
-    WslProcess() noexcept = default;
-
     WslProcess(const WslProcess &) = delete;
     auto operator=(const WslProcess &) -> WslProcess & = delete;
     WslProcess(WslProcess &&) = default;
@@ -280,7 +273,11 @@ struct WslProcess {
         }
     }
 
-    auto FinishOutput() {
+    auto Finish() {
+        struct PbsFishResult {
+            int exit_code;
+            std::optional<devicefs::ReallocUtf8String> standard_output;
+        };
         using FinishForwarding = decltype([](auto &reader,
             const std::string_view context) static {
             if (const auto error = reader.Finish(); error != ERROR_SUCCESS) {
@@ -292,25 +289,41 @@ struct WslProcess {
             FinishForwarding::operator()(*standard_error,
                 "failed to forward WSL standard error");
         }
-        return std::visit([]<class T>(T &reader) static
-            -> std::optional<devicefs::ReallocUtf8String> {
-            if constexpr (std::is_same_v<T, PipeCapture>) {
-                return std::move(reader.Finish());
-            } else if constexpr (std::is_same_v<T, PipeCopy>) {
-                FinishForwarding::operator()(reader,
-                    "failed to forward WSL standard output");
-                return {};
-            } else if constexpr (std::is_same_v<T, SambaReadinessReader>) {
-                reader.Finish();
-                return {};
-            } else {
-                return {};
-            }
-        }, standard_output);
+        return PbsFishResult{
+            .exit_code = std::bit_cast<int>(ProcessExitCode(process.hProcess)),
+            .standard_output = std::visit([]<class T>(T &reader) static
+                -> std::optional<devicefs::ReallocUtf8String> {
+                if constexpr (std::is_same_v<T, PipeCapture>) {
+                    return std::move(reader.Finish());
+                } else if constexpr (std::is_same_v<T, PipeCopy>) {
+                    FinishForwarding::operator()(reader,
+                        "failed to forward WSL standard output");
+                    return {};
+                } else if constexpr (std::is_same_v<T, SambaReadinessReader>) {
+                    reader.Finish();
+                    return {};
+                } else {
+                    return {};
+                }
+            }, standard_output),
+        };
     }
+
+private:
+    WslProcess() noexcept = default;
+    friend class WslProcessFactory;
 };
 
-[[nodiscard]] auto StartWslAsConfiguredUser(
+class WslProcessFactory {
+private:
+    [[nodiscard]] static auto StartWslAsConfiguredUser(
+        const BackupConfiguration &, const auto &,
+        const HANDLE, const HANDLE, const HANDLE);
+    friend auto StartInchoateWslFishProcess(
+        const BackupConfiguration &, const auto &);
+};
+
+[[nodiscard]] auto WslProcessFactory::StartWslAsConfiguredUser(
     const BackupConfiguration &configuration,
     const auto &arguments,
     const HANDLE standard_input,
@@ -318,14 +331,11 @@ struct WslProcess {
     const HANDLE standard_error) {
     const auto wsl_path = WslExecutablePath();
     const auto wsl_path_text = Transcode<std::string>(wsl_path.native());
-    const auto wsl_path_text_view = std::string_view{wsl_path_text};
-    auto command = wil::ArgvToCommandLine(
-        devicefs::DisjointRange{std::span<const std::string_view, 1>{
-            std::addressof(wsl_path_text_view), 1}, arguments});
+    auto command = wil::ArgvToCommandLine(devicefs::DisjointRange{
+        std::array{std::string_view{wsl_path_text}}, arguments});
     const auto wsl_directory = wsl_path.parent_path();
-    const auto windows_username =
-        Transcode<std::wstring>(
-            configuration.windows_username);
+    const auto windows_username = Transcode<std::wstring>(
+        configuration.windows_username);
     if (!RunningAsLocalSystem()) {
         auto result = WslProcess{};
         result.process = StartWslWithLogon(
@@ -408,64 +418,55 @@ struct WslProcess {
     return result;
 }
 
-struct StartedWslFish {
+struct InchoateWslFishProcess {
+    WslProcess process;
     wil::unique_handle standard_input;
     wil::unique_handle standard_output;
     wil::unique_handle standard_error;
-    WslProcess process;
 };
 
-namespace wsl_fish_detail {
+namespace inchoate_wsl_fish_detail {
 
-auto CreateUniquePipe() {
-    struct {
-        wil::unique_handle read;
-        wil::unique_handle write;
-    } pipe;
-    if (!CreatePipe(pipe.read.addressof(), pipe.write.addressof(),
-            nullptr, 0)) {
-        WinError("failed to create a pipe for a Fish program");
+struct UniquePipe {
+    wil::unique_handle read;
+    wil::unique_handle write;
+
+    explicit UniquePipe() {
+        if (!CreatePipe(read.addressof(), write.addressof(), nullptr, 0)) {
+            WinError("failed to create a pipe for a Fish program");
+        }
     }
-    return pipe;
-}
+};
 
-} // namespace wsl_fish_detail
+} // namespace inchoate_wsl_fish_detail
 
-[[nodiscard]] auto StartWslFishProcess(
+[[nodiscard]] auto StartInchoateWslFishProcess(
     const BackupConfiguration &configuration,
-    const auto &arguments) -> StartedWslFish {
-    auto input = wsl_fish_detail::CreateUniquePipe();
-    auto output = wsl_fish_detail::CreateUniquePipe();
-    auto error = wsl_fish_detail::CreateUniquePipe();
-
+    const auto &arguments) {
     const auto range_one = std::array{"--distribution"sv,
         std::string_view{configuration.wsl.distribution}};
-
     const auto range_two = configuration.wsl.linux_user ?
         MALLOCA_LIST(std::string_view, "--user"sv,
             std::string_view{*configuration.wsl.linux_user}) :
         MALLOCA_LIST(std::string_view);
-
     constexpr auto range_three = std::array{
         "--exec"sv, "/usr/local/bin/devicefs-wsl-startup-broker"sv,
         "--no-config"sv, "-c"sv,
         "read --null --global DEVICEFS_FISH_PROGRAM && eval $DEVICEFS_FISH_PROGRAM"sv,
         "--"sv};
 
-    auto process = StartWslAsConfiguredUser(
-        configuration,
-        devicefs::DisjointRange{range_one, range_two} + range_three + arguments,
-        input.read.get(),
-        output.write.get(),
-        error.write.get());
-    input.read.reset();
-    output.write.reset();
-    error.write.reset();
-    return StartedWslFish{
+    auto input = inchoate_wsl_fish_detail::UniquePipe{};
+    auto output = inchoate_wsl_fish_detail::UniquePipe{};
+    auto error = inchoate_wsl_fish_detail::UniquePipe{};
+    return InchoateWslFishProcess{
+        .process = WslProcessFactory::StartWslAsConfiguredUser(
+            configuration,
+            devicefs::DisjointRange{range_one, range_two} + range_three +
+                arguments,
+            input.read.get(), output.write.get(), error.write.get()),
         .standard_input = std::move(input.write),
         .standard_output = std::move(output.read),
         .standard_error = std::move(error.read),
-        .process = std::move(process),
     };
 }
 
@@ -474,7 +475,7 @@ concept FishProgramRange = std::same_as<
     std::remove_cvref_t<decltype(*std::declval<T>().begin())>,
     std::span<const char>>;
 
-[[nodiscard]] auto StartWslFish(StartedWslFish &&started,
+[[nodiscard]] auto StartWslFish(InchoateWslFishProcess &&started,
     const FishProgramRange auto &programs,
     const std::span<const char8_t> standard_input,
     const PbsStandardOutput standard_output = PbsStandardOutput::Forward) {
@@ -512,15 +513,6 @@ concept FishProgramRange = std::same_as<
     return std::move(started.process);
 }
 
-[[nodiscard]] auto FinishWsl(WslProcess &process) -> PbsFishResult {
-    auto standard_output = process.FinishOutput();
-    return PbsFishResult{
-        .exit_code = std::bit_cast<int>(
-            ProcessExitCode(process.process.hProcess)),
-        .standard_output = std::move(standard_output),
-    };
-}
-
 enum class PbsFishSignal {
     Term,
     Kill,
@@ -553,7 +545,7 @@ auto SendPbsFishSignal(
         const auto configuration =
             ReadBackupConfiguration(persistent.configuration);
         return StartWslFish(
-            StartWslFishProcess(configuration, arguments),
+            StartInchoateWslFishProcess(configuration, arguments),
             std::array{std::span<const char>{program}},
             std::span<const char8_t>{});
     }();
@@ -563,7 +555,7 @@ auto SendPbsFishSignal(
             "the WSL {} request did not exit before its timeout",
             text));
     }
-    const auto result = FinishWsl(request);
+    const auto result = request.Finish();
     if (result.exit_code != 0) {
         throw std::runtime_error(std::format(
             "the WSL {} request exited with code {}",
@@ -682,7 +674,7 @@ private:
             }
         }
     }
-    return FinishWsl(operation.process);
+    return operation.process.Finish();
 }
 
 auto TryStopPbsFish(PbsFishOperation &operation) noexcept -> void {
@@ -743,7 +735,7 @@ auto PbsFishOperation::MakeProcess(const auto &configuration,
     // Preparing the manifest below requires a token to identify the user who
     // will run `wsl.exe`. Starting `wsl.exe` here (before preparing the
     // manifest) allows the process handle to be used to obtain that token.
-    auto started = StartWslFishProcess(configuration,
+    auto started = StartInchoateWslFishProcess(configuration,
         devicefs::DisjointRange{range_one, range_two} +
             request.additional_arguments);
 
@@ -838,7 +830,7 @@ auto PbsFishOperation::MakeProcess(const auto &configuration,
 
 [[nodiscard]] auto RunPbsFish(const HANDLE cancellation_event,
     const std::optional<std::u8string> &namespace_override,
-    const auto &request) -> PbsFishResult {
+    const auto &request) {
     constexpr auto kPollInterval = 100ms;
     auto operation = [&namespace_override, &request] {
         const auto persistent = ResolvePersistentPaths();
@@ -850,9 +842,8 @@ auto PbsFishOperation::MakeProcess(const auto &configuration,
     }();
 
     while (true) {
-        if (WaitForProcess(
-                operation.Process(), kPollInterval)) {
-            return FinishWsl(operation.process);
+        if (WaitForProcess(operation.Process(), kPollInterval)) {
+            return operation.process.Finish();
         }
         if (wil::event_is_signaled(cancellation_event)) {
             break;

@@ -351,9 +351,9 @@ namespace devicefs_process_detail {
     const auto process_index =
         CompileTimeCast<std::size_t>(result.status() - WAIT_OBJECT_0);
     if (process_index < sizeof...(devicefs_processes)) {
-        const auto processes = std::array{&devicefs_processes...};
+        const auto processes = std::array{std::cref(devicefs_processes)...};
         return Return{std::in_place, process_index,
-            ProcessExitCode(processes[process_index]->process.hProcess)};
+            ProcessExitCode(processes[process_index].get().process.hProcess)};
     }
     return Return{};
 }

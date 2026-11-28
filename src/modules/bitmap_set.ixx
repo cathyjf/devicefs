@@ -157,7 +157,7 @@ private:
                 }
                 // Re-enable implicit object creation in the slot where
                 // construction failed.
-                ::operator new(sizeof(T), storage_.get() + size_);
+                std::ignore = ::operator new(sizeof(T), storage_.get() + size_);
             });
         }
     }

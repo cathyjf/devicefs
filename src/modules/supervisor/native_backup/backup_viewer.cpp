@@ -130,8 +130,11 @@ auto MakeViewDirectory(const std::wstring_view prefix, const PSID user) {
     return result;
 }
 
+using ViewDeviceFsChild = internal::BasicDeviceFsChild<
+    std::reference_wrapper<bool>>;
+
 auto WaitForViewSession(
-    const DeviceFsChild &devicefs,
+    const ViewDeviceFsChild &devicefs,
     const PbsFishOperation &fish,
     const HANDLE cancellation_event) -> void {
     const auto result = wil::wait_any_failfast(
@@ -173,7 +176,7 @@ auto WaitForViewSession(
         return internal::kCancelledExitCode;
     }
 
-    const auto user = view_user ? std::move(view_user) : [] {
+    const auto user = view_user ? std::move(view_user) : [] static {
         auto information = wil::unique_tokeninfo_ptr<TOKEN_USER>{};
         if (const auto result = wil::get_token_information_nothrow(
                 information, GetCurrentProcessToken()); FAILED(result)) {
@@ -238,7 +241,7 @@ auto WaitForViewSession(
                 kTcpSourcePrefix>(), address, ':', port},
         },
     };
-    auto devicefs = internal::DeviceFsChild{
+    auto devicefs = internal::ViewDeviceFsChild{
         internal::DeviceFsStartRequest{
             .sources = source,
             .mount_target = Transcode<std::string>(devicefs_mount.native()),

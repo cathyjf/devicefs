@@ -367,9 +367,10 @@ namespace devicefs_process_detail {
         cancellation_event, *this, other_devicefs_processes...);
 }
 
-class DeviceFsChild {
+template <class ExitConfirmation = std::monostate>
+class BasicDeviceFsChild {
 public:
-    explicit DeviceFsChild(auto &&...args)
+    explicit BasicDeviceFsChild(auto &&...args)
         requires ((!std::is_same_v<std::remove_cvref_t<decltype(args)>,
             DeviceFsStartRequest> && ...) && requires {
                 devicefs_child_detail::StartDeviceFs(
@@ -378,25 +379,24 @@ public:
         devicefs_{devicefs_child_detail::StartDeviceFs(
             std::forward<decltype(args)>(args)...)} {}
 
-    explicit DeviceFsChild(const DeviceFsStartRequest &request,
-        std::optional<std::reference_wrapper<bool>> exit_confirmed =
-            std::nullopt) :
+    explicit BasicDeviceFsChild(const DeviceFsStartRequest &request,
+        ExitConfirmation exit_confirmed = ExitConfirmation{}) :
         devicefs_{request},
         exit_confirmed_{exit_confirmed} {
-        if (exit_confirmed_) {
-            exit_confirmed_->get() = false;
+        if constexpr (!std::same_as<ExitConfirmation, std::monostate>) {
+            exit_confirmed_.get() = false;
         }
     }
 
-    explicit DeviceFsChild(DeviceFsProcess &&process) noexcept :
+    explicit BasicDeviceFsChild(DeviceFsProcess &&process) noexcept :
         devicefs_{std::move(process)} {}
 
-    DeviceFsChild(const DeviceFsChild &) = delete;
-    DeviceFsChild(DeviceFsChild &&) = delete;
-    auto operator=(const DeviceFsChild &) -> DeviceFsChild & = delete;
-    auto operator=(DeviceFsChild &&) -> DeviceFsChild & = delete;
+    BasicDeviceFsChild(const BasicDeviceFsChild &) = delete;
+    BasicDeviceFsChild(BasicDeviceFsChild &&) = delete;
+    auto operator=(const BasicDeviceFsChild &) -> BasicDeviceFsChild & = delete;
+    auto operator=(BasicDeviceFsChild &&) -> BasicDeviceFsChild & = delete;
 
-    ~DeviceFsChild() {
+    ~BasicDeviceFsChild() {
         // Windows must still be able to read a VHDX's backing file to detach
         // the disk. If detachment failed, terminating DeviceFs could make the
         // disk impossible to detach without rebooting. To mitigate that, we
@@ -406,8 +406,8 @@ public:
         devicefs_.stop_event.SetEvent();
         if (WaitForProcess(devicefs_.process.hProcess,
                 DeviceFsProcess::kShutdownTimeout)) {
-            if (exit_confirmed_) {
-                exit_confirmed_->get() = true;
+            if constexpr (!std::same_as<ExitConfirmation, std::monostate>) {
+                exit_confirmed_.get() = true;
             }
             if (auto exit_code = DWORD{};
                 GetExitCodeProcess(devicefs_.process.hProcess, &exit_code) &&
@@ -438,7 +438,9 @@ public:
 
 private:
     DeviceFsProcess devicefs_;
-    std::optional<std::reference_wrapper<bool>> exit_confirmed_;
+    [[msvc::no_unique_address]] ExitConfirmation exit_confirmed_;
 };
+
+using DeviceFsChild = BasicDeviceFsChild<>;
 
 } // namespace internal

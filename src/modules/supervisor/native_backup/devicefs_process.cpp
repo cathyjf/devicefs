@@ -151,6 +151,38 @@ auto CreateRpcPasswordChannelAndWritePassword(const std::string_view password) {
     return password_input;
 }
 
+// This `forceinline` annotation is intended to discourage MSVC from
+// materializing the `start_process` and `emplace_mapping` closures.
+[[msvc::forceinline]]
+auto StartProcessWithRpcSources(const auto &start_process,
+    const auto &emplace_mapping, const auto &request) {
+    const auto rpc_source_buffer_length =
+        std::ranges::fold_left(request.sources,
+            devicefs::math::SafeAugend{0uz},
+            [](const auto length, const auto &source) static {
+                return length + source.source.length() +
+                    devicefs::rpc::kDeviceSourcePrefix.length() + 1;
+            }).integer;
+    const auto rpc_source_buffer =
+        NEW_MALLOCA_BUFFER(char, rpc_source_buffer_length);
+    auto rpc_source_cursor = rpc_source_buffer.get();
+    for (const auto &source : request.sources) {
+        const auto *const first = rpc_source_cursor;
+        rpc_source_cursor = devicefs::JoinSequences(rpc_source_cursor,
+            devicefs::rpc::kDeviceSourcePrefix,
+            std::string_view{source.source}, '\0');
+        emplace_mapping(source.name, first, rpc_source_cursor - first - 1);
+    }
+    if (!SetEnvironmentVariableA(
+            devicefs::rpc::kEndpointEnvironmentVariable.c_str(),
+            request.rpc_endpoint.c_str())) {
+        WinError("failed to set environment variable '{}' to RPC "
+            "endpoint '{}'", devicefs::rpc::kEndpointEnvironmentVariable,
+            request.rpc_endpoint);
+    }
+    return start_process();
+}
+
 auto StartProcess(const DeviceFsStartRequest &request,
     const DeviceFsStopEventName &stop_event_name) {
     using PackedView = devicefs::PackedTerminatedStringView<char, 3>;
@@ -180,56 +212,42 @@ auto StartProcess(const DeviceFsStartRequest &request,
         NEW_MALLOCA_BUFFER(PackedView, source_argument_count);
     auto source_arguments = devicefs::DisjointReallocVector{std::span{
         source_argument_initial_buffer.get(), source_argument_count}};
-
-    const auto rpc_source_buffer_length = request.rpc_endpoint.empty() ? 0uz :
-        std::ranges::fold_left(request.sources, devicefs::math::SafeAugend{0uz},
-            [](const auto length, const auto &source) static {
-                return length + source.source.length() +
-                    devicefs::rpc::kDeviceSourcePrefix.length() + 1;
-            }).integer;
-    const auto rpc_source_buffer =
-        NEW_MALLOCA_BUFFER(char, rpc_source_buffer_length);
-    auto rpc_source_cursor = rpc_source_buffer.get();
-
-    for (const auto &source : request.sources) {
+    const auto emplace_mapping = [&source_arguments] [[msvc::forceinline]]
+        (const auto &name, auto &&...source_args) {
         source_arguments.emplace_back("--map"_zv);
-        source_arguments.emplace_back(source.name);
-        if (request.rpc_endpoint.empty()) {
-            source_arguments.emplace_back(source.source);
-            continue;
+        source_arguments.emplace_back(name);
+        source_arguments.emplace_back(std::forward<decltype(source_args)>(
+            source_args)...);
+    };
+
+    const auto start_process = [&request, &range_one, &range_two, &range_three,
+        &source_arguments] [[msvc::forceinline]] {
+        return StartProcessWithHandles(ProcessLaunchOptions{
+            .argv = devicefs::DisjointRange{range_one, range_two} +
+                range_three + source_arguments,
+            .diagnostic = [](const auto &command_line) static noexcept {
+                devicefs::WriteToStream(
+                    devicefs::stdout, "Setting up virtual filesystem: {}\n"sv,
+                    command_line);
+            },
+            .flags = request.rpc_endpoint.empty() ? DWORD{} : CREATE_SUSPENDED,
+            .standard_input = request.rpc_password ?
+                CreateRpcPasswordChannelAndWritePassword(
+                    *request.rpc_password).get() :
+                GetStdHandle(STD_INPUT_HANDLE),
+            .inherited_handles = request.inherited_handles,
+        });
+    };
+
+    if (request.rpc_endpoint.empty()) {
+        for (const auto &source : request.sources) {
+            emplace_mapping(source.name, source.source);
         }
-
-        const auto *const first = rpc_source_cursor;
-        rpc_source_cursor = devicefs::JoinSequences(rpc_source_cursor,
-            devicefs::rpc::kDeviceSourcePrefix,
-            std::string_view{source.source}, '\0');
-        source_arguments.emplace_back(first, rpc_source_cursor - first - 1);
+        return start_process();
+    } else {
+        return StartProcessWithRpcSources(start_process, emplace_mapping,
+            request);
     }
-
-    if (!request.rpc_endpoint.empty() &&
-        !SetEnvironmentVariableA(
-            devicefs::rpc::kEndpointEnvironmentVariable.c_str(),
-            request.rpc_endpoint.c_str())) {
-        WinError("failed to set environment variable '{}' to RPC "
-            "endpoint '{}'", devicefs::rpc::kEndpointEnvironmentVariable,
-            request.rpc_endpoint);
-    }
-
-    return StartProcessWithHandles(ProcessLaunchOptions{
-        .argv = devicefs::DisjointRange{range_one, range_two} +
-            range_three + source_arguments,
-        .diagnostic = [](const auto &command_line) static noexcept {
-            devicefs::WriteToStream(
-                devicefs::stdout, "Setting up virtual filesystem: {}\n"sv,
-                command_line);
-        },
-        .flags = request.rpc_endpoint.empty() ? DWORD{} : CREATE_SUSPENDED,
-        .standard_input = request.rpc_password ?
-            CreateRpcPasswordChannelAndWritePassword(
-                *request.rpc_password).get() :
-            GetStdHandle(STD_INPUT_HANDLE),
-        .inherited_handles = request.inherited_handles,
-    });
 }
 
 } // namespace devicefs_process_detail

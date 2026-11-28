@@ -20,6 +20,15 @@ set(CMAKE_OBJCOPY "${LLVM_BIN_DIRECTORY}/llvm-objcopy")
 set(CMAKE_OBJDUMP "${LLVM_BIN_DIRECTORY}/llvm-objdump")
 set(CMAKE_STRIP "${LLVM_BIN_DIRECTORY}/llvm-strip")
 
+find_file(CMAKE_CXX_STDLIB_MODULES_JSON
+    NAMES
+        libc++.modules.json
+    HINTS
+        "${LLVM_BIN_DIRECTORY}/../lib/c++"
+        "${LLVM_BIN_DIRECTORY}/../lib"
+    OPTIONAL
+)
+
 if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
     find_program(CMAKE_LINKER ld64.lld
         HINTS "${LLVM_BIN_DIRECTORY}" /opt/homebrew/opt/lld/bin

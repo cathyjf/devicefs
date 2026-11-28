@@ -5,16 +5,6 @@ cmake_minimum_required(VERSION 4.2)
 
 project(devicefs-terminal LANGUAGES CXX)
 
-if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    unset(CMAKE_CXX_STDLIB_MODULES_JSON)
-    find_file(CMAKE_CXX_STDLIB_MODULES_JSON NAMES libc++.modules.json
-        HINTS
-            "${LLVM_BIN_DIRECTORY}/../lib/c++"
-            "${LLVM_BIN_DIRECTORY}/../lib"
-        REQUIRED
-    )
-endif()
-
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)

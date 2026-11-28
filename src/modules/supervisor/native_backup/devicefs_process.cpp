@@ -55,16 +55,25 @@ struct DeviceFsSource {
     devicefs::ConstantString<char, 36, std::uint32_t> source;
 };
 
-struct DeviceFsStartRequest {
+struct DeviceFsStartRequestTag {};
+
+template <class RpcEndpoint = std::monostate>
+struct BasicDeviceFsStartRequest : DeviceFsStartRequestTag {
     std::span<const DeviceFsSource> sources;
     std::span<const HANDLE> inherited_handles;
     wil::zstring_view mount_target;
     wil::zstring_view read_user;
-    wil::zstring_view rpc_endpoint;
+    [[msvc::no_unique_address]] RpcEndpoint rpc_endpoint;
     std::optional<std::string_view> rpc_password;
     bool vhdx = false;
     bool expose_known_data_map = false;
 };
+
+using DeviceFsStartRequest = BasicDeviceFsStartRequest<>;
+
+template <class T>
+concept AnyDeviceFsStartRequest = std::is_base_of_v<
+    DeviceFsStartRequestTag, std::remove_cvref_t<T>>;
 
 namespace stop_event_detail {
 
@@ -101,7 +110,7 @@ struct DeviceFsProcess {
     std::filesystem::path readiness_path;
     wil::unique_process_information process;
 
-    explicit DeviceFsProcess(const DeviceFsStartRequest &);
+    explicit DeviceFsProcess(const AnyDeviceFsStartRequest auto &);
     auto Resume();
     [[nodiscard]] auto WaitUntilReady(const HANDLE cancellation_event) const;
     [[nodiscard]] auto WaitForExit(const HANDLE cancellation_event,
@@ -183,9 +192,11 @@ auto StartProcessWithRpcSources(const auto &start_process,
     return start_process();
 }
 
-auto StartProcess(const DeviceFsStartRequest &request,
+auto StartProcess(const AnyDeviceFsStartRequest auto &request,
     const DeviceFsStopEventName &stop_event_name) {
     using PackedView = devicefs::PackedTerminatedStringView<char, 3>;
+    constexpr auto kHasRpcEndpoint = !std::same_as<decltype(request.rpc_endpoint),
+        std::monostate>;
 
     const auto executable_path =
         Transcode<std::string>(CurrentExecutablePath().native());
@@ -198,7 +209,7 @@ auto StartProcess(const DeviceFsStartRequest &request,
         "--stop-event"_zv, wil::zstring_view{stop_event_name}});
     const auto range_two = request.vhdx ?
         MALLOCA_LIST(PackedView, "--vhdx"_zv) :
-            ((request.rpc_endpoint.empty() && request.expose_known_data_map) ?
+            ((!kHasRpcEndpoint && request.expose_known_data_map) ?
                 MALLOCA_LIST(PackedView, "--expose-known-data-map"_zv,
                     ConvertNumberToString<kPbsImageChunkSize>()) :
                 MALLOCA_LIST(PackedView));
@@ -230,7 +241,7 @@ auto StartProcess(const DeviceFsStartRequest &request,
                     devicefs::stdout, "Setting up virtual filesystem: {}\n"sv,
                     command_line);
             },
-            .flags = request.rpc_endpoint.empty() ? DWORD{} : CREATE_SUSPENDED,
+            .flags = kHasRpcEndpoint ? CREATE_SUSPENDED : DWORD{},
             .standard_input = request.rpc_password ?
                 CreateRpcPasswordChannelAndWritePassword(
                     *request.rpc_password).get() :
@@ -239,7 +250,7 @@ auto StartProcess(const DeviceFsStartRequest &request,
         });
     };
 
-    if (request.rpc_endpoint.empty()) {
+    if constexpr (!kHasRpcEndpoint) {
         for (const auto &source : request.sources) {
             emplace_mapping(source.name, source.source);
         }
@@ -253,7 +264,7 @@ auto StartProcess(const DeviceFsStartRequest &request,
 } // namespace devicefs_process_detail
 
 // Precondition: `request.sources` is nonempty.
-DeviceFsProcess::DeviceFsProcess(const DeviceFsStartRequest &request) :
+DeviceFsProcess::DeviceFsProcess(const AnyDeviceFsStartRequest auto &request) :
     stop_event{[this] {
         auto stop_event = wil::unique_event_nothrow{CreateEventExA(
             nullptr, stop_event_name.c_str(),
@@ -331,8 +342,7 @@ namespace devicefs_child_detail {
     const auto deadline =
         std::chrono::steady_clock::now() + DeviceFsProcess::kStartTimeout;
     while (true) {
-        if (WaitForProcess(process.hProcess,
-                DeviceFsProcess::kPollInterval)) {
+        if (WaitForProcess(process.hProcess, DeviceFsProcess::kPollInterval)) {
             throw std::runtime_error(std::format(
                 "devicefs exited with code {} before creating readiness path '{}'",
                 ProcessExitCode(process.hProcess),
@@ -389,15 +399,15 @@ template <class ExitConfirmation = std::monostate>
 class BasicDeviceFsChild {
 public:
     explicit BasicDeviceFsChild(auto &&...args)
-        requires ((!std::is_same_v<std::remove_cvref_t<decltype(args)>,
-            DeviceFsStartRequest> && ...) && requires {
+        requires ((!AnyDeviceFsStartRequest<decltype(args)> && ...) &&
+            requires {
                 devicefs_child_detail::StartDeviceFs(
                     std::forward<decltype(args)>(args)...);
             }) :
         devicefs_{devicefs_child_detail::StartDeviceFs(
             std::forward<decltype(args)>(args)...)} {}
 
-    explicit BasicDeviceFsChild(const DeviceFsStartRequest &request,
+    explicit BasicDeviceFsChild(const AnyDeviceFsStartRequest auto &request,
         ExitConfirmation exit_confirmed = ExitConfirmation{}) :
         devicefs_{request},
         exit_confirmed_{exit_confirmed} {

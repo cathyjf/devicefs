@@ -507,7 +507,7 @@ enum class BackupViewPreparation {
     const auto endpoint_view = wil::zstring_view{
         endpoint.data(), endpoint.size() - 1};
     auto suspended_synthetic = internal::DeviceFsProcess{
-        internal::DeviceFsStartRequest{
+        internal::BasicDeviceFsStartRequest{
             .sources = synthetic_sources,
             .mount_target = synthetic_mount_text,
             .rpc_endpoint = endpoint_view,

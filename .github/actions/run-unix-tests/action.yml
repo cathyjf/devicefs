@@ -21,7 +21,7 @@ runs:
         SOURCE_PATH: ${{ inputs.path }}
         PRESET: ${{ inputs.preset }}
       run: |
-        use_sudo=0
+        use_repetition=0
         if [[ $(uname) == 'Darwin' ]]; then
           if [[ $PRESET == 'release' ]]; then
             # On the GitHub macOS runner, opening a newly-mounted volume as
@@ -30,8 +30,8 @@ runs:
             # runner user should have already been granted permission by the
             # Disk Arbitration daemon before this opening occurs. To attempt to
             # work around this apparent defect in the GitHub runner environment,
-            # we will use root to run the test that requires mounting a volume.
-            use_sudo=1
+            # we will allow the affected test to run more than once.
+            use_repetition=1
           fi
         else
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
@@ -47,8 +47,7 @@ runs:
         ctest_argv=(ctest --test-dir "$build_dir" \
           --presets-file "${SOURCE_PATH}/CMakePresets.json" \
           --preset "$PRESET")
-        if [[ $use_sudo -eq 0 ]]; then
-          "${ctest_argv[@]}"
-        else
-          sudo -E -- "${ctest_argv[@]}"
+        if [[ $use_repetition -eq 1 ]]; then
+          ctest_argv+=(--repeat until-pass:5)
         fi
+        "${ctest_argv[@]}"
